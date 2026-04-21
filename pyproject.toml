@@ -30,6 +30,7 @@ dependencies = [
   "typer>=0.15.2",
   "mlx-lm>=0.31.2",
   "langgraph>=1.1.8",
+  "mcp>=1.27.0",
 ]
 
 [dependency-groups]
