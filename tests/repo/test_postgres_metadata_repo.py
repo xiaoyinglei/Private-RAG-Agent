@@ -68,6 +68,13 @@ def test_postgres_metadata_repo_bootstraps_v1_schema(monkeypatch: pytest.MonkeyP
 
 def test_postgres_metadata_repo_saves_v1_records(monkeypatch: pytest.MonkeyPatch) -> None:
     now = datetime(2026, 4, 18, tzinfo=UTC)
+    section_locator = {
+        "visible_text_key": "objects/sections/21.md",
+        "char_range_start": 0,
+        "char_range_end": 256,
+        "byte_range_start": 0,
+        "byte_range_end": 512,
+    }
 
     def handler(sql: str, params: tuple[object, ...]) -> _Cursor:
         if "INSERT INTO public.sources" in sql:
@@ -145,9 +152,11 @@ def test_postgres_metadata_repo_saves_v1_records(monkeypatch: pytest.MonkeyPatch
                     "anchor": "a-b",
                     "page_start": 1,
                     "page_end": 2,
-                    "raw_locator": {"page": 1},
-                    "byte_range_start": 0,
-                    "byte_range_end": 512,
+                        "raw_locator": section_locator,
+                        "char_range_start": 0,
+                        "char_range_end": 256,
+                        "byte_range_start": 0,
+                        "byte_range_end": 512,
                     "visible_text_key": "objects/sections/21.md",
                     "section_kind": "body",
                     "content_hash": "section-hash",
@@ -251,7 +260,9 @@ def test_postgres_metadata_repo_saves_v1_records(monkeypatch: pytest.MonkeyPatch
             anchor="a-b",
             page_start=1,
             page_end=2,
-            raw_locator={"page": 1},
+            raw_locator=section_locator,
+            char_range_start=0,
+            char_range_end=256,
             byte_range_start=0,
             byte_range_end=512,
             visible_text_key="objects/sections/21.md",

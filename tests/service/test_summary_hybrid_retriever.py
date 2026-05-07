@@ -4,7 +4,7 @@ import asyncio
 from dataclasses import dataclass
 
 from rag.retrieval.graph import MilvusSummaryHybridRetriever, RetrievedCandidate, SearchBackedRetrievalFactory
-from rag.retrieval.models import QueryMode
+from rag.retrieval.models import RetrievalProfile
 from rag.retrieval.planning_graph import (
     BranchStagePlan,
     CollectionStage,
@@ -34,11 +34,12 @@ class _Factory:
         query: str,
         results: list[VectorSearchResult],
         source_scope: list[str],
+        retrieval_channels: list[str] | None = None,
     ) -> list[RetrievedCandidate]:
-        del query, source_scope
+        del query, source_scope, retrieval_channels
         return [
             RetrievedCandidate(
-                chunk_id=f"{result.item_kind}-{result.item_id}",
+                evidence_id=f"{result.item_kind}-{result.item_id}",
                 doc_id=result.doc_id,
                 text=result.text or result.item_kind,
                 citation_anchor=f"#{result.item_id}",
@@ -62,9 +63,9 @@ class _Repo:
         *,
         embedding_space: str | None = None,
         item_kind: str | None = None,
-        distinct_chunks: bool = False,
+        distinct_records: bool = False,
     ) -> int:
-        del embedding_space, distinct_chunks
+        del embedding_space, distinct_records
         return 1 if item_kind in {"section_summary", "doc_summary"} else 0
 
     async def hybrid_search_async(
@@ -133,9 +134,9 @@ class _SparseRepo:
         *,
         embedding_space: str | None = None,
         item_kind: str | None = None,
-        distinct_chunks: bool = False,
+        distinct_records: bool = False,
     ) -> int:
-        del distinct_chunks
+        del distinct_records
         return 1 if embedding_space == "default" and item_kind == "section_summary" else 0
 
     async def hybrid_search_async(
@@ -174,8 +175,7 @@ def test_summary_hybrid_retriever_falls_back_from_section_to_doc_when_stage_is_w
         original_query="alpha",
         rewritten_query="alpha",
         sparse_query="alpha",
-        mode=QueryMode.MIX,
-        mode_executor="mix",
+        retrieval_profile=RetrievalProfile.AUTO,
         complexity_gate=ComplexityGate.STANDARD,
         semantic_route="text_first",
         target_collections=("section_summary", "doc_summary"),
@@ -207,7 +207,7 @@ def test_summary_hybrid_retriever_falls_back_from_section_to_doc_when_stage_is_w
     )
 
     assert retriever._vector_repo.calls == ["section_summary", "doc_summary"]  # type: ignore[attr-defined]
-    assert [item.chunk_id for item in results] == ["doc_summary-7"]
+    assert [item.evidence_id for item in results] == ["doc_summary-7"]
 
 
 def test_summary_hybrid_retriever_uses_query_subtasks_and_sparse_vectors() -> None:
@@ -224,8 +224,7 @@ def test_summary_hybrid_retriever_uses_query_subtasks_and_sparse_vectors() -> No
         original_query="Compare Alpha and Beta",
         rewritten_query="Compare Alpha and Beta",
         sparse_query="Compare Alpha and Beta",
-        mode=QueryMode.MIX,
-        mode_executor="mix",
+        retrieval_profile=RetrievalProfile.AUTO,
         complexity_gate=ComplexityGate.COMPLEX,
         semantic_route="text_first",
         target_collections=("section_summary",),
@@ -267,7 +266,6 @@ def test_summary_hybrid_retriever_uses_query_subtasks_and_sparse_vectors() -> No
 def test_summary_candidate_builder_emits_grounding_target_contract() -> None:
     factory = SearchBackedRetrievalFactory(
         metadata_repo=object(),
-        fts_repo=object(),
         graph_repo=object(),
     )
 
@@ -278,11 +276,11 @@ def test_summary_candidate_builder_emits_grounding_target_contract() -> None:
                 item_id="7",
                 item_kind="section_summary",
                 doc_id="42",
-                source_id="source-9",
+                source_id="9",
                 text="Section summary",
                 score=0.91,
                 metadata={
-                    "section_id": "section-7",
+                    "section_id": "7",
                     "toc_path_text": "Architecture / Alpha",
                     "page_start": "2",
                     "page_end": "3",
@@ -295,12 +293,12 @@ def test_summary_candidate_builder_emits_grounding_target_contract() -> None:
 
     assert len(candidates) == 1
     candidate = candidates[0]
-    assert candidate.chunk_id == "summary:section_summary:7"
+    assert candidate.evidence_id == "summary:section_summary:7"
     assert candidate.text == "Section summary"
     assert candidate.citation_anchor == "Architecture / Alpha"
     assert candidate.grounding_target is not None
     assert candidate.grounding_target.kind == "section"
-    assert candidate.grounding_target.section_id == "section-7"
+    assert candidate.grounding_target.section_id == 7
     assert candidate.grounding_target.page_start == 2
     assert candidate.grounding_target.page_end == 3
     assert candidate.grounding_target.section_path == ["Architecture", "Alpha"]
@@ -315,7 +313,6 @@ def test_summary_candidate_builder_drops_pg_inactive_documents_even_if_milvus_re
 
     factory = SearchBackedRetrievalFactory(
         metadata_repo=_MetadataRepo(),
-        fts_repo=object(),
         graph_repo=object(),
     )
 
@@ -326,10 +323,10 @@ def test_summary_candidate_builder_drops_pg_inactive_documents_even_if_milvus_re
                 item_id="7",
                 item_kind="section_summary",
                 doc_id="42",
-                source_id="source-9",
+                source_id="9",
                 text="Section summary",
                 score=0.91,
-                metadata={"section_id": "section-7"},
+                metadata={"section_id": "7"},
             )
         ],
         [],

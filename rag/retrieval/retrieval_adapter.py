@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+import inspect
 from collections.abc import Sequence
 from dataclasses import dataclass
-import inspect
 from typing import Protocol
 
 from rag.retrieval.evidence import CandidateLike, EvidenceService
@@ -328,13 +328,20 @@ class RetrievalAdapter:
         return result
 
     def _skipped_branches(self, plan: PlanningState) -> set[str]:
-        branches = {path.branch for path in plan.retrieval_paths}
-        if "full_text" not in branches:
+        sparse_absorbed = False
+        for path in plan.retrieval_paths:
+            if path.query_variant is QueryVariant.SPARSE:
+                continue
+            try:
+                retriever = self._branch_registry.get(path.branch)
+            except Exception:
+                continue
+            if bool(getattr(retriever, "absorbs_sparse_branch", False)):
+                sparse_absorbed = True
+                break
+        if not sparse_absorbed:
             return set()
-        vector_retriever = self._branch_registry.get("vector")
-        if getattr(vector_retriever, "absorbs_sparse_branch", False):
-            return {"full_text"}
-        return set()
+        return {path.branch for path in plan.retrieval_paths if path.query_variant is QueryVariant.SPARSE}
 
     @staticmethod
     def _effective_scope(
@@ -347,8 +354,6 @@ class RetrievalAdapter:
             return list(plan.predicate_plan.doc_ids)
         if plan.predicate_plan.strategy == "attribute_filter" and supports_plan:
             return []
-        if plan.predicate_plan.overflowed:
-            return []
         return list(source_scope)
 
     @staticmethod
@@ -358,7 +363,9 @@ class RetrievalAdapter:
         requested = tuple(dict.fromkeys(branch_names))
         mapped = {path.branch: path for path in plan.retrieval_paths}
         fallback_steps = {
-            step.branch: step for step in tuple(getattr(plan, "fallback_plan", ()) or ()) if isinstance(step, FallbackStep)
+            step.branch: step
+            for step in tuple(getattr(plan, "fallback_plan", ()) or ())
+            if isinstance(step, FallbackStep)
         }
         selected: list[RetrievalPath] = []
         for branch in requested:
@@ -369,8 +376,13 @@ class RetrievalAdapter:
             fallback = fallback_steps.get(branch)
             if fallback is None:
                 continue
-            query_variant = QueryVariant.SPARSE if branch == "full_text" else QueryVariant.DENSE
-            selected.append(RetrievalPath(branch=branch, limit=max(fallback.limit, 1), query_variant=query_variant))
+            selected.append(
+                RetrievalPath(
+                    branch=branch,
+                    limit=max(fallback.limit, 1),
+                    query_variant=QueryVariant.DENSE,
+                )
+            )
         return tuple(selected)
 
 

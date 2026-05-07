@@ -5,13 +5,14 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
-from typing_extensions import TypedDict
 
 from langgraph.graph import END, START, StateGraph
+from typing_extensions import TypedDict
 
-from rag.retrieval.models import QueryMode, QueryOptions, normalize_query_mode
-from rag.schema.query import ComplexityLevel, QueryUnderstanding, TaskType
+from rag.retrieval.models import QueryOptions, RetrievalProfile, normalize_retrieval_profile
+from rag.schema.query import QueryUnderstanding, TaskType
 from rag.schema.runtime import AccessPolicy
+from rag.utils.text import text_unit_count
 
 
 class ComplexityGate(StrEnum):
@@ -83,7 +84,7 @@ class _PlannerState(TypedDict, total=False):
     source_scope: tuple[str, ...]
     access_policy: AccessPolicy
     query_understanding: QueryUnderstanding
-    mode: QueryMode
+    retrieval_profile: RetrievalProfile
     retrieval_limit: int
     final_limit: int
     complexity_gate: ComplexityGate
@@ -113,8 +114,7 @@ class PlanningState:
     original_query: str
     rewritten_query: str
     sparse_query: str
-    mode: QueryMode
-    mode_executor: str
+    retrieval_profile: RetrievalProfile
     complexity_gate: ComplexityGate
     semantic_route: str
     target_collections: tuple[str, ...]
@@ -156,7 +156,7 @@ class PlanningGraph:
         source_scope: Sequence[str],
         access_policy: AccessPolicy,
         query_understanding: QueryUnderstanding,
-        resolved_mode: QueryMode | str | None,
+        resolved_retrieval_profile: RetrievalProfile | str | None,
         query_options: QueryOptions | None,
     ) -> PlanningState:
         try:
@@ -168,7 +168,7 @@ class PlanningGraph:
                     source_scope=source_scope,
                     access_policy=access_policy,
                     query_understanding=query_understanding,
-                    resolved_mode=resolved_mode,
+                    resolved_retrieval_profile=resolved_retrieval_profile,
                     query_options=query_options,
                 )
             )
@@ -181,7 +181,7 @@ class PlanningGraph:
         source_scope: Sequence[str],
         access_policy: AccessPolicy,
         query_understanding: QueryUnderstanding,
-        resolved_mode: QueryMode | str | None,
+        resolved_retrieval_profile: RetrievalProfile | str | None,
         query_options: QueryOptions | None,
     ) -> PlanningState:
         state = await self._compiled_graph.ainvoke(
@@ -190,11 +190,11 @@ class PlanningGraph:
                 source_scope=source_scope,
                 access_policy=access_policy,
                 query_understanding=query_understanding,
-                resolved_mode=resolved_mode,
+                resolved_retrieval_profile=resolved_retrieval_profile,
                 query_options=query_options,
             )
         )
-        mode = state["mode"]
+        retrieval_profile = state["retrieval_profile"]
         predicate_plan = state["predicate_plan"]
         complexity_gate = state["complexity_gate"]
         semantic_route = state["semantic_route"]
@@ -202,8 +202,7 @@ class PlanningGraph:
             original_query=query,
             rewritten_query=state["rewritten_query"],
             sparse_query=state["sparse_query"],
-            mode=mode,
-            mode_executor=mode.value,
+            retrieval_profile=retrieval_profile,
             complexity_gate=complexity_gate,
             semantic_route=semantic_route,
             target_collections=state["target_collections"],
@@ -256,22 +255,23 @@ class PlanningGraph:
         source_scope: Sequence[str],
         access_policy: AccessPolicy,
         query_understanding: QueryUnderstanding,
-        resolved_mode: QueryMode | str | None,
+        resolved_retrieval_profile: RetrievalProfile | str | None,
         query_options: QueryOptions | None,
     ) -> _PlannerState:
-        mode = normalize_query_mode(query_options.mode if query_options is not None else resolved_mode)
-        retrieval_limit = (
-            max(query_options.retrieval_pool_k or query_options.chunk_top_k or query_options.top_k, 1)
+        retrieval_profile = (
+            query_options.resolved_retrieval_profile
             if query_options is not None
-            else 8
+            else normalize_retrieval_profile(resolved_retrieval_profile)
         )
-        final_limit = max(query_options.chunk_top_k or query_options.top_k, 1) if query_options is not None else 8
+        candidate_top_k = query_options.resolved_candidate_top_k if query_options is not None else 8
+        retrieval_limit = max(query_options.retrieval_pool_k or candidate_top_k, 1) if query_options is not None else 8
+        final_limit = max(candidate_top_k, 1)
         return {
             "query": query,
             "source_scope": tuple(source_scope),
             "access_policy": access_policy,
             "query_understanding": query_understanding,
-            "mode": mode,
+            "retrieval_profile": retrieval_profile,
             "retrieval_limit": retrieval_limit,
             "final_limit": final_limit,
         }
@@ -339,9 +339,9 @@ class PlanningGraph:
         retrieval_limit = int(state["retrieval_limit"])
         final_limit = int(state["final_limit"])
         complexity_gate = state["complexity_gate"]
-        mode = state["mode"]
+        retrieval_profile = state["retrieval_profile"]
         retrieval_paths = self._retrieval_paths(
-            mode=mode,
+            retrieval_profile=retrieval_profile,
             retrieval_limit=retrieval_limit,
             query_understanding=query_understanding,
             semantic_route=semantic_route,
@@ -366,7 +366,7 @@ class PlanningGraph:
                 query_understanding=query_understanding,
             ),
             "allow_web": True,
-            "allow_graph_expansion": True,
+            "allow_graph_expansion": False if self._use_summary_hybrid_paths else True,
             "web_limit": max(1, retrieval_limit // 2),
             "graph_limit": max(2, final_limit),
             "fusion_strategy": "weighted_rrf",
@@ -379,14 +379,12 @@ class PlanningGraph:
 
     @staticmethod
     def _complexity_gate(query: str, understanding: QueryUnderstanding) -> ComplexityGate:
-        query_length = len(query.strip())
-        if understanding.complexity_level in {ComplexityLevel.L3_COMPARATIVE, ComplexityLevel.L4_RESEARCH}:
-            return ComplexityGate.COMPLEX
+        query_tokens = text_unit_count(query.strip())
         if understanding.task_type in {TaskType.COMPARISON, TaskType.TIMELINE, TaskType.RESEARCH}:
             return ComplexityGate.COMPLEX
-        if query_length <= 24 and not understanding.has_explicit_constraints():
+        if query_tokens <= 24 and not understanding.has_explicit_constraints():
             return ComplexityGate.FAST_TRACK
-        if query_length <= 72 and not understanding.needs_graph_expansion:
+        if query_tokens <= 72 and not understanding.needs_graph_expansion:
             return ComplexityGate.STANDARD
         return ComplexityGate.COMPLEX
 
@@ -401,10 +399,8 @@ class PlanningGraph:
             return base
         extras = _ordered_unique(
             [
-                *understanding.preferred_section_terms,
+                *understanding.structure_constraints.focus_terms,
                 *understanding.quoted_terms,
-                *understanding.structure_constraints.heading_hints,
-                *understanding.structure_constraints.title_hints,
             ]
         )
         if not extras:
@@ -423,15 +419,14 @@ class PlanningGraph:
         sparse_terms = _ordered_unique(
             [
                 *understanding.quoted_terms,
-                *understanding.preferred_section_terms,
-                *understanding.structure_constraints.heading_hints,
-                *understanding.structure_constraints.title_hints,
+                *understanding.structure_constraints.focus_terms,
                 *[str(page) for page in understanding.metadata_filters.page_numbers],
             ]
         )
         if not sparse_terms:
-            return rewritten_query
-        return " ".join([query.strip(), *sparse_terms])
+            return rewritten_query or query.strip()
+        combined = " ".join([query.strip(), *sparse_terms])
+        return combined if combined.strip() else (rewritten_query or query.strip())
 
     @staticmethod
     def _semantic_route(understanding: QueryUnderstanding) -> str:
@@ -511,7 +506,7 @@ class PlanningGraph:
                 continue
             active_versions = list_documents(version_group_id=int(version_group_id), active_only=True)
             if active_versions:
-                gated_doc_ids.extend(str(getattr(item, "doc_id")) for item in active_versions)
+                gated_doc_ids.extend(str(item.doc_id) for item in active_versions)
             else:
                 gated_doc_ids.append(str(getattr(document, "doc_id", doc_id)))
         normalized = tuple(_ordered_unique(gated_doc_ids or source_scope))
@@ -547,8 +542,12 @@ class PlanningGraph:
             clauses.setdefault("section_summary", []).append(section_ranges)
             clauses.setdefault("asset_summary", []).append(asset_ranges)
         if understanding.special_targets:
+            targets = ", ".join(
+                _format_expr_value(item)
+                for item in _ordered_unique(understanding.special_targets)
+            )
             clauses.setdefault("asset_summary", []).append(
-                f"asset_type in [{', '.join(_format_expr_value(item) for item in _ordered_unique(understanding.special_targets))}]"
+                f"asset_type in [{targets}]"
             )
         return {collection: " and ".join(parts) for collection, parts in clauses.items() if parts}
 
@@ -611,14 +610,19 @@ class PlanningGraph:
     def _retrieval_paths(
         self,
         *,
-        mode: QueryMode,
+        retrieval_profile: RetrievalProfile,
         retrieval_limit: int,
         query_understanding: QueryUnderstanding,
         semantic_route: str,
     ) -> tuple[RetrievalPath, ...]:
         if self._use_summary_hybrid_paths:
-            paths = [RetrievalPath("vector", retrieval_limit * 2, QueryVariant.DENSE)]
-            if query_understanding.needs_special or semantic_route in {"asset_first", "text_plus_asset"}:
+            vector_limit = retrieval_limit if retrieval_profile is RetrievalProfile.FAST else retrieval_limit * 2
+            paths = [RetrievalPath("vector", vector_limit, QueryVariant.DENSE)]
+            if (
+                retrieval_profile is RetrievalProfile.ASSET
+                or query_understanding.needs_special
+                or semantic_route in {"asset_first", "text_plus_asset"}
+            ):
                 paths.append(RetrievalPath("special", retrieval_limit, QueryVariant.DENSE))
             return tuple(paths)
         aux_paths = [
@@ -630,16 +634,19 @@ class PlanningGraph:
             aux_paths.append(RetrievalPath("metadata", retrieval_limit, QueryVariant.SPARSE))
         if query_understanding.needs_special or semantic_route in {"asset_first", "text_plus_asset"}:
             aux_paths.append(RetrievalPath("special", retrieval_limit, QueryVariant.DENSE))
-        if mode is QueryMode.NAIVE:
+        if retrieval_profile is RetrievalProfile.FAST:
             return (RetrievalPath("vector", retrieval_limit * 2, QueryVariant.DENSE),)
-        if mode is QueryMode.LOCAL:
-            return (RetrievalPath("local", retrieval_limit * 2, QueryVariant.DENSE), *aux_paths)
-        if mode is QueryMode.GLOBAL:
-            return (RetrievalPath("global", retrieval_limit * 2, QueryVariant.DENSE), *aux_paths)
-        if mode is QueryMode.HYBRID:
+        if retrieval_profile is RetrievalProfile.ASSET:
+            return (
+                RetrievalPath("vector", retrieval_limit, QueryVariant.DENSE),
+                RetrievalPath("special", retrieval_limit * 2, QueryVariant.DENSE),
+                *[path for path in aux_paths if path.branch != "special"],
+            )
+        if retrieval_profile is RetrievalProfile.DEEP:
             return (
                 RetrievalPath("local", retrieval_limit, QueryVariant.DENSE),
                 RetrievalPath("global", retrieval_limit, QueryVariant.DENSE),
+                RetrievalPath("vector", retrieval_limit, QueryVariant.DENSE),
                 *aux_paths,
             )
         kg_limit = max(2, retrieval_limit - 1)
@@ -647,7 +654,6 @@ class PlanningGraph:
             RetrievalPath("local", kg_limit, QueryVariant.DENSE),
             RetrievalPath("global", kg_limit, QueryVariant.DENSE),
             RetrievalPath("vector", retrieval_limit, QueryVariant.DENSE),
-            RetrievalPath("full_text", retrieval_limit, QueryVariant.SPARSE),
             *aux_paths,
         )
 
@@ -708,13 +714,7 @@ class PlanningGraph:
     ) -> tuple[FallbackStep, ...]:
         if not enabled:
             return ()
-        steps = [
-            FallbackStep(
-                trigger="empty_response",
-                branch="full_text",
-                limit=retrieval_limit,
-            )
-        ]
+        steps: list[FallbackStep] = []
         if query_understanding.needs_special or semantic_route in {"asset_first", "text_plus_asset"}:
             steps.append(
                 FallbackStep(

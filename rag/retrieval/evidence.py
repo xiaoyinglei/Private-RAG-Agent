@@ -2,58 +2,51 @@ from __future__ import annotations
 
 from collections import Counter
 from collections.abc import Sequence
-from datetime import UTC, datetime
-from hashlib import sha256
-from typing import TYPE_CHECKING, Protocol
+from typing import Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from rag.retrieval.analysis import section_family_aliases
-from rag.schema.core import ChunkRole
 from rag.schema.query import (
-    ArtifactStatus,
-    ArtifactType,
-    ComplexityLevel,
     EvidenceItem,
-    GroundingTarget,
-    KnowledgeArtifact,
-    PreservationSuggestion,
     QueryUnderstanding,
     TaskType,
 )
 from rag.schema.runtime import AccessPolicy, RuntimeMode
-from rag.utils.text import search_terms
+
 
 class CandidateLike(Protocol):
-    chunk_id: str
-    doc_id: str
+    doc_id: int | str
     benchmark_doc_id: str | None
     text: str
     citation_anchor: str
     score: float
     rank: int
     source_kind: str
-    source_id: str | None
+    source_id: int | str | None
     section_path: Sequence[str]
-    chunk_role: ChunkRole | None
-    special_chunk_type: str | None
-    parent_chunk_id: str | None
+    item_id: str
 
 
 def classify_retrieval_family(
     *,
     evidence_kind: str,
-    special_chunk_type: str | None,
+    record_type: str | None,
     retrieval_channels: Sequence[str] = (),
 ) -> str:
     channels = {channel for channel in retrieval_channels if channel}
     if evidence_kind == "external":
         return "external"
-    if special_chunk_type is not None or channels & {"special", "section", "metadata"}:
+    if (record_type or "").startswith("asset") or channels & {"special", "section", "metadata"}:
         return "multimodal"
     if evidence_kind == "graph" or channels & {"local", "global"}:
         return "kg"
-    if channels & {"vector", "full_text"}:
+    has_vector = "vector" in channels
+    has_sparse = "sparse" in channels
+    if has_vector and has_sparse:
+        return "hybrid"
+    if has_sparse:
+        return "sparse"
+    if has_vector:
         return "vector"
     return "kg" if evidence_kind == "graph" else "vector"
 
@@ -61,9 +54,9 @@ def classify_retrieval_family(
 class EvidenceThresholds(BaseModel):
     model_config = ConfigDict(frozen=True)
 
-    fast_min_evidence_chunks: int = 2
+    fast_min_evidence_items: int = 2
     fast_min_sections: int = 1
-    deep_min_evidence_chunks: int = 4
+    deep_min_evidence_items: int = 4
     deep_min_supporting_units: int = 2
 
 
@@ -92,10 +85,19 @@ class EvidenceService:
         self._thresholds = thresholds or EvidenceThresholds()
 
     @staticmethod
+    def _safe_int(value: object, *, default: int | None = None) -> int | None:
+        if value in {None, ""}:
+            return default
+        try:
+            return int(str(value))
+        except (TypeError, ValueError):
+            return default
+
+    @staticmethod
     def _candidate_source_scope(candidate: CandidateLike) -> set[str]:
-        scope = {candidate.doc_id}
+        scope = {str(candidate.doc_id)}
         if candidate.source_id:
-            scope.add(candidate.source_id)
+            scope.add(str(candidate.source_id))
         return scope
 
     @staticmethod
@@ -198,15 +200,7 @@ class EvidenceService:
         if not section_path:
             return True
         section_text = " ".join(section_path).lower()
-        preferred_terms = {term.lower() for term in query_understanding.preferred_section_terms}
-        heading_hints = {hint.lower() for hint in constraints.heading_hints}
-        title_hints = {hint.lower() for hint in constraints.title_hints}
-        semantic_aliases = {
-            alias.lower()
-            for family in constraints.semantic_section_families
-            for alias in section_family_aliases(family)
-        }
-        match_terms = preferred_terms | heading_hints | title_hints | semantic_aliases
+        match_terms = {term.lower() for term in constraints.focus_terms}
         if not match_terms:
             return True
         matched = any(term in section_text for term in match_terms)
@@ -237,30 +231,29 @@ class EvidenceService:
         if evidence_kind not in {"internal", "external", "graph"}:
             evidence_kind = "internal"
         retrieval_channels = list(getattr(candidate, "retrieval_channels", []) or [])
+        record_type = (
+            getattr(candidate, "record_type", None)
+            or getattr(getattr(candidate, "grounding_target", None), "kind", None)
+        )
         retrieval_family = classify_retrieval_family(
             evidence_kind=evidence_kind,
-            special_chunk_type=getattr(candidate, "special_chunk_type", None),
+            record_type=None if record_type is None else str(record_type),
             retrieval_channels=retrieval_channels,
         )
         return EvidenceItem(
-            chunk_id=str(candidate.chunk_id),
-            doc_id=str(candidate.doc_id),
+            evidence_id=str(candidate.item_id),
+            doc_id=EvidenceService._safe_int(candidate.doc_id, default=0) or 0,
             benchmark_doc_id=getattr(candidate, "benchmark_doc_id", None),
-            source_id=None
-            if getattr(candidate, "source_id", None) is None
-            else str(getattr(candidate, "source_id")),
+            source_id=EvidenceService._safe_int(getattr(candidate, "source_id", None), default=None),
             citation_anchor=str(candidate.citation_anchor),
             text=str(candidate.text),
             score=float(candidate.score),
             evidence_kind=evidence_kind,
-            chunk_role=getattr(candidate, "chunk_role", None),
-            special_chunk_type=getattr(candidate, "special_chunk_type", None),
-            parent_chunk_id=getattr(candidate, "parent_chunk_id", None),
+            record_type=None if record_type is None else str(record_type),
             file_name=getattr(candidate, "file_name", None),
             section_path=list(getattr(candidate, "section_path", ()) or ()),
             page_start=getattr(candidate, "page_start", None),
             page_end=getattr(candidate, "page_end", None),
-            chunk_type=getattr(candidate, "chunk_type", None),
             source_type=getattr(candidate, "source_type", None),
             retrieval_channels=retrieval_channels,
             retrieval_family=retrieval_family,
@@ -286,22 +279,19 @@ class EvidenceService:
         *,
         bundle: EvidenceBundle,
         task_type: TaskType,
-        complexity_level: ComplexityLevel,
+        runtime_mode: RuntimeMode,
     ) -> SelfCheckResult:
         internal = bundle.internal
-        section_keys = {item.citation_anchor if item.citation_anchor else item.chunk_id for item in internal}
+        section_keys = {item.citation_anchor if item.citation_anchor else item.evidence_id for item in internal}
         doc_ids = {item.doc_id for item in internal}
 
-        if task_type in {TaskType.LOOKUP, TaskType.SINGLE_DOC_QA} or complexity_level in {
-            ComplexityLevel.L1_DIRECT,
-            ComplexityLevel.L2_SCOPED,
-        }:
+        if runtime_mode is RuntimeMode.FAST or task_type in {TaskType.LOOKUP, TaskType.SINGLE_DOC_QA}:
             evidence_sufficient = (
-                len(internal) >= self._thresholds.fast_min_evidence_chunks
+                len(internal) >= self._thresholds.fast_min_evidence_items
                 and len(section_keys) >= self._thresholds.fast_min_sections
             )
         else:
-            evidence_sufficient = len(internal) >= self._thresholds.deep_min_evidence_chunks and (
+            evidence_sufficient = len(internal) >= self._thresholds.deep_min_evidence_items and (
                 len(doc_ids) >= self._thresholds.deep_min_supporting_units
                 or len(section_keys) >= self._thresholds.deep_min_supporting_units
             )
@@ -321,37 +311,39 @@ class EvidenceService:
 
 class ContextEvidenceMerger:
     def merge(self, retrieval: object) -> list[EvidenceItem]:
-        evidence = getattr(retrieval, "evidence")
-        reranked_chunk_ids = list(getattr(retrieval, "reranked_chunk_ids", []) or [])
-        if not reranked_chunk_ids:
-            reranked_chunk_ids = [
-                candidate.chunk_id for candidate in list(getattr(retrieval, "clean_items", []) or [])
+        evidence = retrieval.evidence
+        reranked_evidence_ids = list(getattr(retrieval, "reranked_evidence_ids", []) or [])
+        if not reranked_evidence_ids:
+            reranked_evidence_ids = [
+                candidate.item_id for candidate in list(getattr(retrieval, "clean_items", []) or [])
             ]
 
-        internal_by_id = {item.chunk_id: item for item in evidence.internal}
-        ordered_internal = [internal_by_id[chunk_id] for chunk_id in reranked_chunk_ids if chunk_id in internal_by_id]
-        seen_internal = {item.chunk_id for item in ordered_internal}
-        ordered_internal.extend(item for item in evidence.internal if item.chunk_id not in seen_internal)
+        internal_by_id = {item.evidence_id: item for item in evidence.internal}
+        ordered_internal = [
+            internal_by_id[evidence_id] for evidence_id in reranked_evidence_ids if evidence_id in internal_by_id
+        ]
+        seen_internal = {item.evidence_id for item in ordered_internal}
+        ordered_internal.extend(item for item in evidence.internal if item.evidence_id not in seen_internal)
 
         merged: list[EvidenceItem] = []
-        merged_by_chunk_id: dict[str, EvidenceItem] = {}
-        ordered_chunk_ids: list[str] = []
+        merged_by_evidence_id: dict[str, EvidenceItem] = {}
+        ordered_evidence_ids: list[str] = []
 
         for item in [*ordered_internal, *evidence.graph]:
-            existing = merged_by_chunk_id.get(item.chunk_id)
+            existing = merged_by_evidence_id.get(item.evidence_id)
             if existing is None:
-                merged_by_chunk_id[item.chunk_id] = item
-                ordered_chunk_ids.append(item.chunk_id)
+                merged_by_evidence_id[item.evidence_id] = item
+                ordered_evidence_ids.append(item.evidence_id)
                 continue
-            merged_by_chunk_id[item.chunk_id] = self._merge_duplicate_item(existing, item)
+            merged_by_evidence_id[item.evidence_id] = self._merge_duplicate_item(existing, item)
 
-        merged.extend(merged_by_chunk_id[chunk_id] for chunk_id in ordered_chunk_ids)
+        merged.extend(merged_by_evidence_id[evidence_id] for evidence_id in ordered_evidence_ids)
 
         seen_external: set[str] = set()
         for item in evidence.external:
-            if item.chunk_id in seen_external:
+            if item.evidence_id in seen_external:
                 continue
-            seen_external.add(item.chunk_id)
+            seen_external.add(item.evidence_id)
             merged.append(item)
         return merged
 
@@ -370,7 +362,7 @@ class ContextEvidenceMerger:
         merged_channels = list(dict.fromkeys([*existing.retrieval_channels, *incoming.retrieval_channels]))
         merged_family = classify_retrieval_family(
             evidence_kind=merged_kind,
-            special_chunk_type=preferred.special_chunk_type or secondary.special_chunk_type,
+            record_type=preferred.record_type or secondary.record_type,
             retrieval_channels=merged_channels,
         )
 
@@ -382,10 +374,8 @@ class ContextEvidenceMerger:
                 "section_path": preferred.section_path or secondary.section_path,
                 "file_name": preferred.file_name or secondary.file_name,
                 "source_id": preferred.source_id or secondary.source_id,
-                "chunk_type": preferred.chunk_type or secondary.chunk_type,
+                "record_type": preferred.record_type or secondary.record_type,
                 "source_type": preferred.source_type or secondary.source_type,
-                "special_chunk_type": preferred.special_chunk_type or secondary.special_chunk_type,
-                "parent_chunk_id": preferred.parent_chunk_id or secondary.parent_chunk_id,
                 "page_start": preferred.page_start if preferred.page_start is not None else secondary.page_start,
                 "page_end": preferred.page_end if preferred.page_end is not None else secondary.page_end,
                 "retrieval_channels": merged_channels,
@@ -394,487 +384,7 @@ class ContextEvidenceMerger:
         )
 
 
-class ArtifactService:
-    _STOPWORDS = {
-        "a",
-        "an",
-        "and",
-        "compare",
-        "comparison",
-        "the",
-        "this",
-        "that",
-        "what",
-        "when",
-        "where",
-        "which",
-        "who",
-        "why",
-        "how",
-        "with",
-        "from",
-        "into",
-        "over",
-        "path",
-        "page",
-        "topic",
-    }
-
-    @staticmethod
-    def _unique_docs(evidence: Sequence[EvidenceItem]) -> set[str]:
-        return {item.doc_id for item in evidence}
-
-    @staticmethod
-    def _artifact_id(query: str, evidence: Sequence[EvidenceItem]) -> str:
-        artifact_seed = query + "|" + "|".join(item.chunk_id for item in evidence)
-        return f"artifact-{sha256(artifact_seed.encode()).hexdigest()[:12]}"
-
-    @staticmethod
-    def _definition_heading(artifact_type: ArtifactType) -> str:
-        return {
-            ArtifactType.COMPARISON_PAGE: "Comparison Definition",
-            ArtifactType.TIMELINE: "Timeline Definition",
-            ArtifactType.DOCUMENT_SUMMARY: "Document Definition",
-            ArtifactType.SECTION_SUMMARY: "Section Definition",
-            ArtifactType.OPEN_QUESTION_PAGE: "Open Question Definition",
-        }.get(artifact_type, "Topic Definition")
-
-    def _related_concepts(self, title: str, query: str) -> list[str]:
-        concepts: list[str] = []
-        seen: set[str] = set()
-        for token in search_terms(f"{title} {query}"):
-            normalized = token.lower()
-            if normalized in self._STOPWORDS or len(normalized) < 4:
-                continue
-            if normalized in seen:
-                continue
-            seen.add(normalized)
-            concepts.append(token)
-        return concepts
-
-    @staticmethod
-    def _key_conclusions(
-        evidence: Sequence[EvidenceItem],
-        differences_or_conflicts: Sequence[str],
-    ) -> list[str]:
-        conclusions: list[str] = []
-        seen: set[str] = set()
-        for value in [*differences_or_conflicts, *(item.text for item in evidence)]:
-            normalized = " ".join(value.split()).lower()
-            if normalized in seen:
-                continue
-            seen.add(normalized)
-            conclusions.append(value)
-            if len(conclusions) == 3:
-                break
-        return conclusions
-
-    @staticmethod
-    def _bullet_lines(values: Sequence[str], empty_message: str) -> list[str]:
-        return [f"- {value}" for value in values] or [f"- {empty_message}"]
-
-    @staticmethod
-    def _evidence_lines(evidence: Sequence[EvidenceItem]) -> list[str]:
-        return [f"- {item.doc_id} | {item.citation_anchor}: {item.text}" for item in evidence] or [
-            "- No supporting evidence captured."
-        ]
-
-    @staticmethod
-    def _normalized_query(query: str) -> str:
-        return " ".join(query.strip().lower().split())
-
-    def _render_topic_or_comparison_body(
-        self,
-        *,
-        query: str,
-        title: str,
-        artifact_type: ArtifactType,
-        evidence: Sequence[EvidenceItem],
-        differences_or_conflicts: Sequence[str],
-        reviewed_at: datetime,
-    ) -> str:
-        doc_ids = sorted(self._unique_docs(evidence))
-        related_concepts = self._related_concepts(title, query)
-        key_conclusions = self._key_conclusions(evidence, differences_or_conflicts)
-        conclusion_lines = self._bullet_lines(key_conclusions, "No conclusions extracted.")
-        evidence_lines = self._evidence_lines(evidence)
-        boundaries = [f"- Coverage is limited to the cited evidence from {len(doc_ids)} document(s)."]
-        if differences_or_conflicts:
-            boundaries.append("- Conflicting evidence means downstream answers should preserve ambiguity.")
-        else:
-            boundaries.append("- Failure cases are not exhaustively enumerated in the current evidence set.")
-        disagreements = self._bullet_lines(
-            differences_or_conflicts,
-            "No material disagreements identified in current evidence.",
-        )
-        related_documents = self._bullet_lines(doc_ids, "No related documents captured.")
-        related_entities = self._bullet_lines(related_concepts, "Not extracted from the current evidence.")
-        sections = [
-            f"# {title}",
-            "",
-            f"## {self._definition_heading(artifact_type)}",
-            f"- Query focus: {query}",
-            "",
-            "## Key Conclusions",
-            *conclusion_lines,
-            "",
-            "## Key Evidence",
-            *evidence_lines,
-            "",
-            "## Boundaries and Failure Cases",
-            *boundaries,
-            "",
-            "## Disagreements",
-            *disagreements,
-            "",
-            "## Related Documents",
-            *related_documents,
-            "",
-            "## Related Concepts and Entities",
-            *related_entities,
-            "",
-            "## Open Questions",
-            "- What additional evidence would strengthen, refine, or falsify this page?",
-            "",
-            "## Last Reviewed",
-            f"- {reviewed_at.isoformat()}",
-            "",
-            "## Evidence Coverage",
-            f"- Coverage: {len(evidence)} evidence item(s) across {len(doc_ids)} document(s).",
-        ]
-        return "\n".join(sections)
-
-    def _render_document_summary_body(
-        self,
-        *,
-        query: str,
-        title: str,
-        evidence: Sequence[EvidenceItem],
-        reviewed_at: datetime,
-    ) -> str:
-        doc_ids = sorted(self._unique_docs(evidence))
-        summary_lines = self._bullet_lines(
-            self._key_conclusions(evidence, []),
-            "No summary extracted.",
-        )
-        sections = [
-            f"# {title}",
-            "",
-            f"## {self._definition_heading(ArtifactType.DOCUMENT_SUMMARY)}",
-            f"- Query focus: {query}",
-            f"- Document scope: {', '.join(doc_ids) if doc_ids else 'No related documents captured.'}",
-            "",
-            "## Summary",
-            *summary_lines,
-            "",
-            "## Key Evidence",
-            *self._evidence_lines(evidence),
-            "",
-            "## Open Questions",
-            "- What parts of this document still need validation or follow-up evidence?",
-            "",
-            "## Last Reviewed",
-            f"- {reviewed_at.isoformat()}",
-            "",
-            "## Evidence Coverage",
-            f"- Coverage: {len(evidence)} evidence item(s) across {len(doc_ids)} document(s).",
-        ]
-        return "\n".join(sections)
-
-    def _render_section_summary_body(
-        self,
-        *,
-        query: str,
-        title: str,
-        evidence: Sequence[EvidenceItem],
-        reviewed_at: datetime,
-    ) -> str:
-        doc_ids = sorted(self._unique_docs(evidence))
-        summary_lines = self._bullet_lines(
-            self._key_conclusions(evidence, []),
-            "No section summary extracted.",
-        )
-        sections = [
-            f"# {title}",
-            "",
-            f"## {self._definition_heading(ArtifactType.SECTION_SUMMARY)}",
-            f"- Query focus: {query}",
-            f"- Section scope: {', '.join(doc_ids) if doc_ids else 'No related documents captured.'}",
-            "",
-            "## Section Summary",
-            *summary_lines,
-            "",
-            "## Key Evidence",
-            *self._evidence_lines(evidence),
-            "",
-            "## Open Questions",
-            "- What section-level detail still needs corroboration?",
-            "",
-            "## Last Reviewed",
-            f"- {reviewed_at.isoformat()}",
-            "",
-            "## Evidence Coverage",
-            f"- Coverage: {len(evidence)} evidence item(s) across {len(doc_ids)} document(s).",
-        ]
-        return "\n".join(sections)
-
-    def _render_timeline_body(
-        self,
-        *,
-        query: str,
-        title: str,
-        evidence: Sequence[EvidenceItem],
-        reviewed_at: datetime,
-    ) -> str:
-        doc_ids = sorted(self._unique_docs(evidence))
-        event_lines = [
-            f"- {index + 1}. {item.doc_id} | {item.citation_anchor}: {item.text}" for index, item in enumerate(evidence)
-        ] or ["- No temporal events captured."]
-        sections = [
-            f"# {title}",
-            "",
-            f"## {self._definition_heading(ArtifactType.TIMELINE)}",
-            f"- Query focus: {query}",
-            f"- Timeline scope: {', '.join(doc_ids) if doc_ids else 'No related documents captured.'}",
-            "",
-            "## Timeline",
-            *event_lines,
-            "",
-            "## Key Evidence",
-            *self._evidence_lines(evidence),
-            "",
-            "## Open Questions",
-            "- Which temporal gaps remain unresolved?",
-            "",
-            "## Last Reviewed",
-            f"- {reviewed_at.isoformat()}",
-            "",
-            "## Evidence Coverage",
-            f"- Coverage: {len(evidence)} evidence item(s) across {len(doc_ids)} document(s).",
-        ]
-        return "\n".join(sections)
-
-    def _render_open_question_body(
-        self,
-        *,
-        query: str,
-        title: str,
-        evidence: Sequence[EvidenceItem],
-        reviewed_at: datetime,
-    ) -> str:
-        doc_ids = sorted(self._unique_docs(evidence))
-        question_lines = self._bullet_lines(
-            [query.strip().rstrip("?")] if query.strip() else [],
-            "No open questions captured.",
-        )
-        candidate_answers = self._bullet_lines(
-            self._key_conclusions(evidence, []),
-            "No candidate answers extracted.",
-        )
-        sections = [
-            f"# {title}",
-            "",
-            f"## {self._definition_heading(ArtifactType.OPEN_QUESTION_PAGE)}",
-            f"- Query focus: {query}",
-            f"- Evidence scope: {', '.join(doc_ids) if doc_ids else 'No related documents captured.'}",
-            "",
-            "## Questions",
-            *question_lines,
-            "",
-            "## Candidate Answers",
-            *candidate_answers,
-            "",
-            "## Key Evidence",
-            *self._evidence_lines(evidence),
-            "",
-            "## Open Questions",
-            "- Which unresolved point should be investigated next?",
-            "",
-            "## Last Reviewed",
-            f"- {reviewed_at.isoformat()}",
-            "",
-            "## Evidence Coverage",
-            f"- Coverage: {len(evidence)} evidence item(s) across {len(doc_ids)} document(s).",
-        ]
-        return "\n".join(sections)
-
-    def _render_body(
-        self,
-        *,
-        query: str,
-        title: str,
-        artifact_type: ArtifactType,
-        evidence: Sequence[EvidenceItem],
-        differences_or_conflicts: Sequence[str],
-        reviewed_at: datetime,
-    ) -> str:
-        if artifact_type is ArtifactType.DOCUMENT_SUMMARY:
-            return self._render_document_summary_body(
-                query=query,
-                title=title,
-                evidence=evidence,
-                reviewed_at=reviewed_at,
-            )
-        if artifact_type is ArtifactType.SECTION_SUMMARY:
-            return self._render_section_summary_body(
-                query=query,
-                title=title,
-                evidence=evidence,
-                reviewed_at=reviewed_at,
-            )
-        if artifact_type is ArtifactType.TIMELINE:
-            return self._render_timeline_body(
-                query=query,
-                title=title,
-                evidence=evidence,
-                reviewed_at=reviewed_at,
-            )
-        if artifact_type is ArtifactType.OPEN_QUESTION_PAGE:
-            return self._render_open_question_body(
-                query=query,
-                title=title,
-                evidence=evidence,
-                reviewed_at=reviewed_at,
-            )
-        return self._render_topic_or_comparison_body(
-            query=query,
-            title=title,
-            artifact_type=artifact_type,
-            evidence=evidence,
-            differences_or_conflicts=differences_or_conflicts,
-            reviewed_at=reviewed_at,
-        )
-
-    def suggest_preservation(
-        self,
-        *,
-        query: str,
-        runtime_mode: RuntimeMode,
-        evidence: Sequence[EvidenceItem],
-        differences_or_conflicts: Sequence[str] | None = None,
-    ) -> PreservationSuggestion:
-        doc_count = len(self._unique_docs(evidence))
-        conflict_count = len(differences_or_conflicts or ())
-        normalized = self._normalized_query(query)
-        is_timeline_query = any(token in normalized for token in ("timeline", "trend", "chronology", "over time"))
-        is_open_question_query = any(
-            token in normalized for token in ("open question", "open questions", "unknown", "unresolved", "gap")
-        )
-        is_section_summary_query = "section" in normalized and any(
-            token in normalized for token in ("summarize", "summary", "recap", "overview")
-        )
-        is_document_summary_query = "document" in normalized and any(
-            token in normalized for token in ("summarize", "summary", "recap", "overview")
-        )
-        reusable = runtime_mode is RuntimeMode.DEEP and (
-            doc_count >= 2
-            or conflict_count > 0
-            or len(evidence) >= 4
-            or is_timeline_query
-            or is_open_question_query
-            or is_section_summary_query
-            or is_document_summary_query
-        )
-        if not reusable:
-            return PreservationSuggestion(suggested=False)
-
-        if "compare" in normalized or conflict_count > 0:
-            artifact_type = ArtifactType.COMPARISON_PAGE.value
-        elif is_timeline_query:
-            artifact_type = ArtifactType.TIMELINE.value
-        elif is_open_question_query:
-            artifact_type = ArtifactType.OPEN_QUESTION_PAGE.value
-        elif is_section_summary_query:
-            artifact_type = ArtifactType.SECTION_SUMMARY.value
-        elif is_document_summary_query:
-            artifact_type = ArtifactType.DOCUMENT_SUMMARY.value
-        else:
-            artifact_type = ArtifactType.TOPIC_PAGE.value
-
-        title = query.strip().rstrip("?") or "Reusable knowledge"
-        rationale = "Evidence spans multiple documents and is likely reusable."
-        if conflict_count > 0:
-            rationale = "Evidence captures a stable comparison or conflict map."
-        elif artifact_type == ArtifactType.TIMELINE.value:
-            rationale = "Evidence is organized around a temporal sequence."
-        elif artifact_type == ArtifactType.OPEN_QUESTION_PAGE.value:
-            rationale = "Evidence captures unresolved questions worth preserving."
-        elif artifact_type in {
-            ArtifactType.DOCUMENT_SUMMARY.value,
-            ArtifactType.SECTION_SUMMARY.value,
-        }:
-            rationale = "Evidence is concentrated enough to preserve a reusable summary."
-
-        return PreservationSuggestion(
-            suggested=True,
-            artifact_type=artifact_type,
-            title=title,
-            rationale=rationale,
-        )
-
-    def apply_lifecycle(
-        self,
-        *,
-        proposed: KnowledgeArtifact,
-        existing_artifacts: Sequence[KnowledgeArtifact],
-    ) -> list[KnowledgeArtifact]:
-        updated_existing: list[KnowledgeArtifact] = []
-        proposed_chunks = set(proposed.supported_chunk_ids)
-        for artifact in existing_artifacts:
-            status = artifact.status
-            if artifact.artifact_type is proposed.artifact_type and artifact.title == proposed.title:
-                existing_chunks = set(artifact.supported_chunk_ids)
-                overlap = bool(existing_chunks & proposed_chunks)
-                if overlap and artifact.body_markdown != proposed.body_markdown:
-                    status = ArtifactStatus.CONFLICTED
-                elif proposed_chunks > existing_chunks:
-                    status = ArtifactStatus.STALE
-            updated_existing.append(artifact.model_copy(update={"status": status}))
-
-        return [*updated_existing, proposed]
-
-    @staticmethod
-    def build_timestamp() -> datetime:
-        return datetime.now(UTC)
-
-    def build_artifact(
-        self,
-        *,
-        query: str,
-        suggestion: PreservationSuggestion,
-        evidence: Sequence[EvidenceItem],
-        differences_or_conflicts: Sequence[str],
-        reviewed_at: datetime | None = None,
-    ) -> KnowledgeArtifact:
-        title = suggestion.title or query.strip().rstrip("?") or "Reusable knowledge"
-        artifact_type = ArtifactType(suggestion.artifact_type or ArtifactType.TOPIC_PAGE.value)
-        last_reviewed_at = reviewed_at or self.build_timestamp()
-        return KnowledgeArtifact(
-            artifact_id=self._artifact_id(query, evidence),
-            artifact_type=artifact_type,
-            title=title,
-            supported_chunk_ids=[item.chunk_id for item in evidence],
-            confidence=None,
-            status=ArtifactStatus.SUGGESTED,
-            last_reviewed_at=last_reviewed_at,
-            body_markdown=self._render_body(
-                query=query,
-                title=title,
-                artifact_type=artifact_type,
-                evidence=evidence,
-                differences_or_conflicts=differences_or_conflicts,
-                reviewed_at=last_reviewed_at,
-            ),
-            source_scope=sorted({item.doc_id for item in evidence}),
-            metadata={
-                "coverage_documents": str(len(self._unique_docs(evidence))),
-                "coverage_evidence_items": str(len(evidence)),
-                "reviewed_at": last_reviewed_at.isoformat(),
-            },
-        )
-
 __all__ = [
-    "ArtifactService",
     "CandidateLike",
     "ContextEvidenceMerger",
     "EvidenceBundle",

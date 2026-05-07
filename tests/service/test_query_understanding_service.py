@@ -37,10 +37,7 @@ class FakeQueryUnderstandingBackend:
                     "match_strategy": "heading",
                     "requires_structure_match": True,
                     "prefer_heading_match": True,
-                    "semantic_section_families": ["architecture"],
-                    "preferred_section_terms": ["系统架构"],
-                    "heading_hints": ["系统架构"],
-                    "locator_terms": ["那一部分", "哪一节"],
+                    "focus_terms": ["architecture", "系统架构", "那一部分", "哪一节"],
                 },
                 "preferred_section_terms": ["系统架构"],
             },
@@ -52,8 +49,7 @@ class FakeQueryUnderstandingBackend:
                 "structure_constraints": {
                     "match_strategy": "semantic",
                     "requires_structure_match": True,
-                    "semantic_section_families": ["architecture"],
-                    "preferred_section_terms": ["系统架构"],
+                    "focus_terms": ["architecture", "系统架构"],
                 },
                 "preferred_section_terms": ["系统架构"],
             },
@@ -135,8 +131,8 @@ def test_query_understanding_service_extracts_structure_constraints_from_explici
     assert result.needs_structure is True
     assert result.structure_constraints.requires_structure_match is True
     assert result.structure_constraints.prefer_heading_match is True
-    assert "architecture" in result.structure_constraints.semantic_section_families
-    assert "系统架构" in result.preferred_section_terms
+    assert "architecture" in result.structure_constraints.focus_terms
+    assert "系统架构" in result.structure_constraints.focus_terms
 
 
 def test_query_understanding_service_extracts_metadata_and_special_constraints() -> None:

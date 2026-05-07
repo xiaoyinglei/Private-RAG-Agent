@@ -3,10 +3,11 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from rag.assembly import TokenAccountingService, TokenizerContract
 import rag.retrieval.grounding_service as grounding_module
+from rag.assembly import TokenAccountingService, TokenizerContract
+from rag.ingest.asset_anchors import asset_anchor
 from rag.retrieval.grounding_service import GroundingBudgets, GroundingService
-from rag.schema.core import AssetRecord, DocumentType, LayoutMetaCacheRecord, SectionRecord, SourceType
+from rag.schema.core import AssetRecord, LayoutMetaCacheRecord, SectionLocatorRecord, SectionRecord
 from rag.schema.query import EvidenceItem, GroundingTarget
 from rag.utils.text import DEFAULT_TOKENIZER_FALLBACK_MODEL
 
@@ -19,6 +20,29 @@ def _token_accounting() -> TokenAccountingService:
             chunking_tokenizer_model_name=DEFAULT_TOKENIZER_FALLBACK_MODEL,
         )
     )
+
+
+def _section_record(**kwargs: Any) -> SectionRecord:
+    byte_start = int(kwargs.setdefault("byte_range_start", 0))
+    byte_end = int(kwargs.setdefault("byte_range_end", max(byte_start + 1, 1)))
+    char_start = int(kwargs.setdefault("char_range_start", byte_start))
+    char_end = int(kwargs.setdefault("char_range_end", byte_end))
+    visible_text_key = str(kwargs.setdefault("visible_text_key", f"doc-{kwargs.get('doc_id', 'unknown')}.txt"))
+    kwargs.setdefault(
+        "raw_locator",
+        SectionLocatorRecord(
+            visible_text_key=visible_text_key,
+            char_range_start=char_start,
+            char_range_end=char_end,
+            byte_range_start=byte_start,
+            byte_range_end=byte_end,
+        ),
+    )
+    return SectionRecord(**kwargs)
+
+
+def _evidence_item(**kwargs: Any) -> EvidenceItem:
+    return EvidenceItem(**kwargs)
 
 
 @dataclass
@@ -78,9 +102,20 @@ class _ObjectStore:
 class _RerankBinding:
     ranking: list[int]
 
-    def rerank(self, query: str, candidates: list[str]) -> list[int]:
-        del query, candidates
+    def rerank(self, query: str, candidates: list[str], **kwargs: object) -> list[int]:
+        del query, candidates, kwargs
         return list(self.ranking)
+
+
+@dataclass
+class _ScoreRerankBinding:
+    scores: list[float]
+    calls: list[tuple[list[str], dict[str, object]]] = field(default_factory=list)
+
+    def rerank(self, query: str, candidates: list[str], **kwargs: object) -> list[float]:
+        del query
+        self.calls.append((list(candidates), dict(kwargs)))
+        return list(self.scores[: len(candidates)])
 
 
 @dataclass
@@ -102,10 +137,23 @@ class _TokenAccountingStub:
         return list(self.chunks)
 
 
+class _PassthroughTokenAccounting:
+    def count(self, text: str) -> int:
+        return len(text.split())
+
+    def clip(self, text: str, budget: int, *, add_ellipsis: bool = False) -> str:
+        del budget, add_ellipsis
+        return text
+
+    def chunk_text(self, text: str, *, chunk_token_size: int, chunk_overlap_tokens: int) -> list[str]:
+        del chunk_token_size, chunk_overlap_tokens
+        return [text]
+
+
 def test_grounding_service_reads_section_byte_range_and_includes_neighbor_asset() -> None:
     metadata_repo = _MetadataRepo(
         sections={
-            7: SectionRecord(
+            7: _section_record(
                 section_id=7,
                 doc_id=42,
                 source_id=9,
@@ -149,18 +197,18 @@ def test_grounding_service_reads_section_byte_range_and_includes_neighbor_asset(
     grounded = service.ground(
         query="What is Alpha architecture?",
         evidence=[
-            EvidenceItem(
-                chunk_id="summary:section_summary:7",
-                doc_id="42",
-                source_id="9",
+            _evidence_item(
+                evidence_id="summary:section_summary:7",
+                doc_id=42,
+                source_id=9,
                 citation_anchor="Architecture / Alpha",
                 text="section summary",
                 score=0.91,
                 grounding_target=GroundingTarget(
                     kind="section",
-                    doc_id="42",
-                    source_id="9",
-                    section_id="7",
+                    doc_id=42,
+                    source_id=9,
+                    section_id=7,
                     page_start=2,
                     page_end=2,
                     section_path=["Architecture", "Alpha"],
@@ -174,15 +222,156 @@ def test_grounding_service_reads_section_byte_range_and_includes_neighbor_asset(
     assert object_store.read_calls == []
     assert grounded[0].text == "Alpha architecture body"
     assert grounded[0].grounding_target is not None
-    assert grounded[0].grounding_target.section_id == "7"
-    assert any(item.special_chunk_type == "table" for item in grounded)
+    assert grounded[0].grounding_target.section_id == 7
+    assert any(item.record_type == "asset" for item in grounded)
     assert any("Alpha capacity table" in item.text for item in grounded)
+
+
+def test_grounding_service_replaces_short_table_anchor_in_section_text() -> None:
+    anchor = asset_anchor("table-1")
+    section_text = f"Expense standards {anchor} apply this year."
+    table_markdown = "| Level | Amount |\n|---|---|\n| A | 100 |"
+    metadata_repo = _MetadataRepo(
+        sections={
+            7: _section_record(
+                section_id=7,
+                doc_id=42,
+                source_id=9,
+                toc_path=["Policy", "Expense"],
+                order_index=1,
+                page_start=1,
+                page_end=1,
+                byte_range_start=0,
+                byte_range_end=len(section_text.encode("utf-8")),
+                visible_text_key="doc-42.txt",
+                section_kind="body",
+                content_hash="section-hash",
+                has_table=True,
+                neighbor_asset_count=1,
+            )
+        },
+        assets={
+            11: AssetRecord(
+                asset_id=11,
+                doc_id=42,
+                source_id=9,
+                section_id=7,
+                asset_type="table",
+                element_ref="table-1",
+                page_no=1,
+                content_hash="asset-hash",
+                storage_key="asset-11.txt",
+                metadata_json={
+                    "asset_anchor": anchor,
+                    "asset_text_preview": table_markdown,
+                    "table_policy": "inline_context",
+                },
+            )
+        },
+    )
+    service = GroundingService(
+        metadata_repo=metadata_repo,
+        object_store=_ObjectStore(payloads={"doc-42.txt": section_text.encode("utf-8")}),
+        token_accounting=_PassthroughTokenAccounting(),
+        budgets=GroundingBudgets(max_neighbor_assets=0),
+    )
+
+    grounded = service.ground(
+        query="expense standards",
+        evidence=[
+            _evidence_item(
+                evidence_id="summary:section_summary:7",
+                doc_id=42,
+                source_id=9,
+                citation_anchor="Policy / Expense",
+                text="section summary",
+                score=0.91,
+                grounding_target=GroundingTarget(kind="section", doc_id=42, source_id=9, section_id=7),
+            )
+        ],
+    )
+
+    section_evidence = [item for item in grounded if item.record_type == "section"]
+    assert len(section_evidence) == 1
+    assert anchor not in section_evidence[0].text
+    assert "TABLE_COMPUTE_ONLY" in section_evidence[0].text
+    assert "<system_instruction>" in section_evidence[0].text
+
+
+def test_grounding_service_replaces_compute_only_table_with_descriptive_block() -> None:
+    anchor = asset_anchor("table-1")
+    section_text = f"Sales ledger {anchor} requires calculation."
+    table_markdown = "| Row | Amount |\n|---|---|\n| row0 | 1 |\n| row999 | 999 |"
+    metadata_repo = _MetadataRepo(
+        sections={
+            7: _section_record(
+                section_id=7,
+                doc_id=42,
+                source_id=9,
+                toc_path=["Report", "Ledger"],
+                order_index=1,
+                byte_range_start=0,
+                byte_range_end=len(section_text.encode("utf-8")),
+                visible_text_key="doc-42.txt",
+                section_kind="body",
+                content_hash="section-hash",
+                has_table=True,
+                neighbor_asset_count=1,
+            )
+        },
+        assets={
+            11: AssetRecord(
+                asset_id=11,
+                doc_id=42,
+                source_id=9,
+                section_id=7,
+                asset_type="table",
+                element_ref="table-1",
+                page_no=1,
+                content_hash="asset-hash",
+                storage_key="asset-11.txt",
+                metadata_json={
+                    "asset_anchor": anchor,
+                    "asset_text_preview": table_markdown,
+                    "table_policy": "compute_only",
+                },
+            )
+        },
+    )
+    service = GroundingService(
+        metadata_repo=metadata_repo,
+        object_store=_ObjectStore(payloads={"doc-42.txt": section_text.encode("utf-8")}),
+        token_accounting=_PassthroughTokenAccounting(),
+        budgets=GroundingBudgets(max_neighbor_assets=0),
+    )
+
+    grounded = service.ground(
+        query="sum sales ledger",
+        evidence=[
+            _evidence_item(
+                evidence_id="summary:section_summary:7",
+                doc_id=42,
+                source_id=9,
+                citation_anchor="Report / Ledger",
+                text="section summary",
+                score=0.91,
+                grounding_target=GroundingTarget(kind="section", doc_id=42, source_id=9, section_id=7),
+            )
+        ],
+    )
+
+    section_texts = [item.text for item in grounded if item.record_type == "section"]
+    assert len(section_texts) == 1
+    assert "TABLE_COMPUTE_ONLY" in section_texts[0]
+    assert "<system_instruction>" in section_texts[0]
+    assert "</system_instruction>" in section_texts[0]
+    assert "row999" not in section_texts[0]
 
 
 def test_grounding_service_uses_layout_meta_cache_for_geometric_neighbor_assets() -> None:
     metadata_repo = _MetadataRepo(
         sections={
-            7: SectionRecord(
+            7: _section_record(
                 section_id=7,
                 doc_id=42,
                 source_id=9,
@@ -246,26 +435,26 @@ def test_grounding_service_uses_layout_meta_cache_for_geometric_neighbor_assets(
     grounded = service.ground(
         query="What is Alpha architecture?",
         evidence=[
-            EvidenceItem(
-                chunk_id="summary:section_summary:7",
-                doc_id="42",
-                source_id="9",
+            _evidence_item(
+                evidence_id="summary:section_summary:7",
+                doc_id=42,
+                source_id=9,
                 citation_anchor="Architecture / Alpha",
                 text="section summary",
                 score=0.91,
-                grounding_target=GroundingTarget(kind="section", doc_id="42", source_id="9", section_id="7"),
+                grounding_target=GroundingTarget(kind="section", doc_id=42, source_id=9, section_id=7),
             )
         ],
     )
 
-    assert any(item.special_chunk_type == "table" for item in grounded)
+    assert any(item.record_type == "asset" for item in grounded)
     assert any("Alpha layout table" in item.text for item in grounded)
 
 
 def test_grounding_service_enforces_input_and_output_budgets() -> None:
     metadata_repo = _MetadataRepo(
         sections={
-            7: SectionRecord(
+            7: _section_record(
                 section_id=7,
                 doc_id=42,
                 source_id=9,
@@ -277,7 +466,7 @@ def test_grounding_service_enforces_input_and_output_budgets() -> None:
                 section_kind="body",
                 content_hash="section-hash",
             ),
-            8: SectionRecord(
+            8: _section_record(
                 section_id=8,
                 doc_id=42,
                 source_id=9,
@@ -294,9 +483,9 @@ def test_grounding_service_enforces_input_and_output_budgets() -> None:
     object_store = _ObjectStore(
         payloads={
             "doc-42.txt": (
-                "alpha one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen "
-                "sixteen seventeen eighteen nineteen twenty"
-            ).encode("utf-8")
+                b"alpha one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen "
+                b"sixteen seventeen eighteen nineteen twenty"
+            )
         }
     )
     token_accounting = _token_accounting()
@@ -307,8 +496,8 @@ def test_grounding_service_enforces_input_and_output_budgets() -> None:
         budgets=GroundingBudgets(
             max_targets_to_read=1,
             max_output_tokens=12,
-            local_chunk_tokens=6,
-            local_chunk_overlap_tokens=0,
+            local_window_tokens=6,
+            local_window_overlap_tokens=0,
             max_neighbor_assets=0,
         ),
     )
@@ -316,29 +505,29 @@ def test_grounding_service_enforces_input_and_output_budgets() -> None:
     grounded = service.ground(
         query="alpha architecture",
         evidence=[
-            EvidenceItem(
-                chunk_id="summary:section_summary:7",
-                doc_id="42",
-                source_id="9",
+            _evidence_item(
+                evidence_id="summary:section_summary:7",
+                doc_id=42,
+                source_id=9,
                 citation_anchor="Architecture",
                 text="section summary A",
                 score=0.91,
-                grounding_target=GroundingTarget(kind="section", doc_id="42", section_id="7"),
+                grounding_target=GroundingTarget(kind="section", doc_id=42, section_id=7),
             ),
-            EvidenceItem(
-                chunk_id="summary:section_summary:8",
-                doc_id="42",
-                source_id="9",
+            _evidence_item(
+                evidence_id="summary:section_summary:8",
+                doc_id=42,
+                source_id=9,
                 citation_anchor="Operations",
                 text="section summary B",
                 score=0.89,
-                grounding_target=GroundingTarget(kind="section", doc_id="42", section_id="8"),
+                grounding_target=GroundingTarget(kind="section", doc_id=42, section_id=8),
             ),
         ],
     )
 
     assert len(object_store.range_calls) == 1
-    assert all(item.chunk_id.startswith("grounded:") for item in grounded)
+    assert all(item.evidence_id.startswith("grounded:") for item in grounded)
     assert sum(token_accounting.count(item.text) for item in grounded) <= 12
 
 
@@ -349,11 +538,11 @@ def test_grounding_service_passthrough_when_grounding_target_is_missing() -> Non
         token_accounting=_token_accounting(),
     )
     evidence = [
-        EvidenceItem(
-            chunk_id="chunk-1",
-            doc_id="42",
+        _evidence_item(
+            evidence_id="summary:section_summary:1",
+            doc_id=42,
             citation_anchor="#a",
-            text="existing chunk text",
+            text="existing evidence text",
             score=0.7,
         )
     ]
@@ -363,8 +552,116 @@ def test_grounding_service_passthrough_when_grounding_target_is_missing() -> Non
     assert grounded == evidence
 
 
-def test_grounding_service_reuses_single_executor_per_query(monkeypatch) -> None:
+def test_grounding_service_expands_only_refined_sibling_sections_inside_parent_boundary() -> None:
+    before_text = b"before window alpha condition"
+    center_text = b"center window alpha exception"
+    after_text = b"after window alpha approval"
+    unrelated_text = b"unrelated parent alpha should not appear"
+    metadata_repo = _MetadataRepo(
+        sections={
+            10: _section_record(
+                section_id=10,
+                doc_id=42,
+                source_id=9,
+                parent_section_id=10,
+                toc_path=["Policy", "Credit"],
+                order_index=0,
+                byte_range_start=0,
+                byte_range_end=len(before_text),
+                visible_text_key="section-10.txt",
+                section_kind="body",
+                content_hash="h10",
+                metadata_json={"window_index": 0, "window_count": 3},
+            ),
+            11: _section_record(
+                section_id=11,
+                doc_id=42,
+                source_id=9,
+                parent_section_id=10,
+                toc_path=["Policy", "Credit"],
+                order_index=1,
+                byte_range_start=0,
+                byte_range_end=len(center_text),
+                visible_text_key="section-11.txt",
+                section_kind="body",
+                content_hash="h11",
+                metadata_json={"window_index": 1, "window_count": 3},
+            ),
+            12: _section_record(
+                section_id=12,
+                doc_id=42,
+                source_id=9,
+                parent_section_id=10,
+                toc_path=["Policy", "Credit"],
+                order_index=2,
+                byte_range_start=0,
+                byte_range_end=len(after_text),
+                visible_text_key="section-12.txt",
+                section_kind="body",
+                content_hash="h12",
+                metadata_json={"window_index": 2, "window_count": 3},
+            ),
+            13: _section_record(
+                section_id=13,
+                doc_id=42,
+                source_id=9,
+                parent_section_id=13,
+                toc_path=["Policy", "Credit"],
+                order_index=3,
+                byte_range_start=0,
+                byte_range_end=len(unrelated_text),
+                visible_text_key="section-13.txt",
+                section_kind="body",
+                content_hash="h13",
+                metadata_json={"window_index": 0, "window_count": 1},
+            ),
+        }
+    )
+    service = GroundingService(
+        metadata_repo=metadata_repo,
+        object_store=_ObjectStore(
+            payloads={
+                "section-10.txt": before_text,
+                "section-11.txt": center_text,
+                "section-12.txt": after_text,
+                "section-13.txt": unrelated_text,
+            }
+        ),
+        token_accounting=_PassthroughTokenAccounting(),
+        budgets=GroundingBudgets(
+            local_window_tokens=64,
+            local_window_overlap_tokens=0,
+            max_neighbor_assets=0,
+            neighbor_section_radius=1,
+            max_neighbor_sections=2,
+        ),
+    )
+
+    grounded = service.ground(
+        query="alpha approval",
+        evidence=[
+            _evidence_item(
+                evidence_id="summary:section_summary:11",
+                doc_id=42,
+                source_id=9,
+                citation_anchor="Policy / Credit",
+                text="section summary",
+                score=0.91,
+                grounding_target=GroundingTarget(kind="section", doc_id=42, source_id=9, section_id=11),
+            )
+        ],
+    )
+
+    joined_text = "\n".join(item.text for item in grounded)
+    assert "before window alpha condition" in joined_text
+    assert "center window alpha exception" in joined_text
+    assert "after window alpha approval" in joined_text
+    assert "unrelated parent alpha should not appear" not in joined_text
+
+
+def test_grounding_service_reuses_executor_across_queries(monkeypatch) -> None:
     created_executors: list[int] = []
+    shutdown_calls: list[bool] = []
 
     class _FakeFuture:
         def __init__(self, value: bytes) -> None:
@@ -387,10 +684,14 @@ def test_grounding_service_reuses_single_executor_per_query(monkeypatch) -> None
         def submit(self, fn, *args):
             return _FakeFuture(fn(*args))
 
+        def shutdown(self, wait: bool = True, cancel_futures: bool = False) -> None:
+            del cancel_futures
+            shutdown_calls.append(wait)
+
     monkeypatch.setattr(grounding_module, "ThreadPoolExecutor", _FakeExecutor)
     metadata_repo = _MetadataRepo(
         sections={
-            7: SectionRecord(
+            7: _section_record(
                 section_id=7,
                 doc_id=42,
                 source_id=9,
@@ -433,26 +734,42 @@ def test_grounding_service_reuses_single_executor_per_query(monkeypatch) -> None
     grounded = service.ground(
         query="What is Alpha architecture?",
         evidence=[
-            EvidenceItem(
-                chunk_id="summary:section_summary:7",
-                doc_id="42",
-                source_id="9",
+            _evidence_item(
+                evidence_id="summary:section_summary:7",
+                doc_id=42,
+                source_id=9,
                 citation_anchor="Architecture / Alpha",
                 text="section summary",
                 score=0.91,
-                grounding_target=GroundingTarget(kind="section", doc_id="42", source_id="9", section_id="7"),
+                grounding_target=GroundingTarget(kind="section", doc_id=42, source_id=9, section_id=7),
             )
         ],
     )
 
     assert grounded
+    service.ground(
+        query="What is Alpha architecture?",
+        evidence=[
+            _evidence_item(
+                evidence_id="summary:section_summary:7",
+                doc_id=42,
+                source_id=9,
+                citation_anchor="Architecture / Alpha",
+                text="section summary",
+                score=0.91,
+                grounding_target=GroundingTarget(kind="section", doc_id=42, source_id=9, section_id=7),
+            )
+        ],
+    )
     assert created_executors == [service.budgets.max_parallel_reads]
+    service.close()
+    assert shutdown_calls == [True]
 
 
 def test_grounding_service_uses_rerank_binding_for_local_evidence_scoring() -> None:
     metadata_repo = _MetadataRepo(
         sections={
-            7: SectionRecord(
+            7: _section_record(
                 section_id=7,
                 doc_id=42,
                 source_id=9,
@@ -473,23 +790,85 @@ def test_grounding_service_uses_rerank_binding_for_local_evidence_scoring() -> N
         token_accounting=_TokenAccountingStub(
             chunks=["Background filler", "Alpha engine handles", "Miscellaneous notes"]
         ),
-        budgets=GroundingBudgets(local_chunk_tokens=3, local_chunk_overlap_tokens=0, max_neighbor_assets=0),
+        budgets=GroundingBudgets(local_window_tokens=3, local_window_overlap_tokens=0, max_neighbor_assets=0),
         rerank_binding=_RerankBinding(ranking=[1, 0, 2]),
     )
 
     grounded = service.ground(
         query="What handles ingestion?",
         evidence=[
-            EvidenceItem(
-                chunk_id="summary:section_summary:7",
-                doc_id="42",
-                source_id="9",
+            _evidence_item(
+                evidence_id="summary:section_summary:7",
+                doc_id=42,
+                source_id=9,
                 citation_anchor="Architecture",
                 text="section summary",
                 score=0.91,
-                grounding_target=GroundingTarget(kind="section", doc_id="42", section_id="7"),
+                grounding_target=GroundingTarget(kind="section", doc_id=42, section_id=7),
             )
         ],
     )
 
     assert grounded[0].text == "Alpha engine handles"
+
+
+def test_grounding_service_caps_and_batches_rerank_bonus_inputs() -> None:
+    metadata_repo = _MetadataRepo(
+        sections={
+            7: _section_record(
+                section_id=7,
+                doc_id=42,
+                source_id=9,
+                toc_path=["Architecture"],
+                order_index=1,
+                byte_range_start=0,
+                byte_range_end=128,
+                visible_text_key="doc-42.txt",
+                section_kind="body",
+                content_hash="section-hash",
+            )
+        }
+    )
+    reranker = _ScoreRerankBinding(scores=[0.1, 0.9])
+    service = GroundingService(
+        metadata_repo=metadata_repo,
+        object_store=_ObjectStore(payloads={"doc-42.txt": b"unused"}),
+        token_accounting=_TokenAccountingStub(
+            chunks=[
+                "first candidate has many words",
+                "second candidate has many words",
+                "third candidate should not reach rerank",
+            ]
+        ),
+        budgets=GroundingBudgets(
+            local_window_tokens=5,
+            local_window_overlap_tokens=0,
+            max_neighbor_assets=0,
+            rerank_max_items=2,
+            rerank_batch_size=4,
+            rerank_max_item_tokens=2,
+            rerank_max_total_tokens=4,
+        ),
+        rerank_binding=reranker,
+    )
+
+    grounded = service.ground(
+        query="neutral query",
+        evidence=[
+            _evidence_item(
+                evidence_id="summary:section_summary:7",
+                doc_id=42,
+                source_id=9,
+                citation_anchor="Architecture",
+                text="section summary",
+                score=0.91,
+                grounding_target=GroundingTarget(kind="section", doc_id=42, section_id=7),
+            )
+        ],
+    )
+
+    assert grounded[0].text == "second candidate has many words"
+    assert len(reranker.calls) == 1
+    candidates, kwargs = reranker.calls[0]
+    assert candidates == ["first candidate", "second candidate"]
+    assert kwargs == {"batch_size": 4, "max_length": 2}

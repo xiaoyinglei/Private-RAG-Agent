@@ -3,16 +3,8 @@ from __future__ import annotations
 from collections.abc import Iterable
 from dataclasses import dataclass
 from math import sqrt
-from typing import Protocol
 
 from rag.schema.runtime import StoredVectorEntry, VectorSearchResult
-
-
-class VectorChunkRecord(Protocol):
-    chunk_id: str
-    doc_id: str
-    segment_id: str
-    text: str
 
 
 @dataclass(frozen=True)
@@ -36,7 +28,7 @@ class InMemoryVectorRepo:
         *,
         metadata: dict[str, str] | None = None,
         embedding_space: str = "default",
-        item_kind: str = "chunk",
+        item_kind: str = "section_summary",
     ) -> None:
         self._records[(embedding_space, item_kind, item_id)] = _VectorRecord(
             item_id=item_id,
@@ -47,21 +39,6 @@ class InMemoryVectorRepo:
             text=dict(metadata or {}).get("text", ""),
         )
 
-    def index_chunks(self, chunks: list[VectorChunkRecord]) -> None:
-        vocabulary = self._build_vocabulary(chunk.text for chunk in chunks)
-        for chunk in chunks:
-            text = chunk.text
-            vector = self._text_to_vector(text, vocabulary)
-            metadata = {"doc_id": chunk.doc_id, "segment_id": chunk.segment_id}
-            self._records[("default", "chunk", chunk.chunk_id)] = _VectorRecord(
-                item_id=chunk.chunk_id,
-                item_kind="chunk",
-                embedding_space="default",
-                vector=vector,
-                metadata=metadata,
-                text=text,
-            )
-
     def search(
         self,
         query: str | Iterable[float],
@@ -69,7 +46,7 @@ class InMemoryVectorRepo:
         limit: int = 10,
         doc_ids: list[str] | None = None,
         embedding_space: str = "default",
-        item_kind: str = "chunk",
+        item_kind: str = "section_summary",
     ) -> list[VectorSearchResult]:
         records = [
             record
@@ -95,7 +72,6 @@ class InMemoryVectorRepo:
                         item_kind=record.item_kind,
                         doc_id=record.metadata.get("doc_id", ""),
                         source_id=record.metadata.get("source_id", ""),
-                        segment_id=record.metadata.get("segment_id", ""),
                         text=record.text,
                         metadata=dict(record.metadata),
                     )
@@ -118,7 +94,6 @@ class InMemoryVectorRepo:
                     item_kind=record.item_kind,
                     doc_id=record.metadata.get("doc_id", ""),
                     source_id=record.metadata.get("source_id", ""),
-                    segment_id=record.metadata.get("segment_id", ""),
                     text=record.text,
                     metadata=dict(record.metadata),
                 )
@@ -131,7 +106,7 @@ class InMemoryVectorRepo:
         item_id: str,
         *,
         embedding_space: str = "default",
-        item_kind: str = "chunk",
+        item_kind: str = "section_summary",
     ) -> StoredVectorEntry | None:
         record = self._records.get((embedding_space, item_kind, item_id))
         if record is None:
@@ -142,7 +117,6 @@ class InMemoryVectorRepo:
             item_kind=record.item_kind,
             embedding_space=record.embedding_space,
             doc_id=metadata.get("doc_id", ""),
-            segment_id=metadata.get("segment_id", ""),
             text=record.text,
             metadata=metadata,
             vector=list(record.vector),
@@ -153,7 +127,7 @@ class InMemoryVectorRepo:
         item_ids: tuple[str, ...] | list[str],
         *,
         embedding_space: str | None = None,
-        item_kind: str | None = "chunk",
+        item_kind: str | None = "section_summary",
     ) -> set[str]:
         return {
             item_id
@@ -171,7 +145,7 @@ class InMemoryVectorRepo:
         *,
         embedding_space: str | None = None,
         item_kind: str | None = None,
-        distinct_chunks: bool = False,
+        distinct_records: bool = False,
     ) -> int:
         records = [
             record
@@ -179,7 +153,7 @@ class InMemoryVectorRepo:
             if (embedding_space is None or record.embedding_space == embedding_space)
             and (item_kind is None or record.item_kind == item_kind)
         ]
-        if not distinct_chunks:
+        if not distinct_records:
             return len(records)
         return len({record.item_id for record in records})
 

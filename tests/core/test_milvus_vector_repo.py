@@ -112,6 +112,74 @@ def test_milvus_vector_repo_upserts_v1_section_summary_with_partition(monkeypatc
         repo.close()
 
 
+def test_milvus_vector_repo_deduplicates_primary_keys_within_one_flush(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(MilvusVectorRepo, "_connect", lambda self: setattr(self, "_connected", True))
+
+    class _Connections:
+        def disconnect(self, alias: str) -> None:
+            return None
+
+    monkeypatch.setitem(sys.modules, "pymilvus", types.SimpleNamespace(connections=_Connections()))
+
+    class _FakeCollection:
+        name = "summary_index__section_summary__default"
+
+        def __init__(self) -> None:
+            self.upsert_calls: list[tuple[list[dict[str, object]], str | None]] = []
+
+        def upsert(self, rows: list[dict[str, object]], partition_name: str | None = None) -> None:
+            item_ids = [row["item_id"] for row in rows]
+            assert len(item_ids) == len(set(item_ids))
+            self.upsert_calls.append(([dict(row) for row in rows], partition_name))
+
+        def flush(self) -> None:
+            return None
+
+        def release(self) -> None:
+            return None
+
+    repo = MilvusVectorRepo("http://127.0.0.1:19530")
+    fake_collection = _FakeCollection()
+    monkeypatch.setattr(repo, "_collection", lambda **kwargs: fake_collection)
+    repo._collections[fake_collection.name] = fake_collection
+
+    record = SectionSummaryRecord(
+        section_id=7,
+        doc_id=42,
+        source_id=9,
+        version_group_id=42,
+        version_no=3,
+        doc_status="published",
+        effective_date=datetime(2026, 4, 18, tzinfo=UTC),
+        updated_at=datetime(2026, 4, 18, 12, 0, tzinfo=UTC),
+        is_active=True,
+        source_type=SourceType.MARKDOWN,
+        embedding_model_id="bge-m3",
+        partition_key=PartitionKey.HOT,
+        page_start=1,
+        page_end=2,
+        section_kind="body",
+        toc_path=["A", "B"],
+        summary_text="old summary",
+        metadata_json={},
+    )
+    try:
+        repo.upsert_records(
+            [
+                (record, [0.1, 0.2]),
+                (record.model_copy(update={"summary_text": "new summary"}), [0.3, 0.4]),
+            ]
+        )
+        assert len(fake_collection.upsert_calls) == 1
+        rows, partition_name = fake_collection.upsert_calls[0]
+        assert partition_name == "hot"
+        assert len(rows) == 1
+        assert rows[0]["item_id"] == 7
+        assert rows[0]["summary_text"] == "new summary"
+    finally:
+        repo.close()
+
+
 def test_milvus_vector_repo_search_injects_system_guardrail(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(MilvusVectorRepo, "_connect", lambda self: setattr(self, "_connected", True))
 
@@ -224,6 +292,95 @@ def test_milvus_vector_repo_hybrid_search_passes_expr_to_every_ann_request(
         )
         assert [result.item_id for result in results] == ["7"]
         assert len(fake_async_client.calls) == 2
+    finally:
+        repo.close()
+
+
+def test_milvus_vector_repo_does_not_reuse_async_client_across_event_loops(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(MilvusVectorRepo, "_connect", lambda self: setattr(self, "_connected", True))
+
+    class _Connections:
+        def disconnect(self, alias: str) -> None:
+            return None
+
+    class _AnnSearchRequest:
+        def __init__(self, **kwargs) -> None:
+            self.kwargs = kwargs
+
+    class _RRFRanker:
+        pass
+
+    clients: list["_FakeAsyncClient"] = []
+
+    class _FakeAsyncClient:
+        def __init__(self, **kwargs) -> None:
+            del kwargs
+            self.loop = asyncio.get_running_loop()
+            self.closed = False
+            clients.append(self)
+
+        async def hybrid_search(self, **kwargs):
+            if asyncio.get_running_loop() is not self.loop:
+                raise RuntimeError("async client reused across event loops")
+            if self.closed:
+                raise RuntimeError("async client reused after close")
+            return [
+                [
+                    {
+                        "id": 7,
+                        "distance": 0.91,
+                        "entity": {
+                            "item_id": 7,
+                            "doc_id": 42,
+                            "source_id": 9,
+                            "section_id": 7,
+                            "summary_text": "Section summary",
+                            "metadata_json": "{}",
+                        },
+                    }
+                ]
+            ]
+
+        async def close(self) -> None:
+            self.closed = True
+
+    monkeypatch.setitem(
+        sys.modules,
+        "pymilvus",
+        types.SimpleNamespace(
+            connections=_Connections(),
+            AnnSearchRequest=_AnnSearchRequest,
+            RRFRanker=_RRFRanker,
+            AsyncMilvusClient=_FakeAsyncClient,
+        ),
+    )
+
+    class _FakeCollection:
+        name = "summary_index__section_summary__default"
+
+        def release(self) -> None:
+            return None
+
+    repo = MilvusVectorRepo("http://127.0.0.1:19530")
+    fake_collection = _FakeCollection()
+    monkeypatch.setattr(repo, "_has_collection", lambda **kwargs: True)
+    monkeypatch.setattr(repo, "_collection", lambda **kwargs: fake_collection)
+    monkeypatch.setattr(repo, "_supports_hybrid_schema", lambda collection: True)
+    repo._collections[fake_collection.name] = fake_collection
+    try:
+        for _ in range(2):
+            results = asyncio.run(
+                repo.hybrid_search_async(
+                    query_vector=[0.1, 0.2],
+                    sparse_query="alpha policy",
+                    doc_ids=["42"],
+                )
+            )
+            assert [result.item_id for result in results] == ["7"]
+        assert len(clients) == 2
+        assert all(client.closed for client in clients)
     finally:
         repo.close()
 

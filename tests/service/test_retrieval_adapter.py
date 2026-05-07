@@ -4,7 +4,7 @@ import asyncio
 from dataclasses import dataclass
 
 from rag.retrieval.evidence import EvidenceService
-from rag.retrieval.models import QueryMode
+from rag.retrieval.models import RetrievalProfile
 from rag.retrieval.planning_graph import ComplexityGate, PlanningState, PredicatePlan, QueryVariant, RetrievalPath
 from rag.retrieval.retrieval_adapter import RetrievalAdapter
 from rag.schema.query import QueryUnderstanding
@@ -13,7 +13,7 @@ from rag.schema.runtime import AccessPolicy, RuntimeMode
 
 @dataclass(frozen=True)
 class _FakeCandidate:
-    chunk_id: str
+    evidence_id: str
     doc_id: str
     text: str
     citation_anchor: str
@@ -22,10 +22,11 @@ class _FakeCandidate:
     source_kind: str = "internal"
     source_id: str | None = None
     section_path: tuple[str, ...] = ()
-    chunk_role: object | None = None
-    special_chunk_type: str | None = None
-    parent_chunk_id: str | None = None
     benchmark_doc_id: str | None = None
+
+    @property
+    def item_id(self) -> str:
+        return self.evidence_id
 
 
 class _AsyncVectorRetriever:
@@ -37,7 +38,7 @@ class _AsyncVectorRetriever:
     async def aretrieve_with_plan(self, *, query: str, source_scope: list[str], plan: PlanningState, **kwargs):
         del query, source_scope, plan, kwargs
         self.calls += 1
-        return [_FakeCandidate("chunk-a", "doc-a", "alpha", "#a", 0.9, 1)]
+        return [_FakeCandidate("evidence-a", "doc-a", "alpha", "#a", 0.9, 1)]
 
 
 class _FullTextRetriever:
@@ -79,8 +80,7 @@ def test_retrieval_adapter_awaits_async_plan_aware_vector_and_skips_full_text() 
         original_query="alpha",
         rewritten_query="alpha",
         sparse_query="alpha",
-        mode=QueryMode.MIX,
-        mode_executor="mix",
+        retrieval_profile=RetrievalProfile.AUTO,
         complexity_gate=ComplexityGate.STANDARD,
         semantic_route="text_first",
         target_collections=("section_summary",),
@@ -108,3 +108,31 @@ def test_retrieval_adapter_awaits_async_plan_aware_vector_and_skips_full_text() 
     assert vector_retriever.calls == 1
     assert result.branch_hits == {"vector": 1, "full_text": 0}
     assert [branch for branch, _items in result.branches] == ["vector"]
+
+
+def test_effective_scope_does_not_turn_overflow_into_empty_scope_for_plain_retrievers() -> None:
+    plan = PlanningState(
+        original_query="alpha",
+        rewritten_query="alpha",
+        sparse_query="alpha",
+        retrieval_profile=RetrievalProfile.AUTO,
+        complexity_gate=ComplexityGate.STANDARD,
+        semantic_route="text_first",
+        target_collections=("section_summary",),
+        predicate_plan=PredicatePlan(
+            strategy="none",
+            doc_ids=("doc-a", "doc-b", "doc-c"),
+            overflowed=True,
+        ),
+        retrieval_paths=(RetrievalPath("vector", 2, QueryVariant.DENSE),),
+        allow_web=False,
+        allow_graph_expansion=False,
+        web_limit=0,
+        graph_limit=0,
+    )
+
+    assert RetrievalAdapter._effective_scope(
+        ["doc-a", "doc-b", "doc-c"],
+        plan=plan,
+        supports_plan=False,
+    ) == ["doc-a", "doc-b", "doc-c"]

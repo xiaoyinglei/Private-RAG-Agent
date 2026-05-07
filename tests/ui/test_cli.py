@@ -5,15 +5,26 @@ from pytest import MonkeyPatch
 from typer.testing import CliRunner
 
 import rag.cli as cli
+from rag import StorageConfig
 from rag.cli import app
 from rag.retrieval.models import BuiltContext, PublicQueryResult
 from rag.schema.query import GroundedAnswer
 from rag.schema.runtime import RetrievalDiagnostics
+from tests.support import make_runtime
 
 runner = CliRunner()
 
 
-def test_cli_ingest_query_delete_rebuild_round_trip(tmp_path: Path) -> None:
+def _use_isolated_cli_runtime(monkeypatch: MonkeyPatch) -> None:
+    def _runtime(storage_root: Path, *, profile_id: str | None = None, require_chat: bool = False):
+        del profile_id
+        return make_runtime(storage=StorageConfig(root=storage_root), require_chat=require_chat)
+
+    monkeypatch.setattr(cli, "_runtime", _runtime)
+
+
+def test_cli_ingest_query_round_trip(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
+    _use_isolated_cli_runtime(monkeypatch)
     storage_root = tmp_path / ".rag"
 
     ingest = runner.invoke(
@@ -48,6 +59,32 @@ def test_cli_ingest_query_delete_rebuild_round_trip(tmp_path: Path) -> None:
     )
     payload = json.loads(query.stdout)
 
+    assert ingest.exit_code == 0
+    assert query.exit_code == 0
+    assert payload["answer"]["answer_text"]
+    assert payload["context"]["evidence"]
+
+
+def test_cli_delete_and_rebuild_use_new_runtime_contract(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
+    _use_isolated_cli_runtime(monkeypatch)
+    storage_root = tmp_path / ".rag"
+
+    ingest = runner.invoke(
+        app,
+        [
+            "ingest",
+            "--storage-root",
+            str(storage_root),
+            "--profile",
+            "test_minimal",
+            "--source-type",
+            "plain_text",
+            "--location",
+            "memory://note-1",
+            "--content",
+            "Alpha Engine handles ingestion.",
+        ],
+    )
     delete = runner.invoke(
         app,
         [
@@ -60,7 +97,6 @@ def test_cli_ingest_query_delete_rebuild_round_trip(tmp_path: Path) -> None:
             "memory://note-1",
         ],
     )
-
     rebuild = runner.invoke(
         app,
         [
@@ -75,11 +111,15 @@ def test_cli_ingest_query_delete_rebuild_round_trip(tmp_path: Path) -> None:
     )
 
     assert ingest.exit_code == 0
-    assert query.exit_code == 0
     assert delete.exit_code == 0
+    delete_payload = json.loads(delete.stdout)
+    assert delete_payload["deleted_doc_ids"]
+    assert delete_payload["deleted_source_ids"]
+    assert delete_payload["deleted_vector_count"] >= 2
     assert rebuild.exit_code == 0
-    assert payload["answer"]["answer_text"]
-    assert payload["context"]["evidence"]
+    rebuild_payload = json.loads(rebuild.stdout)
+    assert rebuild_payload["rebuilt_doc_ids"] == delete_payload["deleted_doc_ids"]
+    assert rebuild_payload["results"][0]["indexed_object_count"] >= 2
 
 
 def test_cli_rejects_missing_source_payload_for_ingest(tmp_path: Path) -> None:
@@ -116,20 +156,6 @@ def test_cli_main_delegates_to_typer_app(monkeypatch: MonkeyPatch) -> None:
     assert calls == ["called"]
 
 
-def test_cli_workbench_help_lists_core_options() -> None:
-    result = runner.invoke(
-        app,
-        [
-            "workbench",
-            "--help",
-        ],
-    )
-
-    assert result.exit_code == 0
-    assert "--workspace-root" in result.stdout
-    assert "--open-browser" in result.stdout
-
-
 def test_cli_profiles_lists_recommended_runtime_profiles() -> None:
     result = runner.invoke(
         app,
@@ -145,25 +171,9 @@ def test_cli_profiles_lists_recommended_runtime_profiles() -> None:
     assert {"local_full", "local_retrieval_cloud_chat", "cloud_full", "test_minimal"} <= profile_ids
 
 
-def test_cli_analyze_task_returns_structured_report(tmp_path: Path) -> None:
+def test_cli_analyze_task_is_disabled_on_new_runtime(tmp_path: Path) -> None:
     storage_root = tmp_path / ".rag"
 
-    ingest = runner.invoke(
-        app,
-        [
-            "ingest",
-            "--storage-root",
-            str(storage_root),
-            "--profile",
-            "test_minimal",
-            "--source-type",
-            "plain_text",
-            "--location",
-            "memory://agent-note",
-            "--content",
-            "Alpha Engine handles ingestion and retrieval orchestration with explicit diagnostics.",
-        ],
-    )
     analyze = runner.invoke(
         app,
         [
@@ -178,15 +188,12 @@ def test_cli_analyze_task_returns_structured_report(tmp_path: Path) -> None:
         ],
     )
 
-    assert ingest.exit_code == 0
-    assert analyze.exit_code == 0
-    payload = json.loads(analyze.stdout)
-    assert payload["final_report"]["executive_summary"]
-    assert payload["traces"]
+    assert analyze.exit_code == 1
+    assert "disabled on the new runtime CLI" in analyze.output
 
 
 def test_cli_query_uses_public_query_contract(monkeypatch: MonkeyPatch) -> None:
-    calls: list[str] = []
+    calls: list[tuple[str, str | None]] = []
 
     class _FakeRuntime:
         def __enter__(self) -> "_FakeRuntime":
@@ -199,11 +206,10 @@ def test_cli_query_uses_public_query_contract(monkeypatch: MonkeyPatch) -> None:
             raise AssertionError("cli query should not use runtime.query")
 
         def query_public(self, query_text: str, *, options=None) -> PublicQueryResult:
-            del options
-            calls.append(query_text)
+            calls.append((query_text, getattr(options, "retrieval_profile", None)))
             return PublicQueryResult(
                 query=query_text,
-                mode="mix",
+                retrieval_profile="auto",
                 answer=GroundedAnswer(
                     answer_text="Alpha answer",
                     groundedness_flag=True,
@@ -232,6 +238,8 @@ def test_cli_query_uses_public_query_contract(monkeypatch: MonkeyPatch) -> None:
             "test_minimal",
             "--query",
             "What does Alpha Engine do?",
+            "--retrieval-profile",
+            "auto",
             "--json",
         ],
     )
@@ -240,4 +248,25 @@ def test_cli_query_uses_public_query_contract(monkeypatch: MonkeyPatch) -> None:
     payload = json.loads(result.stdout)
     assert payload["answer"]["answer_text"] == "Alpha answer"
     assert "retrieval" not in payload
-    assert calls == ["What does Alpha Engine do?"]
+    assert calls == [("What does Alpha Engine do?", "auto")]
+
+
+def test_cli_query_help_uses_new_retrieval_profile_option() -> None:
+    result = runner.invoke(app, ["query", "--help"], env={"COLUMNS": "240"})
+
+    assert result.exit_code == 0
+    assert "--retrieval-profile" in result.output
+    assert "--mode" not in result.output
+
+
+def test_cli_benchmark_help_defaults_to_new_milvus_profile() -> None:
+    help_env = {"COLUMNS": "240"}
+    ingest_help = runner.invoke(app, ["benchmark-ingest", "--help"], env=help_env)
+    evaluate_help = runner.invoke(app, ["benchmark-evaluate", "--help"], env=help_env)
+
+    assert ingest_help.exit_code == 0
+    assert evaluate_help.exit_code == 0
+    assert "--retrieval-profile" in evaluate_help.output
+    assert "--mode" not in evaluate_help.output
+    assert "[default: milvus]" in ingest_help.output
+    assert "[default: milvus]" in evaluate_help.output

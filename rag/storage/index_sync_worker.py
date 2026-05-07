@@ -3,14 +3,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from rag.schema.core import ProcessingStateRecord
+from rag.storage.data_contract_service import DataContractService
 from rag.storage.index_sync_service import IndexSyncService
-from rag.storage.v1_data_contract_service import V1DataContractService
 
 
 @dataclass(slots=True)
 class IndexSyncWorker:
     index_sync_service: IndexSyncService
-    data_contract_service: V1DataContractService
+    data_contract_service: DataContractService
     worker_id: str = "index-sync-worker"
 
     def run_once(self, *, lease_seconds: int = 60) -> ProcessingStateRecord | None:

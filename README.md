@@ -1,517 +1,557 @@
-# RAG
+# RAG 主线运行手册
 
-一个以 **正式版 RAG / GraphRAG 后端** 为目标的项目骨架。这个仓库不把重点放在 demo 页面，而是把下面几条链路做完整并可评测：
-
-- 查询主线：`查询理解 -> 检索编排 -> 融合/重排 -> 证据处理 -> 上下文构建 -> 生成`
-- 入库主线：`文档解析 -> 切分 -> 抽取 -> 入库 -> 索引/图谱构建`
-- Benchmark 主线：`公开数据下载 -> 统一格式转换 -> 正式 ingest -> retrieval baseline -> 离线诊断 -> answer eval`
-
-当前最稳定的系统入口只有三个：
-
-- [rag/runtime.py](/Users/leixiaoying/LLM/RAG学习/rag/runtime.py)：统一 Python 运行时入口
-- [rag/cli.py](/Users/leixiaoying/LLM/RAG学习/rag/cli.py)：CLI 入口
-- [rag/workbench/server.py](/Users/leixiaoying/LLM/RAG学习/rag/workbench/server.py)：浏览器工作台入口
-
-## 项目根目录
+这个仓库当前主线已经切到新的企业知识 RAG 架构。系统目标不是做一个简单 Demo，而是把企业私有文档从解析、入库、检索、精读、引用回答到评测闭环全部跑通。
 
 ```text
-RAG学习/
-├── README.md                                  # 项目说明、目录地图、命令、评测说明
-├── pyproject.toml                             # 项目依赖与工具配置
-├── uv.lock                                    # uv 锁文件
-├── rag/                                       # 正式代码主目录
-├── scripts/                                   # benchmark / profiling / diagnose 入口脚本
-├── tests/                                     # 回归测试
-├── data/                                      # 统一数据根目录：benchmark 数据、索引、评测结果
-└── .venv/                                     # 本地虚拟环境（通常不提交）
+原始文件 -> Parser -> Document / SectionRecord / AssetRecord
+        -> SectionRefiner token 窗口
+        -> Doc / Section / Asset 三类摘要
+        -> Embedding
+        -> Milvus 三类 summary index
+        -> L3 planning
+        -> L4 retrieval / rerank
+        -> L5 grounding / anchor replacement
+        -> L6 synthesis
 ```
 
-## `rag/` 目录结构
+主线契约只认：
+
+- `Document`
+- `SectionRecord`
+- `AssetRecord`
+- `SummaryRecord`
+- `GroundingTarget`
+- `EvidenceItem`
+
+旧 `Chunk / Segment / mode mix/local/global` 不是主线。`rag/agent/**` 也不参与当前重构主线。
+
+## 架构总览
+
+当前系统按 6 层主链路组织。
+
+```text
+L1 Storage
+  原始对象、Document、SectionRecord、AssetRecord、locator、权限、版本、处理状态
+
+L2 Indexing
+  DocSummary / SectionSummary / AssetSummary -> Embedding -> Milvus
+
+L3 Planning
+  complexity gate、semantic route、version gate、predicate push-down
+
+L4 Retrieval
+  多粒度 summary 检索、候选清洗、RRF/融合、rerank、召回诊断
+
+L5 Grounding
+  原文 range read、局部动态切片、neighbor expansion、asset anchor replacement、预算熔断
+
+L6 Synthesis
+  基于 EvidenceItem 生成最终回答、引用、权限/合规复核
+```
+
+### L1：事实层
+
+L1 保存事实，不负责相似度检索。这里的事实包括：
+
+- `Document`：一份业务文档的版本、权限、状态、来源。
+- `SectionRecord`：可检索和可精读的正文窗口，带 `raw_locator`、byte range、token 窗口元数据。
+- `AssetRecord`：表格、图片、OCR 区域、PPT 表格等非正文资产，带 `section_id` 绑定关系。
+- Object Store：保存原始文件、visible text、表格对象、schema/sample 与 DuckDB 可读存储指针。
+
+### L2：轻索引层
+
+L2 只保存检索入口，不保存事实主数据。Milvus 默认拆成三类 summary index：
+
+- `doc_summary`：文档级主题召回。
+- `section_summary`：默认主召回层，处理制度条款、事实问答、流程问答。
+- `asset_summary`：表格、图片、OCR、PPT 资产的语义入口。
+
+Milvus 里只放 summary、向量、标量过滤字段和主键映射，不把大段原文当文本库。
+
+### L3/L4：规划与检索
+
+L3 负责判断“该怎么查”，L4 负责“从哪里召回”。主线不再使用旧 `--mode mix/local/global`，而使用新的 `retrieval_profile`：
+
+- `fast`
+- `auto`
+- `deep`
+- `asset`
+
+规划层会先处理复杂度、语义路由、版本过滤和谓词下推；检索层再对 doc/section/asset summary 做多路召回、候选清洗和 rerank。
+
+### L5：精读与证据层
+
+L5 不相信 summary 本身就是答案。summary 只负责定位，最终回答必须回到原文或资产对象：
+
+- 命中 section 后，通过 `visible_text_key + byte_range` 回读正文。
+- 命中含表格锚点的 section 后，按 `[ASSET_ANCHOR:...]` 找回绑定资产。
+- 表格一律进入 DuckDB Text-to-SQL Sandbox；schema/sample 只用于生成 SQL 与解释结构，不把表格 Markdown 塞进 prompt。
+- 精读阶段受 token、目标数、并发、超时预算控制。
+
+### L6：合成层
+
+L6 只基于 `EvidenceItem` 回答。回答必须能追溯到 `doc_id / section_id / asset_id`，后续 Policy Guard 会作为最终权限与合规闸门。
+
+## 核心设计理念
+
+### 1. Summary-First, Grounding-Later
+
+先用 summary 做轻量召回，再回原文精读。summary 不是事实主库，也不是最终答案来源。
+
+### 2. Facts in Storage, Search in Index
+
+PostgreSQL / Object Store 是事实层，Milvus 是索引层。事实和检索必须分离：
+
+- 原文、表格、定位、权限、版本在 L1。
+- 向量、BM25、标量过滤在 L2。
+
+### 3. 主链路只认新契约
+
+主链路不再混用旧 `Chunk / Segment / ComplexityLevel`。新系统以 `Document / SectionRecord / AssetRecord / SummaryRecord / GroundingTarget / EvidenceItem` 为边界。
+
+旧代码如果不影响主线，只保留到删除；不再为旧契约补测试。
+
+### 4. Token-First
+
+所有切分、窗口、预算、摘要输入输出都按 token 控制，不按字符控制。
+
+当前原则：
+
+- SectionRefiner 按 token 滑动窗口。
+- eval 出题按 token 二次窗口。
+- 摘要输入输出按 token 裁剪。
+- L5 grounding budget 也按 token 记账。
+
+### 5. 资产不混进正文，锚点绑定
+
+表格、图片、OCR、PPT 表格都是 `AssetRecord`，不要把二维结构强行压进普通正文。
+
+正文只保留：
+
+```text
+[ASSET_ANCHOR:xxx]
+```
+
+资产实际内容独立保存。SectionRefiner 切分后，通过锚点追踪把资产绑定到具体细粒度 section，避免“字到了，表没到”。
+
+### 6. 表格统一走 DuckDB Text-to-SQL Sandbox
+
+表格是最容易诱发幻觉的资产类型，当前 RAG 主线不再按大小分成“短表可直接回填 / 中表摘要 / 长表计算”。官方标准只有一个：
+
+- 所有表格资产统一标记为 `table_policy=compute_only`。
+- 严禁 `inline_context`，包括短表。短表直接回填 Markdown 会诱导模型目测、排序、聚合和比较，必须废除。
+- `summary_only` 只作为检索摘要语义，不作为表格处理策略。
+- 表格只暴露 `schema / sample_rows / row_count / column_count / storage_key` 等结构信息。
+- 需要数据值、过滤、排序、聚合、排名、交叉对比时，由 LLM 生成受限 `SELECT`，交给 DuckDB Text-to-SQL Sandbox 执行，再把计算结果交给 L6 合成。
+
+### 7. 摘要必须高密度、结构化、可检索
+
+Section / Asset / Doc 三类摘要都必须稳定模板化。摘要要保留：
+
+- 结构位置
+- 语义核心
+- 事实锚点
+- 数字、金额、日期、制度文号、部门、表头字段、枚举值
+
+这不是为了好看，而是为了让 Milvus hybrid / BM25 / rerank 更容易命中关键事实。
+
+### 8. 默认 Milvus，不再默认 SQLite
+
+SQLite 只作为本地轻量 fallback 或历史参考。当前默认主线是 Milvus，因为设计目标是百万级企业知识库。
+
+### 9. Rerank 是排序增强，不是召回补药
+
+Rerank 只能重排候选，不能解决候选池里没有 gold 的问题。评测时必须同时看：
+
+- `doc_hit`
+- `section_hit`
+- `parent_section_hit`
+- `neighbor_section_hit`
+- `returned_candidate_count`
+- miss category
+
+### 10. DuckDB Text-to-SQL Sandbox 是表格计算边界
+
+Excel / Word 表格 / PPT 表格 / 业务流水 / 聚合统计不能让 LLM 心算，也不能把 Markdown 表格塞进上下文。正确边界是：
+
+```text
+检索命中表格资产 -> 读取 schema/sample -> LLM 生成 SELECT -> DuckDB Sandbox 执行 -> 返回计算结果 -> L6 合成
+```
+
+MCP/Pandas 不属于当前 RAG 主线，统一移到 Phase 4 的高级数据分析功能。当前主线只认 DuckDB Text-to-SQL Sandbox。
+
+## 数据处理原则
+
+### 原始文件到 Section
+
+解析阶段优先保留文档天然结构：
+
+- Word/PDF/Markdown：按 Docling 结构树和标题自然分段。
+- Excel：每个 sheet 作为带锚点的 section，表格本体作为 asset。
+- PPTX：每页 slide 作为 section，文本、表格、备注作为元素。
+- 图片：OCR visible text 作为 section，OCR region 作为元素。
+
+当初始 section 超过 token 上限时，`SectionRefiner` 再做 token 滑动窗口。
+
+### 原始文件到 Asset
+
+资产抽离优先于文本拼接：
+
+- 表格不进入正文，不按短表/长表分流，不允许 `inline_context`。
+- 表格资产保存 schema/sample/形状信息/可计算存储指针，统一以 `compute_only` 进入 DuckDB Text-to-SQL Sandbox。
+- 图片/OCR 保存区域文本与坐标。
+- 后续 L5 根据 `section_id` 和锚点关系补齐资产。
+
+### 入库到 Milvus
+
+入 Milvus 的不是原文，而是三类摘要：
+
+- `DocSummaryRecord`
+- `SectionSummaryRecord`
+- `AssetSummaryRecord`
+
+入库完成后，查询只读 `index_ready` 的对象，避免半成品数据进入检索。
+
+## 当前工程状态
+
+### 已落地
+
+- 默认向量后端：Milvus。
+- 默认摘要模型：`Qwen/Qwen3-8B-MLX-4bit`，聊天模型不再默认兼任摘要模型。
+- 私有文档入库支持：`.pdf / .docx / .md / .markdown / .xlsx / .xls / .pptx / .png / .jpg / .jpeg / .txt`。
+- Word/PDF/Markdown 走 Docling 解析。
+- Excel 走原生 Pandas/OpenPyXL 解析。
+- PPTX 走原生 `python-pptx` 解析。
+- 图片走 OCR repo。
+- 表格资产已走 `[ASSET_ANCHOR:...]`，正文只保留锚点，表格 schema/sample/可计算存储指针作为 `AssetRecord`。
+- `inline_context` 已废除；短表也不能在 L5 回填 Markdown。
+- 所有表格统一 `compute_only`，不把全量 Markdown 入库，`AssetRecord.storage_key` 指向可由 DuckDB 读取的表格对象。
+- `AssetRecord` 已增强：`sheet_name / row_count / column_count / sample_rows / schema`。
+- `table_policy=compute_only` 或聚合计算意图会进入 DuckDB Text-to-SQL Sandbox。
+
+### 移出当前主线
+
+- MCP/Pandas worker 不再作为当前 RAG 主线目标。
+- MCP/Pandas 归档为 Phase 4 的高级数据分析能力，用于未来多表联动、复杂 Python 分析、可视化与长任务编排。
+
+## 目录地图
 
 ```text
 rag/
-├── runtime.py                                 # 系统唯一运行时入口：组装 storage / ingest / retrieval / generation
-├── cli.py                                     # CLI 命令入口：ingest/query/rebuild/benchmark/workbench
-├── benchmarks.py                              # 公开 benchmark 主逻辑：下载、prepare、ingest、retrieval eval、profiling
-├── benchmark_diagnostics.py                   # retrieval 后置诊断：failure analysis、branch diagnostics、recommendations
-├── answer_benchmarks.py                       # answer-level eval：证据一致性 + judge 子集正确性评测
-│
-├── assembly/                                  # 能力装配中心
-│   ├── __init__.py                            # 对外导出 assembly 能力
-│   ├── models.py                              # AssemblyRequest / ProviderConfig / CapabilityBundle 等模型
-│   ├── bindings.py                            # embedding/chat/rerank 的 capability binding
-│   ├── service.py                             # CapabilityAssemblyService：按 profile/requirements 装配 provider
-│   ├── support.py                             # profile、环境变量兼容、provider 默认策略
-│   └── tokenizer.py                           # tokenizer contract、token accounting
-│
-├── ingest/                                    # 入库主线
-│   ├── pipeline.py                            # IngestPipeline：source/document/chunk/vector/fts/graph 串联总控
-│   ├── parser.py                              # source_type -> parser 调度入口
-│   ├── chunking.py                            # 正式切分入口：chunk route、多模态/结构化/token 切分
-│   ├── extract.py                             # 实体/关系抽取与图谱前处理
-│   ├── policy.py                              # ingest 策略解析
-│   ├── parsers/                               # 各类具体解析器实现
-│   └── chunkers/                              # 具体 chunking 实现细节
-│
-├── retrieval/                                 # 查询时主线
-│   ├── analysis.py                            # QueryUnderstanding + RoutingDecision + access policy narrowing
-│   ├── orchestrator.py                        # RetrievalService：branch 检索、fusion、rerank、graph/web 补检索
-│   ├── evidence.py                            # evidence filtering、bundle、自检、artifact suggestion
-│   ├── context.py                             # prompt build、context budget、truncation
-│   ├── graph.py                               # graph retrieval / graph expansion
-│   └── models.py                              # QueryOptions、RetrievalResult、BuiltContext 等查询侧模型
-│
-├── providers/                                 # 模型/推理适配层
-│   ├── adapters.py                            # OpenAI/Ollama/Local-BGE 等 provider repo 实现
-│   ├── embedding.py                           # embedding 适配导出入口
-│   ├── rerank.py                              # rerank 适配导出入口
-│   └── generation.py                          # Grounded answer 生成、citation 构造、fallback、judge prompt
-│
-├── schema/                                    # 跨层共享契约，只放公共模型
-│   ├── core.py                                # Document / Chunk / Source / Content 等核心实体
-│   ├── query.py                               # QueryUnderstanding / GroundedAnswer / EvidenceItem / Citation 等
-│   └── runtime.py                             # AccessPolicy / RetrievalDiagnostics / ProviderAttempt / telemetry 相关模型
-│
-├── storage/                                   # 存储抽象与后端实现
-│   ├── __init__.py                            # StorageBundle 组装根
-│   ├── vector.py                              # 向量存储抽象入口
-│   ├── graph.py                               # 图谱存储抽象入口
-│   ├── metadata.py                            # 元数据存储抽象入口
-│   ├── search.py                              # FTS / web search 抽象入口
-│   ├── object_store.py                        # 对象存储抽象入口
-│   ├── cache.py                               # 缓存能力入口
-│   ├── search_backends/                       # sqlite / pgvector / milvus / web search 等具体实现
-│   ├── repositories/                          # sqlite/postgres/object store 等 repository 实现
-│   └── graph_backends/                        # sqlite / neo4j 图谱后端实现
-│
-├── utils/                                     # 通用工具
-│   ├── text.py                                # 文本处理、token/span/fts 查询辅助
-│   └── telemetry.py                           # 运行指标与评测聚合辅助
-│
-└── workbench/                                 # 浏览器工作台
-    ├── models.py                              # workbench 请求/响应模型
-    ├── service.py                             # workbench 服务层
-    ├── server.py                              # HTTP 服务入口
-    └── static/                                # 前端静态资源
+├── runtime.py                         # 唯一组合根：装配 storage / ingest / retrieval / synthesis
+├── cli.py                             # 新 CLI：ingest / query / benchmark-download / benchmark-ingest / benchmark-evaluate
+├── benchmarks.py                      # benchmark 和 runtime build helper
+├── assembly/                          # provider/profile/tokenizer 装配
+├── ingest/
+│   ├── pipeline.py                    # L1/L2 入库主线
+│   ├── parsers/                       # docling / excel / pptx / image parser
+│   ├── section_refiner.py             # token 窗口切分
+│   ├── retrievalsummarizer.py         # doc/section/asset 三类摘要
+│   ├── table_sampler.py               # 表格 schema/sample/profile/table_policy
+│   └── asset_anchors.py               # [ASSET_ANCHOR:...] 工具
+├── retrieval/
+│   ├── planning_graph.py              # L3 planning
+│   ├── retrieval_adapter.py           # L4 summary index retrieval adapter
+│   ├── rerank_service.py              # 候选清洗 + rerank
+│   ├── grounding_service.py           # L5 raw read / anchor replacement / DuckDB table sandbox trigger
+│   └── synthesis_service.py           # L6 synthesis
+├── schema/
+│   ├── core.py                        # Document / SectionRecord / AssetRecord / SummaryRecord
+│   ├── query.py                       # GroundingTarget / EvidenceItem / answer contract
+│   └── runtime.py                     # Runtime contract / diagnostics / vector result
+└── storage/
+    ├── data_contract_service.py       # 新数据契约服务
+    ├── repositories/                  # sqlite/postgres metadata repo
+    └── search_backends/               # milvus/sqlite vector repo
 ```
-
-## `data/` 目录结构
-
-所有 benchmark 数据、索引和评测输出统一放在 `data/` 下。
 
 ```text
-data/
-├── benchmarks/
-│   ├── fiqa/
-│   │   ├── raw/                               # 原始公开数据：corpus / queries / qrels
-│   │   ├── prepared/
-│   │   │   ├── full/                          # 统一格式 JSONL（完整集）
-│   │   │   └── mini/                          # 统一格式 JSONL（小子集）
-│   │   ├── index/                             # 预留检索库目录（当前未保留正式索引快照）
-│   │   └── eval/                              # 预留评测目录（当前未保留正式结果快照）
-│   │
-│   └── medical_retrieval/
-│       ├── raw/                               # C-MTEB MedicalRetrieval 原始数据
-│       ├── prepared/
-│       │   ├── full/                          # full 文档/问题/qrels JSONL
-│       │   └── mini/                          # mini 文档/问题/qrels JSONL
-│       ├── index/
-│       │   ├── mini/                          # 历史参考线索引：BAAI/bge-m3 + sqlite
-│       │   ├── mini-milvus-bge-v2/            # 低时延线索引壳：BAAI/bge-m3 + Milvus
-│       │   └── mini-milvus-qwen8b-v1/         # 质量优先线索引壳：qwen3-embedding:8b + Milvus
-│       ├── eval/
-│       │   ├── retrieval/
-│       │   │   └── mini/                      # 仅保留 3 条 retrieval 基线的历史与逐 query 输出
-│       │   └── ingest/                        # ingest profiling 输出（按需生成，不长期保留）
-│       └── subsets/                           # 预留实验子集目录（当前已清空）
-│
-└── eval/
-    └── baselines/
-        └── medical_retrieval.json             # 单数据集总表：当前保留的 retrieval 基线、主线标记、核心对比
+scripts/
+├── ingest_private_documents.py        # 私有文件夹入库
+├── export_private_sections.py         # 从 index 导出 SectionRecord JSONL
+├── evaluate_private_retrieval.py      # 私有 golden set 检索评测
+├── download_public_benchmark.py       # 下载公开 benchmark
+├── prepare_public_benchmark.py        # 准备公开 benchmark
+├── ingest_public_benchmark.py         # 公开 benchmark 入库
+└── profile_benchmark_ingest.py        # 入库速度 profiling
 ```
 
-## 主线路：代码如何流转
+## 环境准备
 
-### 1. 运行时装配主线
-
-入口是 [rag/runtime.py](/Users/leixiaoying/LLM/RAG学习/rag/runtime.py)。
-
-流转顺序：
-
-1. `RAGRuntime.from_request()` / `RAGRuntime.from_profile()`
-2. 调 [rag/assembly/service.py](/Users/leixiaoying/LLM/RAG学习/rag/assembly/service.py) 的 `CapabilityAssemblyService`
-3. 根据 [rag/assembly/support.py](/Users/leixiaoying/LLM/RAG学习/rag/assembly/support.py) 的 profile 和环境变量，装配：
-   - embedding binding
-   - chat binding
-   - rerank binding
-   - tokenizer contract
-4. `storage.build()` 构建 storage bundle
-5. `runtime._build_pipelines()` 组装：
-   - ingest pipeline
-   - delete / rebuild pipeline
-   - retrieval service
-   - query pipeline
-
-你可以把 `runtime.py` 理解成：
-**全系统唯一的组合根**。
-
----
-
-### 2. 入库主线
-
-入口通常来自：
-- CLI：`uv run rag ingest ...`
-- benchmark ingest：`scripts/ingest_public_benchmark.py`
-- Python：`runtime.insert(...)` / `runtime.insert_many(...)`
-
-代码流转：
-
-1. [rag/cli.py](/Users/leixiaoying/LLM/RAG学习/rag/cli.py) / [scripts/ingest_public_benchmark.py](/Users/leixiaoying/LLM/RAG学习/scripts/ingest_public_benchmark.py)
-2. [rag/runtime.py](/Users/leixiaoying/LLM/RAG学习/rag/runtime.py)
-   - `runtime.insert()` 或 `runtime.insert_many()`
-3. [rag/ingest/pipeline.py](/Users/leixiaoying/LLM/RAG学习/rag/ingest/pipeline.py)
-   - `IngestPipeline`
-4. [rag/ingest/parser.py](/Users/leixiaoying/LLM/RAG学习/rag/ingest/parser.py)
-   - 根据 `source_type` 分派到 `ingest/parsers/*`
-5. [rag/ingest/chunking.py](/Users/leixiaoying/LLM/RAG学习/rag/ingest/chunking.py)
-   - 文档结构分析
-   - segment -> chunk
-   - benchmark metadata 透传（如 `benchmark_doc_id`）
-6. [rag/ingest/extract.py](/Users/leixiaoying/LLM/RAG学习/rag/ingest/extract.py)
-   - 实体/关系抽取
-7. [rag/storage/*](/Users/leixiaoying/LLM/RAG学习/rag/storage)
-   - metadata repo
-   - vector repo
-   - FTS repo
-   - graph repo
-   - object store
-
-入库主线最终产物：
-- `document`
-- `chunk`
-- `vector`
-- `fts`
-- `graph`
-- `status`
-
----
-
-### 3. 查询主线
-
-入口通常来自：
-- CLI：`uv run rag query ...`
-- workbench
-- benchmark retrieval eval
-- benchmark answer eval
-
-代码流转：
-
-1. [rag/runtime.py](/Users/leixiaoying/LLM/RAG学习/rag/runtime.py)
-   - `runtime.query(query, options=QueryOptions(...))`
-2. `_QueryPipeline.run()`
-3. [rag/retrieval/orchestrator.py](/Users/leixiaoying/LLM/RAG学习/rag/retrieval/orchestrator.py)
-   - `RetrievalService.retrieve(...)`
-4. [rag/retrieval/analysis.py](/Users/leixiaoying/LLM/RAG学习/rag/retrieval/analysis.py)
-   - Query Understanding
-   - RoutingDecision
-   - access policy 收缩
-5. [rag/retrieval/orchestrator.py](/Users/leixiaoying/LLM/RAG学习/rag/retrieval/orchestrator.py)
-   - branch 检索
-   - RRF / fusion
-   - rerank
-   - graph / web 等补召回
-6. [rag/retrieval/evidence.py](/Users/leixiaoying/LLM/RAG学习/rag/retrieval/evidence.py)
-   - evidence filtering
-   - bundle
-   - self-check
-7. [rag/runtime.py](/Users/leixiaoying/LLM/RAG学习/rag/runtime.py)
-   - `_build_bounded_context()`
-8. [rag/retrieval/context.py](/Users/leixiaoying/LLM/RAG学习/rag/retrieval/context.py)
-   - context truncation
-   - prompt build
-9. [rag/providers/generation.py](/Users/leixiaoying/LLM/RAG学习/rag/providers/generation.py)
-   - grounded candidate
-   - answer generation
-   - citation / evidence link 组装
-10. 返回 [RAGQueryResult](/Users/leixiaoying/LLM/RAG学习/rag/retrieval/models.py)
-    - `answer`
-    - `retrieval`
-    - `context`
-    - `generation_provider`
-    - `generation_model`
-
----
-
-### 4. Retrieval Benchmark 主线
-
-入口：
-- [scripts/download_public_benchmark.py](/Users/leixiaoying/LLM/RAG学习/scripts/download_public_benchmark.py)
-- [scripts/prepare_public_benchmark.py](/Users/leixiaoying/LLM/RAG学习/scripts/prepare_public_benchmark.py)
-- [scripts/ingest_public_benchmark.py](/Users/leixiaoying/LLM/RAG学习/scripts/ingest_public_benchmark.py)
-- [scripts/evaluate_retrieval_benchmark.py](/Users/leixiaoying/LLM/RAG学习/scripts/evaluate_retrieval_benchmark.py)
-
-代码流转：
-
-1. `scripts/*`
-2. [rag/benchmarks.py](/Users/leixiaoying/LLM/RAG学习/rag/benchmarks.py)
-3. `build_runtime_for_benchmark(...)`
-4. 复用正式：
-   - ingest pipeline
-   - retrieval service
-5. 落盘：
-   - `baseline.csv`
-   - `per_query.jsonl`
-   - `run_summary.json`
-   - `run_history.jsonl`
-   - `runs/<run_id>/...`
-
-这条链主要回答：
-- 检索能不能命中 gold
-- 排名好不好
-- 模式、embedding、rerank 对 retrieval 指标的影响
-
----
-
-### 5. Retrieval 离线诊断主线
-
-入口：
-- [scripts/diagnose_benchmark_run.py](/Users/leixiaoying/LLM/RAG学习/scripts/diagnose_benchmark_run.py)
-
-代码流转：
-
-1. 脚本读取已有 retrieval run
-2. [rag/benchmark_diagnostics.py](/Users/leixiaoying/LLM/RAG学习/rag/benchmark_diagnostics.py)
-3. `BenchmarkDiagnosticsPostProcessor`
-4. 复跑 retrieval 主链并补 branch 信息
-5. 落盘：
-   - `failure_analysis.jsonl`
-   - `failure_summary.json`
-   - `branch_diagnostics.jsonl`
-   - `branch_summary.json`
-   - `recall_failure_profile.json`
-   - `rerank_profile.json`
-   - `full_text_profile.json`
-   - `recommendations.json`
-
-这条链主要回答：
-- 当前失败主要是召回失败还是排序失败
-- full-text 是否真有独立价值
-- rerank 在帮哪些 query、伤哪些 query
-- 下一步更应该投哪一层
-
----
-
-### 6. Answer Benchmark 主线
-
-入口：
-- [scripts/evaluate_answer_benchmark.py](/Users/leixiaoying/LLM/RAG学习/scripts/evaluate_answer_benchmark.py)
-
-代码流转：
-
-1. 脚本读取 benchmark 的 `queries/qrels/documents`
-2. [rag/answer_benchmarks.py](/Users/leixiaoying/LLM/RAG学习/rag/answer_benchmarks.py)
-3. 对每个 query 调 `runtime.query(...)`
-4. 基于 `RAGQueryResult` 生成：
-   - `AnswerPerQueryRecord`
-   - 证据一致性统计
-5. 对固定子集运行 judge：
-   - 本地 judge 初筛
-   - 强模型复核（可选）
-6. 落盘：
-   - `per_query_answers.jsonl`
-   - `evidence_consistency_summary.json`
-   - `judge_subset.jsonl`
-   - `judge_summary.json`
-   - `answer_recommendations.json`
-   - `run_summary.json`
-   - `baseline.csv`
-
-这条链主要回答：
-- 生成有没有基于证据
-- 检索命中了但答案为什么还没答出来
-- 哪些 query 更适合改 prompt / answer guard
-
-默认索引选择：
-- 对 `medical_retrieval mini`
-  - 不传 `--storage-root` 且不传 embedding override 时，脚本默认走低时延线：
-    - `data/benchmarks/medical_retrieval/index/mini-milvus-bge-v2`
-    - `vector_backend=milvus`
-    - `vector_collection_prefix=medical_retrieval_mini_bge_v2`
-  - 如果显式传：
-    - `--embedding-provider ollama`
-    - `--embedding-model qwen3-embedding:8b`
-    脚本默认切到质量优先线：
-    - `data/benchmarks/medical_retrieval/index/mini-milvus-qwen8b-v1`
-    - `vector_backend=milvus`
-    - `vector_collection_prefix=medical_retrieval_mini_qwen8b_v1`
-
-注意：
-- answer benchmark 会复用**现有索引**
-- 但不会复用旧的 retrieval run 结果
-- 它会对每个 query 重新跑一次完整 `runtime.query(...)`
-  - retrieval
-  - rerank
-  - context build
-  - grounded answer generation
-- 所以 answer benchmark 的时延通常明显高于 retrieval benchmark
-
-## 当前保留的 retrieval 基线
-
-先看这个文件：
-
-- [medical_retrieval.json](/Users/leixiaoying/LLM/RAG学习/data/eval/baselines/medical_retrieval.json)
-
-它是当前 `medical_retrieval` 数据集唯一的收口总表。以后看结果，先看它，不用先翻：
-- `baseline.csv`
-- `run_history.jsonl`
-- `per_query.jsonl`
-
-### 质量优先线
-
-- embedding：`qwen3-embedding:8b`
-- mode：`naive`
-- chunk：`480/64`
-- chunk_top_k：`20`
-- rerank：`on`
-- rerank_pool_k：`10`
-- 向量后端：`Milvus`
-- 索引目录：`data/benchmarks/medical_retrieval/index/mini-milvus-qwen8b-v1`
-
-### 低时延线
-
-- embedding：`BAAI/bge-m3`
-- mode：`naive`
-- chunk：`480/64`
-- chunk_top_k：`20`
-- rerank：`on`
-- rerank_pool_k：`10`
-- 向量后端：`Milvus`
-- 索引目录：`data/benchmarks/medical_retrieval/index/mini-milvus-bge-v2`
-
-### 历史参考线
-
-- embedding：`BAAI/bge-m3`
-- 向量后端：`sqlite`
-- 索引目录：`data/benchmarks/medical_retrieval/index/mini`
-- 用途：保留旧主线对照，不再作为当前低时延主线
-
-## 指标说明
-
-### Retrieval 指标
-
-- `Recall@10`
-  - 前 10 个结果里有没有找回 gold 文档
-- `MRR@10`
-  - 第一个正确文档排得有多靠前
-- `NDCG@10`
-  - top10 的整体排序质量
-- `avg_latency_ms`
-  - 平均单 query 时延
-- `p95_latency_ms`
-  - 95 分位时延，反映尾部慢查询
-- `queries_per_second`
-  - 检索吞吐
-
-### Ingest Profiling 指标
-
-- `docs_per_second`
-  - 每秒入库多少文档
-- `chunks_per_second`
-  - 每秒处理多少 chunk
-- `embedding_elapsed_ms`
-  - embedding 编码阶段耗时
-
-### Diagnostics 指标
-
-- `top1_hit_ratio`
-  - 第 1 名就是正确文档的比例
-- `top10_hit_but_low_rank_ratio`
-  - 前 10 命中，但排位不够靠前的比例
-- `top10_miss_ratio`
-  - 前 10 完全 miss 的比例
-- `recall_failure_ratio`
-  - 召回层根本没找回 gold 的比例
-- `fusion_loss_ratio`
-  - 某分支召回了 gold，但融合后丢掉的比例
-- `mapping_failure_ratio`
-  - chunk -> benchmark_doc_id 映射异常的比例
-- `independent_hit_ratio`
-  - 某分支独立命中 gold 的比例
-- `rerank_helped_query_count`
-  - rerank 帮到的 query 数
-- `rerank_hurt_query_count`
-  - rerank 伤到的 query 数
-
-### Answer Benchmark 指标
-
-- `evidence_consistent_rate`
-  - 回答是否总体与给定证据一致
-- `grounded_answer_rate`
-  - 回答是否以 grounded answer 结构产出
-- `citation_presence_rate`
-  - 是否带 citation
-- `citation_gold_hit_rate`
-  - citation 映射到 benchmark doc 后，是否覆盖 gold 文档
-- `answer_correct_rate`
-  - judge 子集上的答案正确率
-- `avg_generation_latency_ms`
-  - 生成阶段平均耗时，只统计 chat / answer generation
-- `p95_generation_latency_ms`
-  - 生成阶段 95 分位耗时
-- `avg_non_generation_latency_ms`
-  - 非生成阶段平均耗时，近似等于 retrieval + rerank + context build
-- `p95_non_generation_latency_ms`
-  - 非生成阶段 95 分位耗时
-- `avg_context_evidence_count`
-  - 生成时实际送入 prompt 的 evidence 条数
-- `avg_context_token_count`
-  - 生成时实际送入 prompt 的上下文 token 数
-
-## 常用命令
-
-### 1. 下载与准备 benchmark
-
-FiQA：
+### 1. 安装依赖
 
 ```bash
-uv run python scripts/download_public_benchmark.py --dataset fiqa
-uv run python scripts/prepare_public_benchmark.py --dataset fiqa
+uv sync
 ```
 
-MedicalRetrieval：
+### 2. 启动 Milvus
+
+如果你已经有本地 Milvus，只需要确认地址：
+
+```bash
+export MILVUS_URI=http://127.0.0.1:19530
+export RAG_MILVUS_URI=$MILVUS_URI
+```
+
+### 3. 准备 embedding 模型
+
+当前默认建议：
+
+```bash
+ollama pull qwen3-embedding:8b
+```
+
+如果 Ollama 没启动，另开一个终端：
+
+```bash
+ollama serve
+```
+
+### 4. 准备摘要模型
+
+入库摘要默认走本地 MLX：
+
+```bash
+export SUMMARY_MODEL=Qwen/Qwen3-8B-MLX-4bit
+```
+
+入库脚本用 `--summary-provider local-hf --summary-backend mlx` 时会在当前进程加载这个模型，不需要 OpenAI-compatible server。
+
+生成测试题脚本 `generate_eval_dataset.py` 使用 OpenAI-compatible 接口，所以需要另开一个终端启动 MLX server：
+
+```bash
+uv run mlx_lm.server \
+  --model Qwen/Qwen3-8B-MLX-4bit \
+  --host 127.0.0.1 \
+  --port 8080 \
+  --max-tokens 1024 \
+  --temp 0.1 \
+  --chat-template-args '{"enable_thinking":false}'
+```
+
+## 私有数据全链路命令
+
+下面这组命令用于你的公司制度/Word/Excel/PDF/PPTX 私有数据。
+
+先设变量：
+
+```bash
+export INPUT_DIR="/Users/leixiaoying/Desktop/2026-04-27销售中心归口管理的制度及文件"
+export STORAGE_ROOT=data/eval_private/company_policy_milvus_v4
+export COLLECTION_PREFIX=company_policy_v4
+export MILVUS_URI=http://127.0.0.1:19530
+export EMBEDDING_MODEL=qwen3-embedding:8b
+export SUMMARY_MODEL=Qwen/Qwen3-8B-MLX-4bit
+export CHUNK_TOKEN_SIZE=800
+export CHUNK_OVERLAP_TOKENS=120
+```
+
+### 1. 重新切分 + 重新入库 + 生成摘要 + 写 Milvus
+
+重切没有单独脚本。当前主线里，重切就是重新跑 ingest。
+
+推荐每次新实验换新的 `STORAGE_ROOT` 和 `COLLECTION_PREFIX`，避免 Milvus 旧 collection 混入。
+
+```bash
+uv run python scripts/ingest_private_documents.py \
+  --input "$INPUT_DIR" \
+  --storage-root "$STORAGE_ROOT" \
+  --profile local_full \
+  --owner private \
+  --batch-size 8 \
+  --continue-on-error \
+  --embedding-provider ollama \
+  --embedding-model "$EMBEDDING_MODEL" \
+  --embedding-batch-size 8 \
+  --summary-provider local-hf \
+  --summary-model "$SUMMARY_MODEL" \
+  --summary-backend mlx \
+  --vector-backend milvus \
+  --vector-dsn "$MILVUS_URI" \
+  --vector-collection-prefix "$COLLECTION_PREFIX" \
+  --chunk-token-size "$CHUNK_TOKEN_SIZE" \
+  --chunk-overlap-tokens "$CHUNK_OVERLAP_TOKENS" \
+  --output data/eval_private/company_policy_ingest_v4.json
+```
+
+如果你必须复用同一个 `COLLECTION_PREFIX`，先清 Milvus 旧 collection：
+
+```bash
+uv run python - <<'PY'
+from pymilvus import connections, utility
+
+uri = "http://127.0.0.1:19530"
+prefix = "company_policy_v4"
+alias = "cleanup"
+
+connections.connect(alias=alias, uri=uri)
+for name in list(utility.list_collections(using=alias)):
+    if name.startswith(prefix + "__"):
+        utility.drop_collection(name, using=alias)
+        print("dropped", name)
+connections.disconnect(alias)
+PY
+```
+
+### 2. 导出 SectionRecord JSONL
+
+这个文件用于逆向出题和人工检查切分结果。
+
+```bash
+uv run python scripts/export_private_sections.py \
+  --storage-root "$STORAGE_ROOT" \
+  --output data/eval_private/company_policy_sections_v4.jsonl
+```
+
+快速看数量：
+
+```bash
+wc -l data/eval_private/company_policy_sections_v4.jsonl
+```
+
+### 3. 生成 golden eval 测试集
+
+先做 smoke：
+
+```bash
+uv run python generate_eval_dataset.py \
+  --input data/eval_private/company_policy_sections_v4.jsonl \
+  --output data/eval_private/golden_eval_dataset_v4_smoke.jsonl \
+  --failed-output data/eval_private/golden_eval_failed_v4_smoke.jsonl \
+  --model "$SUMMARY_MODEL" \
+  --base-url http://127.0.0.1:8080/v1 \
+  --api-key not-needed \
+  --max-window-tokens 700 \
+  --window-overlap-tokens 80 \
+  --min-window-tokens 120 \
+  --limit-windows 3 \
+  --limit-tasks 9
+```
+
+确认没问题后全量生成：
+
+```bash
+uv run python generate_eval_dataset.py \
+  --input data/eval_private/company_policy_sections_v4.jsonl \
+  --output data/eval_private/golden_eval_dataset_v4.jsonl \
+  --failed-output data/eval_private/golden_eval_failed_v4.jsonl \
+  --model "$SUMMARY_MODEL" \
+  --base-url http://127.0.0.1:8080/v1 \
+  --api-key not-needed \
+  --max-window-tokens 700 \
+  --window-overlap-tokens 80 \
+  --min-window-tokens 120
+```
+
+### 4. 检索评测，不开 rerank
+
+注意：`--chunk-token-size / --chunk-overlap-tokens` 必须和入库一致，否则 runtime contract 会拒绝运行。
+
+```bash
+uv run python scripts/evaluate_private_retrieval.py \
+  --golden-path data/eval_private/golden_eval_dataset_v4.jsonl \
+  --storage-root "$STORAGE_ROOT" \
+  --profile local_full \
+  --retrieval-profile auto \
+  --top-k 20 \
+  --retrieval-pool-k 20 \
+  --neighbor-radius 1 \
+  --no-rerank \
+  --embedding-provider ollama \
+  --embedding-model "$EMBEDDING_MODEL" \
+  --vector-backend milvus \
+  --vector-dsn "$MILVUS_URI" \
+  --vector-collection-prefix "$COLLECTION_PREFIX" \
+  --chunk-token-size "$CHUNK_TOKEN_SIZE" \
+  --chunk-overlap-tokens "$CHUNK_OVERLAP_TOKENS" \
+  --output data/eval_private/private_retrieval_eval_v4_no_rerank.json \
+  --misses-output data/eval_private/private_retrieval_misses_v4_no_rerank.jsonl
+```
+
+### 5. 检索评测，开启 rerank
+
+```bash
+uv run python scripts/evaluate_private_retrieval.py \
+  --golden-path data/eval_private/golden_eval_dataset_v4.jsonl \
+  --storage-root "$STORAGE_ROOT" \
+  --profile local_full \
+  --retrieval-profile auto \
+  --top-k 20 \
+  --retrieval-pool-k 20 \
+  --neighbor-radius 1 \
+  --rerank \
+  --rerank-provider local-bge \
+  --rerank-model BAAI/bge-reranker-v2-m3 \
+  --embedding-provider ollama \
+  --embedding-model "$EMBEDDING_MODEL" \
+  --vector-backend milvus \
+  --vector-dsn "$MILVUS_URI" \
+  --vector-collection-prefix "$COLLECTION_PREFIX" \
+  --chunk-token-size "$CHUNK_TOKEN_SIZE" \
+  --chunk-overlap-tokens "$CHUNK_OVERLAP_TOKENS" \
+  --output data/eval_private/private_retrieval_eval_v4_rerank.json \
+  --misses-output data/eval_private/private_retrieval_misses_v4_rerank.jsonl
+```
+
+### 6. 单条问题检索调试
+
+如果使用自定义 `COLLECTION_PREFIX`，用 Python snippet 最稳：
+
+```bash
+uv run python - <<'PY'
+from pathlib import Path
+
+from rag.benchmarks import build_runtime_for_benchmark
+from rag.retrieval.models import QueryOptions
+from rag.schema.runtime import AccessPolicy
+
+runtime = build_runtime_for_benchmark(
+    storage_root=Path("data/eval_private/company_policy_milvus_v4"),
+    profile_id="local_full",
+    require_chat=False,
+    require_rerank=True,
+    embedding_provider_kind="ollama",
+    embedding_model="qwen3-embedding:8b",
+    rerank_provider_kind="local-bge",
+    rerank_model="BAAI/bge-reranker-v2-m3",
+    vector_backend="milvus",
+    vector_dsn="http://127.0.0.1:19530",
+    vector_collection_prefix="company_policy_v4",
+    chunk_token_size=800,
+    chunk_overlap_tokens=120,
+)
+
+try:
+    payload = runtime.retrieval_service.retrieve_payload(
+        "这里换成你的问题",
+        access_policy=AccessPolicy.default(),
+        query_options=QueryOptions(
+            retrieval_profile="auto",
+            top_k=10,
+            evidence_top_k=10,
+            max_evidence_items=10,
+            retrieval_pool_k=20,
+            rerank_pool_k=20,
+            enable_rerank=True,
+        ),
+    )
+    for index, item in enumerate(payload.clean_items or payload.evidence.all, start=1):
+        print(index, item.item_id, item.record_type, item.score, item.metadata)
+finally:
+    runtime.close()
+PY
+```
+
+## 公开 benchmark 命令
+
+### 1. 下载与准备 MedicalRetrieval mini
 
 ```bash
 uv run python scripts/download_public_benchmark.py --dataset medical_retrieval
 uv run python scripts/prepare_public_benchmark.py --dataset medical_retrieval
 ```
 
-### 2. 正式 ingest
-
-如果用 Milvus，先设置：
-
-```bash
-export RAG_MILVUS_URI=http://127.0.0.1:19530
-```
-
-低时延线：
-
-```bash
-uv run python scripts/ingest_public_benchmark.py \
-  --dataset medical_retrieval \
-  --variant mini \
-  --profile local_full \
-  --storage-root data/benchmarks/medical_retrieval/index/mini-milvus-bge-v2 \
-  --vector-backend milvus \
-  --vector-collection-prefix medical_retrieval_mini_bge_v2 \
-  --batch-size 32 \
-  --embedding-batch-size 8 \
-  --embedding-device mps \
-  --chunk-token-size 480 \
-  --chunk-overlap-tokens 64 \
-  --skip-graph-extraction
-```
-
-质量优先线：
+### 2. 入库：Milvus + qwen3-embedding:8b
 
 ```bash
 uv run python scripts/ingest_public_benchmark.py \
@@ -520,335 +560,86 @@ uv run python scripts/ingest_public_benchmark.py \
   --profile local_full \
   --storage-root data/benchmarks/medical_retrieval/index/mini-milvus-qwen8b-v1 \
   --vector-backend milvus \
+  --vector-dsn "$MILVUS_URI" \
   --vector-collection-prefix medical_retrieval_mini_qwen8b_v1 \
   --batch-size 32 \
   --embedding-batch-size 8 \
   --embedding-provider ollama \
   --embedding-model qwen3-embedding:8b \
+  --summary-provider local-hf \
+  --summary-model Qwen/Qwen3-8B-MLX-4bit \
+  --summary-backend mlx \
   --chunk-token-size 480 \
   --chunk-overlap-tokens 64 \
   --skip-graph-extraction
 ```
 
-### 3. Retrieval baseline
-
-低时延线：
+### 3. 评测：不开 rerank
 
 ```bash
-uv run python scripts/evaluate_retrieval_benchmark.py \
-  --dataset medical_retrieval \
-  --variant mini \
-  --profile local_full \
-  --storage-root data/benchmarks/medical_retrieval/index/mini-milvus-bge-v2 \
-  --vector-backend milvus \
-  --vector-collection-prefix medical_retrieval_mini_bge_v2 \
-  --mode naive \
-  --top-k 10 \
-  --chunk-top-k 20 \
-  --retrieval-pool-k 20 \
-  --rerank-pool-k 10
-```
-
-质量优先线：
-
-```bash
-uv run python scripts/evaluate_retrieval_benchmark.py \
+uv run rag benchmark-evaluate \
   --dataset medical_retrieval \
   --variant mini \
   --profile local_full \
   --storage-root data/benchmarks/medical_retrieval/index/mini-milvus-qwen8b-v1 \
   --vector-backend milvus \
+  --vector-dsn "$MILVUS_URI" \
   --vector-collection-prefix medical_retrieval_mini_qwen8b_v1 \
-  --mode naive \
+  --retrieval-profile auto \
   --top-k 10 \
-  --chunk-top-k 20 \
-  --retrieval-pool-k 20 \
-  --rerank-pool-k 10 \
+  --evidence-top-k 20 \
+  --no-rerank \
   --embedding-provider ollama \
   --embedding-model qwen3-embedding:8b
 ```
 
-### 4. Retrieval 离线诊断
-
-低时延线：
+### 4. 评测：开启 rerank
 
 ```bash
-uv run python scripts/diagnose_benchmark_run.py \
-  --dataset medical_retrieval \
-  --variant mini \
-  --run-id medical_retrieval-20260412T155018448051Z \
-  --profile local_full \
-  --storage-root data/benchmarks/medical_retrieval/index/mini-milvus-bge-v2 \
-  --vector-backend milvus \
-  --vector-collection-prefix medical_retrieval_mini_bge_v2 \
-  --mode naive \
-  --top-k 10 \
-  --chunk-top-k 20 \
-  --rerank \
-  --rerank-pool-k 10
-```
-
-质量优先线：
-
-```bash
-uv run python scripts/diagnose_benchmark_run.py \
-  --dataset medical_retrieval \
-  --variant mini \
-  --run-id medical_retrieval-20260413T022639961261Z \
-  --profile local_full \
-  --storage-root data/benchmarks/medical_retrieval/index/mini-milvus-qwen8b-v1 \
-  --vector-backend milvus \
-  --vector-collection-prefix medical_retrieval_mini_qwen8b_v1 \
-  --mode naive \
-  --top-k 10 \
-  --chunk-top-k 20 \
-  --rerank \
-  --rerank-pool-k 10 \
-  --embedding-provider ollama \
-  --embedding-model qwen3-embedding:8b
-```
-
-### 5. Answer benchmark
-
-低时延线：
-
-```bash
-uv run python scripts/evaluate_answer_benchmark.py \
-  --dataset medical_retrieval \
-  --variant mini \
-  --profile local_full \
-  --storage-root data/benchmarks/medical_retrieval/index/mini-milvus-bge-v2 \
-  --vector-backend milvus \
-  --vector-collection-prefix medical_retrieval_mini_bge_v2 \
-  --mode naive \
-  --top-k 10 \
-  --chunk-top-k 20 \
-  --retrieval-pool-k 20 \
-  --rerank-pool-k 10 \
-  --judge-subset-size 250
-```
-
-质量优先线：
-
-```bash
-uv run python scripts/evaluate_answer_benchmark.py \
+uv run rag benchmark-evaluate \
   --dataset medical_retrieval \
   --variant mini \
   --profile local_full \
   --storage-root data/benchmarks/medical_retrieval/index/mini-milvus-qwen8b-v1 \
   --vector-backend milvus \
+  --vector-dsn "$MILVUS_URI" \
   --vector-collection-prefix medical_retrieval_mini_qwen8b_v1 \
-  --mode naive \
+  --retrieval-profile auto \
   --top-k 10 \
-  --chunk-top-k 20 \
-  --retrieval-pool-k 20 \
-  --rerank-pool-k 10 \
+  --evidence-top-k 20 \
+  --rerank \
   --embedding-provider ollama \
   --embedding-model qwen3-embedding:8b \
-  --judge-subset-size 250
+  --rerank-provider local-bge \
+  --rerank-model BAAI/bge-reranker-v2-m3
 ```
 
-如果你只是想直接走当前默认 Milvus 线，也可以省略 `--storage-root / --vector-backend / --vector-collection-prefix`：
+## 快速代码质量检查
 
-- 默认低时延线：
-```bash
-uv run python scripts/evaluate_answer_benchmark.py \
-  --dataset medical_retrieval \
-  --variant mini \
-  --profile local_full \
-  --mode naive \
-  --top-k 10 \
-  --chunk-top-k 20 \
-  --retrieval-pool-k 20 \
-  --rerank-pool-k 10 \
-  --judge-subset-size 250
-```
-
-- 默认质量优先线：
-```bash
-uv run python scripts/evaluate_answer_benchmark.py \
-  --dataset medical_retrieval \
-  --variant mini \
-  --profile local_full \
-  --mode naive \
-  --top-k 10 \
-  --chunk-top-k 20 \
-  --retrieval-pool-k 20 \
-  --rerank-pool-k 10 \
-  --embedding-provider ollama \
-  --embedding-model qwen3-embedding:8b \
-  --judge-subset-size 250
-```
-
-只做证据一致性，不跑 judge：
+全量：
 
 ```bash
-uv run python scripts/evaluate_answer_benchmark.py \
-  --dataset medical_retrieval \
-  --variant mini \
-  --profile local_full \
-  --mode naive \
-  --top-k 10 \
-  --chunk-top-k 20 \
-  --retrieval-pool-k 20 \
-  --rerank-pool-k 10 \
-  --judge-subset-size 0 \
-  --disable-review
-```
-
-做 `answer_context_top_k` A/B：
-
-```bash
-uv run python scripts/evaluate_answer_benchmark.py \
-  --dataset medical_retrieval \
-  --variant mini \
-  --profile local_full \
-  --mode naive \
-  --top-k 10 \
-  --chunk-top-k 20 \
-  --retrieval-pool-k 20 \
-  --rerank-pool-k 10 \
-  --answer-context-top-k 4 \
-  --judge-subset-size 0
-```
-
-把 `4` 改成 `6 / 8` 即可做生成侧 A/B。这个参数只影响生成用 evidence，不影响 retrieval `chunk_top_k=20`。
-
-### 6. ingest profiling
-
-```bash
-uv run python scripts/profile_benchmark_ingest.py \
-  --dataset medical_retrieval \
-  --variant mini \
-  --profile local_full \
-  --doc-counts 100 \
-  --ingest-batch-sizes 32 \
-  --encode-batch-sizes 8,16,32,64 \
-  --embedding-device mps \
-  --skip-graph-extraction
-```
-
-## 当前实验结论（基于已跑结果）
-
-### Retrieval
-
-已收敛：
-- `mode = naive`
-- `chunk = 480/64`
-- `chunk_top_k = 20`
-- `rerank = on`
-- `rerank_pool_k = 10`
-
-已证伪或已收敛：
-- `stream` 入库不优于 `preload`
-- `local / global / hybrid` 没独立价值
-- `mix` 比 `naive` 更差
-- `chunk_top_k=20/30/40` 分数相同
-- `rerank_pool_k=20/40` 不涨分，只拉高时延
-- `parent_backfill` 无收益
-- `256` 小 chunk 系列没有优于 `480/64`
-
-当前保留的 3 条 retrieval 基线：
-- `BAAI/bge-m3 + sqlite`
-  - `Recall@10 = 0.776667`
-  - `MRR@10 = 0.690972`
-  - `NDCG@10 = 0.712199`
-  - `avg_latency_ms = 2472.225`
-- `BAAI/bge-m3 + milvus`
-  - `Recall@10 = 0.67`
-  - `MRR@10 = 0.588259`
-  - `NDCG@10 = 0.608173`
-  - `avg_latency_ms = 563.793`
-- `qwen3-embedding:8b + milvus`
-  - `Recall@10 = 0.82`
-  - `MRR@10 = 0.705854`
-  - `NDCG@10 = 0.733644`
-  - `avg_latency_ms = 695.559`
-
-当前主线选择：
-- 新质量优先线：`qwen3-embedding:8b + milvus`
-- 新低时延线：`BAAI/bge-m3 + milvus`
-- `BAAI/bge-m3 + sqlite` 只作为历史参考
-
-### Diagnostics
-
-已知事实：
-- 当前 retrieval 主问题是 `recall_failure`
-- `fusion_loss = 0`
-- `mapping_failure = 0`
-- `vector` 是唯一主力分支
-- `full_text` 有极窄场景价值
-- `local/global` 可以继续降级处理
-- `rerank` 有净收益，但副作用不小，后续更适合做 guard 实验
-
-### Answer Eval
-
-目前已经确认：
-- 生成层真正的问题不是“纯乱编”，而是：
-  - 检索命中了但仍然模板化拒答
-  - citation benchmark 映射之前被内部 `document-*` 污染，现在已修正为优先用 `benchmark_doc_id`
-  - 本地长上下文生成非常慢，不适合直接当客户在线链路
-- 新增的 `answer_context_top_k` 用来只压 generation context，不影响 retrieval 结果，便于做 `4 / 6 / 8` A/B
-- answer benchmark 现在会额外记录：
-  - `avg_generation_latency_ms`
-  - `avg_non_generation_latency_ms`
-  - `avg_context_evidence_count`
-  - `avg_context_token_count`
-  这样可以直接判断慢点主要在生成，还是在 retrieval/context build
-
-## 下一步更值得投的方向
-
-按当前诊断和实验结果，优先级建议：
-
-1. `query normalization / alias expansion`
-   - 先解决 recall failure 的表达问题
-2. `conditional full-text`
-   - 不恢复常驻 hybrid，只做条件触发式稀疏检索
-3. `rerank guard`
-   - 不默认所有 query 都强 rerank
-4. `answer_context_top_k` A/B
-   - 降生成时延，减少“检索命中但生成拒答”
-5. `在线链路和评测链路分线`
-   - benchmark 用高质量参数
-   - 在线用更小上下文、更轻 chat 模型或云端 chat
-
-不建议优先再投：
-- `hybrid / mix` 重写
-- `local / global` 调参
-- `fusion` 重写
-- 再开新的 embedding 大范围扫参
-
-## Workbench
-
-启动：
-
-```bash
-uv run rag workbench --storage-root .rag
-```
-
-它适合做：
-- 文档导入
-- 单 query 调试
-- 查看 retrieval diagnostics
-- 查看 context evidence
-- 快速验证 answer/citation 输出
-
-## 测试
-
-常用：
-
-```bash
-uv run pytest -q
 uv run ruff check rag scripts tests
-python3 -m py_compile $(find rag scripts tests -name '*.py' -not -path '*/__pycache__/*')
+uv run pytest -q
 ```
 
-如果只验证 benchmark 相关：
+本次 Excel/表格资产主线重点回归：
 
 ```bash
-uv run pytest \
-  tests/core/test_public_benchmark.py \
-  tests/core/test_benchmark_diagnostics.py \
-  tests/core/test_benchmark_diagnostics_context.py \
-  tests/core/test_answer_benchmarks.py -q
+uv run pytest -q \
+  tests/core/test_excel_parser_repo.py \
+  tests/core/test_ingest_asset_anchors.py \
+  tests/core/test_retrieval_summarizer.py \
+  tests/service/test_grounding_service.py
 ```
+
+## 关键注意事项
+
+- 以后默认用 Milvus，不再默认 SQLite。
+- 入库与检索的 embedding、tokenizer、`chunk_token_size`、`chunk_overlap_tokens` 必须一致。
+- 私有数据每次重跑建议换新的 `COLLECTION_PREFIX`。
+- 表格统一只入 schema/sample/summary/可计算存储指针，不入全量 Markdown。
+- `inline_context` 已废除；短表也只走 `compute_only`，统一由 DuckDB Text-to-SQL Sandbox 计算。
+- MCP/Pandas 不在当前 RAG 主线内，归入 Phase 4 高级数据分析功能。
+- 生成测试题前必须先 `export_private_sections.py`。
+- `generate_eval_dataset.py` 的失败文件只有在真正失败时才会生成。

@@ -16,8 +16,8 @@ def _provider_name(provider: object) -> str:
 
 def _provider_model(provider: object, capability: str) -> str | None:
     attribute_names = {
-        "chat": ("chat_model_name", "_chat_model", "_model"),
-        "embedding": ("embedding_model_name", "_embedding_model"),
+        "chat": ("chat_model_name", "model_name_or_path", "_chat_model", "_model", "_model_name_or_path"),
+        "embedding": ("embedding_model_name", "model_name_or_path", "_embedding_model", "_model_name_or_path"),
         "rerank": ("rerank_model_name", "_rerank_model"),
     }.get(capability, ())
     for attribute_name in attribute_names:
@@ -28,18 +28,18 @@ def _provider_model(provider: object, capability: str) -> str | None:
 
 
 def _supports_capability(provider: object, capability: str) -> bool:
-    method_name = {
-        "chat": "chat",
-        "embedding": "embed",
-        "rerank": "rerank",
-    }[capability]
     configured_name = {
         "chat": "is_chat_configured",
         "embedding": "is_embed_configured",
         "rerank": "is_rerank_configured",
     }[capability]
-    method = getattr(provider, method_name, None)
-    if not callable(method):
+    if capability == "chat":
+        supported = callable(getattr(provider, "generate_text", None)) or callable(getattr(provider, "chat", None))
+    elif capability == "embedding":
+        supported = callable(getattr(provider, "embed", None))
+    else:
+        supported = callable(getattr(provider, "rerank", None))
+    if not supported:
         return False
     configured = getattr(provider, configured_name, True)
     return bool(configured)
@@ -121,9 +121,12 @@ class ChatCapabilityBinding:
 
     def chat(self, prompt: str) -> str:
         chat = getattr(self.backend, "chat", None)
-        if not callable(chat):
-            raise RuntimeError("Chat capability is not available")
-        return str(chat(prompt))
+        if callable(chat):
+            return str(chat(prompt))
+        generate_text = getattr(self.backend, "generate_text", None)
+        if callable(generate_text):
+            return str(generate_text(prompt=prompt))
+        raise RuntimeError("Chat capability is not available")
 
 
 @dataclass(frozen=True, slots=True)
@@ -137,11 +140,11 @@ class RerankCapabilityBinding:
         object.__setattr__(self, "provider_name", _provider_name(self.backend))
         object.__setattr__(self, "model_name", _provider_model(self.backend, "rerank"))
 
-    def rerank(self, query: str, candidates: Sequence[object]) -> list[int]:
+    def rerank(self, query: str, documents: Sequence[str], **kwargs: object) -> list[float]:
         rerank = getattr(self.backend, "rerank", None)
         if not callable(rerank):
             raise RuntimeError("Rerank capability is not available")
-        return list(rerank(query, list(candidates)))
+        return [float(score) for score in rerank(query, list(documents), **kwargs)]
 
 
 CapabilityBinding = EmbeddingCapabilityBinding | ChatCapabilityBinding | RerankCapabilityBinding

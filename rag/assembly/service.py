@@ -32,6 +32,7 @@ from rag.assembly.models import (
     RuntimeContractGovernance,
 )
 from rag.assembly.support import (
+    FallbackEmbeddingRepo,
     assembly_profile_by_id,
     assembly_profiles,
     build_provider,
@@ -44,7 +45,6 @@ from rag.assembly.support import (
     merge_assembly_overrides,
 )
 from rag.assembly.tokenizer import DEFAULT_TOKENIZER_FALLBACK_MODEL, TokenAccountingService, TokenizerContract
-from rag.providers.adapters import FallbackEmbeddingRepo
 from rag.utils.text import load_env_file
 
 

@@ -30,7 +30,7 @@ from rag.benchmarks import (
 from rag.retrieval.analysis import RoutingDecision
 from rag.retrieval.evidence import EvidenceBundle, SelfCheckResult
 from rag.retrieval.models import RetrievalResult
-from rag.schema.query import ComplexityLevel, TaskType
+from rag.schema.query import TaskType
 from rag.schema.runtime import ExternalRetrievalPolicy, Residency, RuntimeMode
 from tests.support import make_runtime
 
@@ -53,14 +53,16 @@ def test_prepared_document_ingest_preserves_benchmark_chunk_metadata() -> None:
                 dataset="fiqa",
             )
         )
+        sections = runtime.stores.metadata_repo.list_sections(doc_id=result.doc_id)
     finally:
         runtime.close()
 
-    assert result.chunks
-    for chunk in result.chunks:
-        assert chunk.metadata["benchmark_dataset"] == "fiqa"
-        assert chunk.metadata["benchmark_doc_id"] == "fiqa-doc-1"
-        assert chunk.metadata["parent_doc_id"] == "fiqa-doc-1"
+    assert result.section_count == 1
+    assert sections
+    for section in sections:
+        assert section.metadata_json["benchmark_dataset"] == "fiqa"
+        assert section.metadata_json["benchmark_doc_id"] == "fiqa-doc-1"
+        assert section.metadata_json["parent_doc_id"] == "fiqa-doc-1"
 
 
 def test_prepared_document_batch_ingest_uses_formal_insert_many_path() -> None:
@@ -90,16 +92,21 @@ def test_prepared_document_batch_ingest_uses_formal_insert_many_path() -> None:
                 ),
             ]
         )
+        all_sections = [
+            section
+            for item in result.results
+            if item.result is not None
+            for section in runtime.stores.metadata_repo.list_sections(doc_id=item.result.doc_id)
+        ]
     finally:
         runtime.close()
 
     assert result.success_count == 2
     assert result.failure_count == 0
-    all_chunks = [chunk for item in result.results for chunk in item.chunks]
-    assert all_chunks
-    for chunk in all_chunks:
-        assert chunk.metadata["benchmark_dataset"] == "fiqa"
-        assert chunk.metadata["benchmark_doc_id"].startswith("fiqa-doc-")
+    assert all_sections
+    for section in all_sections:
+        assert section.metadata_json["benchmark_dataset"] == "fiqa"
+        assert section.metadata_json["benchmark_doc_id"].startswith("fiqa-doc-")
 
 
 def test_prepared_document_batch_ingest_marks_documents_query_visible() -> None:
@@ -131,15 +138,14 @@ def test_prepared_document_batch_ingest_marks_documents_query_visible() -> None:
         )
 
         persisted_documents = [
-            runtime.stores.metadata_repo.get_document(item.document.doc_id)  # type: ignore[arg-type]
+            runtime.stores.metadata_repo.get_document(item.result.doc_id)
             for item in result.results
+            if item.result is not None
         ]
     finally:
         runtime.close()
 
     assert result.success_count == 2
-    assert all(item.document.is_indexed is True for item in result.results)
-    assert all(item.document.index_ready is True for item in result.results)
     assert all(document is not None for document in persisted_documents)
     assert all(document.is_indexed is True for document in persisted_documents if document is not None)
     assert all(document.index_ready is True for document in persisted_documents if document is not None)
@@ -165,14 +171,14 @@ def test_benchmark_ingest_result_reports_throughput() -> None:
         success_count=100,
         duplicate_count=0,
         failure_count=0,
-        chunk_count=250,
+        indexed_object_count=250,
         elapsed_ms=20_000.0,
     )
 
     assert result.docs_per_second == pytest.approx(5.0)
-    assert result.chunks_per_second == pytest.approx(12.5)
+    assert result.indexed_objects_per_second == pytest.approx(12.5)
     assert result.as_json()["docs_per_second"] == pytest.approx(5.0)
-    assert result.as_json()["chunks_per_second"] == pytest.approx(12.5)
+    assert result.as_json()["indexed_objects_per_second"] == pytest.approx(12.5)
 
 
 def test_benchmark_run_summary_reports_query_throughput() -> None:
@@ -182,9 +188,9 @@ def test_benchmark_run_summary_reports_query_throughput() -> None:
         split="dev",
         query_count=300,
         top_k=10,
-        chunk_top_k=20,
+        evidence_top_k=20,
         embedding_model="BAAI/bge-m3",
-        retrieval_mode="naive",
+        retrieval_profile="fast",
         rerank_enabled=True,
         profile_id="local_full",
         recall_at_10=0.7,
@@ -202,9 +208,9 @@ def test_benchmark_run_summary_reports_query_throughput() -> None:
 def test_append_baseline_row_upgrades_existing_csv_header(tmp_path: Path) -> None:
     path = tmp_path / "baseline.csv"
     path.write_text(
-        "run_id,dataset,query_count,top_k,embedding_model,retrieval_mode,rerank_enabled,"
+        "run_id,dataset,query_count,top_k,embedding_model,retrieval_profile,rerank_enabled,"
         "Recall@10,MRR@10,NDCG@10,avg_latency_ms,p95_latency_ms\n"
-        "old-run,medical_retrieval,300,10,BAAI/bge-m3,naive,True,0.7,0.6,0.65,2500.0,3200.0\n",
+        "old-run,medical_retrieval,300,10,BAAI/bge-m3,fast,True,0.7,0.6,0.65,2500.0,3200.0\n",
         encoding="utf-8",
     )
 
@@ -216,9 +222,9 @@ def test_append_baseline_row_upgrades_existing_csv_header(tmp_path: Path) -> Non
             split="dev",
             query_count=300,
             top_k=10,
-            chunk_top_k=20,
+            evidence_top_k=20,
             embedding_model="BAAI/bge-m3",
-            retrieval_mode="naive",
+            retrieval_profile="fast",
             rerank_enabled=True,
             profile_id="local_full",
             recall_at_10=0.71,
@@ -239,9 +245,9 @@ def test_append_baseline_row_upgrades_existing_csv_header(tmp_path: Path) -> Non
 def test_load_baseline_rows_coerces_common_types(tmp_path: Path) -> None:
     path = tmp_path / "baseline.csv"
     path.write_text(
-        "run_id,dataset,query_count,top_k,embedding_model,retrieval_mode,"
+        "run_id,dataset,query_count,top_k,embedding_model,retrieval_profile,"
         "rerank_enabled,Recall@10,MRR@10,NDCG@10,avg_latency_ms,p95_latency_ms,queries_per_second\n"
-        "run-1,medical_retrieval,300,10,BAAI/bge-m3,naive,True,0.7,0.6,0.65,2500.0,3200.0,0.4\n",
+        "run-1,medical_retrieval,300,10,BAAI/bge-m3,fast,True,0.7,0.6,0.65,2500.0,3200.0,0.4\n",
         encoding="utf-8",
     )
 
@@ -254,7 +260,7 @@ def test_load_baseline_rows_coerces_common_types(tmp_path: Path) -> None:
             "query_count": 300,
             "top_k": 10,
             "embedding_model": "BAAI/bge-m3",
-            "retrieval_mode": "naive",
+            "retrieval_profile": "fast",
             "rerank_enabled": True,
             "Recall@10": 0.7,
             "MRR@10": 0.6,
@@ -371,12 +377,21 @@ def test_build_runtime_for_benchmark_creates_storage_root(tmp_path) -> None:
         profile_id="test_minimal",
         require_chat=False,
         require_rerank=False,
+        vector_backend="sqlite",
     )
     try:
         assert storage_root.exists()
         assert storage_root.is_dir()
     finally:
         runtime.close()
+
+
+def test_benchmark_storage_config_defaults_to_milvus_vectors(tmp_path: Path) -> None:
+    storage = benchmarks._benchmark_storage_config(root=tmp_path / "index")
+
+    assert storage.vectors is not None
+    assert storage.vectors.backend == "milvus"
+    assert storage.vectors.dsn == "http://127.0.0.1:19530"
 
 
 def test_build_runtime_for_benchmark_passes_milvus_vector_config(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -427,6 +442,7 @@ def test_build_runtime_for_benchmark_accepts_ollama_embedding_override(tmp_path)
         require_rerank=True,
         embedding_provider_kind="ollama",
         embedding_model="qwen3-embedding:8b",
+        vector_backend="sqlite",
     )
     try:
         binding = runtime.capability_bundle.embedding_bindings[0]
@@ -527,6 +543,53 @@ def test_build_runtime_for_benchmark_accepts_local_hf_chat_overrides(
         runtime.close()
 
 
+def test_build_runtime_for_benchmark_configures_summary_model_without_requiring_chat(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    class _FakeRuntime:
+        def __init__(self) -> None:
+            self.capability_bundle = type("_Bundle", (), {"embedding_bindings": []})()
+
+        def configure_summary_generator(self, **kwargs: object) -> None:
+            captured["summary_generator"] = kwargs
+
+        def close(self) -> None:
+            return None
+
+    def _fake_from_request(*, storage, request, assembly_service):
+        captured["storage"] = storage
+        captured["request"] = request
+        captured["assembly_service"] = assembly_service
+        return _FakeRuntime()
+
+    monkeypatch.setattr(benchmarks.RAGRuntime, "from_request", staticmethod(_fake_from_request))
+
+    runtime = build_runtime_for_benchmark(
+        storage_root=tmp_path / "benchmarks" / "medical_retrieval" / "index",
+        profile_id="local_full",
+        require_chat=False,
+        require_rerank=False,
+        summary_provider_kind="local-hf",
+        summary_model_path="/models/Qwen3-8B-MLX-4bit",
+        summary_backend="mlx",
+    )
+    try:
+        request = captured["request"]
+        assert request.requirements.require_chat is False
+        assert request.overrides is None or request.overrides.chat is None
+        assert captured["summary_generator"] == {
+            "provider_kind": "local-hf",
+            "model": None,
+            "model_path": "/models/Qwen3-8B-MLX-4bit",
+            "backend": "mlx",
+        }
+    finally:
+        runtime.close()
+
+
 def test_build_runtime_for_benchmark_rerank_override_clears_stale_rerank_path(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
@@ -539,12 +602,13 @@ def test_build_runtime_for_benchmark_rerank_override_clears_stale_rerank_path(
         require_chat=False,
         require_rerank=True,
         rerank_model="Qwen/Qwen3-Reranker-4B",
+        vector_backend="sqlite",
     )
     try:
         binding = runtime.capability_bundle.rerank_bindings[0]
         assert binding.model_name == "Qwen/Qwen3-Reranker-4B"
         provider = binding.backend
-        assert provider._rerank_model_ref == "Qwen/Qwen3-Reranker-4B"
+        assert provider.rerank_model_name == "Qwen/Qwen3-Reranker-4B"
     finally:
         runtime.close()
 
@@ -701,7 +765,7 @@ def test_ingest_prepared_documents_streaming_uses_formal_pipeline(tmp_path) -> N
     assert result.success_count == 2
     assert result.failure_count == 0
     assert result.request_count == 2
-    assert result.chunk_count >= 2
+    assert result.indexed_object_count >= 2
 
 
 def test_benchmark_evaluator_reads_benchmark_doc_ids_from_retrieval_result(
@@ -742,7 +806,6 @@ def test_benchmark_evaluator_reads_benchmark_doc_ids_from_retrieval_result(
                 return RetrievalResult(
                     decision=RoutingDecision(
                         task_type=TaskType.LOOKUP,
-                        complexity_level=ComplexityLevel.L1_DIRECT,
                         runtime_mode=RuntimeMode.FAST,
                     ),
                     evidence=EvidenceBundle(),
@@ -751,24 +814,19 @@ def test_benchmark_evaluator_reads_benchmark_doc_ids_from_retrieval_result(
                         evidence_sufficient=True,
                         claim_supported=True,
                     ),
-                    reranked_chunk_ids=["chunk-1", "chunk-2"],
+                    reranked_evidence_ids=["evidence-1", "evidence-2"],
                     reranked_benchmark_doc_ids=["fiqa-doc-1", "fiqa-doc-2"],
                 )
 
         runtime.retrieval_service = _StubRetrievalService()  # type: ignore[assignment]
-        monkeypatch.setattr(
-            runtime.stores.metadata_repo,
-            "get_chunk",
-            lambda chunk_id: (_ for _ in ()).throw(AssertionError(f"unexpected metadata lookup for {chunk_id}")),
-        )
 
         summary = RetrievalBenchmarkEvaluator(
             runtime=runtime,
             dataset="fiqa",
             split="test",
-            retrieval_mode="naive",
+            retrieval_profile="fast",
             top_k=10,
-            chunk_top_k=10,
+            evidence_top_k=10,
             rerank_enabled=False,
         ).evaluate(
             queries_path=queries_path,
@@ -809,7 +867,6 @@ def test_benchmark_evaluator_appends_run_history_instead_of_overwriting(tmp_path
                 return RetrievalResult(
                     decision=RoutingDecision(
                         task_type=TaskType.LOOKUP,
-                        complexity_level=ComplexityLevel.L1_DIRECT,
                         runtime_mode=RuntimeMode.FAST,
                     ),
                     evidence=EvidenceBundle(),
@@ -818,7 +875,7 @@ def test_benchmark_evaluator_appends_run_history_instead_of_overwriting(tmp_path
                         evidence_sufficient=True,
                         claim_supported=True,
                     ),
-                    reranked_chunk_ids=["chunk-1", "chunk-2"],
+                    reranked_evidence_ids=["evidence-1", "evidence-2"],
                     reranked_benchmark_doc_ids=["fiqa-doc-1", "fiqa-doc-2"],
                 )
 
@@ -828,9 +885,9 @@ def test_benchmark_evaluator_appends_run_history_instead_of_overwriting(tmp_path
             runtime=runtime,
             dataset="fiqa",
             split="test",
-            retrieval_mode="naive",
+            retrieval_profile="fast",
             top_k=10,
-            chunk_top_k=10,
+            evidence_top_k=10,
             rerank_enabled=False,
         ).evaluate(
             queries_path=queries_path,
@@ -841,9 +898,9 @@ def test_benchmark_evaluator_appends_run_history_instead_of_overwriting(tmp_path
             runtime=runtime,
             dataset="fiqa",
             split="test",
-            retrieval_mode="naive",
+            retrieval_profile="fast",
             top_k=10,
-            chunk_top_k=10,
+            evidence_top_k=10,
             rerank_enabled=False,
         ).evaluate(
             queries_path=queries_path,
@@ -895,9 +952,9 @@ def test_benchmark_evaluator_fails_fast_on_empty_storage(tmp_path) -> None:
                 runtime=runtime,
                 dataset="fiqa",
                 split="test",
-                retrieval_mode="naive",
+                retrieval_profile="fast",
                 top_k=10,
-                chunk_top_k=10,
+                evidence_top_k=10,
                 rerank_enabled=False,
             ).evaluate(
                 queries_path=queries_path,

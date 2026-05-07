@@ -93,7 +93,7 @@ def main() -> int:
     fieldnames = [
         "dataset",
         "doc_count",
-        "chunk_count",
+        "indexed_object_count",
         "ingest_strategy",
         "ingest_batch_size",
         "encode_batch_size",
@@ -104,7 +104,7 @@ def main() -> int:
         "total_elapsed_ms",
         "embedding_elapsed_ms",
         "docs_per_second",
-        "chunks_per_second",
+        "indexed_objects_per_second",
         "storage_root",
     ]
     run_count = 0

@@ -10,20 +10,18 @@ from rag.retrieval.analysis import (
     narrow_access_policy_for_query,
 )
 from rag.retrieval.evidence import (
-    ArtifactService,
     CandidateLike,
     EvidenceBundle,
     EvidenceService,
     SelfCheckResult,
 )
 from rag.retrieval.graph import GraphExpansionService
-from rag.retrieval.models import QueryMode, QueryOptions, normalize_query_mode
+from rag.retrieval.models import QueryOptions, RetrievalProfile
 from rag.retrieval.planning_graph import PlanningGraph, PlanningState
-from rag.retrieval.retrieval_adapter import RetrievalAdapter
 from rag.retrieval.rerank_service import IndustrialRerankService
+from rag.retrieval.retrieval_adapter import RetrievalAdapter
 from rag.retrieval.runtime_coordinator import CoreRetrievalPayload
-from rag.schema.core import ChunkRole
-from rag.schema.query import QueryUnderstanding
+from rag.schema.query import GroundingTarget, QueryUnderstanding
 from rag.schema.runtime import AccessPolicy, ExecutionLocationPreference, ProviderAttempt
 from rag.utils.telemetry import TelemetryService
 
@@ -32,7 +30,6 @@ from rag.utils.telemetry import TelemetryService
 class RankPipelineResult:
     candidates: list[CandidateLike]
     candidate_count: int
-    parent_backfilled_count: int
     collapsed_candidate_count: int
     pre_rerank_count: int
     post_cleanup_count: int
@@ -42,7 +39,7 @@ class RankPipelineResult:
 
 @dataclass
 class FusedCandidateView(CandidateLike):
-    chunk_id: str
+    evidence_id: str
     doc_id: str
     text: str
     citation_anchor: str
@@ -53,11 +50,8 @@ class FusedCandidateView(CandidateLike):
     section_path: Sequence[str]
     benchmark_doc_id: str | None = None
     effective_access_policy: AccessPolicy | None = None
-    chunk_role: ChunkRole | None = None
-    special_chunk_type: str | None = None
-    parent_chunk_id: str | None = None
-    parent_text: str | None = None
     metadata: dict[str, str] | None = None
+    record_type: str | None = None
     retrieval_channels: list[str] | None = None
     dense_score: float | None = None
     sparse_score: float | None = None
@@ -67,10 +61,11 @@ class FusedCandidateView(CandidateLike):
     fusion_score: float | None = None
     rrf_score: float | None = None
     unified_rank: int | None = None
+    grounding_target: GroundingTarget | None = None
 
     @property
     def item_id(self) -> str:
-        return self.chunk_id
+        return self.evidence_id
 
 
 class L3L4RetrievalEngine:
@@ -82,7 +77,6 @@ class L3L4RetrievalEngine:
         query_understanding_service: QueryUnderstandingService,
         evidence_service: EvidenceService,
         graph_expansion_service: GraphExpansionService,
-        artifact_service: ArtifactService,
         telemetry_service: TelemetryService | None,
         planning_graph: PlanningGraph,
         retrieval_adapter: RetrievalAdapter,
@@ -96,7 +90,6 @@ class L3L4RetrievalEngine:
         self.query_understanding_service = query_understanding_service
         self.evidence_service = evidence_service
         self.graph_expansion_service = graph_expansion_service
-        self.artifact_service = artifact_service
         self.telemetry_service = telemetry_service
         self.planning_graph = planning_graph
         self.retrieval_adapter = retrieval_adapter
@@ -112,11 +105,14 @@ class L3L4RetrievalEngine:
         access_policy: AccessPolicy,
         source_scope: Sequence[str] = (),
         execution_location_preference: ExecutionLocationPreference | None = None,
-        query_mode: QueryMode | str | None = None,
         query_options: QueryOptions | None = None,
     ) -> CoreRetrievalPayload:
         scope = list(source_scope)
-        resolved_mode = normalize_query_mode(query_options.mode if query_options is not None else query_mode)
+        retrieval_profile = (
+            query_options.resolved_retrieval_profile
+            if query_options is not None
+            else RetrievalProfile.AUTO
+        )
         query_understanding = self.query_understanding_service.analyze(
             query,
             access_policy=access_policy,
@@ -131,7 +127,7 @@ class L3L4RetrievalEngine:
             source_scope=scope,
             access_policy=effective_access_policy,
         )
-        if resolved_mode is QueryMode.BYPASS:
+        if retrieval_profile is RetrievalProfile.BYPASS:
             return self._run_bypass_mode(
                 query=query,
                 decision=decision,
@@ -142,7 +138,7 @@ class L3L4RetrievalEngine:
             source_scope=scope,
             access_policy=effective_access_policy,
             query_understanding=query_understanding,
-            resolved_mode=resolved_mode,
+            resolved_retrieval_profile=retrieval_profile,
             query_options=query_options,
         )
         return await self._execute_mode_async(
@@ -179,6 +175,7 @@ class L3L4RetrievalEngine:
             branches=collection.branches,
             query_options=query_options,
             rerank_required=decision.rerank_required,
+            query_understanding=query_understanding,
         )
         reranked_candidates = rank_result.candidates
         evidence = self.evidence_service.assemble_bundle(reranked_candidates)
@@ -213,6 +210,7 @@ class L3L4RetrievalEngine:
                 branches=collection.branches,
                 query_options=query_options,
                 rerank_required=decision.rerank_required,
+                query_understanding=query_understanding,
             )
             reranked_candidates = rank_result.candidates
             evidence = self.evidence_service.assemble_bundle(reranked_candidates)
@@ -220,7 +218,7 @@ class L3L4RetrievalEngine:
         self_check = self.evidence_service.evaluate_self_check(
             bundle=evidence,
             task_type=decision.task_type,
-            complexity_level=decision.complexity_level,
+            runtime_mode=decision.runtime_mode,
         )
 
         web_candidates: list[CandidateLike] = []
@@ -248,6 +246,7 @@ class L3L4RetrievalEngine:
                     branches=[*collection.branches, ("web", web_candidates)],
                     query_options=query_options,
                     rerank_required=decision.rerank_required,
+                    query_understanding=query_understanding,
                 )
                 reranked_candidates = rank_result.candidates
                 evidence = self.evidence_service.assemble_bundle(reranked_candidates)
@@ -283,22 +282,9 @@ class L3L4RetrievalEngine:
         self_check = self.evidence_service.evaluate_self_check(
             bundle=evidence,
             task_type=decision.task_type,
-            complexity_level=decision.complexity_level,
-        )
-        preservation_suggestion = self.artifact_service.suggest_preservation(
-            query=query,
             runtime_mode=decision.runtime_mode,
-            evidence=evidence.all,
-            differences_or_conflicts=[],
         )
         reranked_benchmark_doc_ids = self._benchmark_doc_ids(reranked_candidates)
-        if self.telemetry_service is not None and preservation_suggestion.suggested:
-            self.telemetry_service.record_preservation_suggestion(
-                artifact_type=preservation_suggestion.artifact_type or "unknown",
-                runtime_mode=decision.runtime_mode.value,
-                evidence_count=len(evidence.all),
-                conflict_count=0,
-            )
 
         return CoreRetrievalPayload(
             decision=decision,
@@ -307,7 +293,7 @@ class L3L4RetrievalEngine:
             clean_items=reranked_candidates,
             reranked_benchmark_doc_ids=reranked_benchmark_doc_ids,
             graph_expanded=graph_expanded,
-            mode_executor=plan.mode_executor,
+            retrieval_profile=plan.retrieval_profile.value,
             branch_hits=collection.branch_hits,
             branch_limits=collection.branch_limits,
             planning_complexity_gate=plan.complexity_gate.value,
@@ -333,9 +319,7 @@ class L3L4RetrievalEngine:
             top1_confidence=rank_result.top1_confidence,
             exit_decision=rank_result.exit_decision,
             fallback_triggered=fallback_triggered,
-            parent_backfilled_count=rank_result.parent_backfilled_count,
             collapsed_candidate_count=rank_result.collapsed_candidate_count,
-            preservation_suggestion=preservation_suggestion,
         )
 
     @staticmethod
@@ -405,14 +389,13 @@ class L3L4RetrievalEngine:
             clean_items=[],
             reranked_benchmark_doc_ids=[],
             graph_expanded=False,
-            mode_executor="bypass",
+            retrieval_profile=RetrievalProfile.BYPASS.value,
             branch_hits={},
             branch_limits={},
             fusion_input_count=0,
             fused_count=0,
             query_understanding=query_understanding,
             query_understanding_debug={},
-            parent_backfilled_count=0,
             collapsed_candidate_count=0,
         )
 
@@ -424,11 +407,12 @@ class L3L4RetrievalEngine:
         branches: list[tuple[str, list[CandidateLike]]],
         query_options: QueryOptions | None,
         rerank_required: bool,
+        query_understanding: QueryUnderstanding | None = None,
     ) -> RankPipelineResult:
         candidate_count = sum(len(branch) for _, branch in branches)
         fused_candidates = self.fusion.fuse(
             query=query,
-            mode=plan.mode,
+            retrieval_profile=plan.retrieval_profile,
             branches=branches,
             alpha=plan.fusion_alpha,
         )
@@ -443,59 +427,22 @@ class L3L4RetrievalEngine:
         rerank_result = await self.rerank_service.arank(
             query=query,
             fused_candidates=fused_candidates,
-            reranker=self.reranker,
+            reranker=self.reranker if getattr(self.reranker, "enabled", False) else None,
             rerank_required=rerank_required and (query_options is None or query_options.enable_rerank),
             rerank_pool_k=(query_options.rerank_pool_k if query_options is not None else None),
             allow_asset_fallback=plan.semantic_route in {"asset_first", "text_plus_asset"},
+            query_understanding=query_understanding,
+            min_output_candidates=query_options.resolved_candidate_top_k if query_options is not None else None,
         )
         reranked_candidates = rerank_result.ranked_candidates
-        parent_backfilled_count = 0
         collapsed_candidate_count = 0
         collapsed_candidates: list[CandidateLike] = []
-        seen_keys: set[tuple[str, str, str]] = set()
-        enable_parent_backfill = query_options.enable_parent_backfill if query_options is not None else True
+        seen_keys: set[tuple[str, str]] = set()
         for candidate in reranked_candidates:
-            parent_text = getattr(candidate, "parent_text", None)
-            parent_chunk_id = getattr(candidate, "parent_chunk_id", None)
-            if enable_parent_backfill and parent_chunk_id and parent_text:
-                candidate = FusedCandidateView(
-                    chunk_id=candidate.chunk_id,
-                    doc_id=candidate.doc_id,
-                    text=parent_text,
-                    citation_anchor=candidate.citation_anchor,
-                    score=float(candidate.score),
-                    rank=int(candidate.rank),
-                    source_kind=candidate.source_kind,
-                    source_id=candidate.source_id,
-                    section_path=tuple(candidate.section_path),
-                    benchmark_doc_id=getattr(candidate, "benchmark_doc_id", None),
-                    effective_access_policy=getattr(candidate, "effective_access_policy", None),
-                    chunk_role=getattr(candidate, "chunk_role", None),
-                    special_chunk_type=getattr(candidate, "special_chunk_type", None),
-                    parent_chunk_id=parent_chunk_id,
-                    parent_text=parent_text,
-                    metadata=getattr(candidate, "metadata", None),
-                    retrieval_channels=list(getattr(candidate, "retrieval_channels", []) or []),
-                    dense_score=getattr(candidate, "dense_score", None),
-                    sparse_score=getattr(candidate, "sparse_score", None),
-                    special_score=getattr(candidate, "special_score", None),
-                    structure_score=getattr(candidate, "structure_score", None),
-                    metadata_score=getattr(candidate, "metadata_score", None),
-                    fusion_score=getattr(candidate, "fusion_score", None),
-                    rrf_score=getattr(candidate, "rrf_score", None),
-                    unified_rank=getattr(candidate, "unified_rank", None),
-                )
-                parent_backfilled_count += 1
             if candidate.source_kind != "internal":
                 collapsed_candidates.append(candidate)
                 continue
-            special_chunk_type = getattr(candidate, "special_chunk_type", None)
-            parent_chunk_id = getattr(candidate, "parent_chunk_id", None)
-            dedupe_key = (
-                ("chunk", candidate.doc_id, candidate.chunk_id)
-                if special_chunk_type or not parent_chunk_id
-                else ("parent", candidate.doc_id, parent_chunk_id)
-            )
+            dedupe_key = self._candidate_dedupe_key(candidate)
             if dedupe_key in seen_keys:
                 collapsed_candidate_count += 1
                 continue
@@ -504,11 +451,11 @@ class L3L4RetrievalEngine:
         if query_options is None:
             reranked_candidates = collapsed_candidates
         else:
-            limit = query_options.chunk_top_k or query_options.top_k
+            limit = query_options.resolved_candidate_top_k
             reranked_candidates = [] if limit <= 0 else collapsed_candidates[:limit]
         if self.telemetry_service is not None:
-            fused_ids = [candidate.chunk_id for candidate in fused_candidates]
-            reranked_ids = [candidate.chunk_id for candidate in reranked_candidates]
+            fused_ids = [candidate.item_id for candidate in fused_candidates]
+            reranked_ids = [candidate.item_id for candidate in reranked_candidates]
             self.telemetry_service.record_rerank_effectiveness(
                 input_count=len(fused_candidates),
                 output_count=len(reranked_candidates),
@@ -518,13 +465,23 @@ class L3L4RetrievalEngine:
         return RankPipelineResult(
             candidates=reranked_candidates,
             candidate_count=candidate_count,
-            parent_backfilled_count=parent_backfilled_count,
             collapsed_candidate_count=collapsed_candidate_count,
             pre_rerank_count=rerank_result.diagnostics.input_count,
             post_cleanup_count=rerank_result.diagnostics.output_count,
             top1_confidence=rerank_result.top1_confidence,
             exit_decision=rerank_result.exit_decision,
         )
+
+    @staticmethod
+    def _candidate_dedupe_key(candidate: CandidateLike) -> tuple[str, str]:
+        target = getattr(candidate, "grounding_target", None)
+        if target is not None and getattr(target, "asset_id", None) is not None:
+            return ("asset", str(target.asset_id))
+        if target is not None and getattr(target, "section_id", None) is not None:
+            return ("section", str(target.section_id))
+        if target is not None and getattr(target, "doc_id", None) is not None:
+            return ("document", str(target.doc_id))
+        return ("evidence", candidate.item_id)
 
     def _embedding_provider(self) -> str | None:
         for retriever in (

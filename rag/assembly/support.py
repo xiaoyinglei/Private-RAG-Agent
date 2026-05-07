@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import os
 from collections.abc import Sequence
-from dataclasses import replace
+from dataclasses import dataclass, replace
+from typing import Any, TypeVar
 
 from rag.assembly.models import (
     AssemblyConfig,
@@ -12,13 +13,121 @@ from rag.assembly.models import (
     ProviderConfig,
     TokenizerConfig,
 )
-from rag.providers.adapters import (
-    FallbackEmbeddingRepo,
-    LocalBgeProviderRepo,
-    LocalHfChatProviderRepo,
-    OllamaProviderRepo,
-    OpenAIProviderRepo,
-)
+from rag.providers.fallback import FallbackEmbeddingRepo
+from rag.providers.huggingface.embedder import BgeM3Embedder, HuggingFaceEmbedder
+from rag.providers.huggingface.generator import HuggingFaceGenerator
+from rag.providers.huggingface.rerank import FlagEmbeddingReranker
+from rag.providers.mlx.generator import MLXGenerator
+from rag.providers.ollama.embedder import OllamaEmbedder
+from rag.providers.ollama.generator import OllamaGenerator
+
+T = TypeVar("T")
+
+
+@dataclass(slots=True)
+class _UnavailableProvider:
+    provider_name: str
+    reason: str
+    chat_model_name: str | None = None
+    embedding_model_name: str | None = None
+    rerank_model_name: str | None = None
+    is_chat_configured: bool = False
+    is_embed_configured: bool = False
+    is_rerank_configured: bool = False
+
+
+@dataclass(slots=True)
+class _CompositeProvider:
+    provider_name: str
+    generator: object | None = None
+    embedder: object | None = None
+    reranker: object | None = None
+
+    @property
+    def is_chat_configured(self) -> bool:
+        return self.generator is not None
+
+    @property
+    def is_embed_configured(self) -> bool:
+        return self.embedder is not None
+
+    @property
+    def is_rerank_configured(self) -> bool:
+        return self.reranker is not None
+
+    @property
+    def chat_model_name(self) -> str | None:
+        return _backend_model_name(self.generator, "chat")
+
+    @property
+    def embedding_model_name(self) -> str | None:
+        return _backend_model_name(self.embedder, "embedding")
+
+    @property
+    def rerank_model_name(self) -> str | None:
+        return _backend_model_name(self.reranker, "rerank")
+
+    def generate_text(self, *, prompt: str, **kwargs: Any) -> str:
+        backend = self._require(self.generator, capability="chat")
+        generate_text = getattr(backend, "generate_text", None)
+        if not callable(generate_text):
+            raise RuntimeError(f"{self.provider_name} does not implement chat generation")
+        return str(generate_text(prompt=prompt, **kwargs))
+
+    def generate_structured(self, *, prompt: str, schema: type[T], **kwargs: Any) -> T:
+        backend = self._require(self.generator, capability="chat")
+        generate_structured = getattr(backend, "generate_structured", None)
+        if not callable(generate_structured):
+            raise RuntimeError(f"{self.provider_name} does not implement structured generation")
+        return generate_structured(prompt=prompt, schema=schema, **kwargs)
+
+    def embed(self, texts: Sequence[str], **kwargs: Any) -> list[list[float]]:
+        backend = self._require(self.embedder, capability="embedding")
+        embed = getattr(backend, "embed", None)
+        if not callable(embed):
+            raise RuntimeError(f"{self.provider_name} does not implement embedding")
+        return list(embed(texts, **kwargs))
+
+    def embed_query(self, texts: Sequence[str], **kwargs: Any) -> list[list[float]]:
+        backend = self._require(self.embedder, capability="embedding")
+        embed_query = getattr(backend, "embed_query", None)
+        if callable(embed_query):
+            return list(embed_query(texts, **kwargs))
+        return self.embed(texts, **kwargs)
+
+    def embed_query_sparse(self, texts: Sequence[str], **kwargs: Any) -> list[dict[int, float]]:
+        backend = self._require(self.embedder, capability="embedding")
+        embed_query_sparse = getattr(backend, "embed_query_sparse", None)
+        if not callable(embed_query_sparse):
+            raise RuntimeError(f"{self.provider_name} does not implement sparse embedding")
+        return list(embed_query_sparse(texts, **kwargs))
+
+    def rerank(self, query: str, documents: Sequence[str], **kwargs: Any) -> list[float]:
+        backend = self._require(self.reranker, capability="rerank")
+        rerank = getattr(backend, "rerank", None)
+        if not callable(rerank):
+            raise RuntimeError(f"{self.provider_name} does not implement rerank")
+        return [float(score) for score in rerank(query, documents, **kwargs)]
+
+    def _require(self, backend: object | None, *, capability: str) -> object:
+        if backend is None:
+            raise RuntimeError(f"{self.provider_name} {capability} capability is not configured")
+        return backend
+
+
+def _backend_model_name(backend: object | None, capability: str) -> str | None:
+    if backend is None:
+        return None
+    attribute_names = {
+        "chat": ("model_name_or_path", "_model_name_or_path", "chat_model_name"),
+        "embedding": ("embedding_model_name", "model_name_or_path", "_model_name_or_path"),
+        "rerank": ("rerank_model_name", "model_name_or_path", "_model_name_or_path"),
+    }.get(capability, ())
+    for attribute_name in attribute_names:
+        value = getattr(backend, attribute_name, None)
+        if isinstance(value, str) and value:
+            return value
+    return None
 
 
 def first_non_blank(*values: str | None) -> str | None:
@@ -499,34 +608,102 @@ def _provider_or_default(
 def build_provider(provider_config: ProviderConfig) -> object:
     kind = provider_config.provider_kind
     if kind == "openai-compatible":
-        return OpenAIProviderRepo(
-            api_key=provider_config.api_key,
-            base_url=normalize_gemini_base_url(provider_config.base_url) or "https://api.openai.com/v1",
-            model=provider_config.chat_model or "",
-            embedding_model=provider_config.embedding_model or "",
+        return _UnavailableProvider(
+            provider_name="openai-compatible",
+            reason=(
+                "openai-compatible provider is not implemented in the new provider stack. "
+                "Use a local huggingface/mlx/ollama backend or add a real openai provider module."
+            ),
+            chat_model_name=provider_config.chat_model,
+            embedding_model_name=provider_config.embedding_model,
         )
     if kind == "ollama":
-        return OllamaProviderRepo(
-            base_url=provider_config.base_url or "http://localhost:11434",
-            chat_model=provider_config.chat_model or "",
-            embedding_model=provider_config.embedding_model,
+        generator = (
+            OllamaGenerator(
+                base_url=provider_config.base_url or "http://localhost:11434",
+                default_model=provider_config.chat_model,
+            )
+            if provider_config.chat_model
+            else None
+        )
+        embedder = (
+            OllamaEmbedder(
+                base_url=provider_config.base_url or "http://localhost:11434",
+                default_model=provider_config.embedding_model,
+                batch_size=provider_config.embedding_batch_size or 8,
+            )
+            if provider_config.embedding_model
+            else None
+        )
+        return _CompositeProvider(
+            provider_name="ollama",
+            generator=generator,
+            embedder=embedder,
         )
     if kind == "local-hf":
-        return LocalHfChatProviderRepo(
-            chat_model=provider_config.chat_model,
-            chat_model_path=provider_config.chat_model_path,
-            backend=provider_config.chat_backend,
-            device=provider_config.device,
+        model_ref = first_non_blank(provider_config.chat_model, provider_config.chat_model_path)
+        if model_ref is None:
+            return _UnavailableProvider(
+                provider_name="local-hf",
+                reason="local-hf provider requires chat_model or chat_model_path",
+            )
+        backend = (provider_config.chat_backend or "huggingface").strip().lower()
+        if backend == "mlx":
+            generator = MLXGenerator(model_name_or_path=model_ref)
+        elif backend in {"huggingface", "hf", "transformers", ""}:
+            generator = HuggingFaceGenerator(
+                model_name_or_path=model_ref,
+                device=provider_config.device,
+                local_files_only=True,
+            )
+        else:
+            return _UnavailableProvider(
+                provider_name="local-hf",
+                reason=f"Unsupported local-hf chat backend: {provider_config.chat_backend!r}",
+                chat_model_name=model_ref,
+            )
+        return _CompositeProvider(
+            provider_name="local-hf",
+            generator=generator,
         )
     if kind == "local-bge":
-        return LocalBgeProviderRepo(
-            embedding_model=provider_config.embedding_model or "",
-            embedding_model_path=provider_config.embedding_model_path,
-            rerank_model=provider_config.rerank_model or "",
-            rerank_model_path=provider_config.rerank_model_path,
-            batch_size=provider_config.embedding_batch_size or 8,
-            rerank_batch_size=provider_config.rerank_batch_size or 8,
-            devices=provider_config.device,
+        embedder = None
+        embedding_model_ref = first_non_blank(provider_config.embedding_model, provider_config.embedding_model_path)
+        if embedding_model_ref is not None:
+            normalized_embedding_model = embedding_model_ref.lower()
+            if "bge-m3" in normalized_embedding_model:
+                embedder = BgeM3Embedder(
+                    model_name_or_path=provider_config.embedding_model or embedding_model_ref,
+                    model_path=provider_config.embedding_model_path,
+                    batch_size=provider_config.embedding_batch_size or 8,
+                    device=provider_config.device,
+                )
+            else:
+                embedder = HuggingFaceEmbedder(
+                    model_name_or_path=embedding_model_ref,
+                    batch_size=provider_config.embedding_batch_size or 8,
+                    device=provider_config.device,
+                    local_files_only=True,
+                )
+        reranker = None
+        rerank_model_ref = first_non_blank(provider_config.rerank_model, provider_config.rerank_model_path)
+        if rerank_model_ref is not None:
+            reranker = FlagEmbeddingReranker(
+                model_name_or_path=provider_config.rerank_model or rerank_model_ref,
+                model_path=provider_config.rerank_model_path,
+                batch_size=provider_config.rerank_batch_size or 8,
+                devices=provider_config.device,
+                local_files_only=True,
+            )
+        if embedder is None and reranker is None:
+            return _UnavailableProvider(
+                provider_name="local-bge",
+                reason="local-bge provider requires embedding_model/model_path or rerank_model/model_path",
+            )
+        return _CompositeProvider(
+            provider_name="local-bge",
+            embedder=embedder,
+            reranker=reranker,
         )
     if kind in {"fallback", "default-embedding"}:
         return FallbackEmbeddingRepo()

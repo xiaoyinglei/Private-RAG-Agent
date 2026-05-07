@@ -36,10 +36,10 @@ class _FakeIngestResult:
             "success_count": 1,
             "duplicate_count": 0,
             "failure_count": 0,
-            "chunk_count": 1,
+            "indexed_object_count": 1,
             "elapsed_ms": 10.0,
             "docs_per_second": 100.0,
-            "chunks_per_second": 100.0,
+            "indexed_objects_per_second": 100.0,
         }
 
 
@@ -86,6 +86,8 @@ def test_ingest_script_requires_chat_when_graph_extraction_enabled(
 
     assert exit_code == 0
     assert captured["require_chat"] is True
+    assert captured["vector_backend"] == "milvus"
+    assert captured["vector_dsn"] == "http://127.0.0.1:19530"
     payload = capsys.readouterr().out
     assert '"skip_graph_extraction": false' in payload
 

@@ -2,89 +2,176 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
+from threading import RLock
 from typing import TypeVar
 
-from rag.schema.core import Chunk, Document, Segment, Source
+from pydantic import BaseModel
+
+from rag.schema.core import (
+    AssetRecord,
+    Document,
+    LayoutMetaCacheRecord,
+    ProcessingStateRecord,
+    SectionRecord,
+    Source,
+)
 from rag.schema.query import KnowledgeArtifact
 from rag.schema.runtime import CacheEntry, DocumentStatusRecord
 
-TModel = TypeVar(
-    "TModel",
-    Source,
-    Document,
-    Segment,
-    Chunk,
-    KnowledgeArtifact,
-    DocumentStatusRecord,
-    CacheEntry,
-)
+TModel = TypeVar("TModel", bound=BaseModel)
 
 
 class SQLiteMetadataRepo:
+    """SQLite metadata repository for the new L1/L2 data contract.
+
+    This implementation intentionally stores only the runtime contract models
+    used by the new pipeline: Source, Document, SectionRecord, AssetRecord,
+    LayoutMetaCacheRecord, ProcessingStateRecord, artifacts, document status,
+    and cache entries. Legacy retrieval-row objects are not part of this repo.
+    """
+
     def __init__(self, db_path: Path) -> None:
         self._db_path = db_path
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(db_path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA foreign_keys = ON")
+        self._conn.execute("PRAGMA journal_mode=WAL")
+        self._conn.execute("PRAGMA synchronous=NORMAL")
+        self._conn.execute("PRAGMA temp_store=MEMORY")
+        self._lock = RLock()
+        self._transaction_depth = 0
         self._ensure_schema()
 
     def _ensure_schema(self) -> None:
         self._conn.executescript(
             """
+            CREATE TABLE IF NOT EXISTS id_sequence (
+                sequence_key TEXT PRIMARY KEY,
+                value INTEGER NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS sources (
-                source_id TEXT PRIMARY KEY,
+                source_id INTEGER PRIMARY KEY,
+                source_type TEXT NOT NULL,
                 location TEXT NOT NULL,
                 content_hash TEXT NOT NULL,
                 ingest_version INTEGER NOT NULL,
-                saved_at TEXT NOT NULL,
-                payload TEXT NOT NULL
+                owner_id TEXT,
+                updated_at TEXT NOT NULL,
+                payload TEXT NOT NULL,
+                UNIQUE(location, content_hash, ingest_version)
             );
 
             CREATE INDEX IF NOT EXISTS idx_sources_location_hash
             ON sources(location, content_hash);
 
             CREATE TABLE IF NOT EXISTS documents (
-                doc_id TEXT PRIMARY KEY,
-                source_id TEXT NOT NULL,
+                doc_id INTEGER PRIMARY KEY,
+                source_id INTEGER NOT NULL,
                 location TEXT NOT NULL,
+                file_hash TEXT NOT NULL,
+                version_group_id INTEGER NOT NULL,
+                version_no INTEGER NOT NULL,
+                is_active INTEGER NOT NULL,
+                index_ready INTEGER NOT NULL,
+                storage_tier TEXT NOT NULL,
+                tenant_id TEXT,
+                department_id TEXT,
+                auth_tag TEXT,
+                updated_at TEXT NOT NULL,
+                payload TEXT NOT NULL,
+                UNIQUE(source_id, file_hash, version_no),
+                FOREIGN KEY(source_id) REFERENCES sources(source_id) ON DELETE CASCADE
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_documents_source
+            ON documents(source_id);
+
+            CREATE INDEX IF NOT EXISTS idx_documents_hash
+            ON documents(file_hash);
+
+            CREATE INDEX IF NOT EXISTS idx_documents_version
+            ON documents(version_group_id, version_no DESC);
+
+            CREATE INDEX IF NOT EXISTS idx_documents_scope
+            ON documents(tenant_id, department_id, auth_tag);
+
+            CREATE TABLE IF NOT EXISTS sections (
+                section_id INTEGER PRIMARY KEY,
+                doc_id INTEGER NOT NULL,
+                source_id INTEGER NOT NULL,
+                order_index INTEGER NOT NULL,
+                page_start INTEGER,
+                page_end INTEGER,
                 content_hash TEXT NOT NULL,
-                active INTEGER NOT NULL,
-                saved_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
                 payload TEXT NOT NULL,
-                FOREIGN KEY(source_id) REFERENCES sources(source_id)
+                UNIQUE(doc_id, order_index),
+                FOREIGN KEY(doc_id) REFERENCES documents(doc_id) ON DELETE CASCADE,
+                FOREIGN KEY(source_id) REFERENCES sources(source_id) ON DELETE CASCADE
             );
 
-            CREATE INDEX IF NOT EXISTS idx_documents_location_hash
-            ON documents(location, content_hash, active);
+            CREATE INDEX IF NOT EXISTS idx_sections_doc_order
+            ON sections(doc_id, order_index);
 
-            CREATE TABLE IF NOT EXISTS segments (
-                segment_id TEXT PRIMARY KEY,
-                doc_id TEXT NOT NULL,
-                order_index INTEGER NOT NULL,
-                saved_at TEXT NOT NULL,
+            CREATE INDEX IF NOT EXISTS idx_sections_source_doc
+            ON sections(source_id, doc_id);
+
+            CREATE TABLE IF NOT EXISTS assets (
+                asset_id INTEGER PRIMARY KEY,
+                doc_id INTEGER NOT NULL,
+                source_id INTEGER NOT NULL,
+                section_id INTEGER,
+                page_no INTEGER NOT NULL,
+                content_hash TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
                 payload TEXT NOT NULL,
-                FOREIGN KEY(doc_id) REFERENCES documents(doc_id)
+                UNIQUE(doc_id, content_hash),
+                FOREIGN KEY(doc_id) REFERENCES documents(doc_id) ON DELETE CASCADE,
+                FOREIGN KEY(source_id) REFERENCES sources(source_id) ON DELETE CASCADE,
+                FOREIGN KEY(section_id) REFERENCES sections(section_id) ON DELETE SET NULL
             );
 
-            CREATE INDEX IF NOT EXISTS idx_segments_doc_order
-            ON segments(doc_id, order_index);
+            CREATE INDEX IF NOT EXISTS idx_assets_doc
+            ON assets(doc_id);
 
-            CREATE TABLE IF NOT EXISTS chunks (
-                chunk_id TEXT PRIMARY KEY,
-                doc_id TEXT NOT NULL,
-                segment_id TEXT NOT NULL,
-                order_index INTEGER NOT NULL,
-                saved_at TEXT NOT NULL,
+            CREATE INDEX IF NOT EXISTS idx_assets_section
+            ON assets(section_id);
+
+            CREATE TABLE IF NOT EXISTS layout_meta_cache (
+                cache_id INTEGER PRIMARY KEY,
+                source_id INTEGER NOT NULL,
+                doc_id INTEGER,
+                content_hash TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
                 payload TEXT NOT NULL,
-                FOREIGN KEY(doc_id) REFERENCES documents(doc_id),
-                FOREIGN KEY(segment_id) REFERENCES segments(segment_id)
+                UNIQUE(source_id, content_hash),
+                FOREIGN KEY(source_id) REFERENCES sources(source_id) ON DELETE CASCADE,
+                FOREIGN KEY(doc_id) REFERENCES documents(doc_id) ON DELETE CASCADE
             );
 
-            CREATE INDEX IF NOT EXISTS idx_chunks_doc_order
-            ON chunks(doc_id, order_index);
+            CREATE INDEX IF NOT EXISTS idx_layout_meta_cache_doc
+            ON layout_meta_cache(doc_id);
+
+            CREATE TABLE IF NOT EXISTS processing_state (
+                doc_id INTEGER PRIMARY KEY,
+                source_id INTEGER NOT NULL,
+                stage TEXT NOT NULL,
+                status TEXT NOT NULL,
+                priority TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                payload TEXT NOT NULL,
+                FOREIGN KEY(doc_id) REFERENCES documents(doc_id) ON DELETE CASCADE,
+                FOREIGN KEY(source_id) REFERENCES sources(source_id) ON DELETE CASCADE
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_processing_state_stage
+            ON processing_state(stage, status, updated_at);
 
             CREATE TABLE IF NOT EXISTS artifacts (
                 artifact_id TEXT PRIMARY KEY,
@@ -94,8 +181,8 @@ class SQLiteMetadataRepo:
             );
 
             CREATE TABLE IF NOT EXISTS document_status (
-                doc_id TEXT PRIMARY KEY,
-                source_id TEXT NOT NULL,
+                doc_id INTEGER PRIMARY KEY,
+                source_id INTEGER NOT NULL,
                 location TEXT NOT NULL,
                 content_hash TEXT NOT NULL,
                 status TEXT NOT NULL,
@@ -108,9 +195,6 @@ class SQLiteMetadataRepo:
 
             CREATE INDEX IF NOT EXISTS idx_document_status_source
             ON document_status(source_id, status, updated_at);
-
-            CREATE INDEX IF NOT EXISTS idx_document_status_location
-            ON document_status(location, content_hash, updated_at);
 
             CREATE TABLE IF NOT EXISTS cache_entries (
                 namespace TEXT NOT NULL,
@@ -126,65 +210,132 @@ class SQLiteMetadataRepo:
             ON cache_entries(namespace, updated_at);
             """
         )
-        self._conn.commit()
+        self._commit()
+
+    @contextmanager
+    def transaction(self) -> Iterator[None]:
+        with self._lock:
+            outermost = self._transaction_depth == 0
+            if outermost:
+                self._conn.execute("BEGIN")
+            self._transaction_depth += 1
+            try:
+                yield
+            except Exception:
+                self._transaction_depth -= 1
+                if outermost:
+                    self._conn.rollback()
+                raise
+            else:
+                self._transaction_depth -= 1
+                if outermost:
+                    self._conn.commit()
+
+    def _commit(self) -> None:
+        if self._transaction_depth <= 0:
+            self._conn.commit()
 
     @staticmethod
-    def _dump(model: TModel) -> str:
+    def _dump(model: BaseModel) -> str:
         return json.dumps(model.model_dump(mode="json"), ensure_ascii=True)
 
     @staticmethod
     def _load(model_type: type[TModel], payload: str) -> TModel:
         return model_type.model_validate(json.loads(payload))
 
-    def save_source(self, source: Source) -> Source:
-        self._conn.execute(
-            """
-            INSERT INTO sources (
-                source_id,
-                location,
-                content_hash,
-                ingest_version,
-                saved_at,
-                payload
+    def _next_id(self) -> int:
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO id_sequence(sequence_key, value) VALUES ('global', 0) ON CONFLICT(sequence_key) DO NOTHING"
             )
-            VALUES (?, ?, ?, ?, ?, ?)
-            ON CONFLICT(source_id) DO UPDATE SET
-                location=excluded.location,
-                content_hash=excluded.content_hash,
-                ingest_version=excluded.ingest_version,
-                saved_at=excluded.saved_at,
-                payload=excluded.payload
-            """,
-            (
-                source.source_id,
-                source.location,
-                source.content_hash,
-                source.ingest_version,
-                datetime.now(UTC).isoformat(),
-                self._dump(source),
-            ),
-        )
-        self._conn.commit()
-        return source
+            self._conn.execute("UPDATE id_sequence SET value = value + 1 WHERE sequence_key = 'global'")
+            row = self._conn.execute("SELECT value FROM id_sequence WHERE sequence_key = 'global'").fetchone()
+            self._commit()
+            if row is None:
+                raise RuntimeError("failed to allocate sqlite metadata id")
+            return int(row["value"])
 
-    def get_source(self, source_id: int) -> Source | None:
+    def _source_location_for_document(self, document: Document) -> str:
+        source = self.get_source(document.source_id)
+        if source is not None:
+            return source.location
+        return str(document.metadata_json.get("location", "") or document.title or document.doc_id)
+
+    def _existing_source_for_key(self, source: Source) -> Source | None:
         row = self._conn.execute(
-            "SELECT payload FROM sources WHERE source_id = ?",
-            (source_id,),
+            """
+            SELECT payload
+            FROM sources
+            WHERE location = ? AND content_hash = ? AND ingest_version = ?
+            LIMIT 1
+            """,
+            (source.location, source.content_hash, source.ingest_version),
         ).fetchone()
         return None if row is None else self._load(Source, row["payload"])
 
-    def get_source_by_location_and_hash(
-        self,
-        location: str,
-        content_hash: str,
-    ) -> Source | None:
+    def _existing_document_for_key(self, document: Document) -> Document | None:
+        row = self._conn.execute(
+            """
+            SELECT payload
+            FROM documents
+            WHERE source_id = ? AND file_hash = ? AND version_no = ?
+            LIMIT 1
+            """,
+            (document.source_id, document.file_hash, document.version_no),
+        ).fetchone()
+        return None if row is None else self._load(Document, row["payload"])
+
+    def save_source(self, source: Source) -> Source:
+        now = datetime.now(UTC)
+        existing = self._existing_source_for_key(source) if source.source_id <= 0 else None
+        source_id = existing.source_id if existing is not None else source.source_id
+        saved = source.model_copy(
+            update={
+                "source_id": source_id if source_id > 0 else self._next_id(),
+                "updated_at": now,
+            }
+        )
+        self._conn.execute(
+            """
+            INSERT INTO sources (
+                source_id, source_type, location, content_hash, ingest_version,
+                owner_id, updated_at, payload
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(source_id) DO UPDATE SET
+                source_type=excluded.source_type,
+                location=excluded.location,
+                content_hash=excluded.content_hash,
+                ingest_version=excluded.ingest_version,
+                owner_id=excluded.owner_id,
+                updated_at=excluded.updated_at,
+                payload=excluded.payload
+            """,
+            (
+                saved.source_id,
+                saved.source_type.value,
+                saved.location,
+                saved.content_hash,
+                saved.ingest_version,
+                saved.owner_id,
+                saved.updated_at.isoformat(),
+                self._dump(saved),
+            ),
+        )
+        self._commit()
+        return saved
+
+    def get_source(self, source_id: int) -> Source | None:
+        row = self._conn.execute("SELECT payload FROM sources WHERE source_id = ?", (source_id,)).fetchone()
+        return None if row is None else self._load(Source, row["payload"])
+
+    def get_source_by_location_and_hash(self, location: str, content_hash: str) -> Source | None:
         row = self._conn.execute(
             """
             SELECT payload
             FROM sources
             WHERE location = ? AND content_hash = ?
-            ORDER BY ingest_version DESC, saved_at DESC
+            ORDER BY ingest_version DESC, updated_at DESC
             LIMIT 1
             """,
             (location, content_hash),
@@ -197,7 +348,7 @@ class SQLiteMetadataRepo:
             SELECT payload
             FROM sources
             WHERE content_hash = ?
-            ORDER BY ingest_version DESC, saved_at DESC
+            ORDER BY updated_at DESC, source_id DESC
             LIMIT 1
             """,
             (content_hash,),
@@ -210,7 +361,7 @@ class SQLiteMetadataRepo:
             SELECT payload
             FROM sources
             WHERE location = ?
-            ORDER BY ingest_version DESC, saved_at DESC
+            ORDER BY ingest_version DESC, updated_at DESC
             LIMIT 1
             """,
             (location,),
@@ -219,78 +370,91 @@ class SQLiteMetadataRepo:
 
     def list_sources(self, location: str | None = None) -> list[Source]:
         if location is None:
-            rows = self._conn.execute(
-                "SELECT payload FROM sources ORDER BY saved_at, source_id",
-            ).fetchall()
+            rows = self._conn.execute("SELECT payload FROM sources ORDER BY updated_at DESC, source_id DESC").fetchall()
         else:
             rows = self._conn.execute(
-                "SELECT payload FROM sources WHERE location = ? ORDER BY saved_at, source_id",
+                "SELECT payload FROM sources WHERE location = ? ORDER BY updated_at DESC, source_id DESC",
                 (location,),
             ).fetchall()
         return [self._load(Source, row["payload"]) for row in rows]
 
+    def delete_source(self, source_id: int) -> int:
+        cursor = self._conn.execute("DELETE FROM sources WHERE source_id = ?", (source_id,))
+        self._commit()
+        return int(cursor.rowcount)
+
     def save_document(self, document: Document) -> Document:
-        location = str(document.metadata_json.get("location", "") or document.title or document.doc_id)
-        content_hash = str(document.metadata_json.get("content_hash", "") or document.file_hash or document.doc_id)
-        active = bool(document.is_active)
+        now = datetime.now(UTC)
+        existing = self._existing_document_for_key(document) if document.doc_id <= 0 else None
+        doc_id = existing.doc_id if existing is not None else document.doc_id
+        doc_id = doc_id if doc_id > 0 else self._next_id()
+        version_group_id = document.version_group_id if document.version_group_id > 0 else doc_id
+        saved = document.model_copy(
+            update={
+                "doc_id": doc_id,
+                "version_group_id": version_group_id,
+                "updated_at": now,
+            }
+        )
         self._conn.execute(
             """
             INSERT INTO documents (
-                doc_id,
-                source_id,
-                location,
-                content_hash,
-                active,
-                saved_at,
-                payload
+                doc_id, source_id, location, file_hash, version_group_id,
+                version_no, is_active, index_ready, storage_tier, tenant_id,
+                department_id, auth_tag, updated_at, payload
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(doc_id) DO UPDATE SET
                 source_id=excluded.source_id,
                 location=excluded.location,
-                content_hash=excluded.content_hash,
-                active=excluded.active,
-                saved_at=excluded.saved_at,
+                file_hash=excluded.file_hash,
+                version_group_id=excluded.version_group_id,
+                version_no=excluded.version_no,
+                is_active=excluded.is_active,
+                index_ready=excluded.index_ready,
+                storage_tier=excluded.storage_tier,
+                tenant_id=excluded.tenant_id,
+                department_id=excluded.department_id,
+                auth_tag=excluded.auth_tag,
+                updated_at=excluded.updated_at,
                 payload=excluded.payload
             """,
             (
-                document.doc_id,
-                document.source_id,
-                location,
-                content_hash,
-                1 if active else 0,
-                datetime.now(UTC).isoformat(),
-                self._dump(document),
+                saved.doc_id,
+                saved.source_id,
+                self._source_location_for_document(saved),
+                saved.file_hash,
+                saved.version_group_id,
+                saved.version_no,
+                1 if saved.is_active else 0,
+                1 if saved.index_ready else 0,
+                str(saved.storage_tier.value if hasattr(saved.storage_tier, "value") else saved.storage_tier),
+                saved.tenant_id,
+                saved.department_id,
+                saved.auth_tag,
+                saved.updated_at.isoformat(),
+                self._dump(saved),
             ),
         )
-        self._conn.commit()
-        return document
-
-    def save_document_bundle(
-        self,
-        document: Document,
-        segments: list[Segment],
-        chunks: list[Chunk],
-    ) -> None:
-        self.save_document(document)
-        for segment in segments:
-            self.save_segment(segment)
-        for chunk in chunks:
-            self.save_chunk(chunk)
+        self._commit()
+        return saved
 
     def get_document(self, doc_id: int) -> Document | None:
-        row = self._conn.execute(
-            "SELECT payload FROM documents WHERE doc_id = ?",
-            (doc_id,),
-        ).fetchone()
+        row = self._conn.execute("SELECT payload FROM documents WHERE doc_id = ?", (doc_id,)).fetchone()
         return None if row is None else self._load(Document, row["payload"])
 
-    def is_document_active(self, doc_id: int) -> bool:
+    def find_document_by_hash(self, file_hash: str) -> Document | None:
         row = self._conn.execute(
-            "SELECT active FROM documents WHERE doc_id = ?",
-            (doc_id,),
+            """
+            SELECT payload
+            FROM documents
+            WHERE file_hash = ?
+            ORDER BY updated_at DESC, doc_id DESC
+            LIMIT 1
+            """,
+            (file_hash,),
         ).fetchone()
-        return bool(row["active"]) if row is not None else False
+        return None if row is None else self._load(Document, row["payload"])
 
     def list_documents(
         self,
@@ -299,37 +463,34 @@ class SQLiteMetadataRepo:
         active_only: bool = False,
         version_group_id: int | None = None,
     ) -> list[Document]:
-        clauses = []
+        clauses: list[str] = []
         params: list[object] = []
         if source_id is not None:
             clauses.append("source_id = ?")
             params.append(source_id)
         if active_only:
-            clauses.append("active = 1")
-        where_sql = "" if not clauses else f"WHERE {' AND '.join(clauses)}"
+            clauses.append("is_active = 1")
+        if version_group_id is not None:
+            clauses.append("version_group_id = ?")
+            params.append(version_group_id)
+        where_sql = "" if not clauses else f" WHERE {' AND '.join(clauses)}"
         rows = self._conn.execute(
-            f"SELECT payload FROM documents {where_sql} ORDER BY saved_at, doc_id",
+            f"SELECT payload FROM documents{where_sql} ORDER BY updated_at DESC, doc_id DESC",
             tuple(params),
         ).fetchall()
-        documents = [self._load(Document, row["payload"]) for row in rows]
-        if version_group_id is not None:
-            documents = [document for document in documents if document.version_group_id == version_group_id]
-        if active_only:
-            documents = [document for document in documents if document.is_active]
-        documents.sort(key=lambda item: (item.version_group_id, -item.version_no, item.updated_at), reverse=False)
-        return documents
+        return [self._load(Document, row["payload"]) for row in rows]
 
-    def get_active_document_by_location_and_hash(
-        self,
-        location: str,
-        content_hash: str,
-    ) -> Document | None:
+    def is_document_active(self, doc_id: int) -> bool:
+        row = self._conn.execute("SELECT is_active FROM documents WHERE doc_id = ?", (doc_id,)).fetchone()
+        return bool(row["is_active"]) if row is not None else False
+
+    def get_active_document_by_location_and_hash(self, location: str, content_hash: str) -> Document | None:
         row = self._conn.execute(
             """
             SELECT payload
             FROM documents
-            WHERE location = ? AND content_hash = ? AND active = 1
-            ORDER BY saved_at DESC, doc_id DESC
+            WHERE location = ? AND file_hash = ? AND is_active = 1
+            ORDER BY updated_at DESC, doc_id DESC
             LIMIT 1
             """,
             (location, content_hash),
@@ -342,7 +503,7 @@ class SQLiteMetadataRepo:
             SELECT payload
             FROM documents
             WHERE location = ?
-            ORDER BY saved_at DESC, doc_id DESC
+            ORDER BY updated_at DESC, doc_id DESC
             LIMIT 1
             """,
             (location,),
@@ -350,117 +511,391 @@ class SQLiteMetadataRepo:
         return None if row is None else self._load(Document, row["payload"])
 
     def deactivate_documents_for_location(self, location: str) -> None:
-        rows = self._conn.execute(
-            "SELECT payload FROM documents WHERE location = ?",
-            (location,),
-        ).fetchall()
-        for row in rows:
+        for row in self._conn.execute("SELECT payload FROM documents WHERE location = ?", (location,)).fetchall():
             document = self._load(Document, row["payload"])
             self.save_document(document.model_copy(update={"is_active": False}))
 
-    def set_document_active(self, doc_id: int, *, active: bool) -> None:
+    def deactivate_document(self, doc_id: int) -> Document:
         document = self.get_document(doc_id)
         if document is None:
-            return
-        self.save_document(document.model_copy(update={"is_active": active}))
+            raise KeyError(f"document {doc_id} not found")
+        return self.save_document(document.model_copy(update={"is_active": False}))
 
-    def save_segment(self, segment: Segment) -> None:
+    def set_document_active(self, doc_id: int, *, active: bool) -> None:
+        document = self.get_document(doc_id)
+        if document is not None:
+            self.save_document(document.model_copy(update={"is_active": active}))
+
+    def set_document_index_state(
+        self,
+        doc_id: int,
+        *,
+        is_indexed: bool | None = None,
+        index_ready: bool | None = None,
+        embedding_model_id: str | None = None,
+        indexed_at: datetime | None = None,
+        last_index_error: str | None = None,
+    ) -> Document:
+        document = self.get_document(doc_id)
+        if document is None:
+            raise KeyError(f"document {doc_id} not found")
+        updates: dict[str, object] = {"updated_at": datetime.now(UTC), "last_index_error": last_index_error}
+        if is_indexed is not None:
+            updates["is_indexed"] = is_indexed
+        if index_ready is not None:
+            updates["index_ready"] = index_ready
+        if embedding_model_id is not None:
+            updates["embedding_model_id"] = embedding_model_id
+        if indexed_at is not None:
+            updates["indexed_at"] = indexed_at
+        elif is_indexed:
+            updates["indexed_at"] = updates["updated_at"]
+        return self.save_document(document.model_copy(update=updates))
+
+    def increment_document_reference_count(self, doc_id: int, *, amount: int = 1) -> Document:
+        document = self.get_document(doc_id)
+        if document is None:
+            raise KeyError(f"document {doc_id} not found")
+        return self.save_document(
+            document.model_copy(update={"reference_count": max(0, document.reference_count + amount)})
+        )
+
+    def set_document_storage_tier(self, doc_id: int, *, storage_tier: object) -> Document:
+        document = self.get_document(doc_id)
+        if document is None:
+            raise KeyError(f"document {doc_id} not found")
+        return self.save_document(document.model_copy(update={"storage_tier": storage_tier}))
+
+    def delete_document(self, doc_id: int) -> int:
+        cursor = self._conn.execute("DELETE FROM documents WHERE doc_id = ?", (doc_id,))
+        self._commit()
+        return int(cursor.rowcount)
+
+    def save_section(self, section: SectionRecord) -> SectionRecord:
+        existing = None
+        if section.section_id <= 0:
+            existing = self._conn.execute(
+                "SELECT payload FROM sections WHERE doc_id = ? AND order_index = ?",
+                (section.doc_id, section.order_index),
+            ).fetchone()
+        existing_section = None if existing is None else self._load(SectionRecord, existing["payload"])
+        saved = section.model_copy(
+            update={
+                "section_id": (
+                    existing_section.section_id
+                    if existing_section is not None
+                    else section.section_id if section.section_id > 0 else self._next_id()
+                ),
+                "updated_at": datetime.now(UTC),
+            }
+        )
         self._conn.execute(
             """
-            INSERT INTO segments (segment_id, doc_id, order_index, saved_at, payload)
-            VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT(segment_id) DO UPDATE SET
+            INSERT INTO sections (
+                section_id, doc_id, source_id, order_index, page_start, page_end,
+                content_hash, updated_at, payload
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(section_id) DO UPDATE SET
                 doc_id=excluded.doc_id,
+                source_id=excluded.source_id,
                 order_index=excluded.order_index,
-                saved_at=excluded.saved_at,
+                page_start=excluded.page_start,
+                page_end=excluded.page_end,
+                content_hash=excluded.content_hash,
+                updated_at=excluded.updated_at,
                 payload=excluded.payload
             """,
             (
-                segment.segment_id,
-                segment.doc_id,
-                segment.order_index,
-                datetime.now(UTC).isoformat(),
-                self._dump(segment),
+                saved.section_id,
+                saved.doc_id,
+                saved.source_id,
+                saved.order_index,
+                saved.page_start,
+                saved.page_end,
+                saved.content_hash,
+                saved.updated_at.isoformat(),
+                self._dump(saved),
             ),
         )
-        self._conn.commit()
+        self._commit()
+        return saved
 
-    def get_segment(self, segment_id: str) -> Segment | None:
-        row = self._conn.execute(
-            "SELECT payload FROM segments WHERE segment_id = ?",
-            (segment_id,),
-        ).fetchone()
-        return None if row is None else self._load(Segment, row["payload"])
+    def save_sections(self, sections: list[SectionRecord]) -> list[SectionRecord]:
+        return [self.save_section(section) for section in sections]
 
-    def list_segments(self, doc_id: str) -> list[Segment]:
+    def get_section(self, section_id: int) -> SectionRecord | None:
+        row = self._conn.execute("SELECT payload FROM sections WHERE section_id = ?", (section_id,)).fetchone()
+        return None if row is None else self._load(SectionRecord, row["payload"])
+
+    def list_sections(
+        self,
+        *,
+        doc_id: int | None = None,
+        source_id: int | None = None,
+    ) -> list[SectionRecord]:
+        clauses: list[str] = []
+        params: list[object] = []
+        if doc_id is not None:
+            clauses.append("doc_id = ?")
+            params.append(doc_id)
+        if source_id is not None:
+            clauses.append("source_id = ?")
+            params.append(source_id)
+        where_sql = "" if not clauses else f" WHERE {' AND '.join(clauses)}"
         rows = self._conn.execute(
-            "SELECT payload FROM segments WHERE doc_id = ? ORDER BY order_index, segment_id",
-            (doc_id,),
+            f"SELECT payload FROM sections{where_sql} ORDER BY doc_id, order_index, section_id",
+            tuple(params),
         ).fetchall()
-        return [self._load(Segment, row["payload"]) for row in rows]
+        return [self._load(SectionRecord, row["payload"]) for row in rows]
 
-    def delete_segments_for_document(self, doc_id: str) -> int:
-        cursor = self._conn.execute("DELETE FROM segments WHERE doc_id = ?", (doc_id,))
-        self._conn.commit()
+    def delete_sections_for_document(self, *, doc_id: int) -> int:
+        cursor = self._conn.execute("DELETE FROM sections WHERE doc_id = ?", (doc_id,))
+        self._commit()
         return int(cursor.rowcount)
 
-    def save_chunk(self, chunk: Chunk) -> None:
-        order_index = int(
-            chunk.order_index if chunk.order_index else chunk.metadata.get("order_index", chunk.citation_span[0])
+    def save_asset(self, asset: AssetRecord) -> AssetRecord:
+        existing = None
+        if asset.asset_id <= 0:
+            existing = self._conn.execute(
+                "SELECT payload FROM assets WHERE doc_id = ? AND content_hash = ?",
+                (asset.doc_id, asset.content_hash),
+            ).fetchone()
+        existing_asset = None if existing is None else self._load(AssetRecord, existing["payload"])
+        saved = asset.model_copy(
+            update={
+                "asset_id": (
+                    existing_asset.asset_id
+                    if existing_asset is not None
+                    else asset.asset_id if asset.asset_id > 0 else self._next_id()
+                ),
+                "updated_at": datetime.now(UTC),
+            }
         )
         self._conn.execute(
             """
-            INSERT INTO chunks (chunk_id, doc_id, segment_id, order_index, saved_at, payload)
+            INSERT INTO assets (
+                asset_id, doc_id, source_id, section_id, page_no, content_hash,
+                updated_at, payload
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(asset_id) DO UPDATE SET
+                doc_id=excluded.doc_id,
+                source_id=excluded.source_id,
+                section_id=excluded.section_id,
+                page_no=excluded.page_no,
+                content_hash=excluded.content_hash,
+                updated_at=excluded.updated_at,
+                payload=excluded.payload
+            """,
+            (
+                saved.asset_id,
+                saved.doc_id,
+                saved.source_id,
+                saved.section_id,
+                saved.page_no,
+                saved.content_hash,
+                saved.updated_at.isoformat(),
+                self._dump(saved),
+            ),
+        )
+        self._commit()
+        return saved
+
+    def save_assets(self, assets: list[AssetRecord]) -> list[AssetRecord]:
+        return [self.save_asset(asset) for asset in assets]
+
+    def get_asset(self, asset_id: int) -> AssetRecord | None:
+        row = self._conn.execute("SELECT payload FROM assets WHERE asset_id = ?", (asset_id,)).fetchone()
+        return None if row is None else self._load(AssetRecord, row["payload"])
+
+    def list_assets(
+        self,
+        *,
+        doc_id: int | None = None,
+        source_id: int | None = None,
+        section_id: int | None = None,
+    ) -> list[AssetRecord]:
+        clauses: list[str] = []
+        params: list[object] = []
+        if doc_id is not None:
+            clauses.append("doc_id = ?")
+            params.append(doc_id)
+        if source_id is not None:
+            clauses.append("source_id = ?")
+            params.append(source_id)
+        if section_id is not None:
+            clauses.append("section_id = ?")
+            params.append(section_id)
+        where_sql = "" if not clauses else f" WHERE {' AND '.join(clauses)}"
+        rows = self._conn.execute(
+            f"SELECT payload FROM assets{where_sql} ORDER BY doc_id, page_no, asset_id",
+            tuple(params),
+        ).fetchall()
+        return [self._load(AssetRecord, row["payload"]) for row in rows]
+
+    def delete_assets_for_document(self, *, doc_id: int) -> int:
+        cursor = self._conn.execute("DELETE FROM assets WHERE doc_id = ?", (doc_id,))
+        self._commit()
+        return int(cursor.rowcount)
+
+    def save_layout_meta_cache(self, record: LayoutMetaCacheRecord) -> LayoutMetaCacheRecord:
+        existing = None
+        if record.cache_id <= 0:
+            existing = self._conn.execute(
+                "SELECT payload FROM layout_meta_cache WHERE source_id = ? AND content_hash = ?",
+                (record.source_id, record.content_hash),
+            ).fetchone()
+        existing_cache = None if existing is None else self._load(LayoutMetaCacheRecord, existing["payload"])
+        saved = record.model_copy(
+            update={
+                "cache_id": (
+                    existing_cache.cache_id
+                    if existing_cache is not None
+                    else record.cache_id if record.cache_id > 0 else self._next_id()
+                ),
+                "updated_at": datetime.now(UTC),
+            }
+        )
+        self._conn.execute(
+            """
+            INSERT INTO layout_meta_cache (
+                cache_id, source_id, doc_id, content_hash, updated_at, payload
+            )
             VALUES (?, ?, ?, ?, ?, ?)
-            ON CONFLICT(chunk_id) DO UPDATE SET
+            ON CONFLICT(cache_id) DO UPDATE SET
+                source_id=excluded.source_id,
                 doc_id=excluded.doc_id,
-                segment_id=excluded.segment_id,
-                order_index=excluded.order_index,
-                saved_at=excluded.saved_at,
+                content_hash=excluded.content_hash,
+                updated_at=excluded.updated_at,
                 payload=excluded.payload
             """,
             (
-                chunk.chunk_id,
-                chunk.doc_id,
-                chunk.segment_id,
-                order_index,
-                datetime.now(UTC).isoformat(),
-                self._dump(chunk),
+                saved.cache_id,
+                saved.source_id,
+                saved.doc_id,
+                saved.content_hash,
+                saved.updated_at.isoformat(),
+                self._dump(saved),
             ),
         )
-        self._conn.commit()
+        self._commit()
+        return saved
 
-    def get_chunk(self, chunk_id: str) -> Chunk | None:
+    def get_layout_meta_cache(
+        self,
+        *,
+        source_id: int | None = None,
+        doc_id: int | None = None,
+        content_hash: str | None = None,
+    ) -> LayoutMetaCacheRecord | None:
+        clauses: list[str] = []
+        params: list[object] = []
+        if source_id is not None:
+            clauses.append("source_id = ?")
+            params.append(source_id)
+        if doc_id is not None:
+            clauses.append("doc_id = ?")
+            params.append(doc_id)
+        if content_hash is not None:
+            clauses.append("content_hash = ?")
+            params.append(content_hash)
+        if not clauses:
+            raise ValueError("at least one layout cache filter is required")
         row = self._conn.execute(
-            "SELECT payload FROM chunks WHERE chunk_id = ?",
-            (chunk_id,),
+            f"""
+            SELECT payload
+            FROM layout_meta_cache
+            WHERE {' AND '.join(clauses)}
+            ORDER BY updated_at DESC, cache_id DESC
+            LIMIT 1
+            """,
+            tuple(params),
         ).fetchone()
-        return None if row is None else self._load(Chunk, row["payload"])
+        return None if row is None else self._load(LayoutMetaCacheRecord, row["payload"])
 
-    def list_chunks(self, doc_id: str) -> list[Chunk]:
+    def list_layout_meta_cache(
+        self,
+        *,
+        source_id: int | None = None,
+        doc_id: int | None = None,
+    ) -> list[LayoutMetaCacheRecord]:
+        clauses: list[str] = []
+        params: list[object] = []
+        if source_id is not None:
+            clauses.append("source_id = ?")
+            params.append(source_id)
+        if doc_id is not None:
+            clauses.append("doc_id = ?")
+            params.append(doc_id)
+        where_sql = "" if not clauses else f" WHERE {' AND '.join(clauses)}"
         rows = self._conn.execute(
-            "SELECT payload FROM chunks WHERE doc_id = ? ORDER BY order_index, chunk_id",
-            (doc_id,),
+            f"SELECT payload FROM layout_meta_cache{where_sql} ORDER BY updated_at DESC, cache_id DESC",
+            tuple(params),
         ).fetchall()
-        return [self._load(Chunk, row["payload"]) for row in rows]
+        return [self._load(LayoutMetaCacheRecord, row["payload"]) for row in rows]
 
-    def delete_chunks_for_document(self, doc_id: str) -> int:
-        cursor = self._conn.execute("DELETE FROM chunks WHERE doc_id = ?", (doc_id,))
-        self._conn.commit()
-        return int(cursor.rowcount)
+    def save_processing_state(self, record: ProcessingStateRecord) -> ProcessingStateRecord:
+        saved = record.model_copy(update={"updated_at": datetime.now(UTC)})
+        self._conn.execute(
+            """
+            INSERT INTO processing_state (
+                doc_id, source_id, stage, status, priority, updated_at, payload
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(doc_id) DO UPDATE SET
+                source_id=excluded.source_id,
+                stage=excluded.stage,
+                status=excluded.status,
+                priority=excluded.priority,
+                updated_at=excluded.updated_at,
+                payload=excluded.payload
+            """,
+            (
+                saved.doc_id,
+                saved.source_id,
+                saved.stage,
+                saved.status,
+                saved.priority,
+                saved.updated_at.isoformat(),
+                self._dump(saved),
+            ),
+        )
+        self._commit()
+        return saved
 
-    def list_chunks_by_ids(self, chunk_ids: list[str] | tuple[str, ...]) -> list[Chunk]:
-        normalized_ids = tuple(dict.fromkeys(chunk_ids))
-        if not normalized_ids:
-            return []
-        placeholders = ", ".join("?" for _ in normalized_ids)
+    def get_processing_state(self, doc_id: int) -> ProcessingStateRecord | None:
+        row = self._conn.execute("SELECT payload FROM processing_state WHERE doc_id = ?", (doc_id,)).fetchone()
+        return None if row is None else self._load(ProcessingStateRecord, row["payload"])
+
+    def list_processing_states(
+        self,
+        *,
+        source_id: int | None = None,
+        status: str | None = None,
+        stage: str | None = None,
+    ) -> list[ProcessingStateRecord]:
+        clauses: list[str] = []
+        params: list[object] = []
+        if source_id is not None:
+            clauses.append("source_id = ?")
+            params.append(source_id)
+        if status is not None:
+            clauses.append("status = ?")
+            params.append(status)
+        if stage is not None:
+            clauses.append("stage = ?")
+            params.append(stage)
+        where_sql = "" if not clauses else f" WHERE {' AND '.join(clauses)}"
         rows = self._conn.execute(
-            f"SELECT payload FROM chunks WHERE chunk_id IN ({placeholders})",
-            normalized_ids,
+            f"SELECT payload FROM processing_state{where_sql} ORDER BY updated_at DESC, doc_id DESC",
+            tuple(params),
         ).fetchall()
-        loaded = [self._load(Chunk, row["payload"]) for row in rows]
-        chunk_by_id = {chunk.chunk_id: chunk for chunk in loaded}
-        return [chunk_by_id[chunk_id] for chunk_id in normalized_ids if chunk_id in chunk_by_id]
+        return [self._load(ProcessingStateRecord, row["payload"]) for row in rows]
+
+    def delete_processing_state(self, doc_id: int) -> None:
+        self._conn.execute("DELETE FROM processing_state WHERE doc_id = ?", (doc_id,))
+        self._commit()
 
     def save_artifact(self, artifact: KnowledgeArtifact) -> None:
         self._conn.execute(
@@ -472,26 +907,16 @@ class SQLiteMetadataRepo:
                 saved_at=excluded.saved_at,
                 payload=excluded.payload
             """,
-            (
-                artifact.artifact_id,
-                artifact.status.value,
-                datetime.now(UTC).isoformat(),
-                self._dump(artifact),
-            ),
+            (artifact.artifact_id, artifact.status.value, datetime.now(UTC).isoformat(), self._dump(artifact)),
         )
-        self._conn.commit()
+        self._commit()
 
     def get_artifact(self, artifact_id: str) -> KnowledgeArtifact | None:
-        row = self._conn.execute(
-            "SELECT payload FROM artifacts WHERE artifact_id = ?",
-            (artifact_id,),
-        ).fetchone()
+        row = self._conn.execute("SELECT payload FROM artifacts WHERE artifact_id = ?", (artifact_id,)).fetchone()
         return None if row is None else self._load(KnowledgeArtifact, row["payload"])
 
     def list_artifacts(self) -> list[KnowledgeArtifact]:
-        rows = self._conn.execute(
-            "SELECT payload FROM artifacts ORDER BY saved_at, artifact_id",
-        ).fetchall()
+        rows = self._conn.execute("SELECT payload FROM artifacts ORDER BY saved_at, artifact_id").fetchall()
         return [self._load(KnowledgeArtifact, row["payload"]) for row in rows]
 
     def save_document_status(self, status: DocumentStatusRecord) -> DocumentStatusRecord:
@@ -499,16 +924,8 @@ class SQLiteMetadataRepo:
         self._conn.execute(
             """
             INSERT INTO document_status (
-                doc_id,
-                source_id,
-                location,
-                content_hash,
-                status,
-                stage,
-                attempts,
-                error_message,
-                updated_at,
-                payload
+                doc_id, source_id, location, content_hash, status, stage,
+                attempts, error_message, updated_at, payload
             )
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(doc_id) DO UPDATE SET
@@ -528,30 +945,27 @@ class SQLiteMetadataRepo:
                 normalized.location,
                 normalized.content_hash,
                 normalized.status.value,
-                str(normalized.stage),
+                str(normalized.stage.value if hasattr(normalized.stage, "value") else normalized.stage),
                 normalized.attempts,
                 normalized.error_message,
                 normalized.updated_at.isoformat(),
                 self._dump(normalized),
             ),
         )
-        self._conn.commit()
+        self._commit()
         return normalized
 
-    def get_document_status(self, doc_id: str) -> DocumentStatusRecord | None:
-        row = self._conn.execute(
-            "SELECT payload FROM document_status WHERE doc_id = ?",
-            (doc_id,),
-        ).fetchone()
+    def get_document_status(self, doc_id: int) -> DocumentStatusRecord | None:
+        row = self._conn.execute("SELECT payload FROM document_status WHERE doc_id = ?", (doc_id,)).fetchone()
         return None if row is None else self._load(DocumentStatusRecord, row["payload"])
 
     def list_document_statuses(
         self,
         *,
-        source_id: str | None = None,
+        source_id: int | None = None,
         status: str | None = None,
     ) -> list[DocumentStatusRecord]:
-        clauses = []
+        clauses: list[str] = []
         params: list[object] = []
         if source_id is not None:
             clauses.append("source_id = ?")
@@ -559,16 +973,16 @@ class SQLiteMetadataRepo:
         if status is not None:
             clauses.append("status = ?")
             params.append(status)
-        where_sql = "" if not clauses else f"WHERE {' AND '.join(clauses)}"
+        where_sql = "" if not clauses else f" WHERE {' AND '.join(clauses)}"
         rows = self._conn.execute(
-            f"SELECT payload FROM document_status {where_sql} ORDER BY updated_at DESC, doc_id",
+            f"SELECT payload FROM document_status{where_sql} ORDER BY updated_at DESC, doc_id DESC",
             tuple(params),
         ).fetchall()
         return [self._load(DocumentStatusRecord, row["payload"]) for row in rows]
 
-    def delete_document_status(self, doc_id: str) -> None:
+    def delete_document_status(self, doc_id: int) -> None:
         self._conn.execute("DELETE FROM document_status WHERE doc_id = ?", (doc_id,))
-        self._conn.commit()
+        self._commit()
 
     def save_cache_entry(self, entry: CacheEntry) -> CacheEntry:
         now = datetime.now(UTC)
@@ -582,12 +996,7 @@ class SQLiteMetadataRepo:
         self._conn.execute(
             """
             INSERT INTO cache_entries (
-                namespace,
-                cache_key,
-                created_at,
-                updated_at,
-                expires_at,
-                payload
+                namespace, cache_key, created_at, updated_at, expires_at, payload
             )
             VALUES (?, ?, ?, ?, ?, ?)
             ON CONFLICT(namespace, cache_key) DO UPDATE SET
@@ -604,7 +1013,7 @@ class SQLiteMetadataRepo:
                 self._dump(normalized),
             ),
         )
-        self._conn.commit()
+        self._commit()
         return normalized
 
     def get_cache_entry(self, cache_key: str, *, namespace: str = "default") -> CacheEntry | None:
@@ -621,7 +1030,7 @@ class SQLiteMetadataRepo:
     def list_cache_entries(self, *, namespace: str | None = None) -> list[CacheEntry]:
         if namespace is None:
             rows = self._conn.execute(
-                "SELECT payload FROM cache_entries ORDER BY updated_at DESC, namespace, cache_key",
+                "SELECT payload FROM cache_entries ORDER BY updated_at DESC, namespace, cache_key"
             ).fetchall()
         else:
             rows = self._conn.execute(
@@ -636,11 +1045,8 @@ class SQLiteMetadataRepo:
         return [self._load(CacheEntry, row["payload"]) for row in rows]
 
     def delete_cache_entry(self, cache_key: str, *, namespace: str = "default") -> None:
-        self._conn.execute(
-            "DELETE FROM cache_entries WHERE namespace = ? AND cache_key = ?",
-            (namespace, cache_key),
-        )
-        self._conn.commit()
+        self._conn.execute("DELETE FROM cache_entries WHERE namespace = ? AND cache_key = ?", (namespace, cache_key))
+        self._commit()
 
     def purge_expired_cache_entries(self, *, now: datetime | None = None) -> int:
         effective_now = (now or datetime.now(UTC)).isoformat()
@@ -651,7 +1057,7 @@ class SQLiteMetadataRepo:
             """,
             (effective_now,),
         )
-        self._conn.commit()
+        self._commit()
         return int(cursor.rowcount)
 
     def close(self) -> None:

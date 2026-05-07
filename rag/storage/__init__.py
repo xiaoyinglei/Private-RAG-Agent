@@ -7,24 +7,8 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import NoReturn, cast
 
-from rag.schema.runtime import CacheRepo, FullTextSearchRepo, GraphRepo, MetadataRepo, ObjectStore, VectorRepo
-from rag.storage.cache import CacheStore
-from rag.storage.graph import GraphStore
-from rag.storage.graph_backends.neo4j_graph_repo import Neo4jGraphRepo
-from rag.storage.graph_backends.sqlite_graph_repo import SQLiteGraphRepo
-from rag.storage.metadata import ChunkStore, DocumentStore, StatusStore
-from rag.storage.repositories.file_object_store import FileObjectStore
-from rag.storage.repositories.postgres_metadata_repo import PostgresMetadataRepo
-from rag.storage.repositories.redis_cache_repo import RedisCacheRepo
-from rag.storage.repositories.s3_object_store import S3ObjectStore
-from rag.storage.repositories.sqlite_metadata_repo import SQLiteMetadataRepo
-from rag.storage.search_backends.milvus_vector_repo import MilvusVectorRepo
-from rag.storage.search_backends.pgvector_vector_repo import PgvectorVectorRepo
-from rag.storage.search_backends.postgres_fts_repo import PostgresFTSRepo
-from rag.storage.search_backends.sqlite_fts_repo import SQLiteFTSRepo
-from rag.storage.search_backends.sqlite_vector_repo import SQLiteVectorRepo
-from rag.storage.v1_data_contract_service import V1DataContractService
-from rag.storage.vector import VectorStore
+from rag.schema.runtime import CacheRepo, GraphRepo, MetadataRepo, ObjectStore, VectorRepo
+from rag.storage.data_contract_service import DataContractService
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,17 +25,10 @@ class StorageComponentConfig:
 @dataclass(slots=True)
 class StorageBundle:
     root: Path
-    documents: DocumentStore
-    chunks: ChunkStore
-    vectors: VectorStore
-    graph: GraphStore
-    status: StatusStore
-    cache: CacheStore
     metadata_repo: MetadataRepo
     vector_repo: VectorRepo
     graph_repo: GraphRepo
     cache_repo: CacheRepo
-    fts_repo: FullTextSearchRepo
     object_store: ObjectStore
     _closeables: tuple[object, ...] = field(default_factory=tuple, repr=False)
     _ephemeral_root: TemporaryDirectory[str] | None = field(default=None, repr=False)
@@ -78,7 +55,6 @@ class StorageConfig:
     graph: StorageComponentConfig | None = None
     cache: StorageComponentConfig | None = None
     object_store: StorageComponentConfig | None = None
-    fts: StorageComponentConfig | None = None
 
     @classmethod
     def in_memory(cls, root: str | PathLike[str] | Path | None = None) -> StorageConfig:
@@ -99,11 +75,11 @@ class StorageConfig:
         )
         vectors_config = self._component_config(
             self.vectors,
-            default_backend="sqlite" if self.backend in {"sqlite", "in_memory"} else "pgvector",
+            default_backend="sqlite" if self.backend in {"sqlite", "in_memory"} else "milvus",
         )
         graph_config = self._component_config(
             self.graph,
-            default_backend="sqlite" if self.backend in {"sqlite", "in_memory"} else "neo4j",
+            default_backend="null",
         )
         cache_config = self._component_config(
             self.cache,
@@ -113,19 +89,13 @@ class StorageConfig:
             self.object_store,
             default_backend="local" if self.backend in {"sqlite", "in_memory"} else "s3",
         )
-        fts_config = self._component_config(
-            self.fts,
-            default_backend="sqlite" if self.backend in {"sqlite", "in_memory"} else "postgres",
-        )
         metadata_config = self._inherit_component_dsn(metadata_config, fallback=None)
         vectors_config = self._inherit_component_dsn(vectors_config, fallback=metadata_config.dsn)
-        fts_config = self._inherit_component_dsn(fts_config, fallback=metadata_config.dsn)
 
         metadata_repo = self._build_metadata_repo(metadata_config, root)
         vector_repo = self._build_vector_repo(vectors_config, root)
         graph_repo = self._build_graph_repo(graph_config, root)
         cache_repo = self._build_cache_repo(cache_config, root, metadata_repo=metadata_repo)
-        fts_repo = self._build_fts_repo(fts_config, root)
         object_store = self._build_object_store(object_config, root)
 
         closeables = (
@@ -133,23 +103,15 @@ class StorageConfig:
             vector_repo,
             graph_repo,
             cache_repo,
-            fts_repo,
             object_store,
         )
 
         return StorageBundle(
             root=root,
-            documents=DocumentStore(metadata_repo=metadata_repo),
-            chunks=ChunkStore(metadata_repo=metadata_repo),
-            vectors=VectorStore(vector_repo=vector_repo),
-            graph=GraphStore(graph_repo=graph_repo),
-            status=StatusStore(metadata_repo=metadata_repo),
-            cache=CacheStore(cache_repo=cache_repo),
             metadata_repo=metadata_repo,
             vector_repo=vector_repo,
             graph_repo=graph_repo,
             cache_repo=cache_repo,
-            fts_repo=fts_repo,
             object_store=object_store,
             _closeables=closeables,
             _ephemeral_root=ephemeral_root,
@@ -191,8 +153,12 @@ class StorageConfig:
     def _build_metadata_repo(self, component: StorageComponentConfig, root: Path) -> MetadataRepo:
         backend = component.backend.lower()
         if backend in {"sqlite", "in_memory"}:
+            from rag.storage.repositories.sqlite_metadata_repo import SQLiteMetadataRepo
+
             return cast(MetadataRepo, SQLiteMetadataRepo(self._component_path(root, component, "metadata.sqlite3")))
         if backend in {"postgres", "postgresql"}:
+            from rag.storage.repositories.postgres_metadata_repo import PostgresMetadataRepo
+
             return cast(
                 MetadataRepo,
                 PostgresMetadataRepo(
@@ -205,16 +171,12 @@ class StorageConfig:
     def _build_vector_repo(self, component: StorageComponentConfig, root: Path) -> VectorRepo:
         backend = component.backend.lower()
         if backend in {"sqlite", "in_memory"}:
+            from rag.storage.search_backends.sqlite_vector_repo import SQLiteVectorRepo
+
             return cast(VectorRepo, SQLiteVectorRepo(self._component_path(root, component, "vectors.sqlite3")))
-        if backend == "pgvector":
-            return cast(
-                VectorRepo,
-                PgvectorVectorRepo(
-                    self._require_dsn(component, env_names=("RAG_VECTOR_DSN", "RAG_PGVECTOR_DSN", "RAG_POSTGRES_DSN")),
-                    schema=component.namespace or "public",
-                ),
-            )
         if backend == "milvus":
+            from rag.storage.search_backends.milvus_vector_repo import MilvusVectorRepo
+
             return cast(
                 VectorRepo,
                 MilvusVectorRepo(
@@ -228,21 +190,13 @@ class StorageConfig:
         self._unsupported_component(component, "Unsupported vector backend.")
 
     def _build_graph_repo(self, component: StorageComponentConfig, root: Path) -> GraphRepo:
+        del root
         backend = component.backend.lower()
-        if backend in {"sqlite", "in_memory"}:
-            return cast(GraphRepo, SQLiteGraphRepo(self._component_path(root, component, "graph.sqlite3")))
-        if backend == "neo4j":
-            return cast(
-                GraphRepo,
-                Neo4jGraphRepo(
-                    self._require_dsn(component, env_names=("RAG_GRAPH_DSN", "RAG_NEO4J_URI")),
-                    username=self._env_or_option(component, "username", env_names=("RAG_NEO4J_USERNAME",)),
-                    password=self._env_or_option(component, "password", env_names=("RAG_NEO4J_PASSWORD",)),
-                    database=component.namespace
-                    or self._env_or_option(component, "database", env_names=("RAG_NEO4J_DATABASE",)),
-                ),
-            )
-        self._unsupported_component(component, "Unsupported graph backend.")
+        if backend == "null":
+            from rag.storage.graph_backends.null_graph_repo import NullGraphRepo
+
+            return cast(GraphRepo, NullGraphRepo())
+        self._unsupported_component(component, "Graph backends must be rebuilt on the EvidenceItem contract.")
 
     def _build_cache_repo(
         self,
@@ -255,6 +209,8 @@ class StorageConfig:
         if backend in {"metadata", "sqlite", "in_memory"}:
             return self._require_cache_repo(metadata_repo)
         if backend == "redis":
+            from rag.storage.repositories.redis_cache_repo import RedisCacheRepo
+
             return cast(
                 CacheRepo,
                 RedisCacheRepo(
@@ -279,25 +235,15 @@ class StorageConfig:
             raise RuntimeError(f"selected metadata-backed cache requires cache capability: {joined}")
         return cast(CacheRepo, repo)
 
-    def _build_fts_repo(self, component: StorageComponentConfig, root: Path) -> FullTextSearchRepo:
-        backend = component.backend.lower()
-        if backend in {"sqlite", "in_memory"}:
-            return cast(FullTextSearchRepo, SQLiteFTSRepo(self._component_path(root, component, "fts.sqlite3")))
-        if backend in {"postgres", "postgresql"}:
-            return cast(
-                FullTextSearchRepo,
-                PostgresFTSRepo(
-                    self._require_dsn(component, env_names=("RAG_FTS_DSN", "RAG_POSTGRES_DSN")),
-                    schema=component.namespace or "public",
-                ),
-            )
-        self._unsupported_component(component, "Unsupported full-text backend.")
-
     def _build_object_store(self, component: StorageComponentConfig, root: Path) -> ObjectStore:
         backend = component.backend.lower()
         if backend in {"local", "sqlite", "in_memory"}:
+            from rag.storage.repositories.file_object_store import FileObjectStore
+
             return cast(ObjectStore, FileObjectStore(self._component_path(root, component, "objects")))
         if backend in {"s3", "minio"}:
+            from rag.storage.repositories.s3_object_store import S3ObjectStore
+
             bucket = component.bucket or self._env_or_option(component, "bucket", env_names=("RAG_OBJECT_BUCKET",))
             if not bucket:
                 self._unsupported_component(component, "S3/MinIO object store requires bucket configuration.")
@@ -365,14 +311,8 @@ class StorageConfig:
 
 
 __all__ = [
-    "CacheStore",
-    "ChunkStore",
-    "DocumentStore",
-    "GraphStore",
-    "StatusStore",
     "StorageBundle",
     "StorageComponentConfig",
     "StorageConfig",
-    "V1DataContractService",
-    "VectorStore",
+    "DataContractService",
 ]

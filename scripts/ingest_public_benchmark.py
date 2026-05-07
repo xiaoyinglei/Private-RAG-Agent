@@ -37,8 +37,12 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--chat-model", default=None)
     parser.add_argument("--chat-model-path", default=None)
     parser.add_argument("--chat-backend", default=None, choices=["auto", "mlx", "transformers"])
-    parser.add_argument("--vector-backend", default="sqlite", choices=["sqlite", "milvus", "pgvector"])
-    parser.add_argument("--vector-dsn", default=None)
+    parser.add_argument("--summary-provider", default=None, choices=["ollama", "openai-compatible", "local-hf"])
+    parser.add_argument("--summary-model", default=None)
+    parser.add_argument("--summary-model-path", default=None)
+    parser.add_argument("--summary-backend", default=None, choices=["auto", "mlx", "transformers"])
+    parser.add_argument("--vector-backend", default="milvus", choices=["sqlite", "milvus", "pgvector"])
+    parser.add_argument("--vector-dsn", default="http://127.0.0.1:19530")
     parser.add_argument("--vector-namespace", default=None)
     parser.add_argument("--vector-collection-prefix", default=None)
     parser.add_argument("--chunk-token-size", type=int, default=None)
@@ -85,6 +89,10 @@ def main(argv: list[str] | None = None) -> int:
         chat_model=args.chat_model,
         chat_model_path=args.chat_model_path,
         chat_backend=args.chat_backend,
+        summary_provider_kind=args.summary_provider,
+        summary_model=args.summary_model,
+        summary_model_path=args.summary_model_path,
+        summary_backend=args.summary_backend,
         vector_backend=args.vector_backend,
         vector_dsn=args.vector_dsn,
         vector_namespace=args.vector_namespace,
@@ -116,6 +124,10 @@ def main(argv: list[str] | None = None) -> int:
                         "chat_model_override": args.chat_model,
                         "chat_model_path_override": args.chat_model_path,
                         "chat_backend_override": args.chat_backend,
+                        "summary_provider": args.summary_provider,
+                        "summary_model_override": args.summary_model,
+                        "summary_model_path_override": args.summary_model_path,
+                        "summary_backend_override": args.summary_backend,
                         "vector_backend": args.vector_backend,
                         "vector_namespace": args.vector_namespace,
                         "vector_collection_prefix": args.vector_collection_prefix,
@@ -149,6 +161,10 @@ def main(argv: list[str] | None = None) -> int:
                 "chat_model_override": args.chat_model,
                 "chat_model_path_override": args.chat_model_path,
                 "chat_backend_override": args.chat_backend,
+                "summary_provider": args.summary_provider,
+                "summary_model_override": args.summary_model,
+                "summary_model_path_override": args.summary_model_path,
+                "summary_backend_override": args.summary_backend,
                 "vector_backend": args.vector_backend,
                 "vector_namespace": args.vector_namespace,
                 "vector_collection_prefix": args.vector_collection_prefix,

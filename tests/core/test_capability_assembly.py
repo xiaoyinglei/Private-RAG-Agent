@@ -298,7 +298,7 @@ def test_assembly_uses_compat_env_then_default_with_structured_diagnostics(
     fallback_bundle = fallback_service.evaluate_request(AssemblyRequest())
 
     assert fallback_bundle.status == "degraded"
-    assert fallback_bundle.embedding_bindings[0].provider_name == "fallbackembedding"
+    assert fallback_bundle.embedding_bindings[0].provider_name == "fallback"
     fallback_decision = next(
         decision
         for decision in fallback_bundle.diagnostics.decisions
@@ -393,6 +393,12 @@ def test_capability_assembly_uses_legacy_env_profile_for_openai_compatible_provi
         "GEMINI_CHAT_MODEL",
         "GEMINI_EMBEDDING_MODEL",
         "GEMINI_BASE_URL",
+        "OLLAMA_BASE_URL",
+        "OLLAMA_CHAT_MODEL",
+        "OLLAMA_EMBEDDING_MODEL",
+        "PKP_OLLAMA__BASE_URL",
+        "PKP_OLLAMA__CHAT_MODEL",
+        "PKP_OLLAMA__EMBEDDING_MODEL",
     ):
         monkeypatch.delenv(key, raising=False)
     monkeypatch.setenv("PKP_OPENAI__API_KEY", "test-key")
@@ -400,7 +406,9 @@ def test_capability_assembly_uses_legacy_env_profile_for_openai_compatible_provi
     monkeypatch.setenv("PKP_OPENAI__EMBEDDING_MODEL", "gemini-embedding-001")
     monkeypatch.setenv("PKP_OPENAI__BASE_URL", "https://generativelanguage.googleapis.com/v1beta")
 
-    service = CapabilityAssemblyService()
+    service = CapabilityAssemblyService(env_path=".env.test-unused")
+    monkeypatch.setattr(service, "_load_env", lambda: None)
+    monkeypatch.setattr(service, "_build_provider", lambda config: _FakeProvider(config))
     catalog = service.catalog_from_environment()
     bundle = service.assemble_request(
         AssemblyRequest(
@@ -410,7 +418,7 @@ def test_capability_assembly_uses_legacy_env_profile_for_openai_compatible_provi
     )
 
     assert any(profile.profile_id == "openai-compatible" for profile in catalog.profiles)
-    assert bundle.chat_bindings[0].provider_name == "openai"
+    assert bundle.chat_bindings[0].provider_name == "openai-compatible"
     assert bundle.chat_bindings[0].model_name == "gemini-2.5-pro"
     assert bundle.embedding_bindings[0].model_name == "gemini-embedding-001"
     assert bundle.token_contract.embedding_model_name == "gemini-embedding-001"
@@ -445,11 +453,12 @@ def test_capability_assembly_builds_env_reranker_outside_business_modules(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.delenv("RAG_RERANK_MODEL_PATH", raising=False)
+    monkeypatch.delenv("PKP_LOCAL_BGE__RERANK_MODEL_PATH", raising=False)
     monkeypatch.setenv("RAG_RERANK_MODEL", "BAAI/bge-reranker-v2-m3")
 
-    bundle = CapabilityAssemblyService().assemble_request(
-        AssemblyRequest(requirements=CapabilityRequirements())
-    )
+    service = CapabilityAssemblyService(env_path=".env.test-unused")
+    monkeypatch.setattr(service, "_load_env", lambda: None)
+    bundle = service.assemble_request(AssemblyRequest(requirements=CapabilityRequirements()))
 
     assert bundle.rerank_bindings
     assert bundle.rerank_bindings[0].provider_name == "local-bge"

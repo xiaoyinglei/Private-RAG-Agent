@@ -32,12 +32,25 @@ class WebParserRepo:
         current_lines: list[str] = []
         current_order = 0
         current_heading_level: int | None = 1
+        visible_parts: list[str] = []
+        visible_cursor = 0
+        visible_section_separator = " "
 
         def flush_section() -> None:
-            nonlocal current_lines, current_order
-            if not current_lines and not sections:
+            nonlocal current_lines, current_order, visible_cursor
+            if not current_lines:
                 return
             text = normalize_whitespace("\n".join(current_lines))
+            if not text:
+                current_lines = []
+                return
+            if visible_parts:
+                visible_parts.append(visible_section_separator)
+                visible_cursor += len(visible_section_separator)
+            char_range_start = visible_cursor
+            visible_parts.append(text)
+            visible_cursor += len(text)
+            char_range_end = visible_cursor
             sections.append(
                 ParsedSection(
                     toc_path=tuple(heading_stack),
@@ -45,6 +58,8 @@ class WebParserRepo:
                     page_range=None,
                     order_index=current_order,
                     text=text,
+                    char_range_start=char_range_start,
+                    char_range_end=char_range_end,
                     anchor_hint=slugify(" ".join(heading_stack)),
                 )
             )
@@ -72,22 +87,26 @@ class WebParserRepo:
         flush_section()
 
         if not sections:
+            root_text = normalize_whitespace(soup.get_text(" ", strip=True)) or document_title
             sections = [
                 ParsedSection(
                     toc_path=(document_title,),
                     heading_level=1,
                     page_range=None,
                     order_index=0,
-                    text=normalize_whitespace(soup.get_text(" ", strip=True)),
+                    text=root_text,
+                    char_range_start=0,
+                    char_range_end=len(root_text),
                     anchor_hint=slugify(document_title),
                 )
             ]
+            visible_parts = [root_text]
 
-        visible_text = normalize_whitespace(" ".join(section.text for section in sections))
+        visible_text = "".join(visible_parts)
         return ParsedDocument(
             title=document_title,
             source_type=SourceType.WEB,
-            doc_type=DocumentType.WEB_PAGE,
+            doc_type=DocumentType.ARTICLE,
             authors=[owner],
             language="en",
             sections=sections,

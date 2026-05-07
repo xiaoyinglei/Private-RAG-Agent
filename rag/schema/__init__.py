@@ -1,9 +1,30 @@
-from rag.schema import core as _core
-from rag.schema import query as _query
-from rag.schema import runtime as _runtime
+from .core import Document, Source, SourceType
+from .query import (
+    EvidenceItem,
+    GroundingTarget,
+    MetadataFilters,
+    PolicyHints,
+    QueryRequest,
+    QueryResponse,
+    QueryUnderstanding,
+    StructureConstraints,
+    TaskType,
+)
+from .runtime import AccessPolicy, RuntimeMode
 
-__all__ = [*_core.__all__, *_query.__all__, *_runtime.__all__]
-
-globals().update({name: getattr(_core, name) for name in _core.__all__})
-globals().update({name: getattr(_query, name) for name in _query.__all__})
-globals().update({name: getattr(_runtime, name) for name in _runtime.__all__})
+__all__ = [
+    "AccessPolicy",
+    "Document",
+    "EvidenceItem",
+    "GroundingTarget",
+    "MetadataFilters",
+    "PolicyHints",
+    "QueryRequest",
+    "QueryResponse",
+    "QueryUnderstanding",
+    "RuntimeMode",
+    "Source",
+    "SourceType",
+    "StructureConstraints",
+    "TaskType",
+]

@@ -69,7 +69,7 @@ class CapabilityRequirements:
     require_chat: bool = False
     require_rerank: bool = False
     allow_degraded: bool = True
-    default_context_tokens: int = 1024
+    default_context_tokens: int = 2048
     default_chunk_token_size: int = 480
     default_chunk_overlap_tokens: int = 64
     default_prompt_reserved_tokens: int = 256

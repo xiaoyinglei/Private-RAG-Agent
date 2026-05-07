@@ -24,7 +24,7 @@ from rag import CapabilityRequirements, RAGRuntime, StorageComponentConfig, Stor
 from rag.assembly import AssemblyOverrides, CapabilityAssemblyService, ProviderConfig, TokenizerConfig
 from rag.ingest.pipeline import IngestRequest
 from rag.retrieval import QueryOptions
-from rag.schema.core import DocumentType, ParsedDocument, ParsedSection, SourceType
+from rag.schema.core import SourceType
 from rag.schema.runtime import (
     AccessPolicy,
     ExecutionLocation,
@@ -36,6 +36,8 @@ from rag.schema.runtime import (
 
 FIQA_DATASET = "fiqa"
 MEDICAL_RETRIEVAL_DATASET = "medical_retrieval"
+DEFAULT_VECTOR_BACKEND = "milvus"
+DEFAULT_MILVUS_DSN = "http://127.0.0.1:19530"
 FIQA_BEIR_ZIP_URL = "https://public.ukp.informatik.tu-darmstadt.de/thakur/BEIR/datasets/fiqa.zip"
 
 
@@ -158,7 +160,7 @@ class BenchmarkIngestResult:
     success_count: int
     duplicate_count: int
     failure_count: int
-    chunk_count: int = 0
+    indexed_object_count: int = 0
     elapsed_ms: float | None = None
 
     @property
@@ -168,10 +170,10 @@ class BenchmarkIngestResult:
         return self.request_count / (self.elapsed_ms / 1000.0)
 
     @property
-    def chunks_per_second(self) -> float:
+    def indexed_objects_per_second(self) -> float:
         if not self.elapsed_ms or self.elapsed_ms <= 0:
             return 0.0
-        return self.chunk_count / (self.elapsed_ms / 1000.0)
+        return self.indexed_object_count / (self.elapsed_ms / 1000.0)
 
     def as_json(self) -> dict[str, object]:
         return {
@@ -180,10 +182,10 @@ class BenchmarkIngestResult:
             "success_count": self.success_count,
             "duplicate_count": self.duplicate_count,
             "failure_count": self.failure_count,
-            "chunk_count": self.chunk_count,
+            "indexed_object_count": self.indexed_object_count,
             "elapsed_ms": None if self.elapsed_ms is None else round(self.elapsed_ms, 3),
             "docs_per_second": round(self.docs_per_second, 3),
-            "chunks_per_second": round(self.chunks_per_second, 3),
+            "indexed_objects_per_second": round(self.indexed_objects_per_second, 3),
         }
 
 
@@ -199,7 +201,7 @@ class BenchmarkEmbeddingRuntimeInfo:
 class BenchmarkIngestProfileResult:
     dataset: str
     doc_count: int
-    chunk_count: int
+    indexed_object_count: int
     ingest_strategy: str
     ingest_batch_size: int
     encode_batch_size: int
@@ -215,16 +217,16 @@ class BenchmarkIngestProfileResult:
         return self.doc_count / (self.total_elapsed_ms / 1000.0)
 
     @property
-    def chunks_per_second(self) -> float:
+    def indexed_objects_per_second(self) -> float:
         if self.total_elapsed_ms <= 0:
             return 0.0
-        return self.chunk_count / (self.total_elapsed_ms / 1000.0)
+        return self.indexed_object_count / (self.total_elapsed_ms / 1000.0)
 
     def as_json(self) -> dict[str, object]:
         return {
             "dataset": self.dataset,
             "doc_count": self.doc_count,
-            "chunk_count": self.chunk_count,
+            "indexed_object_count": self.indexed_object_count,
             "ingest_strategy": self.ingest_strategy,
             "ingest_batch_size": self.ingest_batch_size,
             "encode_batch_size": self.encode_batch_size,
@@ -233,7 +235,7 @@ class BenchmarkIngestProfileResult:
             "total_elapsed_ms": round(self.total_elapsed_ms, 3),
             "embedding_elapsed_ms": round(self.embedding_elapsed_ms, 3),
             "docs_per_second": round(self.docs_per_second, 3),
-            "chunks_per_second": round(self.chunks_per_second, 3),
+            "indexed_objects_per_second": round(self.indexed_objects_per_second, 3),
         }
 
 
@@ -295,9 +297,9 @@ class BenchmarkRunSummary:
     split: str
     query_count: int
     top_k: int
-    chunk_top_k: int
+    evidence_top_k: int
     embedding_model: str | None
-    retrieval_mode: str
+    retrieval_profile: str
     rerank_enabled: bool
     profile_id: str | None
     recall_at_10: float
@@ -323,7 +325,7 @@ class BenchmarkRunSummary:
             "query_count": self.query_count,
             "top_k": self.top_k,
             "embedding_model": self.embedding_model or "",
-            "retrieval_mode": self.retrieval_mode,
+            "retrieval_profile": self.retrieval_profile,
             "rerank_enabled": self.rerank_enabled,
             "Recall@10": round(self.recall_at_10, 6),
             "MRR@10": round(self.mrr_at_10, 6),
@@ -338,7 +340,7 @@ class BenchmarkRunSummary:
         payload.update(
             {
                 "split": self.split,
-                "chunk_top_k": self.chunk_top_k,
+                "evidence_top_k": self.evidence_top_k,
                 "profile_id": self.profile_id,
                 "avg_query_understanding_latency_ms": (
                     None
@@ -364,26 +366,24 @@ class RetrievalBenchmarkEvaluator:
         runtime: RAGRuntime,
         dataset: str,
         split: str,
-        retrieval_mode: str,
+        retrieval_profile: str,
         top_k: int,
-        chunk_top_k: int,
+        evidence_top_k: int,
         retrieval_pool_k: int | None = None,
         rerank_enabled: bool,
         rerank_pool_k: int | None = None,
-        enable_parent_backfill: bool = True,
         execution_location_preference: ExecutionLocationPreference = ExecutionLocationPreference.LOCAL_ONLY,
         access_policy: AccessPolicy | None = None,
     ) -> None:
         self.runtime = runtime
         self.dataset = dataset
         self.split = split
-        self.retrieval_mode = retrieval_mode
+        self.retrieval_profile = retrieval_profile
         self.top_k = top_k
-        self.chunk_top_k = chunk_top_k
+        self.evidence_top_k = evidence_top_k
         self.retrieval_pool_k = retrieval_pool_k
         self.rerank_enabled = rerank_enabled
         self.rerank_pool_k = rerank_pool_k
-        self.enable_parent_backfill = enable_parent_backfill
         self.execution_location_preference = execution_location_preference
         self.access_policy = access_policy or benchmark_access_policy()
 
@@ -429,13 +429,12 @@ class RetrievalBenchmarkEvaluator:
                     access_policy=self.access_policy,
                     execution_location_preference=self.execution_location_preference,
                     query_options=QueryOptions(
-                        mode=self.retrieval_mode,
+                        retrieval_profile=self.retrieval_profile,
                         top_k=self.top_k,
-                        chunk_top_k=self.chunk_top_k,
+                        evidence_top_k=self.evidence_top_k,
                         retrieval_pool_k=self.retrieval_pool_k,
                         enable_rerank=self.rerank_enabled,
                         rerank_pool_k=self.rerank_pool_k,
-                        enable_parent_backfill=self.enable_parent_backfill,
                         max_context_tokens=self.runtime.token_contract.max_context_tokens,
                     ),
                 )
@@ -483,9 +482,9 @@ class RetrievalBenchmarkEvaluator:
             split=self.split,
             query_count=len(per_query_results),
             top_k=self.top_k,
-            chunk_top_k=self.chunk_top_k,
+            evidence_top_k=self.evidence_top_k,
             embedding_model=_embedding_model_name(self.runtime),
-            retrieval_mode=self.retrieval_mode,
+            retrieval_profile=self.retrieval_profile,
             rerank_enabled=self.rerank_enabled,
             profile_id=self.runtime.selected_profile_id,
             recall_at_10=_mean(result.recall_at_10 for result in per_query_results),
@@ -514,22 +513,31 @@ class RetrievalBenchmarkEvaluator:
     def _validate_retrieval_index(self) -> None:
         documents = self.runtime.stores.metadata_repo.list_documents()
         document_count = len(documents)
-        chunk_count = sum(
-            len(self.runtime.stores.metadata_repo.list_chunks(document.doc_id))
+        section_count = sum(
+            len(self.runtime.stores.metadata_repo.list_sections(doc_id=document.doc_id))
             for document in documents
         )
-        vector_count = self.runtime.stores.vector_repo.count_vectors(item_kind="chunk")
-        if document_count <= 0 or chunk_count <= 0:
+        asset_count = sum(
+            len(self.runtime.stores.metadata_repo.list_assets(doc_id=document.doc_id))
+            for document in documents
+        )
+        vector_count = sum(
+            self.runtime.stores.vector_repo.count_vectors(item_kind=item_kind)
+            for item_kind in ("doc_summary", "section_summary", "asset_summary")
+        )
+        if document_count <= 0 or section_count <= 0:
             raise RuntimeError(
                 "benchmark index is empty: "
-                f"storage_root={self.runtime.stores.root} documents={document_count} chunks={chunk_count}. "
+                f"storage_root={self.runtime.stores.root} documents={document_count} "
+                f"sections={section_count} assets={asset_count}. "
                 "Run benchmark ingest before evaluation."
             )
-        vector_required_modes = {"naive", "local", "global", "hybrid"}
-        if self.retrieval_mode in vector_required_modes and vector_count <= 0:
+        vector_required_profiles = {"fast", "auto", "deep", "asset"}
+        if self.retrieval_profile in vector_required_profiles and vector_count <= 0:
             raise RuntimeError(
                 "benchmark vector index is empty: "
-                f"storage_root={self.runtime.stores.root} vectors={vector_count} retrieval_mode={self.retrieval_mode}. "
+                f"storage_root={self.runtime.stores.root} vectors={vector_count} "
+                f"retrieval_profile={self.retrieval_profile}. "
                 "Run benchmark ingest before evaluation."
             )
 
@@ -1117,6 +1125,7 @@ def ingest_prepared_documents(
         requests = iter_prepared_benchmark_requests(
             documents_path=documents_path,
             dataset=dataset,
+            show_progress=False,
         )
         return ingest_prepared_request_stream(
             runtime,
@@ -1126,7 +1135,11 @@ def ingest_prepared_documents(
             batch_size=batch_size,
             continue_on_error=continue_on_error,
         )
-    requests = load_prepared_benchmark_requests(documents_path=documents_path, dataset=dataset)
+    requests = load_prepared_benchmark_requests(
+        documents_path=documents_path,
+        dataset=dataset,
+        show_progress=False,
+    )
     return ingest_prepared_requests(
         runtime,
         dataset=dataset,
@@ -1141,12 +1154,14 @@ def load_prepared_benchmark_requests(
     documents_path: Path,
     dataset: str,
     limit: int | None = None,
+    show_progress: bool = True,
 ) -> list[IngestRequest]:
     return list(
         iter_prepared_benchmark_requests(
             documents_path=documents_path,
             dataset=dataset,
             limit=limit,
+            show_progress=show_progress,
         )
     )
 
@@ -1156,18 +1171,19 @@ def iter_prepared_benchmark_requests(
     documents_path: Path,
     dataset: str,
     limit: int | None = None,
+    show_progress: bool = True,
 ) -> Iterator[IngestRequest]:
-    document_count = _count_lines(documents_path)
-    total = document_count if limit is None else min(document_count, limit)
-    for index, record in enumerate(
-        _progress(
-            iter_jsonl(documents_path),
+    records: Iterable[dict[str, object]] = iter_jsonl(documents_path)
+    if show_progress:
+        document_count = _count_lines(documents_path)
+        total = document_count if limit is None else min(document_count, limit)
+        records = _progress(
+            records,
             total=total,
             desc=f"Loading {dataset} documents",
             unit="doc",
-        ),
-        start=1,
-    ):
+        )
+    for index, record in enumerate(records, start=1):
         yield prepared_document_to_ingest_request(record, dataset=dataset)
         if limit is not None and index >= limit:
             break
@@ -1184,7 +1200,7 @@ def ingest_prepared_requests(
     success_count = 0
     duplicate_count = 0
     failure_count = 0
-    chunk_count = 0
+    indexed_object_count = 0
     total_requests = len(requests)
     total_batches = max((total_requests + batch_size - 1) // batch_size, 1) if total_requests else 0
     started = time.perf_counter()
@@ -1197,11 +1213,9 @@ def ingest_prepared_requests(
             batch = requests[start : start + batch_size]
             with _suppress_process_output():
                 result = runtime.insert_many(batch, continue_on_error=continue_on_error)
-            batch_duplicates = sum(1 for item in result.results if item.is_duplicate)
             success_count += result.success_count
             failure_count += result.failure_count
-            duplicate_count += batch_duplicates
-            chunk_count += sum(item.chunk_count for item in result.results)
+            indexed_object_count += result.indexed_object_count
             processed = result.success_count + result.failure_count
             for _ in range(processed):
                 progress.update(1)
@@ -1219,7 +1233,7 @@ def ingest_prepared_requests(
         success_count=success_count,
         duplicate_count=duplicate_count,
         failure_count=failure_count,
-        chunk_count=chunk_count,
+        indexed_object_count=indexed_object_count,
         elapsed_ms=(time.perf_counter() - started) * 1000.0,
     )
 
@@ -1236,7 +1250,7 @@ def ingest_prepared_request_stream(
     success_count = 0
     duplicate_count = 0
     failure_count = 0
-    chunk_count = 0
+    indexed_object_count = 0
     total_batches = max((total_requests + batch_size - 1) // batch_size, 1) if total_requests else 0
     started = time.perf_counter()
     batch: list[IngestRequest] = []
@@ -1251,7 +1265,7 @@ def ingest_prepared_request_stream(
             if len(batch) < batch_size:
                 continue
             batch_index += 1
-            success_count, duplicate_count, failure_count, chunk_count = _ingest_batch(
+            success_count, duplicate_count, failure_count, indexed_object_count = _ingest_batch(
                 runtime=runtime,
                 batch=batch,
                 continue_on_error=continue_on_error,
@@ -1259,14 +1273,14 @@ def ingest_prepared_request_stream(
                 success_count=success_count,
                 duplicate_count=duplicate_count,
                 failure_count=failure_count,
-                chunk_count=chunk_count,
+                indexed_object_count=indexed_object_count,
                 batch_index=batch_index,
                 total_batches=total_batches,
             )
             batch = []
         if batch:
             batch_index += 1
-            success_count, duplicate_count, failure_count, chunk_count = _ingest_batch(
+            success_count, duplicate_count, failure_count, indexed_object_count = _ingest_batch(
                 runtime=runtime,
                 batch=batch,
                 continue_on_error=continue_on_error,
@@ -1274,7 +1288,7 @@ def ingest_prepared_request_stream(
                 success_count=success_count,
                 duplicate_count=duplicate_count,
                 failure_count=failure_count,
-                chunk_count=chunk_count,
+                indexed_object_count=indexed_object_count,
                 batch_index=batch_index,
                 total_batches=total_batches,
             )
@@ -1284,7 +1298,7 @@ def ingest_prepared_request_stream(
         success_count=success_count,
         duplicate_count=duplicate_count,
         failure_count=failure_count,
-        chunk_count=chunk_count,
+        indexed_object_count=indexed_object_count,
         elapsed_ms=(time.perf_counter() - started) * 1000.0,
     )
 
@@ -1298,17 +1312,15 @@ def _ingest_batch(
     success_count: int,
     duplicate_count: int,
     failure_count: int,
-    chunk_count: int,
+    indexed_object_count: int,
     batch_index: int,
     total_batches: int,
 ) -> tuple[int, int, int, int]:
     with _suppress_process_output():
         result = runtime.insert_many(list(batch), continue_on_error=continue_on_error)
-    batch_duplicates = sum(1 for item in result.results if item.is_duplicate)
     success_count += result.success_count
     failure_count += result.failure_count
-    duplicate_count += batch_duplicates
-    chunk_count += sum(item.chunk_count for item in result.results)
+    indexed_object_count += result.indexed_object_count
     processed = result.success_count + result.failure_count
     if processed < len(batch):
         progress.update(len(batch))
@@ -1320,7 +1332,7 @@ def _ingest_batch(
         duplicate=duplicate_count,
         failure=failure_count,
     )
-    return success_count, duplicate_count, failure_count, chunk_count
+    return success_count, duplicate_count, failure_count, indexed_object_count
 
 
 def prepared_document_to_ingest_request(record: Mapping[str, object], *, dataset: str) -> IngestRequest:
@@ -1336,33 +1348,14 @@ def prepared_document_to_ingest_request(record: Mapping[str, object], *, dataset
     metadata.setdefault("parent_doc_id", doc_id)
     visible_text = text or title
     language = metadata.get("language", "en")
-    parsed = ParsedDocument(
-        title=title,
-        source_type=source_type,
-        doc_type=DocumentType.ARTICLE,
-        authors=["benchmark"],
-        language=language,
-        sections=[
-            ParsedSection(
-                toc_path=(title,),
-                heading_level=1,
-                page_range=None,
-                order_index=0,
-                text=visible_text,
-                anchor_hint=doc_id,
-                metadata=metadata,
-            )
-        ],
-        visible_text=visible_text,
-        metadata=metadata,
-    )
+    metadata.setdefault("language", language)
     return IngestRequest(
         location=f"benchmark://{dataset}/documents/{doc_id}",
         source_type=source_type,
         owner="benchmark",
         title=title,
-        content_text=f"{title}\n\n{visible_text}" if title and visible_text != title else visible_text,
-        parsed_document=parsed,
+        content_text=visible_text,
+        metadata=metadata,
     )
 
 
@@ -1475,7 +1468,7 @@ def append_baseline_row(path: Path, summary: BenchmarkRunSummary) -> None:
         "query_count",
         "top_k",
         "embedding_model",
-        "retrieval_mode",
+        "retrieval_profile",
         "rerank_enabled",
         "Recall@10",
         "MRR@10",
@@ -1655,6 +1648,10 @@ def build_runtime_for_benchmark(
     chat_model: str | None = None,
     chat_model_path: str | None = None,
     chat_backend: str | None = None,
+    summary_provider_kind: str | None = None,
+    summary_model: str | None = None,
+    summary_model_path: str | None = None,
+    summary_backend: str | None = None,
     vector_backend: str | None = None,
     vector_dsn: str | None = None,
     vector_namespace: str | None = None,
@@ -1736,6 +1733,13 @@ def build_runtime_for_benchmark(
         request=request,
         assembly_service=assembly_service,
     )
+    if summary_model is not None or summary_model_path is not None or summary_provider_kind is not None:
+        runtime.configure_summary_generator(
+            provider_kind=summary_provider_kind or ("local-hf" if summary_model_path is not None else "ollama"),
+            model=summary_model,
+            model_path=summary_model_path,
+            backend=summary_backend,
+        )
     if skip_graph_extraction:
         runtime.ingest_pipeline.extractor = None
         runtime.ingest_pipeline.merger = None
@@ -1757,9 +1761,11 @@ def _benchmark_storage_config(
     vector_namespace: str | None = None,
     vector_collection_prefix: str | None = None,
 ) -> StorageConfig:
-    backend = (vector_backend or "sqlite").strip().lower()
+    backend = (vector_backend or DEFAULT_VECTOR_BACKEND).strip().lower()
     if backend in {"", "sqlite", "in_memory"}:
         return StorageConfig(root=root)
+    if backend == "milvus" and vector_dsn is None:
+        vector_dsn = DEFAULT_MILVUS_DSN
     return StorageConfig(
         root=root,
         vectors=StorageComponentConfig(
@@ -1869,6 +1875,7 @@ def profile_benchmark_ingest(
                 documents_path=documents_path,
                 dataset=dataset,
                 limit=doc_limit,
+                show_progress=False,
             )
             result = ingest_prepared_requests(
                 runtime,
@@ -1883,6 +1890,7 @@ def profile_benchmark_ingest(
                 documents_path=documents_path,
                 dataset=dataset,
                 limit=doc_limit,
+                show_progress=False,
             )
             result = ingest_prepared_request_stream(
                 runtime,
@@ -1898,7 +1906,7 @@ def profile_benchmark_ingest(
         return BenchmarkIngestProfileResult(
             dataset=dataset,
             doc_count=result.success_count,
-            chunk_count=result.chunk_count,
+            indexed_object_count=result.indexed_object_count,
             ingest_strategy=ingest_strategy,
             ingest_batch_size=ingest_batch_size,
             encode_batch_size=encode_batch_size,

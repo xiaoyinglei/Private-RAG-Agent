@@ -8,7 +8,7 @@ from typing import TypeVar
 from rag.retrieval.analysis import RoutingDecision
 from rag.retrieval.evidence import CandidateLike, EvidenceBundle, SelfCheckResult
 from rag.retrieval.models import RetrievalResult
-from rag.schema.query import PreservationSuggestion, QueryUnderstanding
+from rag.schema.query import QueryUnderstanding
 from rag.schema.runtime import ProviderAttempt, RetrievalDiagnostics
 
 T = TypeVar("T")
@@ -22,7 +22,7 @@ class CoreRetrievalPayload:
     clean_items: list[CandidateLike]
     reranked_benchmark_doc_ids: list[str]
     graph_expanded: bool = False
-    mode_executor: str | None = None
+    retrieval_profile: str | None = None
     branch_hits: dict[str, int] = field(default_factory=dict)
     branch_limits: dict[str, int] = field(default_factory=dict)
     planning_complexity_gate: str | None = None
@@ -48,30 +48,25 @@ class CoreRetrievalPayload:
     top1_confidence: float | None = None
     exit_decision: str | None = None
     fallback_triggered: list[str] = field(default_factory=list)
-    parent_backfilled_count: int = 0
     collapsed_candidate_count: int = 0
-    preservation_suggestion: PreservationSuggestion = field(
-        default_factory=lambda: PreservationSuggestion(suggested=False)
-    )
 
 
-def inflate_legacy_retrieval_result(payload: CoreRetrievalPayload) -> RetrievalResult:
+def to_retrieval_result(payload: CoreRetrievalPayload) -> RetrievalResult:
     diagnostics = build_retrieval_diagnostics(payload)
     return RetrievalResult(
         decision=payload.decision,
         evidence=payload.evidence,
         self_check=payload.self_check,
-        reranked_chunk_ids=[candidate.chunk_id for candidate in payload.clean_items],
+        reranked_evidence_ids=[candidate.item_id for candidate in payload.clean_items],
         reranked_benchmark_doc_ids=list(payload.reranked_benchmark_doc_ids or []),
         graph_expanded=bool(payload.graph_expanded),
         diagnostics=diagnostics,
-        preservation_suggestion=payload.preservation_suggestion,
     )
 
 
 def build_retrieval_diagnostics(payload: CoreRetrievalPayload) -> RetrievalDiagnostics:
     diagnostics = RetrievalDiagnostics(
-        mode_executor=payload.mode_executor,
+        retrieval_profile=payload.retrieval_profile,
         branch_hits=dict(payload.branch_hits or {}),
         branch_limits=dict(payload.branch_limits or {}),
         planning_complexity_gate=payload.planning_complexity_gate,
@@ -83,7 +78,7 @@ def build_retrieval_diagnostics(payload: CoreRetrievalPayload) -> RetrievalDiagn
         operator_plan=list(payload.operator_plan or []),
         rewritten_query=payload.rewritten_query,
         sparse_query=payload.sparse_query,
-        reranked_chunk_ids=[candidate.chunk_id for candidate in payload.clean_items],
+        reranked_evidence_ids=[candidate.item_id for candidate in payload.clean_items],
         reranked_benchmark_doc_ids=list(payload.reranked_benchmark_doc_ids or []),
         embedding_provider=payload.embedding_provider,
         rerank_provider=payload.rerank_provider,
@@ -100,7 +95,6 @@ def build_retrieval_diagnostics(payload: CoreRetrievalPayload) -> RetrievalDiagn
         top1_confidence=payload.top1_confidence,
         exit_decision=payload.exit_decision,
         fallback_triggered=list(payload.fallback_triggered or []),
-        parent_backfilled_count=payload.parent_backfilled_count,
         collapsed_candidate_count=payload.collapsed_candidate_count,
     )
     return diagnostics
@@ -115,4 +109,4 @@ class RuntimeCoordinator:
         raise RuntimeError("synchronous runtime bridge cannot run inside an active event loop; call the async path")
 
 
-__all__ = ["CoreRetrievalPayload", "RuntimeCoordinator", "build_retrieval_diagnostics", "inflate_legacy_retrieval_result"]
+__all__ = ["CoreRetrievalPayload", "RuntimeCoordinator", "build_retrieval_diagnostics", "to_retrieval_result"]

@@ -4,7 +4,6 @@ from pathlib import Path
 
 from rag import CapabilityRequirements, RAGRuntime, StorageConfig
 from rag.assembly import AssemblyConfig, CapabilityAssemblyService, CapabilityBundle
-from rag.ingest.pipeline import IngestService
 from rag.retrieval.models import QueryOptions
 from rag.schema.runtime import OcrVisionRepo, VisualDescriptionRepo, WebFetchRepo
 
@@ -62,7 +61,9 @@ def make_ingest_service(
     ocr_repo: OcrVisionRepo | None = None,
     vlm_repo: VisualDescriptionRepo | None = None,
     web_fetch_repo: WebFetchRepo | None = None,
-) -> IngestService:
+) -> object:
+    from rag.ingest.pipeline import IngestService
+
     return IngestService.create_in_memory(
         root,
         capability_bundle=capability_bundle or make_capability_bundle(),

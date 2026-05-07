@@ -11,6 +11,8 @@ from rag.schema.query import EvidenceItem
 from rag.schema.runtime import RuntimeMode
 from rag.utils.text import DEFAULT_TOKENIZER_FALLBACK_MODEL
 
+MAX_TOKENS_PER_EVIDENCE = 2500
+
 if TYPE_CHECKING:
     from rag.retrieval.models import ContextEvidence
 
@@ -83,18 +85,18 @@ class EvidenceTruncator:
         evidence: list[EvidenceItem],
         *,
         token_budget: int,
-        max_evidence_chunks: int,
-        mode: str = "mix",
+        max_evidence_items: int | None = None,
+        retrieval_profile: str = "auto",
     ) -> ContextTruncationResult:
         from rag.retrieval.models import ContextEvidence
 
         normalized_budget = max(token_budget, 1)
-        normalized_max_chunks = min(max(max_evidence_chunks, 1), normalized_budget)
-        family_order = self._family_order(mode)
-        coverage_order = self._family_coverage_order(mode)
+        normalized_max_items = min(max(max_evidence_items or len(evidence) or 1, 1), normalized_budget)
+        family_order = self._family_order(retrieval_profile)
+        coverage_order = self._family_coverage_order(retrieval_profile)
         prioritized_items = self._prioritize_evidence(
             evidence,
-            normalized_max_chunks,
+            normalized_max_items,
             coverage_order=coverage_order,
             family_order=family_order,
         )
@@ -123,7 +125,6 @@ class EvidenceTruncator:
             selected.append(
                 ContextEvidence(
                     evidence_id=f"E{len(selected) + 1}",
-                    chunk_id=item.chunk_id,
                     doc_id=item.doc_id,
                     benchmark_doc_id=item.benchmark_doc_id,
                     source_id=item.source_id,
@@ -131,14 +132,11 @@ class EvidenceTruncator:
                     text=selected_text,
                     score=item.score,
                     evidence_kind=item.evidence_kind,
-                    chunk_role=item.chunk_role,
-                    special_chunk_type=item.special_chunk_type,
-                    parent_chunk_id=item.parent_chunk_id,
+                    record_type=item.record_type,
                     section_path=list(item.section_path),
                     file_name=item.file_name,
                     page_start=item.page_start,
                     page_end=item.page_end,
-                    chunk_type=item.chunk_type,
                     source_type=item.source_type,
                     retrieval_channels=list(item.retrieval_channels),
                     retrieval_family=self._evidence_family(item),
@@ -164,17 +162,17 @@ class EvidenceTruncator:
     def _prioritize_evidence(
         self,
         evidence: list[EvidenceItem],
-        max_evidence_chunks: int,
+        max_evidence_items: int,
         *,
         coverage_order: tuple[str, ...],
         family_order: tuple[str, ...],
     ) -> list[EvidenceItem]:
-        if len(evidence) <= max_evidence_chunks:
+        if len(evidence) <= max_evidence_items:
             return list(evidence)
 
         indexed_items = list(enumerate(evidence))
         selected_indices: list[int] = []
-        selected_docs: set[str] = set()
+        selected_docs: set[int] = set()
         selected_groups: set[str] = set()
         family_priority = {
             family: len(family_order) - position
@@ -188,7 +186,7 @@ class EvidenceTruncator:
             selected_groups.add(self._group_key(item))
 
         for family in coverage_order:
-            if len(selected_indices) >= max_evidence_chunks:
+            if len(selected_indices) >= max_evidence_items:
                 break
             family_candidates = [
                 (index, item)
@@ -225,7 +223,7 @@ class EvidenceTruncator:
             reverse=True,
         )
         for index, item in remaining:
-            if len(selected_indices) >= max_evidence_chunks:
+            if len(selected_indices) >= max_evidence_items:
                 break
             select(index, item)
 
@@ -234,57 +232,69 @@ class EvidenceTruncator:
     def _allocate_token_budgets(self, evidence: list[EvidenceItem], token_budget: int) -> list[int]:
         if not evidence:
             return []
-        assigned = [1] * len(evidence)
-        remaining = max(token_budget - len(evidence), 0)
         desired_counts = [max(self.token_accounting.count(item.text), 1) for item in evidence]
+        total_desired = sum(desired_counts)
+        if total_desired <= token_budget:
+            return desired_counts
         ranked_indices = sorted(
             range(len(evidence)),
             key=lambda index: self._budget_priority(evidence[index], original_index=index),
             reverse=True,
         )
-        while remaining > 0:
-            progress = False
-            for index in ranked_indices:
-                if assigned[index] >= desired_counts[index]:
-                    continue
-                assigned[index] += 1
-                remaining -= 1
-                progress = True
-                if remaining <= 0:
-                    break
-            if not progress:
+        # 高分项目优先满足需求，低分项目只给最小预算，单条上限 MAX_TOKENS_PER_EVIDENCE
+        assigned = [0] * len(evidence)
+        remaining = token_budget
+        for idx in ranked_indices:
+            target = min(desired_counts[idx], remaining, MAX_TOKENS_PER_EVIDENCE)
+            if target < 40:
+                target = 0
+            assigned[idx] = target
+            remaining -= target
+            if remaining <= 0:
                 break
+        # 过滤掉预算为 0 的项
+        non_zero = [b for b in assigned if b > 0]
+        if non_zero and len(non_zero) < len(assigned):
+            return assigned
+        # 如果全部有预算但某些太少（<40），改用均分
+        if any(0 < b < 40 for b in assigned if b > 0):
+            per_item = max(token_budget // len(evidence), 40)
+            assigned = [min(per_item, d) for d in desired_counts]
         return assigned
 
     @staticmethod
-    def _family_order(mode: str) -> tuple[str, ...]:
-        from rag.retrieval.models import QueryMode, normalize_query_mode
+    def _family_order(retrieval_profile: str) -> tuple[str, ...]:
+        from rag.retrieval.models import (
+            RetrievalProfile,
+            normalize_retrieval_profile,
+        )
 
-        resolved_mode = normalize_query_mode(mode)
-        family_order_by_mode: dict[QueryMode, tuple[str, ...]] = {
-            QueryMode.BYPASS: ("vector", "kg", "multimodal", "external"),
-            QueryMode.NAIVE: ("vector", "multimodal", "kg", "external"),
-            QueryMode.LOCAL: ("kg", "multimodal", "vector", "external"),
-            QueryMode.GLOBAL: ("kg", "multimodal", "vector", "external"),
-            QueryMode.HYBRID: ("kg", "multimodal", "vector", "external"),
-            QueryMode.MIX: ("kg", "vector", "multimodal", "external"),
+        resolved_profile = normalize_retrieval_profile(retrieval_profile)
+        family_order_by_profile: dict[RetrievalProfile, tuple[str, ...]] = {
+            RetrievalProfile.BYPASS: ("vector", "kg", "multimodal", "external"),
+            RetrievalProfile.FAST: ("vector", "multimodal", "kg", "external"),
+            RetrievalProfile.AUTO: ("kg", "vector", "multimodal", "external"),
+            RetrievalProfile.DEEP: ("kg", "vector", "multimodal", "external"),
+            RetrievalProfile.ASSET: ("multimodal", "vector", "kg", "external"),
         }
-        return family_order_by_mode[resolved_mode]
+        return family_order_by_profile[resolved_profile]
 
     @staticmethod
-    def _family_coverage_order(mode: str) -> tuple[str, ...]:
-        from rag.retrieval.models import QueryMode, normalize_query_mode
+    def _family_coverage_order(retrieval_profile: str) -> tuple[str, ...]:
+        from rag.retrieval.models import (
+            RetrievalProfile,
+            normalize_retrieval_profile,
+        )
 
-        resolved_mode = normalize_query_mode(mode)
-        coverage_order_by_mode: dict[QueryMode, tuple[str, ...]] = {
-            QueryMode.BYPASS: ("vector",),
-            QueryMode.NAIVE: ("vector",),
-            QueryMode.LOCAL: ("kg", "multimodal"),
-            QueryMode.GLOBAL: ("kg", "multimodal"),
-            QueryMode.HYBRID: ("kg", "multimodal"),
-            QueryMode.MIX: ("kg", "vector", "multimodal"),
+        resolved_profile = normalize_retrieval_profile(retrieval_profile)
+        coverage_order_by_profile: dict[RetrievalProfile, tuple[str, ...]] = {
+            RetrievalProfile.BYPASS: ("vector",),
+            RetrievalProfile.FAST: ("vector",),
+            RetrievalProfile.AUTO: ("kg", "vector", "multimodal"),
+            RetrievalProfile.DEEP: ("kg", "vector", "multimodal"),
+            RetrievalProfile.ASSET: ("multimodal", "vector"),
         }
-        return coverage_order_by_mode[resolved_mode]
+        return coverage_order_by_profile[resolved_profile]
 
     def _budget_priority(
         self,
@@ -295,7 +305,7 @@ class EvidenceTruncator:
         return (
             max(float(item.score), 0.0),
             int(item.evidence_kind == "internal"),
-            int(bool(item.special_chunk_type)),
+            int((item.record_type or "").startswith("asset")),
             int(item.page_start is not None),
             -original_index,
         )
@@ -306,7 +316,7 @@ class EvidenceTruncator:
         *,
         original_index: int,
         family_priority: dict[str, int],
-        selected_docs: set[str],
+        selected_docs: set[int],
         selected_groups: set[str],
     ) -> tuple[int, float, int, int, int, int]:
         return (
@@ -320,11 +330,17 @@ class EvidenceTruncator:
 
     @staticmethod
     def _group_key(item: EvidenceItem) -> str:
-        if item.parent_chunk_id:
-            return f"parent:{item.doc_id}:{item.parent_chunk_id}"
-        if item.special_chunk_type:
-            return f"special:{item.doc_id}:{item.chunk_id}"
-        return f"chunk:{item.doc_id}:{item.chunk_id}"
+        target = item.grounding_target
+        if target is not None and target.asset_id is not None:
+            return f"asset:{item.doc_id}:{target.asset_id}"
+        if target is not None and target.section_id is not None:
+            # 用 section_path 的前两级做粗粒度分组，防止 neighbor_expansion
+            # 把同一章节的不同段落认成不同 group
+            path_prefix = " > ".join(target.section_path[:2]) if target.section_path else ""
+            if path_prefix:
+                return f"section_path:{item.doc_id}:{path_prefix}"
+            return f"section:{item.doc_id}:{target.section_id}"
+        return f"evidence:{item.doc_id}:{item.evidence_id}"
 
     def _clip_text(self, text: str, budget: int) -> str:
         return self.token_accounting.clip(text, budget, add_ellipsis=True)
@@ -333,7 +349,7 @@ class EvidenceTruncator:
     def _evidence_family(item: EvidenceItem) -> str:
         return item.retrieval_family or classify_retrieval_family(
             evidence_kind=item.evidence_kind,
-            special_chunk_type=item.special_chunk_type,
+            record_type=item.record_type,
             retrieval_channels=item.retrieval_channels,
         )
 

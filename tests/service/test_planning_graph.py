@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from rag.retrieval.models import QueryMode, QueryOptions
+from rag.retrieval.models import QueryOptions, RetrievalProfile
 from rag.retrieval.planning_graph import ComplexityGate, PlanningGraph
-from rag.schema.query import ComplexityLevel, QueryUnderstanding, TaskType
+from rag.schema.query import QueryUnderstanding, TaskType
 from rag.schema.runtime import AccessPolicy
 
 
@@ -31,10 +31,9 @@ def test_planning_graph_promotes_large_doc_whitelist_to_attribute_filter() -> No
         access_policy=AccessPolicy.default(),
         query_understanding=QueryUnderstanding(
             task_type=TaskType.COMPARISON,
-            complexity_level=ComplexityLevel.L3_COMPARATIVE,
             query_type="comparison",
         ),
-        resolved_mode=QueryMode.MIX,
+        resolved_retrieval_profile=RetrievalProfile.AUTO,
         query_options=QueryOptions(),
     )
 
@@ -59,7 +58,7 @@ def test_planning_graph_summary_hybrid_profile_uses_vector_and_special_only() ->
             needs_metadata=True,
             special_targets=["table"],
         ),
-        resolved_mode=QueryMode.MIX,
+        resolved_retrieval_profile=RetrievalProfile.AUTO,
         query_options=QueryOptions(top_k=6),
     )
 
@@ -75,11 +74,10 @@ def test_planning_graph_summary_hybrid_emits_explicit_operator_and_fallback_plan
         access_policy=AccessPolicy.default(),
         query_understanding=QueryUnderstanding(
             task_type=TaskType.COMPARISON,
-            complexity_level=ComplexityLevel.L3_COMPARATIVE,
             needs_special=True,
             special_targets=["table"],
         ),
-        resolved_mode=QueryMode.MIX,
+        resolved_retrieval_profile=RetrievalProfile.AUTO,
         query_options=QueryOptions(top_k=4),
     )
 
@@ -95,7 +93,6 @@ def test_planning_graph_summary_hybrid_emits_explicit_operator_and_fallback_plan
         "doc_summary",
     ]
     assert {(step.trigger, step.branch) for step in plan.fallback_plan} == {
-        ("empty_response", "full_text"),
         ("asset_fallback", "special"),
     }
     assert len(plan.query_subtasks) == 2
@@ -110,13 +107,29 @@ def test_planning_graph_complex_comparison_emits_query_decomposition_subtasks() 
         access_policy=AccessPolicy.default(),
         query_understanding=QueryUnderstanding(
             task_type=TaskType.COMPARISON,
-            complexity_level=ComplexityLevel.L3_COMPARATIVE,
             query_type="comparison",
         ),
-        resolved_mode=QueryMode.MIX,
+        resolved_retrieval_profile=RetrievalProfile.AUTO,
         query_options=QueryOptions(top_k=4),
     )
 
     assert [subtask.prompt for subtask in plan.query_subtasks] == ["Alpha", "Beta across finance documents"]
     assert plan.operator_plan[0].name == "VersionGate"
     assert any(step.name == "QueryDecomposition" for step in plan.operator_plan)
+
+
+def test_complexity_gate_uses_token_units_not_character_length() -> None:
+    query = "alpha beta gamma delta epsilon"
+
+    assert len(query) > 24
+    assert PlanningGraph._complexity_gate(query, QueryUnderstanding()) is ComplexityGate.FAST_TRACK
+
+
+def test_complexity_gate_keeps_complex_task_types_complex() -> None:
+    assert (
+        PlanningGraph._complexity_gate(
+            "alpha beta",
+            QueryUnderstanding(task_type=TaskType.COMPARISON),
+        )
+        is ComplexityGate.COMPLEX
+    )

@@ -8,14 +8,15 @@ from rag.schema.query import EvidenceItem
 from rag.schema.runtime import AccessPolicy
 
 
-def _resolve_document(get_document: object, doc_id: str) -> Any | None:
+def _resolve_document(get_document: object, doc_id: object) -> Any | None:
     if not callable(get_document):
         return None
     document = get_document(doc_id)
     if document is not None:
         return document
-    if doc_id.isdigit():
-        return get_document(int(doc_id))
+    normalized = str(doc_id).strip()
+    if normalized.isdigit():
+        return get_document(int(normalized))
     return None
 
 

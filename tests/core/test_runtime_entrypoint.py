@@ -2,9 +2,13 @@ from __future__ import annotations
 
 import pytest
 
+import rag.schema.query as query_schema
 from rag import RAGRuntime, StorageConfig
 from rag.assembly import AssemblyConfig, CapabilityAssemblyService, CapabilityRequirements, ProviderConfig
 from rag.retrieval import QueryOptions
+from rag.retrieval.models import PublicQueryResult, RetrievalResult
+from rag.runtime import DEFAULT_SUMMARY_MODEL, DEFAULT_SUMMARY_PROVIDER_KIND
+from rag.schema.query import EvidenceItem, GroundingTarget
 
 
 class _FakeProvider:
@@ -82,6 +86,30 @@ def test_runtime_catalog_lists_recommended_profiles(monkeypatch: pytest.MonkeyPa
     assert {"local_full", "local_retrieval_cloud_chat", "cloud_full", "test_minimal"} <= profile_ids
 
 
+def test_runtime_default_summary_generator_is_not_chat_binding(monkeypatch: pytest.MonkeyPatch) -> None:
+    service = _assembly_service(monkeypatch)
+    runtime = RAGRuntime.from_profile(
+        storage=StorageConfig.in_memory(),
+        profile_id="test_minimal",
+        assembly_service=service,
+    )
+    try:
+        info = runtime.ingest_pipeline._summarizer.generator_info()
+    finally:
+        runtime.close()
+
+    assert info["provider_name"] == DEFAULT_SUMMARY_PROVIDER_KIND
+    assert info["model_name"] == DEFAULT_SUMMARY_MODEL
+    assert info["model_name"] != "cloud-chat"
+
+
+def test_public_retrieval_result_excludes_old_preservation_contract() -> None:
+    assert "preservation_suggestion" not in PublicQueryResult.model_fields
+    assert "preservation_suggestion" not in RetrievalResult.model_fields
+    assert not hasattr(query_schema, "ArtifactType")
+    assert not hasattr(query_schema, "PreservationSuggestion")
+
+
 def test_runtime_from_profile_round_trips_and_exposes_diagnostics(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -92,6 +120,7 @@ def test_runtime_from_profile_round_trips_and_exposes_diagnostics(
         requirements=CapabilityRequirements(require_chat=True, default_context_tokens=1024),
         assembly_service=service,
     )
+    retrieval_payload = None
     try:
         runtime.insert(
             source_type="plain_text",
@@ -101,8 +130,9 @@ def test_runtime_from_profile_round_trips_and_exposes_diagnostics(
         )
         result = runtime.query(
             "What does Alpha Engine handle?",
-            options=QueryOptions(mode="mix"),
+            options=QueryOptions(retrieval_profile="auto"),
         )
+        retrieval_payload = runtime.retrieval_service.last_payload
     finally:
         runtime.close()
 
@@ -117,6 +147,20 @@ def test_runtime_from_profile_round_trips_and_exposes_diagnostics(
     )
     assert result.answer.answer_text
     assert result.context.evidence
+    assert retrieval_payload is not None
+    payload_evidence = retrieval_payload.evidence.all
+    assert payload_evidence
+    assert all(isinstance(item, EvidenceItem) for item in payload_evidence)
+    assert all("chunk_id" not in item.model_dump() for item in payload_evidence)
+    assert all(
+        item.grounding_target is None or isinstance(item.grounding_target, GroundingTarget)
+        for item in payload_evidence
+    )
+    assert all("chunk_id" not in item.model_dump() for item in result.context.evidence)
+    assert all(
+        item.grounding_target is None or isinstance(item.grounding_target, GroundingTarget)
+        for item in result.context.evidence
+    )
 
 
 def test_runtime_from_request_with_test_minimal_uses_new_entrypoint(
@@ -138,7 +182,7 @@ def test_runtime_from_request_with_test_minimal_uses_new_entrypoint(
         )
         result = runtime.query(
             "What is the recommended entrypoint for runtime construction?",
-            options=QueryOptions(mode="mix"),
+            options=QueryOptions(retrieval_profile="auto"),
         )
     finally:
         runtime.close()

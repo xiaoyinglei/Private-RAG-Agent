@@ -2,33 +2,29 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-from collections import defaultdict
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
 from rag.assembly import EmbeddingCapabilityBinding
-from rag.retrieval.analysis import section_family_aliases, special_target_aliases
+from rag.retrieval.analysis import special_target_aliases
 from rag.retrieval.evidence import CandidateLike, EvidenceBundle
-from rag.schema.core import Chunk, ChunkRole, Document, Segment, Source
+from rag.schema.core import AssetRecord, Document, SectionRecord, Source
 from rag.schema.query import GroundingTarget, QueryUnderstanding
 from rag.schema.runtime import (
     AccessPolicy,
     ExecutionLocationPreference,
-    FullTextSearchRepo,
     GraphRepo,
     VectorSearchResult,
 )
 from rag.storage.search_backends.web_search_repo import DeterministicWebSearchRepo
 from rag.utils.text import keyword_overlap, search_terms
 
-_MULTIMODAL_NODE_TYPES = {"table", "figure", "caption", "ocr_region", "image_summary", "formula"}
-
 
 @dataclass(frozen=True)
 class RetrievedCandidate(CandidateLike):
-    chunk_id: str
+    evidence_id: str
     doc_id: str
     text: str
     citation_anchor: str
@@ -39,21 +35,18 @@ class RetrievedCandidate(CandidateLike):
     benchmark_doc_id: str | None = None
     section_path: tuple[str, ...] = ()
     effective_access_policy: AccessPolicy | None = None
-    chunk_role: ChunkRole | None = None
-    special_chunk_type: str | None = None
-    parent_chunk_id: str | None = None
-    parent_text: str | None = None
     metadata: dict[str, str] | None = None
     file_name: str | None = None
     page_start: int | None = None
     page_end: int | None = None
-    chunk_type: str | None = None
+    record_type: str | None = None
     source_type: str | None = None
+    retrieval_channels: list[str] | None = None
     grounding_target: GroundingTarget | None = None
 
     @property
     def item_id(self) -> str:
-        return self.chunk_id
+        return self.evidence_id
 
 
 class VectorSearchRepoProtocol(Protocol):
@@ -64,7 +57,7 @@ class VectorSearchRepoProtocol(Protocol):
         limit: int = 10,
         doc_ids: list[str] | None = None,
         embedding_space: str = "default",
-        item_kind: str = "chunk",
+        item_kind: str = "section_summary",
     ) -> Sequence[VectorSearchResult]: ...
 
     def count_vectors(
@@ -72,7 +65,7 @@ class VectorSearchRepoProtocol(Protocol):
         *,
         embedding_space: str | None = None,
         item_kind: str | None = None,
-        distinct_chunks: bool = False,
+        distinct_records: bool = False,
     ) -> int: ...
 
 
@@ -108,13 +101,35 @@ class RetrievalMetadataRepoProtocol(Protocol):
         version_group_id: int | None = None,
     ) -> list[Document]: ...
 
-    def get_segment(self, segment_id: str) -> Segment | None: ...
+    def get_section(self, section_id: int) -> SectionRecord | None: ...
 
-    def list_segments(self, doc_id: str) -> list[Segment]: ...
+    def list_sections(self, doc_id: int) -> list[SectionRecord]: ...
 
-    def get_chunk(self, chunk_id: str) -> Chunk | None: ...
+    def get_asset(self, asset_id: int) -> AssetRecord | None: ...
 
-    def list_chunks(self, doc_id: str) -> list[Chunk]: ...
+    def list_assets(self, doc_id: int) -> list[AssetRecord]: ...
+
+
+class EmptyGraphRetriever:
+    last_provider: str | None = None
+    last_attempts: list[object] = []
+
+    def prepare_for_policy(
+        self,
+        *,
+        access_policy: AccessPolicy,
+        execution_location_preference: ExecutionLocationPreference | None,
+    ) -> None:
+        del access_policy, execution_location_preference
+
+    def __call__(
+        self,
+        query: str,
+        source_scope: list[str],
+        query_understanding: QueryUnderstanding,
+    ) -> list[RetrievedCandidate]:
+        del query, source_scope, query_understanding
+        return []
 
 
 class MultiProviderBackedVectorRetriever:
@@ -124,15 +139,15 @@ class MultiProviderBackedVectorRetriever:
         factory: SearchBackedRetrievalFactory,
         vector_repo: VectorSearchRepoProtocol,
         bindings: Sequence[EmbeddingCapabilityBinding],
-        item_kind: str = "chunk",
-        candidate_builder: Callable[[str, list[VectorSearchResult], list[str]], list[RetrievedCandidate]] | None = None,
+        item_kind: str,
+        candidate_builder: Callable[[str, list[VectorSearchResult], list[str]], list[RetrievedCandidate]],
         default_preference: ExecutionLocationPreference = ExecutionLocationPreference.LOCAL_FIRST,
     ) -> None:
         self._factory = factory
         self._vector_repo = vector_repo
         self._bindings = tuple(bindings)
         self._item_kind = item_kind
-        self._candidate_builder = candidate_builder or factory.build_chunk_candidates_from_vector_results
+        self._candidate_builder = candidate_builder
         self._default_preference = default_preference
         self._prepared_locations: tuple[str, ...] = ("local", "cloud")
         self.last_provider: str | None = None
@@ -164,13 +179,21 @@ class MultiProviderBackedVectorRetriever:
         ordered_bindings = self._ordered_bindings()
         for binding in ordered_bindings:
             candidates = self._search_binding(
-                binding, query=query, source_scope=source_scope, target_space=binding.space
+                binding,
+                query=query,
+                source_scope=source_scope,
+                target_space=binding.space,
             )
             if candidates:
                 self.last_provider = binding.provider_name
                 return candidates
         for binding in ordered_bindings:
-            candidates = self._search_binding(binding, query=query, source_scope=source_scope, target_space="default")
+            candidates = self._search_binding(
+                binding,
+                query=query,
+                source_scope=source_scope,
+                target_space="default",
+            )
             if candidates:
                 self.last_provider = binding.provider_name
                 return candidates
@@ -279,12 +302,24 @@ class MilvusSummaryHybridRetriever:
         self.last_attempts = []
         ordered_bindings = self._ordered_bindings()
         for binding in ordered_bindings:
-            candidates = await self._search_binding(binding, query=query, source_scope=source_scope, target_space=binding.space, plan=plan)
+            candidates = await self._search_binding(
+                binding,
+                query=query,
+                source_scope=source_scope,
+                target_space=binding.space,
+                plan=plan,
+            )
             if candidates:
                 self.last_provider = binding.provider_name
                 return candidates
         for binding in ordered_bindings:
-            candidates = await self._search_binding(binding, query=query, source_scope=source_scope, target_space="default", plan=plan)
+            candidates = await self._search_binding(
+                binding,
+                query=query,
+                source_scope=source_scope,
+                target_space="default",
+                plan=plan,
+            )
             if candidates:
                 self.last_provider = binding.provider_name
                 return candidates
@@ -334,14 +369,13 @@ class MilvusSummaryHybridRetriever:
                 if self._vector_repo.count_vectors(embedding_space=target_space, item_kind=item_kind) <= 0:
                     continue
                 remaining = max(min(stage.limit, branch_limit) - len(results), 1)
-                expr = self._stage_expr(plan, item_kind=item_kind)
                 hits = await self._hybrid_search(
                     query_vector=query_vectors[0],
                     sparse_query=sparse_query,
                     sparse_query_vector=sparse_query_vector,
                     limit=remaining,
                     doc_ids=source_scope or None,
-                    expr=expr,
+                    expr=self._stage_expr(plan, item_kind=item_kind),
                     embedding_space=target_space,
                     item_kind=item_kind,
                     fusion_strategy=fusion_strategy,
@@ -359,10 +393,13 @@ class MilvusSummaryHybridRetriever:
                 break
         if not results:
             return []
+        sparse_used = bool(sparse_query.strip()) if sparse_query else False
+        channels = ["vector", "sparse"] if sparse_used else ["vector"]
         return self._factory.build_summary_candidates_from_vector_results(
             query,
             results[:branch_limit],
             source_scope,
+            retrieval_channels=channels,
         )
 
     def _branch_limit(self, plan: object) -> int:
@@ -403,9 +440,8 @@ class MilvusSummaryHybridRetriever:
         tasks = [(rewritten_query, sparse_query)]
         for subtask in tuple(getattr(plan, "query_subtasks", ()) or ()):
             prompt = str(getattr(subtask, "prompt", "") or "").strip()
-            if not prompt or prompt == rewritten_query:
-                continue
-            tasks.append((prompt, prompt))
+            if prompt and prompt != rewritten_query:
+                tasks.append((prompt, prompt))
         ordered: list[tuple[str, str]] = []
         seen: set[tuple[str, str]] = set()
         for item in tasks:
@@ -475,108 +511,15 @@ class MilvusSummaryHybridRetriever:
         return await hybrid_search_async(**kwargs)
 
 
-class HybridSpecialRetriever:
-    def __init__(
-        self,
-        *,
-        lexical_retriever: Callable[[str, list[str], QueryUnderstanding], list[RetrievedCandidate]],
-        vector_retriever: MultiProviderBackedVectorRetriever,
-    ) -> None:
-        self._lexical_retriever = lexical_retriever
-        self._vector_retriever = vector_retriever
-        self.last_provider: str | None = None
-        self.last_attempts: list[object] = []
-
-    def prepare_for_policy(
-        self,
-        *,
-        access_policy: AccessPolicy,
-        execution_location_preference: ExecutionLocationPreference | None,
-    ) -> None:
-        self._vector_retriever.prepare_for_policy(
-            access_policy=access_policy,
-            execution_location_preference=execution_location_preference,
-        )
-
-    def __call__(
-        self,
-        query: str,
-        source_scope: list[str],
-        query_understanding: QueryUnderstanding,
-    ) -> list[RetrievedCandidate]:
-        lexical_candidates = self._lexical_retriever(query, source_scope, query_understanding)
-        vector_candidates = self._vector_retriever(query, source_scope, query_understanding)
-        self.last_provider = self._vector_retriever.last_provider
-        self.last_attempts = list(self._vector_retriever.last_attempts)
-        if not vector_candidates:
-            return lexical_candidates
-        merged: dict[str, RetrievedCandidate] = {}
-        for candidate in [*lexical_candidates, *vector_candidates]:
-            existing = merged.get(candidate.chunk_id)
-            if existing is None:
-                merged[candidate.chunk_id] = candidate
-                continue
-            merged_score = max(float(existing.score), float(candidate.score))
-            merged[candidate.chunk_id] = existing.__class__(
-                **{
-                    **existing.__dict__,
-                    "score": merged_score,
-                    "rank": min(existing.rank, candidate.rank),
-                    "special_chunk_type": existing.special_chunk_type or candidate.special_chunk_type,
-                    "metadata": dict((existing.metadata or {}) | (candidate.metadata or {})),
-                }
-            )
-        ordered = sorted(merged.values(), key=lambda item: (-item.score, item.chunk_id))
-        return [
-            candidate.__class__(**{**candidate.__dict__, "rank": index})
-            for index, candidate in enumerate(ordered, start=1)
-        ]
-
-
 class SearchBackedRetrievalFactory:
     def __init__(
         self,
         *,
         metadata_repo: RetrievalMetadataRepoProtocol,
-        fts_repo: FullTextSearchRepo,
         graph_repo: GraphRepo,
     ) -> None:
         self._metadata_repo = metadata_repo
-        self._fts_repo = fts_repo
         self._graph_repo = graph_repo
-
-    @staticmethod
-    def _benchmark_doc_id(
-        *,
-        chunk_metadata: Mapping[str, object] | None = None,
-        document: Document | None = None,
-    ) -> str | None:
-        if chunk_metadata is not None:
-            value = chunk_metadata.get("benchmark_doc_id")
-            if isinstance(value, str) and value.strip():
-                return value.strip()
-            benchmark_flag = chunk_metadata.get("benchmark")
-            if bool(benchmark_flag) and document is not None:
-                return document.doc_id
-        if document is not None:
-            value = document.metadata_json.get("benchmark_doc_id")
-            if isinstance(value, str) and value.strip():
-                return value.strip()
-            if document.metadata_json.get("benchmark"):
-                return str(document.doc_id)
-        return None
-
-    def full_text_retriever(
-        self,
-        query: str,
-        source_scope: list[str],
-        query_understanding: QueryUnderstanding,
-    ) -> list[RetrievedCandidate]:
-        del query_understanding
-        return self._build_candidates_from_chunk_ids(
-            [result.chunk_id for result in self._fts_repo.search(query, limit=12, doc_ids=source_scope or None)],
-            source_kind="internal",
-        )
 
     def section_retriever(
         self,
@@ -586,60 +529,33 @@ class SearchBackedRetrievalFactory:
     ) -> list[RetrievedCandidate]:
         query_terms = search_terms(query)
         constraints = query_understanding.structure_constraints
-        preferred_sections = set(query_understanding.preferred_section_terms)
-        semantic_aliases = {
-            alias
-            for family in constraints.semantic_section_families
-            for alias in section_family_aliases(family)
-        }
-        heading_hints = set(constraints.heading_hints) | set(constraints.title_hints)
-        if not (preferred_sections or semantic_aliases or heading_hints or constraints.locator_terms):
+        focus_terms = {term for term in constraints.focus_terms if term}
+        if not focus_terms:
             return []
         candidates: list[RetrievedCandidate] = []
         for document in self._iter_documents(source_scope):
             source = self._metadata_repo.get_source(document.source_id)
-            for chunk in self._metadata_repo.list_chunks(document.doc_id):
-                segment = self._metadata_repo.get_segment(chunk.segment_id)
-                if segment is None:
-                    continue
-                section_text = " ".join(segment.toc_path)
-                heading_score = sum(1 for hint in heading_hints if hint and hint in section_text)
-                preferred_score = sum(1 for term in preferred_sections if term and term in section_text)
-                semantic_score = sum(1 for alias in semantic_aliases if alias and alias in section_text.lower())
+            for section in self._metadata_repo.list_sections(document.doc_id):
+                section_text = " ".join(section.toc_path)
+                heading_score = sum(1 for term in focus_terms if term in section_text)
                 lexical_score = keyword_overlap(query_terms, section_text)
-                score = heading_score + preferred_score + semantic_score + lexical_score
-                if constraints.prefer_heading_match and heading_score <= 0 and preferred_score <= 0:
+                score = heading_score + lexical_score
+                if constraints.prefer_heading_match and heading_score <= 0:
                     continue
                 if score <= 0.0:
                     continue
                 candidates.append(
-                    RetrievedCandidate(
-                        chunk_id=chunk.chunk_id,
-                        doc_id=chunk.doc_id,
-                        benchmark_doc_id=self._benchmark_doc_id(
-                            chunk_metadata=chunk.metadata,
-                            document=document,
-                        ),
-                        source_id=document.source_id,
-                        text=chunk.text,
-                        citation_anchor=chunk.citation_anchor,
+                    self._candidate_from_section(
+                        section,
+                        document=document,
+                        source=source,
                         score=round(float(score), 6),
                         rank=1,
-                        section_path=tuple(segment.toc_path),
-                        effective_access_policy=chunk.effective_access_policy,
-                        chunk_role=chunk.chunk_role,
-                        special_chunk_type=chunk.special_chunk_type,
-                        parent_chunk_id=chunk.parent_chunk_id,
-                        metadata=dict(chunk.metadata),
-                        file_name=self._resolve_file_name(document.title, None if source is None else source.location),
-                        page_start=None if segment.page_range is None else segment.page_range[0],
-                        page_end=None if segment.page_range is None else segment.page_range[1],
-                        chunk_type=chunk.special_chunk_type or chunk.chunk_role.value,
-                        source_type=None if source is None else source.source_type.value,
+                        retrieval_channels=["section"],
                     )
                 )
-        candidates.sort(key=lambda item: (-item.score, item.chunk_id))
-        return candidates[:12]
+        candidates.sort(key=lambda item: (-item.score, item.evidence_id))
+        return self._rerank_candidates(candidates[:12])
 
     def special_retriever(
         self,
@@ -657,24 +573,26 @@ class SearchBackedRetrievalFactory:
             return []
         candidates: list[RetrievedCandidate] = []
         for document in self._iter_documents(source_scope):
-            for chunk in self._metadata_repo.list_chunks(document.doc_id):
-                if chunk.chunk_role is not ChunkRole.SPECIAL:
-                    continue
-                score = float(keyword_overlap(query_terms, chunk.text))
-                special_type = chunk.special_chunk_type or ""
-                aliases = target_aliases.get(special_type, set())
-                score += float(int(bool(special_type and special_type in target_aliases)))
+            source = self._metadata_repo.get_source(document.source_id)
+            for asset in self._metadata_repo.list_assets(document.doc_id):
+                score = float(keyword_overlap(query_terms, asset.caption or asset.asset_type))
+                aliases = target_aliases.get(asset.asset_type, set())
+                score += float(int(asset.asset_type in target_aliases))
                 score += float(sum(1 for alias in aliases if alias and alias in lowered))
-                if score <= 0:
+                if score <= 0.0:
                     continue
-                candidates.extend(
-                    self._build_candidates_from_chunk_ids([chunk.chunk_id], source_kind="internal", scope=source_scope)
+                candidates.append(
+                    self._candidate_from_asset(
+                        asset,
+                        document=document,
+                        source=source,
+                        score=round(score, 6),
+                        rank=1,
+                        retrieval_channels=["special"],
+                    )
                 )
-                if candidates:
-                    latest = candidates[-1]
-                    candidates[-1] = latest.__class__(**{**latest.__dict__, "score": float(score), "rank": 1})
-        candidates.sort(key=lambda item: (-item.score, item.chunk_id))
-        return candidates[:12]
+        candidates.sort(key=lambda item: (-item.score, item.evidence_id))
+        return self._rerank_candidates(candidates[:12])
 
     def metadata_retriever(
         self,
@@ -686,95 +604,67 @@ class SearchBackedRetrievalFactory:
         page_numbers = set(query_understanding.metadata_filters.page_numbers)
         page_ranges = list(query_understanding.metadata_filters.page_ranges)
         source_types = set(query_understanding.metadata_filters.source_types)
-        preferred_sections = set(query_understanding.preferred_section_terms)
+        focus_terms = set(query_understanding.structure_constraints.focus_terms)
         document_titles = set(query_understanding.metadata_filters.document_titles)
         file_names = set(query_understanding.metadata_filters.file_names)
-        if not (
-            page_numbers
-            or page_ranges
-            or source_types
-            or preferred_sections
-            or document_titles
-            or file_names
-            or query_understanding.special_targets
-        ):
+        special_targets = set(query_understanding.special_targets)
+        if not (page_numbers or page_ranges or source_types or focus_terms or document_titles or file_names or special_targets):
             return []
+
         candidates: list[RetrievedCandidate] = []
         for document in self._iter_documents(source_scope):
             source = self._metadata_repo.get_source(document.source_id)
             source_type = "" if source is None else source.source_type.value
             file_name = self._resolve_file_name(document.title, None if source is None else source.location)
-            for chunk in self._metadata_repo.list_chunks(document.doc_id):
-                if chunk.chunk_role is ChunkRole.PARENT:
-                    continue
-                segment = self._metadata_repo.get_segment(chunk.segment_id)
-                section_text = "" if segment is None else " ".join(segment.toc_path)
+            for section in self._metadata_repo.list_sections(document.doc_id):
+                section_text = " ".join(section.toc_path)
                 score = 0.0
                 if source_types and source_type in source_types:
                     score += 1.0
-                if document_titles and document.title in document_titles:
+                if document_titles and (document.title or "") in document_titles:
                     score += 1.0
                 if file_names and file_name in file_names:
                     score += 1.0
-                if preferred_sections and any(term in section_text for term in preferred_sections):
+                if focus_terms and any(term in section_text for term in focus_terms):
                     score += 1.0
-                if page_numbers:
-                    page_no = chunk.metadata.get("page_no", "")
-                    if page_no.isdigit() and int(page_no) in page_numbers:
-                        score += 1.0
-                    elif segment is not None and segment.page_range is not None:
-                        start, end = segment.page_range
-                        if any(start <= page <= end for page in page_numbers):
-                            score += 1.0
-                if page_ranges and segment is not None and segment.page_range is not None:
-                    start, end = segment.page_range
-                    if any(not (page_range.end < start or page_range.start > end) for page_range in page_ranges):
-                        score += 1.0
-                if (
-                    query_understanding.special_targets
-                    and chunk.special_chunk_type in query_understanding.special_targets
-                ):
+                if self._section_page_matches(section, page_numbers=page_numbers, page_ranges=page_ranges):
                     score += 1.0
-                if score <= 0:
-                    continue
-                candidates.extend(
-                    self._build_candidates_from_chunk_ids([chunk.chunk_id], source_kind="internal", scope=source_scope)
-                )
-                if candidates:
-                    latest = candidates[-1]
-                    candidates[-1] = latest.__class__(**{**latest.__dict__, "score": score, "rank": 1})
-        candidates.sort(key=lambda item: (-item.score, item.chunk_id))
-        return candidates[:12]
+                if score > 0.0:
+                    candidates.append(
+                        self._candidate_from_section(
+                            section,
+                            document=document,
+                            source=source,
+                            score=round(score, 6),
+                            rank=1,
+                            retrieval_channels=["metadata"],
+                        )
+                    )
+            if special_targets:
+                for asset in self._metadata_repo.list_assets(document.doc_id):
+                    if asset.asset_type not in special_targets:
+                        continue
+                    candidates.append(
+                        self._candidate_from_asset(
+                            asset,
+                            document=document,
+                            source=source,
+                            score=1.0,
+                            rank=1,
+                            retrieval_channels=["metadata", "special"],
+                        )
+                    )
+        candidates.sort(key=lambda item: (-item.score, item.evidence_id))
+        return self._rerank_candidates(candidates[:12])
 
     def graph_expander(
-        self, query: str, source_scope: list[str], evidence: list[CandidateLike]
+        self,
+        query: str,
+        source_scope: list[str],
+        evidence: list[CandidateLike],
     ) -> list[RetrievedCandidate]:
-        del query
-        seed_chunk_ids = [candidate.chunk_id for candidate in evidence if candidate.source_kind == "internal"]
-        seed_node_scores: dict[str, float] = {}
-        for candidate in evidence:
-            candidate_score = max(float(candidate.score), 0.0)
-            if candidate_score <= 0.0:
-                continue
-            for node in self._graph_repo.list_nodes_for_chunk(candidate.chunk_id):
-                seed_node_scores[node.node_id] = max(seed_node_scores.get(node.node_id, 0.0), candidate_score)
-            for edge in self._graph_repo.list_edges_for_chunk(candidate.chunk_id, include_candidates=True):
-                for node_id in (edge.from_node_id, edge.to_node_id):
-                    edge_score = candidate_score * max(edge.confidence, 0.0)
-                    seed_node_scores[node_id] = max(seed_node_scores.get(node_id, 0.0), edge_score)
-        chunk_scores, support_counts = self._score_graph_walk(
-            seed_node_scores=seed_node_scores,
-            max_depth=2,
-        )
-        for chunk_id in seed_chunk_ids:
-            chunk_scores.pop(chunk_id, None)
-            support_counts.pop(chunk_id, None)
-        return self._build_scored_candidates(
-            chunk_scores,
-            support_counts,
-            source_scope=source_scope,
-            source_kind="graph",
-        )
+        del query, source_scope, evidence
+        return []
 
     def web_retriever(
         self,
@@ -785,7 +675,7 @@ class SearchBackedRetrievalFactory:
         del source_scope, query_understanding
         return [
             RetrievedCandidate(
-                chunk_id=f"web-{index}",
+                evidence_id=f"web-{index}",
                 doc_id=f"web-doc-{index}",
                 benchmark_doc_id=None,
                 source_id=result.url,
@@ -795,8 +685,9 @@ class SearchBackedRetrievalFactory:
                 rank=index,
                 source_kind="external",
                 file_name=result.title,
-                chunk_type="external",
+                record_type="external",
                 source_type="web",
+                retrieval_channels=["web"],
             )
             for index, result in enumerate(DeterministicWebSearchRepo().search(query), start=1)
         ]
@@ -818,7 +709,12 @@ class SearchBackedRetrievalFactory:
                 default_preference=default_preference,
             )
         return MultiProviderBackedVectorRetriever(
-            factory=self, vector_repo=vector_repo, bindings=bindings, default_preference=default_preference
+            factory=self,
+            vector_repo=vector_repo,
+            bindings=bindings,
+            item_kind="section_summary",
+            candidate_builder=self.build_summary_candidates_from_vector_results,
+            default_preference=default_preference,
         )
 
     def local_retriever_from_repo(
@@ -827,15 +723,9 @@ class SearchBackedRetrievalFactory:
         bindings: Sequence[EmbeddingCapabilityBinding],
         *,
         default_preference: ExecutionLocationPreference = ExecutionLocationPreference.LOCAL_FIRST,
-    ) -> MultiProviderBackedVectorRetriever:
-        return MultiProviderBackedVectorRetriever(
-            factory=self,
-            vector_repo=vector_repo,
-            bindings=bindings,
-            item_kind="entity",
-            candidate_builder=self.build_local_candidates_from_vector_results,
-            default_preference=default_preference,
-        )
+    ) -> EmptyGraphRetriever:
+        del vector_repo, bindings, default_preference
+        return EmptyGraphRetriever()
 
     def global_retriever_from_repo(
         self,
@@ -843,15 +733,9 @@ class SearchBackedRetrievalFactory:
         bindings: Sequence[EmbeddingCapabilityBinding],
         *,
         default_preference: ExecutionLocationPreference = ExecutionLocationPreference.LOCAL_FIRST,
-    ) -> MultiProviderBackedVectorRetriever:
-        return MultiProviderBackedVectorRetriever(
-            factory=self,
-            vector_repo=vector_repo,
-            bindings=bindings,
-            item_kind="relation",
-            candidate_builder=self.build_global_candidates_from_vector_results,
-            default_preference=default_preference,
-        )
+    ) -> EmptyGraphRetriever:
+        del vector_repo, bindings, default_preference
+        return EmptyGraphRetriever()
 
     def special_retriever_from_repo(
         self,
@@ -859,7 +743,7 @@ class SearchBackedRetrievalFactory:
         bindings: Sequence[EmbeddingCapabilityBinding],
         *,
         default_preference: ExecutionLocationPreference = ExecutionLocationPreference.LOCAL_FIRST,
-    ) -> HybridSpecialRetriever | MilvusSummaryHybridRetriever:
+    ) -> MultiProviderBackedVectorRetriever | MilvusSummaryHybridRetriever:
         if self._supports_hybrid_vector_repo(vector_repo) and bindings:
             return MilvusSummaryHybridRetriever(
                 factory=self,
@@ -869,16 +753,13 @@ class SearchBackedRetrievalFactory:
                 branch_name="special",
                 default_preference=default_preference,
             )
-        return HybridSpecialRetriever(
-            lexical_retriever=self.special_retriever,
-            vector_retriever=MultiProviderBackedVectorRetriever(
-                factory=self,
-                vector_repo=vector_repo,
-                bindings=bindings,
-                item_kind="multimodal",
-                candidate_builder=self.build_multimodal_candidates_from_vector_results,
-                default_preference=default_preference,
-            ),
+        return MultiProviderBackedVectorRetriever(
+            factory=self,
+            vector_repo=vector_repo,
+            bindings=bindings,
+            item_kind="asset_summary",
+            candidate_builder=self.build_summary_candidates_from_vector_results,
+            default_preference=default_preference,
         )
 
     @staticmethod
@@ -892,105 +773,30 @@ class SearchBackedRetrievalFactory:
         query: str,
         results: list[VectorSearchResult],
         source_scope: list[str],
+        retrieval_channels: list[str] | None = None,
     ) -> list[RetrievedCandidate]:
         del query
+        channels = retrieval_channels or ["vector"]
         merged: dict[str, RetrievedCandidate] = {}
-        allowed_scope = set(source_scope)
+        allowed_scope = {str(item) for item in source_scope}
         for result in results:
             base_score = max(float(result.score), 0.0)
             if base_score <= 0.0:
+                continue
+            if not self._document_is_query_visible(str(result.doc_id)):
                 continue
             candidate = self._summary_candidate_from_result(
                 result=result,
                 score=base_score * self._summary_result_weight(result.item_kind),
+                retrieval_channels=list(channels),
             )
-            if allowed_scope and candidate.doc_id not in allowed_scope:
+            if allowed_scope and not self._candidate_scope(candidate) & allowed_scope:
                 continue
-            if not self._document_is_query_visible(candidate.doc_id):
-                continue
-            existing = merged.get(candidate.chunk_id)
+            existing = merged.get(candidate.evidence_id)
             if existing is None or candidate.score > existing.score:
-                merged[candidate.chunk_id] = candidate
-        ordered = sorted(merged.values(), key=lambda item: (-item.score, item.chunk_id))
-        return [
-            candidate.__class__(**{**candidate.__dict__, "rank": index})
-            for index, candidate in enumerate(ordered[:12], start=1)
-        ]
-
-    def build_chunk_candidates_from_vector_results(
-        self, query: str, results: list[VectorSearchResult], source_scope: list[str]
-    ) -> list[RetrievedCandidate]:
-        del query
-        chunk_scores = {result.item_id: float(result.score) for result in results if float(result.score) > 0.0}
-        support_counts = {result.item_id: 1 for result in results if float(result.score) > 0.0}
-        return self._build_scored_candidates(chunk_scores, support_counts, source_scope=source_scope)
-
-    def build_local_candidates_from_vector_results(
-        self, query: str, results: list[VectorSearchResult], source_scope: list[str]
-    ) -> list[RetrievedCandidate]:
-        del query
-        seed_node_scores: dict[str, float] = {}
-        for result in results:
-            base_score = max(float(result.score), 0.0)
-            if base_score <= 0.0:
-                continue
-            seed_node_scores[result.item_id] = max(seed_node_scores.get(result.item_id, 0.0), base_score)
-        chunk_scores, support_counts = self._score_graph_walk(
-            seed_node_scores=seed_node_scores,
-            max_depth=2,
-        )
-        return self._build_scored_candidates(chunk_scores, support_counts, source_scope=source_scope)
-
-    def build_global_candidates_from_vector_results(
-        self, query: str, results: list[VectorSearchResult], source_scope: list[str]
-    ) -> list[RetrievedCandidate]:
-        del query
-        chunk_scores: dict[str, float] = defaultdict(float)
-        support_counts: dict[str, int] = defaultdict(int)
-        seed_node_scores: dict[str, float] = {}
-        for result in results:
-            edge = self._graph_repo.get_edge(result.item_id, include_candidates=True)
-            if edge is None:
-                continue
-            base_score = max(float(result.score), 0.0)
-            if base_score <= 0.0:
-                continue
-            edge_weight = self._edge_traversal_weight(confidence=edge.confidence, depth=0)
-            self._add_scored_chunk_ids(chunk_scores, support_counts, edge.evidence_chunk_ids, score=base_score)
-            for node_id in (edge.from_node_id, edge.to_node_id):
-                seed_node_scores[node_id] = max(seed_node_scores.get(node_id, 0.0), base_score * edge_weight)
-        walked_scores, walked_support = self._score_graph_walk(
-            seed_node_scores=seed_node_scores,
-            max_depth=1,
-        )
-        for chunk_id, score in walked_scores.items():
-            chunk_scores[chunk_id] += score
-            support_counts[chunk_id] += walked_support.get(chunk_id, 0)
-        return self._build_scored_candidates(chunk_scores, support_counts, source_scope=source_scope)
-
-    def build_multimodal_candidates_from_vector_results(
-        self,
-        query: str,
-        results: list[VectorSearchResult],
-        source_scope: list[str],
-    ) -> list[RetrievedCandidate]:
-        del query
-        chunk_scores: dict[str, float] = defaultdict(float)
-        support_counts: dict[str, int] = defaultdict(int)
-        for result in results:
-            base_score = max(float(result.score), 0.0)
-            if base_score <= 0.0:
-                continue
-            node = self._graph_repo.get_node(result.item_id)
-            if node is None or node.node_type not in _MULTIMODAL_NODE_TYPES:
-                continue
-            self._add_scored_chunk_ids(
-                chunk_scores,
-                support_counts,
-                self._graph_repo.list_node_evidence_chunk_ids(node.node_id),
-                score=base_score,
-            )
-        return self._build_scored_candidates(chunk_scores, support_counts, source_scope=source_scope)
+                merged[candidate.evidence_id] = candidate
+        ordered = sorted(merged.values(), key=lambda item: (-item.score, item.evidence_id))
+        return self._rerank_candidates(ordered[:12])
 
     @staticmethod
     def _summary_result_weight(item_kind: str) -> float:
@@ -1005,6 +811,7 @@ class SearchBackedRetrievalFactory:
         *,
         result: VectorSearchResult,
         score: float,
+        retrieval_channels: list[str] | None = None,
     ) -> RetrievedCandidate:
         metadata = dict(result.metadata)
         section_path = self._toc_path_tuple(metadata.get("toc_path_text"))
@@ -1015,30 +822,119 @@ class SearchBackedRetrievalFactory:
             page_start = page_no
         if page_end is None:
             page_end = page_start
-        chunk_id = f"summary:{result.item_kind}:{result.item_id}"
-        chunk_type = metadata.get("asset_type") or metadata.get("section_kind") or result.item_kind
-        citation_anchor = self._summary_citation_anchor(result, section_path=section_path)
+        evidence_id = f"summary:{result.item_kind}:{result.item_id}"
+        record_type = metadata.get("asset_type") or metadata.get("section_kind") or result.item_kind
+        document = self._get_document(result.doc_id)
+        get_source = getattr(self._metadata_repo, "get_source", None)
+        source = None if document is None or not callable(get_source) else get_source(document.source_id)
+        document_title = None if document is None else getattr(document, "title", None)
+        source_location = None if source is None else getattr(source, "location", None)
         return RetrievedCandidate(
-            chunk_id=chunk_id,
-            doc_id=result.doc_id,
+            evidence_id=evidence_id,
+            doc_id=str(result.doc_id),
             text=result.text,
-            citation_anchor=citation_anchor,
+            citation_anchor=self._summary_citation_anchor(result, section_path=section_path),
             score=round(score, 6),
             rank=1,
             source_kind="internal",
-            source_id=result.source_id or metadata.get("source_id"),
+            source_id=str(result.source_id or metadata.get("source_id") or ""),
+            benchmark_doc_id=self._benchmark_doc_id(metadata=metadata, document=document),
             section_path=section_path,
             metadata=metadata,
+            file_name=self._resolve_file_name(document_title, source_location),
             page_start=page_start,
             page_end=page_end,
-            chunk_type=str(chunk_type) if chunk_type is not None else result.item_kind,
+            record_type=str(record_type) if record_type is not None else result.item_kind,
             source_type=metadata.get("source_type"),
-            special_chunk_type=metadata.get("asset_type"),
+            retrieval_channels=retrieval_channels or ["vector"],
             grounding_target=self._grounding_target_from_result(
                 result,
                 section_path=section_path,
                 page_start=page_start,
                 page_end=page_end,
+            ),
+        )
+
+    def _candidate_from_section(
+        self,
+        section: SectionRecord,
+        *,
+        document: Document,
+        source: Source | None,
+        score: float,
+        rank: int,
+        retrieval_channels: list[str],
+    ) -> RetrievedCandidate:
+        section_path = tuple(section.toc_path)
+        metadata = {key: str(value) for key, value in section.metadata_json.items()}
+        return RetrievedCandidate(
+            evidence_id=f"section:{section.section_id}",
+            doc_id=str(section.doc_id),
+            source_id=str(section.source_id),
+            benchmark_doc_id=self._benchmark_doc_id(metadata=document.metadata_json, document=document),
+            text=" / ".join(section_path) or section.section_kind,
+            citation_anchor=" / ".join(section_path) or f"section:{section.section_id}",
+            score=score,
+            rank=rank,
+            section_path=section_path,
+            effective_access_policy=document.effective_access_policy,
+            metadata=metadata,
+            file_name=self._resolve_file_name(document.title, None if source is None else source.location),
+            page_start=section.page_start,
+            page_end=section.page_end,
+            record_type=section.section_kind,
+            source_type=None if source is None else source.source_type.value,
+            retrieval_channels=retrieval_channels,
+            grounding_target=GroundingTarget(
+                kind="section",
+                doc_id=section.doc_id,
+                source_id=section.source_id,
+                section_id=section.section_id,
+                page_start=section.page_start,
+                page_end=section.page_end,
+                section_path=list(section_path),
+                raw_locator={"section_id": str(section.section_id)},
+            ),
+        )
+
+    def _candidate_from_asset(
+        self,
+        asset: AssetRecord,
+        *,
+        document: Document,
+        source: Source | None,
+        score: float,
+        rank: int,
+        retrieval_channels: list[str],
+    ) -> RetrievedCandidate:
+        metadata = {key: str(value) for key, value in asset.metadata_json.items()}
+        return RetrievedCandidate(
+            evidence_id=f"asset:{asset.asset_id}",
+            doc_id=str(asset.doc_id),
+            source_id=str(asset.source_id),
+            benchmark_doc_id=self._benchmark_doc_id(metadata=document.metadata_json, document=document),
+            text=asset.caption or asset.asset_type,
+            citation_anchor=f"{asset.asset_type}@p{asset.page_no}",
+            score=score,
+            rank=rank,
+            section_path=(),
+            effective_access_policy=document.effective_access_policy,
+            metadata=metadata,
+            file_name=self._resolve_file_name(document.title, None if source is None else source.location),
+            page_start=asset.page_no,
+            page_end=asset.page_no,
+            record_type=f"asset:{asset.asset_type}",
+            source_type=None if source is None else source.source_type.value,
+            retrieval_channels=retrieval_channels,
+            grounding_target=GroundingTarget(
+                kind="asset",
+                doc_id=asset.doc_id,
+                source_id=asset.source_id,
+                section_id=asset.section_id,
+                asset_id=asset.asset_id,
+                page_start=asset.page_no,
+                page_end=asset.page_no,
+                raw_locator={"asset_id": str(asset.asset_id)},
             ),
         )
 
@@ -1063,10 +959,10 @@ class SearchBackedRetrievalFactory:
             asset_id = metadata.get("asset_id") or result.item_id
         return GroundingTarget(
             kind=target_kind,
-            doc_id=result.doc_id,
-            source_id=result.source_id or metadata.get("source_id"),
-            section_id=section_id,
-            asset_id=asset_id,
+            doc_id=int(str(result.doc_id)),
+            source_id=None if (result.source_id or metadata.get("source_id")) in {None, ""} else int(str(result.source_id or metadata.get("source_id"))),
+            section_id=None if section_id in {None, ""} else int(str(section_id)),
+            asset_id=None if asset_id in {None, ""} else int(str(asset_id)),
             page_start=page_start,
             page_end=page_end,
             section_path=list(section_path),
@@ -1109,188 +1005,53 @@ class SearchBackedRetrievalFactory:
         except (TypeError, ValueError):
             return None
 
+    @staticmethod
+    def _section_page_matches(
+        section: SectionRecord,
+        *,
+        page_numbers: set[int],
+        page_ranges: Sequence[object],
+    ) -> bool:
+        if not page_numbers and not page_ranges:
+            return False
+        pages: set[int] = set()
+        if section.page_start is not None and section.page_end is not None:
+            pages.update(range(section.page_start, section.page_end + 1))
+        elif section.page_start is not None:
+            pages.add(section.page_start)
+        elif section.page_end is not None:
+            pages.add(section.page_end)
+        if not pages:
+            return False
+        if page_numbers and pages & page_numbers:
+            return True
+        return any(any(page_range.start <= page <= page_range.end for page in pages) for page_range in page_ranges)
+
     def _iter_documents(self, source_scope: list[str]) -> list[Document]:
         documents = self._metadata_repo.list_documents(active_only=True)
         if not source_scope:
             return documents
-        allowed = set(source_scope)
-        return [document for document in documents if {document.doc_id, document.source_id} & allowed]
-
-    @staticmethod
-    def _resolve_file_name(title: str, location: str | None) -> str | None:
-        if title.strip():
-            return title.strip()
-        if not location:
-            return None
-        if "://" in location:
-            return location
-        return Path(location).name or location
-
-    @staticmethod
-    def _add_scored_chunk_ids(
-        chunk_scores: dict[str, float], support_counts: dict[str, int], chunk_ids: Sequence[str], *, score: float
-    ) -> None:
-        if score <= 0.0:
-            return
-        for chunk_id in chunk_ids:
-            chunk_scores[chunk_id] = chunk_scores.get(chunk_id, 0.0) + score
-            support_counts[chunk_id] = support_counts.get(chunk_id, 0) + 1
-
-    def _score_graph_walk(
-        self,
-        *,
-        seed_node_scores: dict[str, float],
-        max_depth: int,
-    ) -> tuple[dict[str, float], dict[str, int]]:
-        chunk_scores: dict[str, float] = defaultdict(float)
-        support_counts: dict[str, int] = defaultdict(int)
-        if not seed_node_scores:
-            return chunk_scores, support_counts
-
-        frontier: list[tuple[str, float, int]] = [
-            (node_id, score, 0) for node_id, score in seed_node_scores.items() if score > 0.0
-        ]
-        best_node_scores = dict(seed_node_scores)
-
-        while frontier:
-            node_id, node_score, depth = frontier.pop(0)
-            if node_score <= 0.0:
-                continue
-            current_node = self._graph_repo.get_node(node_id)
-            current_node_type = None if current_node is None else current_node.node_type
-
-            self._add_scored_chunk_ids(
-                chunk_scores,
-                support_counts,
-                self._graph_repo.list_node_evidence_chunk_ids(node_id),
-                score=node_score,
-            )
-            if depth >= max_depth:
-                continue
-
-            for edge in self._graph_repo.list_edges_for_node(node_id, include_candidates=True):
-                if (
-                    current_node_type in {"table", "figure", "caption", "ocr_region", "image_summary", "formula"}
-                    and edge.relation_type == "contains_special"
-                ):
-                    continue
-                traversal_weight = self._edge_traversal_weight(confidence=edge.confidence, depth=depth)
-                if traversal_weight <= 0.0:
-                    continue
-                edge_score = node_score * traversal_weight
-                self._add_scored_chunk_ids(
-                    chunk_scores,
-                    support_counts,
-                    edge.evidence_chunk_ids,
-                    score=edge_score,
-                )
-                adjacent = edge.to_node_id if edge.from_node_id == node_id else edge.from_node_id
-                next_score = edge_score
-                if next_score <= best_node_scores.get(adjacent, 0.0):
-                    continue
-                best_node_scores[adjacent] = next_score
-                frontier.append((adjacent, next_score, depth + 1))
-        return chunk_scores, support_counts
-
-    @staticmethod
-    def _edge_traversal_weight(
-        *,
-        confidence: float,
-        depth: int,
-    ) -> float:
-        del depth
-        return max(confidence, 0.0)
-
-    def _build_scored_candidates(
-        self,
-        chunk_scores: dict[str, float],
-        support_counts: dict[str, int],
-        *,
-        source_scope: list[str],
-        source_kind: str = "internal",
-        limit: int = 12,
-    ) -> list[RetrievedCandidate]:
-        ordered = sorted(chunk_scores.items(), key=lambda item: (-item[1], -support_counts.get(item[0], 0), item[0]))[
-            :limit
-        ]
-        if not ordered:
-            return []
-        candidates = self._build_candidates_from_chunk_ids(
-            [chunk_id for chunk_id, _score in ordered],
-            source_kind=source_kind,
-            scope=source_scope,
-        )
-        return self._override_candidate_scores(candidates, {chunk_id: score for chunk_id, score in ordered})
-
-    @staticmethod
-    def _override_candidate_scores(
-        candidates: list[RetrievedCandidate], score_map: dict[str, float]
-    ) -> list[RetrievedCandidate]:
+        allowed = {str(item) for item in source_scope}
         return [
-            candidate
-            if candidate.chunk_id not in score_map
-            else candidate.__class__(**{**candidate.__dict__, "score": score_map[candidate.chunk_id], "rank": index})
-            for index, candidate in enumerate(candidates, start=1)
+            document
+            for document in documents
+            if {str(document.doc_id), str(document.source_id)} & allowed
         ]
 
-    def _build_candidates_from_chunk_ids(
-        self, chunk_ids: list[str], *, source_kind: str, scope: list[str] | None = None
-    ) -> list[RetrievedCandidate]:
-        allowed = set(scope or [])
-        candidates: list[RetrievedCandidate] = []
-        for rank, chunk_id in enumerate(chunk_ids, start=1):
-            chunk = self._metadata_repo.get_chunk(chunk_id)
-            if chunk is None:
-                continue
-            document = self._metadata_repo.get_document(chunk.doc_id)
-            if document is None:
-                continue
-            if not self._document_record_is_query_visible(document):
-                continue
-            source = self._metadata_repo.get_source(document.source_id)
-            if allowed and not ({document.doc_id, document.source_id} & allowed):
-                continue
-            segment = self._metadata_repo.get_segment(chunk.segment_id)
-            parent_chunk = (
-                None if chunk.parent_chunk_id is None else self._metadata_repo.get_chunk(chunk.parent_chunk_id)
-            )
-            candidates.append(
-                RetrievedCandidate(
-                    chunk_id=chunk.chunk_id,
-                    doc_id=chunk.doc_id,
-                    benchmark_doc_id=self._benchmark_doc_id(
-                        chunk_metadata=chunk.metadata,
-                        document=document,
-                    ),
-                    source_id=document.source_id,
-                    text=chunk.text,
-                    citation_anchor=chunk.citation_anchor,
-                    score=1.0 / rank,
-                    rank=rank,
-                    source_kind=source_kind,
-                    section_path=tuple(segment.toc_path) if segment is not None else (),
-                    effective_access_policy=chunk.effective_access_policy,
-                    chunk_role=chunk.chunk_role,
-                    special_chunk_type=chunk.special_chunk_type,
-                    parent_chunk_id=chunk.parent_chunk_id,
-                    parent_text=None if parent_chunk is None else parent_chunk.text,
-                    metadata=dict(chunk.metadata),
-                    file_name=self._resolve_file_name(document.title, None if source is None else source.location),
-                    page_start=None if segment is None or segment.page_range is None else segment.page_range[0],
-                    page_end=None if segment is None or segment.page_range is None else segment.page_range[1],
-                    chunk_type=chunk.special_chunk_type or chunk.chunk_role.value,
-                    source_type=None if source is None else source.source_type.value,
-                )
-            )
-        return candidates
+    def _get_document(self, doc_id: int | str) -> Document | None:
+        get_document = getattr(self._metadata_repo, "get_document", None)
+        if not callable(get_document):
+            return None
+        try:
+            return get_document(int(str(doc_id)))
+        except (TypeError, ValueError):
+            return None
 
     def _document_is_query_visible(self, doc_id: str) -> bool:
         get_document = getattr(self._metadata_repo, "get_document", None)
         if not callable(get_document):
             return True
-        document = get_document(doc_id)
-        if document is None and str(doc_id).isdigit():
-            document = get_document(int(str(doc_id)))
+        document = self._get_document(doc_id)
         if document is None:
             return False
         return self._document_record_is_query_visible(document)
@@ -1304,16 +1065,64 @@ class SearchBackedRetrievalFactory:
         status = str(getattr(document, "doc_status", "") or "").strip().lower()
         return status not in {"retired", "expired", "deleted", "inactive"}
 
+    @staticmethod
+    def _candidate_scope(candidate: RetrievedCandidate) -> set[str]:
+        scope = {str(candidate.doc_id)}
+        if candidate.source_id:
+            scope.add(str(candidate.source_id))
+        return scope
+
+    @staticmethod
+    def _benchmark_doc_id(
+        *,
+        metadata: Mapping[str, object] | None = None,
+        document: Document | None = None,
+    ) -> str | None:
+        if metadata is not None:
+            value = metadata.get("benchmark_doc_id")
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+            benchmark_flag = metadata.get("benchmark")
+            if bool(benchmark_flag) and document is not None:
+                return str(document.doc_id)
+        if document is not None:
+            metadata_json = getattr(document, "metadata_json", {})
+            if not isinstance(metadata_json, Mapping):
+                metadata_json = {}
+            value = metadata_json.get("benchmark_doc_id")
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+            if metadata_json.get("benchmark"):
+                return str(document.doc_id)
+        return None
+
+    @staticmethod
+    def _resolve_file_name(title: str | None, location: str | None) -> str | None:
+        if title and title.strip():
+            return title.strip()
+        if not location:
+            return None
+        if "://" in location:
+            return location
+        return Path(location).name or location
+
+    @staticmethod
+    def _rerank_candidates(candidates: list[RetrievedCandidate]) -> list[RetrievedCandidate]:
+        return [
+            candidate.__class__(**{**candidate.__dict__, "rank": index})
+            for index, candidate in enumerate(candidates, start=1)
+        ]
+
 
 class GraphExpansionService:
     @staticmethod
     def _candidate_allowed(candidate: CandidateLike, source_scope: Sequence[str]) -> bool:
         if not source_scope:
             return True
-        scope = {candidate.doc_id}
+        scope = {str(candidate.doc_id)}
         if candidate.source_id:
-            scope.add(candidate.source_id)
-        return bool(scope & set(source_scope))
+            scope.add(str(candidate.source_id))
+        return bool(scope & {str(item) for item in source_scope})
 
     def expand(
         self,
@@ -1324,17 +1133,29 @@ class GraphExpansionService:
         graph_candidates: Sequence[CandidateLike],
         access_policy: AccessPolicy,
     ) -> list[CandidateLike]:
-        del query, access_policy
-        if not evidence.internal:
+        del query
+        if access_policy.local_only:
             return []
-        return [candidate for candidate in graph_candidates if self._candidate_allowed(candidate, source_scope)]
+        seen = {item.evidence_id for item in evidence.all}
+        expanded: list[CandidateLike] = []
+        for candidate in graph_candidates:
+            if candidate.evidence_id in seen:
+                continue
+            if not self._candidate_allowed(candidate, source_scope):
+                continue
+            expanded.append(candidate)
+            seen.add(candidate.evidence_id)
+        return expanded
 
 
 __all__ = [
+    "EmptyGraphRetriever",
     "GraphExpansionService",
-    "HybridSpecialRetriever",
+    "HybridVectorSearchRepoProtocol",
     "MilvusSummaryHybridRetriever",
     "MultiProviderBackedVectorRetriever",
+    "RetrievalMetadataRepoProtocol",
     "RetrievedCandidate",
     "SearchBackedRetrievalFactory",
+    "VectorSearchRepoProtocol",
 ]

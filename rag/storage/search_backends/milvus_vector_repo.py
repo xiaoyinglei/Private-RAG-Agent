@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import asyncio
+import inspect
 import json
 import re
 from collections import defaultdict
@@ -39,7 +39,9 @@ class MilvusVectorRepo:
         self._collections: dict[str, Any] = {}
         self._dirty_collections: set[str] = set()
         self._pending_upserts: dict[str, list[tuple[str, dict[str, Any]]]] = defaultdict(list)
-        self._async_client: Any | None = None
+        # AsyncMilvusClient is bound to the event loop that creates it. The
+        # CLI benchmark path uses a sync bridge with short-lived event loops,
+        # so hybrid search must create clients per call instead of caching one.
         self._connect()
 
     def upsert(
@@ -160,7 +162,6 @@ class MilvusVectorRepo:
             item_kind=item_kind,
             embedding_space=embedding_space,
             doc_id=str(row["doc_id"]),
-            segment_id=str(row.get("section_id") or row["item_id"]),
             text=self._entry_text(row, item_kind=item_kind),
             metadata=metadata,
             vector=[float(value) for value in cast(list[float], row.get("embedding", []))],
@@ -192,9 +193,9 @@ class MilvusVectorRepo:
         *,
         embedding_space: str | None = None,
         item_kind: str | None = None,
-        distinct_chunks: bool = False,
+        distinct_records: bool = False,
     ) -> int:
-        del distinct_chunks
+        del distinct_records
         self._flush_dirty_collections()
         total = 0
         for collection in self._iter_target_collections(item_kind=item_kind, embedding_space=embedding_space):
@@ -413,8 +414,11 @@ class MilvusVectorRepo:
         collection = self._collections.get(name)
         if collection is None:
             return
-        grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        latest_by_item_id: dict[int, tuple[str, dict[str, Any]]] = {}
         for partition_name, row in buffered:
+            latest_by_item_id[int(row["item_id"])] = (partition_name, row)
+        grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for partition_name, row in latest_by_item_id.values():
             grouped[partition_name].append(row)
         for partition_name, rows in grouped.items():
             self._upsert_rows(collection, rows, partition_name=partition_name)
@@ -674,7 +678,6 @@ class MilvusVectorRepo:
             item_kind=item_kind,
             doc_id=str(entity.get("doc_id", "")),
             source_id=str(entity.get("source_id", metadata.get("source_id", ""))),
-            segment_id=str(entity.get("section_id") or entity.get("item_id", "")),
             text=cls._entry_text(entity, item_kind=item_kind),
             metadata=metadata,
         )
@@ -734,28 +737,34 @@ class MilvusVectorRepo:
             alpha=alpha,
             RRFRanker=RRFRanker,
         )
-        hits = await async_client.hybrid_search(
-            collection_name=collection.name,
-            reqs=[dense_request, sparse_request],
-            ranker=ranker,
-            limit=limit,
-            output_fields=output_fields,
-            partition_names=["hot"],
-            consistency_level=self._consistency_level,
-        )
-        if not hits:
+        try:
             hits = await async_client.hybrid_search(
                 collection_name=collection.name,
                 reqs=[dense_request, sparse_request],
                 ranker=ranker,
                 limit=limit,
                 output_fields=output_fields,
-                partition_names=None,
+                partition_names=["hot"],
                 consistency_level=self._consistency_level,
             )
-        results = [self._vector_result_from_client_hit(hit, item_kind=item_kind) for hit in (hits[0] if hits else [])]
-        results.sort(key=lambda item: (-item.score, item.item_id))
-        return results[:limit]
+            if not hits:
+                hits = await async_client.hybrid_search(
+                    collection_name=collection.name,
+                    reqs=[dense_request, sparse_request],
+                    ranker=ranker,
+                    limit=limit,
+                    output_fields=output_fields,
+                    partition_names=None,
+                    consistency_level=self._consistency_level,
+                )
+            results = [
+                self._vector_result_from_client_hit(hit, item_kind=item_kind)
+                for hit in (hits[0] if hits else [])
+            ]
+            results.sort(key=lambda item: (-item.score, item.item_id))
+            return results[:limit]
+        finally:
+            await self._close_async_client_instance(async_client)
 
     def supports_hybrid_search(self) -> bool:
         return True
@@ -786,8 +795,6 @@ class MilvusVectorRepo:
         return {"metric_type": "BM25", "params": {}}
 
     def _get_async_client(self) -> Any:
-        if self._async_client is not None:
-            return self._async_client
         from pymilvus import AsyncMilvusClient
 
         kwargs: dict[str, object] = {"uri": self._uri}
@@ -795,19 +802,18 @@ class MilvusVectorRepo:
             kwargs["token"] = self._token
         if self._db_name:
             kwargs["db_name"] = self._db_name
-        self._async_client = AsyncMilvusClient(**kwargs)
-        return self._async_client
+        return AsyncMilvusClient(**kwargs)
 
     def _close_async_client(self) -> None:
-        if self._async_client is None:
-            return
-        close = getattr(self._async_client, "close", None)
+        return None
+
+    @staticmethod
+    async def _close_async_client_instance(async_client: Any) -> None:
+        close = getattr(async_client, "close", None)
         if callable(close):
-            try:
-                asyncio.run(close())
-            except RuntimeError:
-                pass
-        self._async_client = None
+            result = close()
+            if inspect.isawaitable(result):
+                await result
 
     @staticmethod
     def _supports_hybrid_schema(collection: Any) -> bool:
@@ -856,7 +862,6 @@ class MilvusVectorRepo:
             item_kind=item_kind,
             doc_id=str(entity.get("doc_id", "")),
             source_id=str(entity.get("source_id", metadata.get("source_id", ""))),
-            segment_id=str(entity.get("section_id") or item_id),
             text=cls._entry_text(entity, item_kind=item_kind),
             metadata=metadata,
         )

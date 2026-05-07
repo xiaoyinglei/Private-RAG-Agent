@@ -811,7 +811,10 @@ class PostgresMetadataRepo:
                 anchor,
                 page_start,
                 page_end,
+                content_storage_key,
                 raw_locator,
+                char_range_start,
+                char_range_end,
                 byte_range_start,
                 byte_range_end,
                 visible_text_key,
@@ -825,7 +828,7 @@ class PostgresMetadataRepo:
                 metadata_json
             )
             VALUES (
-                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
             )
             ON CONFLICT (doc_id, order_index) DO UPDATE SET
                 source_id = EXCLUDED.source_id,
@@ -835,7 +838,10 @@ class PostgresMetadataRepo:
                 anchor = EXCLUDED.anchor,
                 page_start = EXCLUDED.page_start,
                 page_end = EXCLUDED.page_end,
+                content_storage_key = EXCLUDED.content_storage_key,
                 raw_locator = EXCLUDED.raw_locator,
+                char_range_start = EXCLUDED.char_range_start,
+                char_range_end = EXCLUDED.char_range_end,
                 byte_range_start = EXCLUDED.byte_range_start,
                 byte_range_end = EXCLUDED.byte_range_end,
                 visible_text_key = EXCLUDED.visible_text_key,
@@ -859,7 +865,10 @@ class PostgresMetadataRepo:
                 saved_section.anchor,
                 saved_section.page_start,
                 saved_section.page_end,
+                saved_section.content_storage_key,
                 self._json_dumps(saved_section.raw_locator),
+                saved_section.char_range_start,
+                saved_section.char_range_end,
                 saved_section.byte_range_start,
                 saved_section.byte_range_end,
                 saved_section.visible_text_key,
@@ -1054,7 +1063,10 @@ class PostgresMetadataRepo:
                 anchor TEXT,
                 page_start INT,
                 page_end INT,
+                content_storage_key TEXT,
                 raw_locator JSONB NOT NULL DEFAULT '{{}}'::jsonb,
+                char_range_start BIGINT,
+                char_range_end BIGINT,
                 byte_range_start BIGINT,
                 byte_range_end BIGINT,
                 visible_text_key TEXT,
@@ -1072,6 +1084,27 @@ class PostgresMetadataRepo:
         )
         self._conn.execute(
             f"CREATE INDEX IF NOT EXISTS idx_{self._schema}_sections_doc_order ON {self._schema}.sections(doc_id, order_index)"
+        )
+        self._conn.execute(
+            f"ALTER TABLE {self._schema}.sections ADD COLUMN IF NOT EXISTS content_storage_key TEXT"
+        )
+        self._conn.execute(
+            f"ALTER TABLE {self._schema}.sections ADD COLUMN IF NOT EXISTS char_range_start BIGINT"
+        )
+        self._conn.execute(
+            f"ALTER TABLE {self._schema}.sections ADD COLUMN IF NOT EXISTS char_range_end BIGINT"
+        )
+        self._conn.execute(
+            f"ALTER TABLE {self._schema}.sections ADD COLUMN IF NOT EXISTS byte_range_start BIGINT"
+        )
+        self._conn.execute(
+            f"ALTER TABLE {self._schema}.sections ADD COLUMN IF NOT EXISTS byte_range_end BIGINT"
+        )
+        self._conn.execute(
+            f"ALTER TABLE {self._schema}.sections ADD COLUMN IF NOT EXISTS visible_text_key TEXT"
+        )
+        self._conn.execute(
+            f"ALTER TABLE {self._schema}.sections ADD COLUMN IF NOT EXISTS raw_locator JSONB NOT NULL DEFAULT '{{}}'::jsonb"
         )
         self._conn.execute(
             f"CREATE INDEX IF NOT EXISTS idx_{self._schema}_sections_source_doc ON {self._schema}.sections(source_id, doc_id)"
@@ -1185,6 +1218,11 @@ class PostgresMetadataRepo:
 
     def _asset_from_row(self, row: dict[str, Any]) -> AssetRecord:
         data = self._json_columns(dict(row), "bbox", "raw_locator", "metadata_json")
+        metadata = data.get("metadata_json", {})
+        if isinstance(metadata, dict):
+            for key in ("sheet_name", "row_count", "column_count", "sample_rows", "schema"):
+                if key not in data and key in metadata:
+                    data[key] = metadata[key]
         return AssetRecord.model_validate(data)
 
     def _layout_cache_from_row(self, row: dict[str, Any]) -> LayoutMetaCacheRecord:
@@ -1212,6 +1250,8 @@ class PostgresMetadataRepo:
 
     @staticmethod
     def _json_dumps(value: object) -> str:
+        if hasattr(value, "model_dump") and callable(getattr(value, "model_dump")):
+            value = value.model_dump(mode="python")
         return json.dumps(value, ensure_ascii=True, sort_keys=True)
 
     @staticmethod

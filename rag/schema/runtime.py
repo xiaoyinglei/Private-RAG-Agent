@@ -12,17 +12,14 @@ from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 if TYPE_CHECKING:
     from rag.schema.core import (
         AssetRecord,
-        Chunk,
         Document,
-        GraphEdge,
-        GraphNode,
         LayoutMetaCacheRecord,
         OcrResult,
         ProcessingStateRecord,
         SectionRecord,
-        Segment,
         Source,
     )
+    from rag.schema.graph import GraphEdge, GraphNode
     from rag.schema.query import KnowledgeArtifact, QueryUnderstanding
 
 
@@ -125,7 +122,7 @@ class ProviderAttempt(BaseModel):
 class RetrievalDiagnostics(BaseModel):
     model_config = ConfigDict(frozen=True)
 
-    mode_executor: str | None = None
+    retrieval_profile: str | None = None
     branch_hits: dict[str, int] = Field(default_factory=dict)
     branch_limits: dict[str, int] = Field(default_factory=dict)
     planning_complexity_gate: str | None = None
@@ -137,8 +134,10 @@ class RetrievalDiagnostics(BaseModel):
     operator_plan: list[str] = Field(default_factory=list)
     rewritten_query: str | None = None
     sparse_query: str | None = None
-    reranked_chunk_ids: list[str] = Field(default_factory=list)
+    
+    reranked_evidence_ids: list[str] = Field(default_factory=list)
     reranked_benchmark_doc_ids: list[str] = Field(default_factory=list)
+    
     embedding_provider: str | None = None
     rerank_provider: str | None = None
     attempts: list[ProviderAttempt] = Field(default_factory=list)
@@ -154,7 +153,6 @@ class RetrievalDiagnostics(BaseModel):
     top1_confidence: float | None = None
     exit_decision: str | None = None
     fallback_triggered: list[str] = Field(default_factory=list)
-    parent_backfilled_count: int = 0
     collapsed_candidate_count: int = 0
 
 
@@ -196,7 +194,8 @@ class IndexHealth(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     documents: int = 0
-    chunks: int = 0
+    sections: int = 0
+    assets: int = 0
     vectors: int = 0
     missing_vectors: int = 0
 
@@ -223,8 +222,8 @@ class DocumentPipelineStage(StrEnum):
     INGEST = "ingest"
     PARSE = "parse"
     ROUTE = "route"
-    CHUNK = "chunk"
     EXTRACT = "extract"
+    SUMMARIZE = "summarize"
     PERSIST = "persist"
     INDEX = "index"
     DELETE = "delete"
@@ -234,8 +233,8 @@ class DocumentPipelineStage(StrEnum):
 class DocumentStatusRecord(BaseModel):
     model_config = ConfigDict(frozen=True)
 
-    doc_id: str
-    source_id: str
+    doc_id: int
+    source_id: int
     location: str
     content_hash: str
     status: DocumentProcessingStatus
@@ -307,28 +306,16 @@ def coerce_evaluation_metric_input(
 
 
 @dataclass(frozen=True)
-class ChunkSearchResult:
-    chunk_id: str
-    doc_id: str
-    source_id: str
-    title: str
-    toc_path: tuple[str, ...]
-    snippet: str
-    score: float
-
-
-@dataclass(frozen=True)
 class RetrievalRecord:
     item_id: str
-    item_kind: str = "chunk"
-    doc_id: str = ""
-    source_id: str = ""
-    segment_id: str = ""
+    item_kind: str = "section"
+    doc_id: int = 0
+    source_id: int = 0
     text: str = ""
     metadata: dict[str, str] = field(default_factory=dict)
 
     @property
-    def chunk_id(self) -> str:
+    def evidence_id(self) -> str:
         return self.item_id
 
 
@@ -342,20 +329,10 @@ class StoredVectorEntry:
     item_id: str
     item_kind: str
     embedding_space: str
-    doc_id: str
-    segment_id: str
+    doc_id: int
     text: str
     metadata: dict[str, str] = field(default_factory=dict)
     vector: list[float] = field(default_factory=list)
-
-
-@dataclass(frozen=True)
-class GraphNodeRecord:
-    node_id: str
-    node_type: str
-    label: str
-    metadata: dict[str, str] = field(default_factory=dict)
-
 
 @dataclass(frozen=True)
 class SearchResult:
@@ -393,7 +370,7 @@ class ModelProviderRepo(Protocol):
 
     def chat(self, prompt: str) -> str: ...
 
-    def rerank(self, query: str, candidates: Sequence[str]) -> list[int]: ...
+    def rerank(self, query: str, documents: Sequence[str]) -> list[float]: ...
 
 
 class VectorRepo(Protocol):
@@ -404,7 +381,7 @@ class VectorRepo(Protocol):
         *,
         metadata: dict[str, str] | None = None,
         embedding_space: str = "default",
-        item_kind: str = "chunk",
+        item_kind: str = "section",
     ) -> None: ...
 
     def search(
@@ -412,9 +389,9 @@ class VectorRepo(Protocol):
         query: Iterable[float],
         *,
         limit: int = 10,
-        doc_ids: list[str] | None = None,
+        doc_ids: list[int] | None = None,
         embedding_space: str = "default",
-        item_kind: str = "chunk",
+        item_kind: str = "section",
     ) -> list[VectorSearchResult]: ...
 
     def get_entry(
@@ -422,7 +399,7 @@ class VectorRepo(Protocol):
         item_id: str,
         *,
         embedding_space: str = "default",
-        item_kind: str = "chunk",
+        item_kind: str = "section",
     ) -> StoredVectorEntry | None: ...
 
     def existing_item_ids(
@@ -430,7 +407,7 @@ class VectorRepo(Protocol):
         item_ids: Sequence[str],
         *,
         embedding_space: str | None = None,
-        item_kind: str | None = "chunk",
+        item_kind: str | None = "section",
     ) -> set[str]: ...
 
     def count_vectors(
@@ -438,12 +415,12 @@ class VectorRepo(Protocol):
         *,
         embedding_space: str | None = None,
         item_kind: str | None = None,
-        distinct_chunks: bool = False,
+        distinct_records: bool = False,
     ) -> int: ...
 
     def delete_for_documents(
         self,
-        doc_ids: Sequence[str],
+        doc_ids: Sequence[int],
         *,
         item_kind: str | None = None,
     ) -> int: ...
@@ -491,28 +468,6 @@ class DocumentActivationRepo(Protocol):
     def set_document_active(self, doc_id: int, *, active: bool) -> None: ...
 
 
-class SegmentRepo(Protocol):
-    def save_segment(self, segment: Segment) -> None: ...
-
-    def get_segment(self, segment_id: str) -> Segment | None: ...
-
-    def list_segments(self, doc_id: str) -> list[Segment]: ...
-
-    def delete_segments_for_document(self, doc_id: str) -> int: ...
-
-
-class ChunkRepo(Protocol):
-    def save_chunk(self, chunk: Chunk) -> None: ...
-
-    def get_chunk(self, chunk_id: str) -> Chunk | None: ...
-
-    def list_chunks(self, doc_id: str) -> list[Chunk]: ...
-
-    def list_chunks_by_ids(self, chunk_ids: Sequence[str]) -> list[Chunk]: ...
-
-    def delete_chunks_for_document(self, doc_id: str) -> int: ...
-
-
 class ArtifactRepo(Protocol):
     def save_artifact(self, artifact: KnowledgeArtifact) -> None: ...
 
@@ -524,16 +479,16 @@ class ArtifactRepo(Protocol):
 class DocumentStatusRepo(Protocol):
     def save_document_status(self, status: DocumentStatusRecord) -> DocumentStatusRecord: ...
 
-    def get_document_status(self, doc_id: str) -> DocumentStatusRecord | None: ...
+    def get_document_status(self, doc_id: int) -> DocumentStatusRecord | None: ...
 
     def list_document_statuses(
         self,
         *,
-        source_id: str | None = None,
+        source_id: int | None = None,
         status: str | None = None,
     ) -> list[DocumentStatusRecord]: ...
 
-    def delete_document_status(self, doc_id: str) -> None: ...
+    def delete_document_status(self, doc_id: int) -> None: ...
 
 
 class GroundingMetadataRepo(Protocol):
@@ -615,7 +570,7 @@ class CacheRepo(Protocol):
 class GraphRepo(Protocol):
     def save_node(self, node: GraphNode) -> None: ...
 
-    def merge_node_evidence(self, node_id: str, evidence_chunk_ids: Sequence[str]) -> None: ...
+    def merge_node_evidence(self, node_id: str, evidence_ids: Sequence[str]) -> None: ...
 
     def get_node(self, node_id: str) -> GraphNode | None: ...
 
@@ -623,13 +578,13 @@ class GraphRepo(Protocol):
 
     def list_nodes_by_alias(self, alias: str, *, node_type: str | None = None) -> list[GraphNode]: ...
 
-    def list_node_evidence_chunk_ids(self, node_id: str) -> list[str]: ...
+    def list_node_evidence_ids(self, node_id: str) -> list[str]: ...
 
     def save_candidate_edge(self, edge: GraphEdge) -> None: ...
 
     def save_edge(self, edge: GraphEdge) -> None: ...
 
-    def bind_node_evidence(self, node_id: str, chunk_ids: Sequence[str]) -> None: ...
+    def bind_node_evidence(self, node_id: str, evidence_ids: Sequence[str]) -> None: ...
 
     def promote_candidate_edge(self, edge_id: str) -> None: ...
 
@@ -645,34 +600,9 @@ class GraphRepo(Protocol):
 
     def list_edges_for_node(self, node_id: str, *, include_candidates: bool = False) -> list[GraphEdge]: ...
 
-    def list_edges_for_chunk(self, chunk_id: str, *, include_candidates: bool = False) -> list[GraphEdge]: ...
+    def list_edges_for_evidence(self, evidence_id: str, *, include_candidates: bool = False) -> list[GraphEdge]: ...
 
-    def delete_by_chunk_ids(self, chunk_ids: Sequence[str]) -> tuple[list[str], list[str]]: ...
-
-    def close(self) -> None: ...
-
-
-class FullTextSearchRepo(Protocol):
-    def index_chunk(
-        self,
-        *,
-        chunk_id: str,
-        doc_id: str,
-        source_id: str,
-        title: str,
-        toc_path: list[str],
-        text: str,
-    ) -> None: ...
-
-    def search(
-        self,
-        query: str,
-        *,
-        limit: int = 10,
-        doc_ids: Sequence[str] | None = None,
-    ) -> list[ChunkSearchResult]: ...
-
-    def delete_by_chunk_ids(self, chunk_ids: Sequence[str]) -> int: ...
+    def delete_by_evidence_ids(self, evidence_ids: Sequence[str]) -> tuple[list[str], list[str]]: ...
 
     def close(self) -> None: ...
 
@@ -695,8 +625,6 @@ __all__ = [
     "CacheEntry",
     "CacheRepo",
     "CapabilityHealth",
-    "ChunkSearchResult",
-    "ChunkRepo",
     "DataContractMetadataRepo",
     "DocumentPipelineStage",
     "DocumentProcessingStatus",
@@ -708,8 +636,6 @@ __all__ = [
     "ExecutionLocation",
     "ExecutionLocationPreference",
     "ExternalRetrievalPolicy",
-    "FullTextSearchRepo",
-    "GraphNodeRecord",
     "GraphRepo",
     "GroundingMetadataRepo",
     "HealthReport",
@@ -729,7 +655,6 @@ __all__ = [
     "RetrievalRecord",
     "RuntimeMode",
     "SearchResult",
-    "SegmentRepo",
     "StoredVectorEntry",
     "TelemetryEvent",
     "VectorRepo",

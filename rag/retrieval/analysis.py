@@ -3,12 +3,11 @@ from __future__ import annotations
 import json
 import time
 from collections.abc import Iterable, Sequence
+from typing import Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from rag.assembly import ChatCapabilityBinding
 from rag.schema.query import (
-    ComplexityLevel,
     MetadataFilters,
     PolicyHints,
     QueryUnderstanding,
@@ -26,6 +25,15 @@ from rag.schema.runtime import (
 
 _DEEP_TASK_TYPES = {TaskType.COMPARISON, TaskType.SYNTHESIS, TaskType.TIMELINE, TaskType.RESEARCH}
 
+
+class ChatBindingLike(Protocol):
+    backend: object
+    location: str
+    provider_name: str
+    model_name: str | None
+
+    def chat(self, prompt: str) -> str: ...
+
 _QUERY_UNDERSTANDING_PROMPT = """You are the query-understanding module for a document-grounded RAG system.
 Return exactly one JSON object and nothing else.
 Your job is to extract both explicit user constraints and semantic retrieval intent from the query.
@@ -36,17 +44,13 @@ If the query explicitly mentions page numbers, page ranges, file names, document
 quoted phrases, heading or section hints, extract them.
 Use enum values exactly:
 - task_type: lookup | single_doc_qa | comparison | synthesis | timeline | research
-- complexity_level: L1_direct | L2_scoped | L3_comparative | L4_research
 - query_type: lookup | scoped_lookup | structure_lookup | section_lookup | special_lookup
   | comparison | summary | process | research
 - structure_constraints.match_strategy: none | semantic | heading
-- structure_constraints.semantic_section_families values: architecture | overview | process
-  | deployment | evaluation | conclusion
 - special_targets values: table | figure | ocr_region | image_summary | caption | formula
 Return JSON matching this schema:
 {
   "task_type": "lookup",
-  "complexity_level": "L1_direct",
   "query_type": "lookup",
   "needs_special": false,
   "needs_structure": false,
@@ -56,11 +60,7 @@ Return JSON matching this schema:
     "match_strategy": "none",
     "requires_structure_match": false,
     "prefer_heading_match": false,
-    "semantic_section_families": [],
-    "preferred_section_terms": [],
-    "heading_hints": [],
-    "title_hints": [],
-    "locator_terms": []
+    "focus_terms": []
   },
   "metadata_filters": {
     "page_numbers": [],
@@ -70,7 +70,6 @@ Return JSON matching this schema:
     "file_names": []
   },
   "special_targets": [],
-  "preferred_section_terms": [],
   "source_scope_hints": [],
   "quoted_terms": [],
   "policy_hints": {
@@ -99,7 +98,7 @@ Important guidance:
 - Most user queries will NOT include page numbers, exact file names, or exact document titles.
 - Treat page numbers, page ranges, file names, document titles, and quoted phrases as OPTIONAL low-frequency explicit constraints.
 - Do NOT over-focus on metadata extraction when the real signal is task intent, structure intent, or special-object intent.
-- If the user asks about a process, architecture, evaluation, conclusion, comparison, or summary, reflect that in task_type, query_type, needs_structure, preferred_section_terms, and semantic_section_families.
+- If the user asks about a process, architecture, evaluation, conclusion, comparison, or summary, reflect that in task_type, query_type, needs_structure, and structure_constraints.focus_terms.
 - If the user clearly refers to tables, figures, captions, OCR text, image summaries, or formulas, mark needs_special=true and populate special_targets.
 - Only set metadata filters when they are explicitly stated or clearly implied by the query.
 - Do not guess hidden facts outside the query.
@@ -113,12 +112,6 @@ Policy handling:
   - only this file
   then place them under policy_hints and source_scope_hints.
 - Do not infer policy restrictions unless the user clearly stated them.
-
-Complexity guidance:
-- L1_direct: simple direct lookup, likely answerable from one focused retrieval step
-- L2_scoped: scoped lookup with some document/section/object targeting
-- L3_comparative: comparison, conflict checking, multi-part reasoning across sections/docs
-- L4_research: open-ended investigation, synthesis, research-style exploration
 
 Task type guidance:
 - lookup: fact lookup, direct answer, short retrieval
@@ -144,21 +137,16 @@ Structure guidance:
   - none: no meaningful structure signal
   - semantic: query implies a section family or topical area, but not exact heading text
   - heading: query explicitly hints at headings/sections/titles
-- semantic_section_families values:
-  architecture | overview | process | deployment | evaluation | conclusion
 
 Use enum values exactly:
 - task_type: lookup | single_doc_qa | comparison | synthesis | timeline | research
-- complexity_level: L1_direct | L2_scoped | L3_comparative | L4_research
 - query_type: lookup | scoped_lookup | structure_lookup | section_lookup | special_lookup | comparison | summary | process | research
 - structure_constraints.match_strategy: none | semantic | heading
-- structure_constraints.semantic_section_families values: architecture | overview | process | deployment | evaluation | conclusion
 - special_targets values: table | figure | ocr_region | image_summary | caption | formula
 
 Return JSON matching exactly this schema:
 {
   "task_type": "lookup",
-  "complexity_level": "L1_direct",
   "query_type": "lookup",
   "needs_special": false,
   "needs_structure": false,
@@ -168,11 +156,7 @@ Return JSON matching exactly this schema:
     "match_strategy": "none",
     "requires_structure_match": false,
     "prefer_heading_match": false,
-    "semantic_section_families": [],
-    "preferred_section_terms": [],
-    "heading_hints": [],
-    "title_hints": [],
-    "locator_terms": []
+    "focus_terms": []
   },
   "metadata_filters": {
     "page_numbers": [],
@@ -182,7 +166,6 @@ Return JSON matching exactly this schema:
     "file_names": []
   },
   "special_targets": [],
-  "preferred_section_terms": [],
   "source_scope_hints": [],
   "quoted_terms": [],
   "policy_hints": {
@@ -196,7 +179,7 @@ Additional rules:
 - needs_structure should be true when the answer likely depends on a section/category/part of a document rather than generic semantic retrieval.
 - needs_metadata should be true only when explicit metadata-style filtering is present or clearly required.
 - needs_graph_expansion should usually remain false unless the query explicitly requires relationship/path-style reasoning across entities or linked concepts.
-- preferred_section_terms should capture user-facing semantic targets such as "deployment", "evaluation results", "conclusion", "architecture", "appendix", "table", etc.
+- structure_constraints.focus_terms should capture user-facing semantic targets such as "deployment", "evaluation results", "conclusion", "architecture", "appendix", or explicit heading/category hints.
 - source_scope_hints should capture explicit source narrowing such as "this PDF", "uploaded file", "my notes", "this report".
 - quoted_terms should contain exact phrases the user likely wants matched literally.
 
@@ -221,7 +204,6 @@ class RoutingDecision(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     task_type: TaskType
-    complexity_level: ComplexityLevel
     runtime_mode: RuntimeMode
     source_scope: list[str] = Field(default_factory=list)
     web_search_allowed: bool = False
@@ -233,7 +215,7 @@ class QueryUnderstandingService:
     def __init__(
         self,
         *,
-        chat_bindings: Sequence[ChatCapabilityBinding] = (),
+        chat_bindings: Sequence[ChatBindingLike] = (),
         enable_llm: bool = True,
     ) -> None:
         self._chat_bindings = tuple(chat_bindings)
@@ -325,7 +307,7 @@ class QueryUnderstandingService:
         self,
         access_policy: AccessPolicy | None,
         execution_location_preference: ExecutionLocationPreference,
-    ) -> list[ChatCapabilityBinding]:
+    ) -> list[ChatBindingLike]:
         if not self._chat_bindings:
             return []
         if access_policy is not None and access_policy.local_only:
@@ -336,7 +318,7 @@ class QueryUnderstandingService:
             preferred_locations = ("local", "cloud")
         else:
             preferred_locations = ("cloud", "local")
-        ordered: list[ChatCapabilityBinding] = []
+        ordered: list[ChatBindingLike] = []
         remaining = list(self._chat_bindings)
         for location in preferred_locations:
             matched = [binding for binding in remaining if binding.location == location]
@@ -346,9 +328,9 @@ class QueryUnderstandingService:
         return ordered
 
     @staticmethod
-    def _dedupe_bindings(bindings: Sequence[ChatCapabilityBinding]) -> list[ChatCapabilityBinding]:
+    def _dedupe_bindings(bindings: Sequence[ChatBindingLike]) -> list[ChatBindingLike]:
         seen: set[int] = set()
-        ordered: list[ChatCapabilityBinding] = []
+        ordered: list[ChatBindingLike] = []
         for binding in bindings:
             identity = id(binding.backend)
             if identity in seen:
@@ -395,11 +377,7 @@ class QueryUnderstandingService:
             match_strategy=structure.match_strategy,
             requires_structure_match=structure.requires_structure_match,
             prefer_heading_match=structure.prefer_heading_match,
-            semantic_section_families=_ordered_unique(structure.semantic_section_families),
-            preferred_section_terms=_ordered_unique(structure.preferred_section_terms),
-            heading_hints=_ordered_unique(structure.heading_hints),
-            title_hints=_ordered_unique(structure.title_hints),
-            locator_terms=_ordered_unique(structure.locator_terms),
+            focus_terms=_ordered_unique(structure.focus_terms),
         )
         normalized_metadata = MetadataFilters(
             page_numbers=_ordered_unique_ints(metadata.page_numbers),
@@ -414,15 +392,6 @@ class QueryUnderstandingService:
             source_type_scope=_ordered_unique(policy.source_type_scope),
         )
         special_targets = _ordered_unique(understanding.special_targets)
-        preferred_section_terms = _ordered_unique(
-            [
-                *understanding.preferred_section_terms,
-                *normalized_structure.preferred_section_terms,
-                *normalized_structure.heading_hints,
-                *normalized_structure.title_hints,
-                *understanding.quoted_terms,
-            ]
-        )
         needs_special = understanding.needs_special or bool(special_targets)
         needs_structure = understanding.needs_structure or normalized_structure.has_constraints()
         needs_metadata = understanding.needs_metadata or normalized_metadata.has_constraints()
@@ -434,7 +403,6 @@ class QueryUnderstandingService:
                 "structure_constraints": normalized_structure,
                 "metadata_filters": normalized_metadata,
                 "special_targets": special_targets,
-                "preferred_section_terms": preferred_section_terms,
                 "source_scope_hints": _ordered_unique(understanding.source_scope_hints),
                 "quoted_terms": _ordered_unique(understanding.quoted_terms),
                 "policy_hints": normalized_policy,
@@ -445,7 +413,6 @@ class QueryUnderstandingService:
     def _fallback_understanding() -> QueryUnderstanding:
         return QueryUnderstanding(
             task_type=TaskType.LOOKUP,
-            complexity_level=ComplexityLevel.L1_DIRECT,
             query_type="lookup",
         )
 
@@ -461,8 +428,7 @@ class RoutingService:
     ) -> RoutingDecision:
         del query
         task_type = query_understanding.task_type
-        complexity_level = query_understanding.complexity_level
-        runtime_mode = self._runtime_mode(task_type, complexity_level, source_scope, query_understanding)
+        runtime_mode = self._runtime_mode(task_type, source_scope, query_understanding)
         allow_external = (
             True
             if access_policy is None
@@ -470,7 +436,6 @@ class RoutingService:
         )
         return RoutingDecision(
             task_type=task_type,
-            complexity_level=complexity_level,
             runtime_mode=runtime_mode,
             source_scope=list(source_scope),
             web_search_allowed=allow_external and not source_scope and task_type in _DEEP_TASK_TYPES,
@@ -481,13 +446,12 @@ class RoutingService:
     @staticmethod
     def _runtime_mode(
         task_type: TaskType,
-        complexity_level: ComplexityLevel,
         source_scope: Sequence[str],
         query_understanding: QueryUnderstanding,
     ) -> RuntimeMode:
         if query_understanding.needs_graph_expansion:
             return RuntimeMode.DEEP
-        if complexity_level in {ComplexityLevel.L3_COMPARATIVE, ComplexityLevel.L4_RESEARCH}:
+        if task_type in {TaskType.COMPARISON, TaskType.TIMELINE, TaskType.RESEARCH}:
             return RuntimeMode.DEEP
         if task_type is TaskType.SYNTHESIS and len(source_scope) != 1:
             return RuntimeMode.DEEP
