@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 from collections import defaultdict, deque
+from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+from rag.schema.query import AnswerCitation, EvidenceItem
 
 
 class SubTaskNode(BaseModel):
@@ -84,3 +87,28 @@ class TaskDAG(BaseModel):
                 if indegree[neighbor] == 0:
                     queue.append(neighbor)
         return visited_count != len(subtask_ids)
+
+
+class SubTaskStatus(StrEnum):
+    PENDING = "pending"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
+class SubTaskResult(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    subtask: SubTaskNode
+    status: SubTaskStatus = SubTaskStatus.PENDING
+    findings: list[str] = Field(default_factory=list)
+    evidence: list[EvidenceItem] = Field(default_factory=list)
+    citations: list[AnswerCitation] = Field(default_factory=list)
+    error_message: str | None = None
+
+    @model_validator(mode="after")
+    def _validate_error_message(self) -> SubTaskResult:
+        if self.status == SubTaskStatus.FAILED and not self.error_message:
+            raise ValueError("error_message is required when status=FAILED")
+        if self.status != SubTaskStatus.FAILED and self.error_message is not None:
+            raise ValueError("error_message must be None unless status=FAILED")
+        return self

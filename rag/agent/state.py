@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field
 from typing_extensions import TypedDict
 
 from rag.agent.core.context import AgentRunConfig
-from rag.agent.core.task import TaskDAG
+from rag.agent.core.task import SubTaskResult, TaskDAG
 from rag.agent.memory.models import ContextBudgetSnapshot, ExtractedFact, WorkingSummary
 
 
@@ -57,7 +57,7 @@ class AgentState(TypedDict):
     working_summary: WorkingSummary | None
     extracted_facts: list[ExtractedFact]
     context_budget: ContextBudgetSnapshot | None
-    subtask_results: Annotated[dict, _merge_subtask_results]
+    subtask_results: Annotated[dict[str, SubTaskResult], _merge_subtask_results]
     terminal_subtasks: Annotated[set[str], _merge_sets]
     successful_subtasks: Annotated[set[str], _merge_sets]
     final_answer: str | None

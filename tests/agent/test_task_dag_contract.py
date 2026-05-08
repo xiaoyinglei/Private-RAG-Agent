@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from rag.agent.core.task import SubTaskNode, TaskDAG, TaskEdge
+from rag.agent.core.task import SubTaskNode, SubTaskResult, SubTaskStatus, TaskDAG, TaskEdge
 
 
 def _subtask(subtask_id: str, *, priority: int = 1) -> SubTaskNode:
@@ -65,3 +65,17 @@ def test_ready_subtasks_are_sorted_by_priority_then_id() -> None:
         "high",
         "low",
     ]
+
+
+def test_failed_subtask_result_requires_error_message() -> None:
+    with pytest.raises(ValueError, match="error_message is required"):
+        SubTaskResult(subtask=_subtask("s1"), status=SubTaskStatus.FAILED)
+
+
+def test_completed_subtask_result_rejects_error_message() -> None:
+    with pytest.raises(ValueError, match="error_message must be None"):
+        SubTaskResult(
+            subtask=_subtask("s1"),
+            status=SubTaskStatus.COMPLETED,
+            error_message="should not be set",
+        )
