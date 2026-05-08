@@ -4,10 +4,13 @@ import asyncio
 import time
 from typing import Any
 
-from pydantic import ValidationError
-
 from rag.agent.state import AgentState, ToolCallPlan
-from rag.agent.tools.registry import ToolRegistry
+from rag.agent.tools.registry import (
+    ToolInputValidationError,
+    ToolOutputValidationError,
+    ToolRegistry,
+    ToolRunnerMissingError,
+)
 from rag.agent.tools.spec import ToolError, ToolResult, ToolSpec
 
 
@@ -132,23 +135,48 @@ async def _execute_one_tool(call: ToolCallPlan, *, tool_registry: ToolRegistry) 
         )
 
     try:
-        spec.input_model.model_validate(call.arguments)
-    except ValidationError as exc:
+        output = await tool_registry.run(call.tool_name, call.arguments)
+    except ToolInputValidationError as exc:
         return _error_result(
             call,
             code="invalid_arguments",
-            message=str(exc),
+            message=str(exc.validation_error),
             retryable=False,
             started_at=started_at,
             detail={"errors": exc.errors()},
         )
+    except ToolRunnerMissingError:
+        return _error_result(
+            call,
+            code="tool_not_implemented",
+            message=f"{call.tool_name} has no registered callable runner",
+            retryable=False,
+            started_at=started_at,
+        )
+    except ToolOutputValidationError as exc:
+        return _error_result(
+            call,
+            code="invalid_output",
+            message=str(exc.validation_error),
+            retryable=False,
+            started_at=started_at,
+            detail={"errors": exc.errors()},
+        )
+    except Exception as exc:
+        return _error_result(
+            call,
+            code="internal",
+            message=str(exc),
+            retryable=True,
+            started_at=started_at,
+        )
 
-    return _error_result(
-        call,
-        code="tool_not_implemented",
-        message=f"{call.tool_name} has no registered callable runner",
-        retryable=False,
-        started_at=started_at,
+    return ToolResult(
+        tool_call_id=call.tool_call_id,
+        tool_name=call.tool_name,
+        status="ok",
+        output=output,
+        latency_ms=(time.perf_counter() - started_at) * 1000,
     )
 
 

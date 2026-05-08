@@ -61,6 +61,17 @@ def _make_registry() -> ToolRegistry:
     return registry
 
 
+def _make_registry_with_echo_runner() -> ToolRegistry:
+    registry = ToolRegistry()
+    registry.register(
+        _echo_spec,
+        runner=lambda payload: EchoOutput(message=f"echo:{payload.message}"),
+    )
+    registry.register(_hidden_spec)
+    registry.register(_confirmation_spec)
+    return registry
+
+
 def _make_config(*, run_id: str = "graph-test", max_parallel_calls: int = 4) -> AgentRunConfig:
     return AgentRunConfig(
         run_id=run_id,
@@ -182,6 +193,19 @@ class TestBaseGraph:
         assert tool_result.status == "error"
         assert tool_result.error.code == "tool_not_implemented"
         assert result["insufficient_evidence_flag"] is True
+
+    @pytest.mark.anyio
+    async def test_registered_tool_with_runner_records_ok_result(self) -> None:
+        graph = _make_graph(tool_registry=_make_registry_with_echo_runner())
+        call = ToolCallPlan.create("echo", {"message": "hello"})
+        result = await graph.ainvoke(
+            _initial_state(pending_tool_calls=[call]),
+            config={"configurable": {"thread_id": "graph-test"}},
+        )
+        [tool_result] = result["tool_results"]
+        assert tool_result.status == "ok"
+        assert tool_result.output == EchoOutput(message="echo:hello")
+        assert result["groundedness_flag"] is True
 
     @pytest.mark.anyio
     async def test_unregistered_tool_records_failure_result(self) -> None:
