@@ -5,8 +5,11 @@ from __future__ import annotations
 from importlib import import_module
 
 __all__ = [
-    "AgentTaskRequest",
-    "AnalysisAgentService",
+    "AgentDefinition",
+    "AgentRunConfig",
+    "AgentState",
+    "ToolRegistry",
+    "ToolSpec",
     "AssemblyConfig",
     "AssemblyDiagnostics",
     "AssemblyOverrides",
@@ -20,8 +23,11 @@ __all__ = [
 ]
 
 _EXPORTS = {
-    "AgentTaskRequest": ("rag.agent", "AgentTaskRequest"),
-    "AnalysisAgentService": ("rag.agent", "AnalysisAgentService"),
+    "AgentDefinition": ("rag.agent", "AgentDefinition"),
+    "AgentRunConfig": ("rag.agent", "AgentRunConfig"),
+    "AgentState": ("rag.agent", "AgentState"),
+    "ToolRegistry": ("rag.agent", "ToolRegistry"),
+    "ToolSpec": ("rag.agent", "ToolSpec"),
     "AssemblyConfig": ("rag.assembly", "AssemblyConfig"),
     "AssemblyDiagnostics": ("rag.assembly", "AssemblyDiagnostics"),
     "AssemblyOverrides": ("rag.assembly", "AssemblyOverrides"),
