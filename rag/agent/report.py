@@ -10,7 +10,7 @@ from rag.agent.schema import (
     SubTaskResult,
     SubTaskStatus,
 )
-from rag.agent.state import AgentRunState
+from typing import Any
 
 
 class AgentReportBuilder:
@@ -19,7 +19,7 @@ class AgentReportBuilder:
     def build(
         self,
         *,
-        state: AgentRunState,
+        state: Any,
         executive_summary: str,
         key_findings: list[str],
         risks: list[str],
@@ -92,7 +92,7 @@ class AgentReportBuilder:
         return entries
 
     @staticmethod
-    def _execution_summary(state: AgentRunState) -> ExecutionSummary:
+    def _execution_summary(state: Any) -> ExecutionSummary:
         return ExecutionSummary(
             subtasks_count=len(state.subtasks),
             completed_subtasks=sum(1 for item in state.subtask_results if item.status is SubTaskStatus.COMPLETED),

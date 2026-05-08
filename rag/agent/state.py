@@ -1,71 +1,150 @@
-"""Mutable run-state objects for agent execution and failure tracking."""
-
 from __future__ import annotations
 
-from datetime import UTC, datetime
-from enum import StrEnum
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from langgraph.graph import add_messages
+from langgraph.graph.message import BaseMessage
+from pydantic import BaseModel, Field
+from typing_extensions import TypedDict
 
-from rag.agent.schema import (
-    AgentFinalReport,
-    AgentRunStatus,
-    AgentTaskRequest,
-    ExecutionStepTrace,
-    SubTask,
-    SubTaskResult,
-    TaskUnderstanding,
-)
+from rag.agent.core.context import AgentRunConfig
 
 
-class AgentFailureKind(StrEnum):
-    PLANNER_FAILURE = "planner_failure"
-    RETRIEVAL_MISS = "retrieval_miss"
-    EVIDENCE_CONFLICT = "evidence_conflict"
-    RETRY_EXHAUSTED = "retry_exhausted"
-    EXTERNAL_DISABLED = "external_disabled"
-    SOURCE_CONSTRAINED = "source_constrained"
-    SYNTHESIS_INFORMATION_GAP = "synthesis_information_gap"
+class ToolCallPlan(BaseModel):
+    tool_call_id: str
+    tool_name: str
+    arguments: dict[str, object]
+
+    @classmethod
+    def create(cls, tool_name: str, arguments: dict[str, object]) -> ToolCallPlan:
+        from uuid import uuid4
+
+        return cls(
+            tool_call_id=f"tc_{uuid4().hex[:12]}",
+            tool_name=tool_name,
+            arguments=arguments,
+        )
 
 
-class AgentFailureEvent(BaseModel):
-    model_config = ConfigDict(frozen=True)
+class ThinkOutput(BaseModel):
+    action: Literal["execute", "synthesize", "pause"]
+    tool_calls: list[ToolCallPlan] = Field(default_factory=list)
+    thought: str
+    confidence: float = Field(default=1.0, ge=0.0, le=1.0)
+    stop_reason: str | None = None
+    needs_user_input: str | None = None
 
-    kind: AgentFailureKind
-    message: str
-    stage: str
-    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+
+class WorkingSummary(BaseModel):
+    summary: str
+    covered_message_ids: list[str]
+    updated_at: str
+    token_count: int
 
 
-class AgentRunState(BaseModel):
-    request: AgentTaskRequest
-    status: AgentRunStatus = AgentRunStatus.PENDING
-    task_understanding: TaskUnderstanding | None = None
-    subtasks: list[SubTask] = Field(default_factory=list)
-    subtask_results: list[SubTaskResult] = Field(default_factory=list)
-    traces: list[ExecutionStepTrace] = Field(default_factory=list)
-    failures: list[AgentFailureEvent] = Field(default_factory=list)
-    web_used: bool = False
-    retries_used: int = 0
-    final_report: AgentFinalReport | None = None
+class ExtractedFact(BaseModel):
+    fact_id: str
+    text: str
+    source_message_ids: list[str] = Field(default_factory=list)
+    evidence_ids: list[str] = Field(default_factory=list)
+    confidence: float = Field(default=1.0, ge=0.0, le=1.0)
+    stale: bool = False
 
-    @property
-    def has_failures(self) -> bool:
-        return bool(self.failures)
 
-    def record_trace(self, trace: ExecutionStepTrace) -> None:
-        self.traces.append(trace)
+class ContextBudgetSnapshot(BaseModel):
+    max_context_tokens: int
+    system_tokens: int = 0
+    evidence_tokens: int = 0
+    working_memory_tokens: int = 0
+    recalled_memory_tokens: int = 0
+    message_tail_tokens: int = 0
+    tool_result_tokens: int = 0
 
-    def record_result(self, result: SubTaskResult) -> None:
-        self.subtask_results.append(result)
-        self.traces.extend(result.traces)
 
-    def record_failure(self, failure: AgentFailureEvent) -> None:
-        self.failures.append(failure)
+class AgentState(TypedDict):
+    messages: Annotated[list[BaseMessage], add_messages]
+    evidence: Annotated[list, _merge_evidence]
+    citations: Annotated[list, _merge_citations]
+    tool_results: Annotated[list, _merge_tool_results]
+    task: str
+    run_config: AgentRunConfig
+    plan: object | None
+    iteration: int
+    status: str
+    pending_tool_calls: list[ToolCallPlan]
+    confirmed_tool_call_ids: set[str]
+    user_decision: str | None
+    next_subtasks: list[object] | None
+    working_summary: WorkingSummary | None
+    extracted_facts: list[ExtractedFact]
+    context_budget: ContextBudgetSnapshot | None
+    subtask_results: Annotated[dict, _merge_subtask_results]
+    terminal_subtasks: Annotated[set[str], _merge_sets]
+    successful_subtasks: Annotated[set[str], _merge_sets]
+    final_answer: str | None
+    groundedness_flag: bool
+    insufficient_evidence_flag: bool
+
+
+def _merge_evidence(left: list, right: list) -> list:
+    from rag.schema.query import EvidenceItem
+
+    merged: dict[str, EvidenceItem] = {}
+    for item in left + right:
+        existing = merged.get(item.evidence_id)
+        if existing is None:
+            merged[item.evidence_id] = item
+        elif _texts_contradict(existing.text, item.text):
+            merged[item.evidence_id] = existing.model_copy(
+                update={"retrieval_channels": [*existing.retrieval_channels, "conflict"]}
+            )
+            conflict_id = f"{item.evidence_id}__conflict"
+            merged[conflict_id] = item.model_copy(
+                update={
+                    "evidence_id": conflict_id,
+                    "retrieval_channels": [*item.retrieval_channels, "conflict"],
+                }
+            )
+        elif item.score > existing.score:
+            merged[item.evidence_id] = item
+    return sorted(merged.values(), key=lambda evidence: evidence.score, reverse=True)
+
+
+def _texts_contradict(a: str, b: str) -> bool:
+    negation_markers = (" not ", " no ", " does not ", " cannot ", " without ", "未", "不")
+    a_lower = f" {a.lower().strip()} "
+    b_lower = f" {b.lower().strip()} "
+    a_negated = any(marker in a_lower for marker in negation_markers)
+    b_negated = any(marker in b_lower for marker in negation_markers)
+    return a_negated != b_negated
+
+
+def _merge_citations(left: list, right: list) -> list:
+    return list({citation.citation_id: citation for citation in left + right}.values())
+
+
+def _merge_tool_results(left: list, right: list) -> list:
+    return list({result.tool_call_id: result for result in left + right}.values())
+
+
+def _merge_subtask_results(left: dict, right: dict) -> dict:
+    return {**left, **right}
+
+
+def _merge_sets(left: set, right: set) -> set:
+    return left | right
 
 
 __all__ = [
-    "AgentFailureEvent",
-    "AgentFailureKind",
-    "AgentRunState",
+    "AgentState",
+    "ContextBudgetSnapshot",
+    "ExtractedFact",
+    "ThinkOutput",
+    "ToolCallPlan",
+    "WorkingSummary",
+    "_merge_citations",
+    "_merge_evidence",
+    "_merge_sets",
+    "_merge_subtask_results",
+    "_merge_tool_results",
 ]
