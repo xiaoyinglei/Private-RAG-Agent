@@ -8,6 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from rag.agent.core.compiler import AgentGraphCompiler
 from rag.agent.core.context import AgentRunConfig, RuntimeRegistry
 from rag.agent.core.definition import AgentDefinition
+from rag.agent.graphs.nodes.evaluate import EvaluateDecisionProvider
 from rag.agent.state import AgentState, ToolCallPlan
 from rag.agent.tools.registry import ToolRegistry
 from rag.agent.tools.spec import ToolResult
@@ -75,11 +76,13 @@ class AgentService:
         definition: AgentDefinition,
         tool_registry: ToolRegistry,
         query_understanding_service: object | None = None,
+        evaluate_decision_provider: EvaluateDecisionProvider | None = None,
     ) -> None:
         self._definition = definition
         self._compiler = AgentGraphCompiler(
             tool_registry=tool_registry,
             query_understanding_service=query_understanding_service,
+            evaluate_decision_provider=evaluate_decision_provider,
         )
 
     def initial_state(self, request: AgentRunRequest) -> AgentState:

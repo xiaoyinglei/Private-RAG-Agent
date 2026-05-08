@@ -3,7 +3,11 @@ from __future__ import annotations
 from langgraph.graph import END, START, StateGraph
 
 from rag.agent.core.definition import AgentDefinition
-from rag.agent.graphs.nodes.evaluate import evaluate_node, route_after_evaluate
+from rag.agent.graphs.nodes.evaluate import (
+    EvaluateDecisionProvider,
+    evaluate_node,
+    route_after_evaluate,
+)
 from rag.agent.graphs.nodes.execute import execute_node
 from rag.agent.graphs.nodes.observe import observe_node
 from rag.agent.graphs.nodes.pause import pause_node
@@ -19,6 +23,7 @@ def build_agent_graph(
     definition: AgentDefinition,
     tool_registry: ToolRegistry,
     query_understanding_service: object | None = None,
+    evaluate_decision_provider: EvaluateDecisionProvider | None = None,
 ):
     graph = StateGraph(AgentState)
     understanding_service = query_understanding_service or QueryUnderstandingService(enable_llm=False)
@@ -31,7 +36,11 @@ def build_agent_graph(
         return await execute_node(state, tool_registry=tool_registry, allowed_tools=allowed_tools)
 
     async def bound_evaluate_node(state: AgentState) -> dict:
-        return await evaluate_node(state, definition=definition)
+        return await evaluate_node(
+            state,
+            definition=definition,
+            decision_provider=evaluate_decision_provider,
+        )
 
     graph.add_node("route", bound_route_node)
     graph.add_node("execute", bound_execute_node)
@@ -63,6 +72,7 @@ def build_agent_graph(
         route_after_evaluate,
         {
             "execute": "execute",
+            "pause": "pause",
             "synthesize": "synthesize",
         },
     )

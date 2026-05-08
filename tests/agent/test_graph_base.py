@@ -6,7 +6,7 @@ from pydantic import BaseModel
 from rag.agent.core.context import AgentRunConfig, RuntimeRegistry
 from rag.agent.core.definition import AgentDefinition, ToolPolicy
 from rag.agent.graphs.base import build_agent_graph
-from rag.agent.state import AgentState, ToolCallPlan
+from rag.agent.state import AgentState, ThinkOutput, ToolCallPlan
 from rag.agent.tools.registry import ToolRegistry
 from rag.agent.tools.spec import ToolError, ToolPermissions, ToolSpec
 from rag.schema.query import QueryUnderstanding, TaskType
@@ -188,12 +188,31 @@ def _make_graph(
     *,
     definition: AgentDefinition | None = None,
     tool_registry: ToolRegistry | None = None,
+    evaluate_decision_provider: object | None = None,
 ):
     return build_agent_graph(
         definition=definition or _make_definition(),
         tool_registry=tool_registry or _make_registry(),
         query_understanding_service=_research_service(),
+        evaluate_decision_provider=evaluate_decision_provider,
     )
+
+
+class _ScriptedDecisionProvider:
+    def __init__(self, decisions: list[ThinkOutput]) -> None:
+        self._decisions = list(decisions)
+        self.calls = 0
+
+    async def decide(
+        self,
+        state: AgentState,
+        *,
+        definition: AgentDefinition,
+        budget_remaining: int,
+    ) -> ThinkOutput:
+        del state, definition, budget_remaining
+        self.calls += 1
+        return self._decisions.pop(0)
 
 
 class TestBaseGraph:
@@ -207,6 +226,54 @@ class TestBaseGraph:
         result = await graph.ainvoke(_initial_state(), config={"configurable": {"thread_id": "graph-test"}})
         assert result["status"] == "done"
         assert result["final_answer"] is not None
+
+    @pytest.mark.anyio
+    async def test_evaluate_decision_provider_can_schedule_tool_call(self) -> None:
+        call = ToolCallPlan.create("echo", {"message": "from-think"})
+        provider = _ScriptedDecisionProvider(
+            [
+                ThinkOutput(action="execute", tool_calls=[call], thought="need echo"),
+                ThinkOutput(action="synthesize", thought="done", stop_reason="evidence_sufficient"),
+            ]
+        )
+        graph = _make_graph(
+            tool_registry=_make_registry_with_echo_runner(),
+            evaluate_decision_provider=provider,
+        )
+
+        result = await graph.ainvoke(
+            _initial_state(config=_make_config(run_id="think-execute")),
+            config={"configurable": {"thread_id": "think-execute"}},
+        )
+
+        assert result["status"] == "done"
+        assert result["stop_reason"] == "evidence_sufficient"
+        assert provider.calls == 2
+        [tool_result] = result["tool_results"]
+        assert tool_result.status == "ok"
+        assert tool_result.output == EchoOutput(message="echo:from-think")
+
+    @pytest.mark.anyio
+    async def test_evaluate_decision_provider_can_pause_run(self) -> None:
+        provider = _ScriptedDecisionProvider(
+            [
+                ThinkOutput(
+                    action="pause",
+                    thought="need user choice",
+                    needs_user_input="Choose a data source",
+                )
+            ]
+        )
+        graph = _make_graph(evaluate_decision_provider=provider)
+
+        result = await graph.ainvoke(
+            _initial_state(config=_make_config(run_id="think-pause")),
+            config={"configurable": {"thread_id": "think-pause"}},
+        )
+
+        assert result["status"] == "paused"
+        assert result["needs_user_input"] == "Choose a data source"
+        assert result["final_answer"] is None
 
     @pytest.mark.anyio
     async def test_registered_tool_without_runner_fails_closed(self) -> None:

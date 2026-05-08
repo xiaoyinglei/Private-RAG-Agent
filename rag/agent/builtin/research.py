@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 
 from rag.agent.core.definition import AgentDefinition, ModelPolicy, ToolPolicy
+from rag.agent.graphs.nodes.evaluate import EvaluateDecisionProvider
 from rag.agent.service import AgentService
 from rag.agent.tools.builtin_registry import create_builtin_tool_registry
 from rag.agent.tools.registry import ToolRunner
@@ -45,9 +46,11 @@ def create_research_agent_service(
     *,
     runners: Mapping[str, ToolRunner] | None = None,
     query_understanding_service: object | None = None,
+    evaluate_decision_provider: EvaluateDecisionProvider | None = None,
 ) -> AgentService:
     return AgentService(
         definition=RESEARCH_AGENT,
         tool_registry=create_builtin_tool_registry(runners=runners),
         query_understanding_service=query_understanding_service,
+        evaluate_decision_provider=evaluate_decision_provider,
     )
