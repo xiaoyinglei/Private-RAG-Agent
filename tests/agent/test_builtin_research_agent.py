@@ -73,6 +73,7 @@ async def test_research_agent_service_factory_wires_explicit_runners() -> None:
     )
 
     assert result.status == "done"
+    assert result.final_answer == "summary:Explain policy"
     assert result.tool_results[0].status == "ok"
     assert result.tool_results[0].output == LLMTextOutput(
         text="summary:Explain policy",

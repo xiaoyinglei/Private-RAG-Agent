@@ -70,6 +70,7 @@ async def test_agent_service_run_executes_explicit_tool_call_with_runner() -> No
     )
 
     assert result.status == "done"
+    assert result.final_answer == "summary:Explain policy"
     assert result.tool_results[0].status == "ok"
     assert result.tool_results[0].output == LLMTextOutput(
         text="summary:Explain policy",
