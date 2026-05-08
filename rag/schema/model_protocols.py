@@ -2,11 +2,12 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Any, Protocol, TypeVar
+from typing import TYPE_CHECKING, Any, Protocol, TypeVar
 
 from pydantic import BaseModel
 
-from rag.schema.core import OcrResult
+if TYPE_CHECKING:
+    from rag.schema.core import OcrResult
 
 
 T = TypeVar("T", bound=BaseModel)

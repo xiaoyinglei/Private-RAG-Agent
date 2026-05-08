@@ -9,6 +9,7 @@ from rag.retrieval.models import (
     RetrievalProfile,
     normalize_retrieval_profile,
 )
+from rag.retrieval.orchestrator import RetrievalService, RetrievalServiceConfig
 
 __all__ = [
     "BuiltContext",
@@ -16,6 +17,8 @@ __all__ = [
     "PublicQueryResult",
     "QueryOptions",
     "RAGQueryResult",
+    "RetrievalService",
+    "RetrievalServiceConfig",
     "RetrievalProfile",
     "normalize_retrieval_profile",
 ]

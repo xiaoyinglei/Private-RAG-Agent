@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass
 
 from rag.retrieval.analysis import (
     QueryUnderstandingService,
@@ -16,56 +15,14 @@ from rag.retrieval.evidence import (
     SelfCheckResult,
 )
 from rag.retrieval.graph import GraphExpansionService
-from rag.retrieval.models import QueryOptions, RetrievalProfile
+from rag.retrieval.models import FusedCandidateView, QueryOptions, RankPipelineResult, RetrievalProfile
 from rag.retrieval.planning_graph import PlanningGraph, PlanningState
 from rag.retrieval.rerank_service import IndustrialRerankService
 from rag.retrieval.retrieval_adapter import RetrievalAdapter
 from rag.retrieval.runtime_coordinator import CoreRetrievalPayload
-from rag.schema.query import GroundingTarget, QueryUnderstanding
+from rag.schema.query import QueryUnderstanding
 from rag.schema.runtime import AccessPolicy, ExecutionLocationPreference, ProviderAttempt
 from rag.utils.telemetry import TelemetryService
-
-
-@dataclass(frozen=True, slots=True)
-class RankPipelineResult:
-    candidates: list[CandidateLike]
-    candidate_count: int
-    collapsed_candidate_count: int
-    pre_rerank_count: int
-    post_cleanup_count: int
-    top1_confidence: float | None
-    exit_decision: str | None
-
-
-@dataclass
-class FusedCandidateView(CandidateLike):
-    evidence_id: str
-    doc_id: str
-    text: str
-    citation_anchor: str
-    score: float
-    rank: int
-    source_kind: str
-    source_id: str | None
-    section_path: Sequence[str]
-    benchmark_doc_id: str | None = None
-    effective_access_policy: AccessPolicy | None = None
-    metadata: dict[str, str] | None = None
-    record_type: str | None = None
-    retrieval_channels: list[str] | None = None
-    dense_score: float | None = None
-    sparse_score: float | None = None
-    special_score: float | None = None
-    structure_score: float | None = None
-    metadata_score: float | None = None
-    fusion_score: float | None = None
-    rrf_score: float | None = None
-    unified_rank: int | None = None
-    grounding_target: GroundingTarget | None = None
-
-    @property
-    def item_id(self) -> str:
-        return self.evidence_id
 
 
 class L3L4RetrievalEngine:
@@ -527,4 +484,4 @@ class L3L4RetrievalEngine:
         return ranked_doc_ids
 
 
-__all__ = ["L3L4RetrievalEngine", "RankPipelineResult"]
+__all__ = ["FusedCandidateView", "L3L4RetrievalEngine", "RankPipelineResult"]

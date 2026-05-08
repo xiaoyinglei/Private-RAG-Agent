@@ -10,19 +10,17 @@ from pydantic import BaseModel, ConfigDict
 
 from rag.agent.schema import AgentTaskRequest, TaskUnderstanding
 from rag.assembly import ChatCapabilityBinding
-from rag.retrieval.analysis import QueryUnderstandingDiagnostics, QueryUnderstandingService
-from rag.schema.query import ComplexityLevel, QueryUnderstanding, TaskType
+from rag.retrieval.analysis import QueryUnderstandingService
+from rag.schema.query import QueryUnderstanding, TaskType
 
 _TASK_UNDERSTANDING_PROMPT = """You are the task-understanding module for an evidence-grounded analysis agent.
 Return exactly one JSON object and nothing else.
 The output must describe the task-level objective and deliverable, not retrieval tactics.
 Use enum values exactly:
 - task_type: lookup | single_doc_qa | comparison | synthesis | timeline | research
-- complexity_level: L1_direct | L2_scoped | L3_comparative | L4_research
 Return JSON matching this schema:
 {
   "task_type": "research",
-  "complexity_level": "L4_research",
   "deliverable_type": "analysis_report",
   "decomposition_required": true,
   "needs_external_evidence": false,
@@ -163,9 +161,6 @@ class TaskUnderstandingService:
         needs_timeline = task_type is TaskType.TIMELINE or "timeline" in request.user_query.lower()
         if request.expected_output == "structured_analysis_report" and task_type is TaskType.LOOKUP:
             task_type = TaskType.SYNTHESIS
-        complexity = query_understanding.complexity_level
-        if complexity is ComplexityLevel.L1_DIRECT and request.max_subtasks > 1:
-            complexity = ComplexityLevel.L4_RESEARCH if task_type in {TaskType.SYNTHESIS, TaskType.RESEARCH} else complexity
         needs_comparison = task_type is TaskType.COMPARISON or "compare" in request.user_query.lower()
         needs_external_evidence = request.allow_web and not request.source_scope and task_type in {
             TaskType.COMPARISON,
@@ -194,7 +189,6 @@ class TaskUnderstandingService:
             success_criteria.append("Present chronology in an evidence-grounded order.")
         return TaskUnderstanding(
             task_type=task_type,
-            complexity_level=complexity,
             deliverable_type=deliverable_type,
             decomposition_required=decomposition_required,
             needs_external_evidence=needs_external_evidence,

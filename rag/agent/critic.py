@@ -116,7 +116,7 @@ class EvidenceCritic:
             overlap = keyword_overlap(search_terms(left.text), right.text)
             if overlap == 0:
                 continue
-            conflicts.append(f"Conflicting evidence between {left.chunk_id} and {right.chunk_id}.")
+            conflicts.append(f"Conflicting evidence between {left.evidence_id} and {right.evidence_id}.")
         return conflicts
 
 

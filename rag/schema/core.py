@@ -58,9 +58,9 @@ class StorageTier(StrEnum):
     COLD = "cold"
 
 
-class PartitionKey(StrEnum):
-    HOT = "hot"
-    COLD = "cold"
+# Index partitions intentionally mirror lifecycle storage tiers.
+PartitionKey = StorageTier
+
 
 class AssetRelationType(StrEnum):
     CAPTION_OF = "caption_of"

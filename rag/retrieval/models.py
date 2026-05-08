@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import TYPE_CHECKING, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from rag.retrieval.evidence import CandidateLike
 from rag.schema.query import EvidenceItem, GroundedAnswer, GroundingTarget
 from rag.schema.runtime import AccessPolicy, ExecutionLocationPreference, ProviderAttempt, RetrievalDiagnostics
 
@@ -63,49 +65,58 @@ class QueryOptions:
         return max(candidate_top_k, 1)
 
 
-class ContextEvidence(BaseModel):
+@dataclass
+class FusedCandidateView(CandidateLike):
+    evidence_id: str
+    doc_id: str
+    text: str
+    citation_anchor: str
+    score: float
+    rank: int
+    source_kind: str
+    source_id: str | None
+    section_path: Sequence[str]
+    benchmark_doc_id: str | None = None
+    effective_access_policy: AccessPolicy | None = None
+    metadata: dict[str, str] | None = None
+    record_type: str | None = None
+    retrieval_channels: list[str] | None = None
+    dense_score: float | None = None
+    sparse_score: float | None = None
+    special_score: float | None = None
+    structure_score: float | None = None
+    metadata_score: float | None = None
+    fusion_score: float | None = None
+    rrf_score: float | None = None
+    unified_rank: int | None = None
+    grounding_target: GroundingTarget | None = None
+
+    @property
+    def item_id(self) -> str:
+        return self.evidence_id
+
+
+@dataclass(frozen=True, slots=True)
+class RankPipelineResult:
+    candidates: list[CandidateLike]
+    candidate_count: int
+    collapsed_candidate_count: int
+    pre_rerank_count: int
+    post_cleanup_count: int
+    top1_confidence: float | None
+    exit_decision: str | None
+
+
+class ContextEvidence(EvidenceItem):
     model_config = ConfigDict(frozen=True)
 
-    evidence_id: str
-    doc_id: int
-    benchmark_doc_id: str | None = None
-    source_id: int | None = None
-    citation_anchor: str
-    text: str
-    score: float
-    evidence_kind: str = "internal"
-    record_type: str | None = None
-    section_path: list[str] = Field(default_factory=list)
-    file_name: str | None = None
-    page_start: int | None = None
-    page_end: int | None = None
-    source_type: str | None = None
-    retrieval_channels: list[str] = Field(default_factory=list)
-    retrieval_family: str | None = None
-    grounding_target: GroundingTarget | None = None
     token_count: int
     selected_token_count: int
     truncated: bool = False
 
     def as_evidence_item(self) -> EvidenceItem:
-        return EvidenceItem(
-            evidence_id=self.evidence_id,
-            doc_id=self.doc_id,
-            benchmark_doc_id=self.benchmark_doc_id,
-            source_id=self.source_id,
-            citation_anchor=self.citation_anchor,
-            text=self.text,
-            score=self.score,
-            evidence_kind=self.evidence_kind,
-            record_type=self.record_type,
-            file_name=self.file_name,
-            section_path=self.section_path,
-            page_start=self.page_start,
-            page_end=self.page_end,
-            source_type=self.source_type,
-            retrieval_channels=list(self.retrieval_channels),
-            retrieval_family=self.retrieval_family,
-            grounding_target=self.grounding_target,
+        return EvidenceItem.model_validate(
+            self.model_dump(exclude={"token_count", "selected_token_count", "truncated"})
         )
 
 

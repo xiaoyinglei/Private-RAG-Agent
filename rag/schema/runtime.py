@@ -9,12 +9,13 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
+from rag.schema.model_protocols import OcrVisionRepo, VisualDescriptionRepo
+
 if TYPE_CHECKING:
     from rag.schema.core import (
         AssetRecord,
         Document,
         LayoutMetaCacheRecord,
-        OcrResult,
         ProcessingStateRecord,
         SectionRecord,
         Source,
@@ -341,20 +342,6 @@ class SearchResult:
     snippet: str
     score: float = 0.0
     source: str = "web"
-
-
-class OcrVisionRepo(Protocol):
-    def extract(self, image_path: Path) -> OcrResult: ...
-
-
-class VisualDescriptionRepo(Protocol):
-    def describe_visual(
-        self,
-        image_bytes: bytes,
-        *,
-        mime_type: str = "image/png",
-        prompt: str | None = None,
-    ) -> str: ...
 
 
 class WebFetchRepo(Protocol):

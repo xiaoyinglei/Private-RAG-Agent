@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass
-from typing import Protocol
+from dataclasses import dataclass, fields, replace
+from typing import Any, Protocol
 
 from rag.retrieval.analysis import (
     QueryUnderstandingService,
@@ -17,7 +17,13 @@ from rag.retrieval.evidence import (
 )
 from rag.retrieval.graph import GraphExpansionService
 from rag.retrieval.l3_l4_engine import L3L4RetrievalEngine
-from rag.retrieval.models import QueryOptions, RetrievalProfile, RetrievalResult
+from rag.retrieval.models import (
+    FusedCandidateView,
+    QueryOptions,
+    RankPipelineResult,
+    RetrievalProfile,
+    RetrievalResult,
+)
 from rag.retrieval.planning_graph import PlanningGraph, PlanningState
 from rag.retrieval.rerank_service import IndustrialRerankService
 from rag.retrieval.retrieval_adapter import RetrievalAdapter
@@ -27,7 +33,7 @@ from rag.retrieval.runtime_coordinator import (
     to_retrieval_result,
 )
 from rag.schema.model_protocols import Reranker as ModelReranker
-from rag.schema.query import GroundingTarget, QueryUnderstanding
+from rag.schema.query import QueryUnderstanding
 from rag.schema.runtime import AccessPolicy, ExecutionLocationPreference, ProviderAttempt
 from rag.utils.telemetry import TelemetryService
 
@@ -120,35 +126,28 @@ class FusedCandidate:
     branch_scores: dict[str, float]
 
 
-@dataclass
-class FusedCandidateView(CandidateLike):
-    evidence_id: str
-    doc_id: str
-    text: str
-    citation_anchor: str
-    score: float
-    rank: int
-    source_kind: str
-    source_id: str | None
-    section_path: Sequence[str]
-    benchmark_doc_id: str | None = None
-    effective_access_policy: AccessPolicy | None = None
-    metadata: dict[str, str] | None = None
-    record_type: str | None = None
-    retrieval_channels: list[str] | None = None
-    dense_score: float | None = None
-    sparse_score: float | None = None
-    special_score: float | None = None
-    structure_score: float | None = None
-    metadata_score: float | None = None
-    fusion_score: float | None = None
-    rrf_score: float | None = None
-    unified_rank: int | None = None
-    grounding_target: GroundingTarget | None = None
-
-    @property
-    def item_id(self) -> str:
-        return self.evidence_id
+@dataclass(frozen=True, slots=True)
+class RetrievalServiceConfig:
+    vector_retriever: RetrieverFn | None = None
+    local_retriever: RetrieverFn | None = None
+    global_retriever: RetrieverFn | None = None
+    section_retriever: RetrieverFn | None = None
+    special_retriever: RetrieverFn | None = None
+    metadata_retriever: RetrieverFn | None = None
+    graph_expander: GraphExpander | None = None
+    web_retriever: RetrieverFn | None = None
+    reranker: ModelReranker | None = None
+    routing_service: RoutingService | None = None
+    query_understanding_service: QueryUnderstandingService | None = None
+    evidence_service: EvidenceService | None = None
+    graph_expansion_service: GraphExpansionService | None = None
+    telemetry_service: TelemetryService | None = None
+    evidence_thresholds: EvidenceThresholds | None = None
+    metadata_scope_resolver: object | None = None
+    planning_graph: PlanningGraph | None = None
+    retrieval_adapter: RetrievalAdapter | None = None
+    rerank_service: IndustrialRerankService | None = None
+    fusion_alpha: float = 0.65
 
 
 @dataclass(slots=True)
@@ -261,56 +260,44 @@ class ReciprocalRankFusion:
             grounding_target=getattr(item.candidate, "grounding_target", None),
         )
 
-@dataclass(frozen=True, slots=True)
-class RankPipelineResult:
-    candidates: list[CandidateLike]
-    candidate_count: int
-    collapsed_candidate_count: int
-    pre_rerank_count: int
-    post_cleanup_count: int
-    top1_confidence: float | None
-    exit_decision: str | None
-
 class RetrievalService:
+    @staticmethod
+    def _normalize_config(
+        config: RetrievalServiceConfig | None,
+        overrides: dict[str, Any],
+    ) -> RetrievalServiceConfig:
+        config = config or RetrievalServiceConfig()
+        if not overrides:
+            return config
+        allowed = {field.name for field in fields(RetrievalServiceConfig)}
+        unexpected = sorted(set(overrides) - allowed)
+        if unexpected:
+            names = ", ".join(unexpected)
+            raise TypeError(f"Unexpected RetrievalService option(s): {names}")
+        return replace(config, **overrides)
+
     def __init__(
         self,
-        *,
-        vector_retriever: RetrieverFn | None = None,
-        local_retriever: RetrieverFn | None = None,
-        global_retriever: RetrieverFn | None = None,
-        section_retriever: RetrieverFn | None = None,
-        special_retriever: RetrieverFn | None = None,
-        metadata_retriever: RetrieverFn | None = None,
-        graph_expander: GraphExpander | None = None,
-        web_retriever: RetrieverFn | None = None,
-        reranker: ModelReranker | None = None,
-        routing_service: RoutingService | None = None,
-        query_understanding_service: QueryUnderstandingService | None = None,
-        evidence_service: EvidenceService | None = None,
-        graph_expansion_service: GraphExpansionService | None = None,
-        telemetry_service: TelemetryService | None = None,
-        evidence_thresholds: EvidenceThresholds | None = None,
-        metadata_scope_resolver: object | None = None,
-        planning_graph: PlanningGraph | None = None,
-        retrieval_adapter: RetrievalAdapter | None = None,
-        rerank_service: IndustrialRerankService | None = None,
-        fusion_alpha: float = 0.65,
+        config: RetrievalServiceConfig | None = None,
+        **overrides: Any,
     ) -> None:
-        self._vector_retriever: RetrieverFn = vector_retriever or (lambda _query, _scope, _understanding: [])
-        self._local_retriever: RetrieverFn = local_retriever or (lambda _query, _scope, _understanding: [])
-        self._global_retriever: RetrieverFn = global_retriever or (lambda _query, _scope, _understanding: [])
-        self._section_retriever: RetrieverFn = section_retriever or (lambda _query, _scope, _understanding: [])
-        self._special_retriever: RetrieverFn = special_retriever or (lambda _query, _scope, _understanding: [])
-        self._metadata_retriever: RetrieverFn = metadata_retriever or (lambda _query, _scope, _understanding: [])
-        self._graph_expander: GraphExpander = graph_expander or (lambda _query, _scope, _evidence: [])
-        self._web_retriever: RetrieverFn = web_retriever or (lambda _query, _scope, _understanding: [])
-        self._reranker = reranker
-        self._routing_service = routing_service or RoutingService()
-        self._query_understanding_service = query_understanding_service or QueryUnderstandingService()
-        self._evidence_service = evidence_service or EvidenceService(evidence_thresholds)
-        self._graph_expansion_service = graph_expansion_service or GraphExpansionService()
-        self._telemetry_service = telemetry_service
-        self._fusion = ReciprocalRankFusion(alpha=fusion_alpha)
+        config = self._normalize_config(config, overrides)
+        self.config = config
+        self._vector_retriever: RetrieverFn = config.vector_retriever or (lambda _query, _scope, _understanding: [])
+        self._local_retriever: RetrieverFn = config.local_retriever or (lambda _query, _scope, _understanding: [])
+        self._global_retriever: RetrieverFn = config.global_retriever or (lambda _query, _scope, _understanding: [])
+        self._section_retriever: RetrieverFn = config.section_retriever or (lambda _query, _scope, _understanding: [])
+        self._special_retriever: RetrieverFn = config.special_retriever or (lambda _query, _scope, _understanding: [])
+        self._metadata_retriever: RetrieverFn = config.metadata_retriever or (lambda _query, _scope, _understanding: [])
+        self._graph_expander: GraphExpander = config.graph_expander or (lambda _query, _scope, _evidence: [])
+        self._web_retriever: RetrieverFn = config.web_retriever or (lambda _query, _scope, _understanding: [])
+        self._reranker = config.reranker
+        self._routing_service = config.routing_service or RoutingService()
+        self._query_understanding_service = config.query_understanding_service or QueryUnderstandingService()
+        self._evidence_service = config.evidence_service or EvidenceService(config.evidence_thresholds)
+        self._graph_expansion_service = config.graph_expansion_service or GraphExpansionService()
+        self._telemetry_service = config.telemetry_service
+        self._fusion = ReciprocalRankFusion(alpha=config.fusion_alpha)
         self._unified_reranker = UnifiedReranker(reranker=self._reranker)
         self.last_result: RetrievalResult | None = None
         self.last_payload: CoreRetrievalPayload | None = None
@@ -323,13 +310,15 @@ class RetrievalService:
             metadata_retriever=self._metadata_retriever,
             web_retriever=self._web_retriever,
         )
-        self._planning_graph = planning_graph or PlanningGraph(metadata_scope_resolver=metadata_scope_resolver)
-        self._retrieval_adapter = retrieval_adapter or RetrievalAdapter(
+        self._planning_graph = config.planning_graph or PlanningGraph(
+            metadata_scope_resolver=config.metadata_scope_resolver
+        )
+        self._retrieval_adapter = config.retrieval_adapter or RetrievalAdapter(
             branch_registry=self._branch_registry,
             evidence_service=self._evidence_service,
             telemetry_service=self._telemetry_service,
         )
-        self._rerank_service = rerank_service or IndustrialRerankService()
+        self._rerank_service = config.rerank_service or IndustrialRerankService()
         self._runtime_coordinator = RuntimeCoordinator()
         self._l3_l4_engine = L3L4RetrievalEngine(
             branch_registry=self._branch_registry,
@@ -665,6 +654,7 @@ __all__ = [
     "GraphExpander",
     "ReciprocalRankFusion",
     "RetrievalService",
+    "RetrievalServiceConfig",
     "RetrieverFn",
     "UnifiedReranker",
 ]

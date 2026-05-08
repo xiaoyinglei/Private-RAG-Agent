@@ -7,7 +7,7 @@ from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from rag.schema.query import ComplexityLevel, EvidenceItem, MetadataFilters, PolicyHints, TaskType
+from rag.schema.query import AnswerCitation, EvidenceItem, MetadataFilters, PolicyHints, TaskType
 
 
 class CriticAction(StrEnum):
@@ -44,7 +44,6 @@ class TaskUnderstanding(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     task_type: TaskType = TaskType.RESEARCH
-    complexity_level: ComplexityLevel = ComplexityLevel.L4_RESEARCH
     deliverable_type: str = "analysis_report"
     decomposition_required: bool = True
     needs_external_evidence: bool = False
@@ -115,18 +114,11 @@ class SubTaskResult(BaseModel):
     unresolved_questions: list[str] = Field(default_factory=list)
 
 
-class ReportCitation(BaseModel):
+class ReportCitation(AnswerCitation):
     model_config = ConfigDict(frozen=True)
 
-    citation_id: str
     subtask_id: str
     chunk_id: str
-    doc_id: str
-    file_name: str | None = None
-    citation_anchor: str | None = None
-    section_path: list[str] = Field(default_factory=list)
-    page_start: int | None = None
-    page_end: int | None = None
     evidence_kind: str = "internal"
 
 

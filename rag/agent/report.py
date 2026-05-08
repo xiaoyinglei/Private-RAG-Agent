@@ -7,8 +7,8 @@ from rag.agent.schema import (
     EvidenceMapEntry,
     ExecutionSummary,
     ReportCitation,
-    SubTaskStatus,
     SubTaskResult,
+    SubTaskStatus,
 )
 from rag.agent.state import AgentRunState
 
@@ -45,14 +45,17 @@ class AgentReportBuilder:
         seen: set[str] = set()
         for result in results:
             for item in result.evidence:
-                if item.chunk_id in seen:
+                evidence_id = item.evidence_id
+                if evidence_id in seen:
                     continue
-                seen.add(item.chunk_id)
+                seen.add(evidence_id)
                 citations.append(
                     ReportCitation(
                         citation_id=f"cit-{len(citations) + 1}",
                         subtask_id=result.subtask.subtask_id,
-                        chunk_id=item.chunk_id,
+                        chunk_id=evidence_id,
+                        evidence_id=evidence_id,
+                        record_type=item.record_type or "unknown",
                         doc_id=item.doc_id,
                         file_name=item.file_name,
                         citation_anchor=item.citation_anchor,
@@ -60,19 +63,22 @@ class AgentReportBuilder:
                         page_start=item.page_start,
                         page_end=item.page_end,
                         evidence_kind=item.evidence_kind,
+                        benchmark_doc_id=item.benchmark_doc_id,
+                        source_id=item.source_id,
+                        source_type=item.source_type,
                     )
                 )
         return citations
 
     @staticmethod
     def _evidence_map(results: list[SubTaskResult], citations: list[ReportCitation]) -> list[EvidenceMapEntry]:
-        citation_index = {citation.chunk_id: citation.citation_id for citation in citations}
+        citation_index = {citation.evidence_id: citation.citation_id for citation in citations}
         entries: list[EvidenceMapEntry] = []
         for result in results:
             citation_ids = [
-                citation_index[item.chunk_id]
+                citation_index[item.evidence_id]
                 for item in result.evidence[:3]
-                if item.chunk_id in citation_index
+                if item.evidence_id in citation_index
             ]
             for finding in result.findings[:2]:
                 entries.append(

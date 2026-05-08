@@ -135,9 +135,11 @@ class RetrievalAdapter:
     ) -> BranchCollectionResult:
         branches: list[tuple[str, list[CandidateLike]]] = []
         branch_hits: dict[str, int] = {}
-        selected_paths = self._selected_paths(plan, branch_names)
-        branch_limits = {path.branch: path.limit for path in selected_paths}
-        skipped_branches = self._skipped_branches(plan) if skip_absorbed_sparse else set()
+        selected_paths, branch_limits, skipped_branches = self._collection_inputs(
+            plan=plan,
+            branch_names=branch_names,
+            skip_absorbed_sparse=skip_absorbed_sparse,
+        )
         for path in selected_paths:
             if path.branch in skipped_branches:
                 branch_hits[path.branch] = 0
@@ -153,23 +155,16 @@ class RetrievalAdapter:
                     plan=plan,
                 )
             )
-            filtered = self._evidence_service.filter_candidates(
-                raw_candidates,
+            self._record_branch_candidates(
+                path=path,
+                raw_candidates=raw_candidates,
                 source_scope=source_scope,
                 access_policy=access_policy,
                 runtime_mode=runtime_mode,
                 query_understanding=query_understanding,
+                branches=branches,
+                branch_hits=branch_hits,
             )
-            limited = filtered[: path.limit]
-            branch_hits[path.branch] = len(limited)
-            if self._telemetry_service is not None:
-                self._telemetry_service.record_branch_usage(
-                    branch=path.branch,
-                    hit_count=len(limited),
-                    runtime_mode=runtime_mode.value,
-                )
-            if limited:
-                branches.append((path.branch, limited))
         return BranchCollectionResult(branches=branches, branch_hits=branch_hits, branch_limits=branch_limits)
 
     async def _collect_async(
@@ -185,9 +180,11 @@ class RetrievalAdapter:
     ) -> BranchCollectionResult:
         branches: list[tuple[str, list[CandidateLike]]] = []
         branch_hits: dict[str, int] = {}
-        selected_paths = self._selected_paths(plan, branch_names)
-        branch_limits = {path.branch: path.limit for path in selected_paths}
-        skipped_branches = self._skipped_branches(plan) if skip_absorbed_sparse else set()
+        selected_paths, branch_limits, skipped_branches = self._collection_inputs(
+            plan=plan,
+            branch_names=branch_names,
+            skip_absorbed_sparse=skip_absorbed_sparse,
+        )
         for path in selected_paths:
             if path.branch in skipped_branches:
                 branch_hits[path.branch] = 0
@@ -203,24 +200,59 @@ class RetrievalAdapter:
                     plan=plan,
                 )
             )
-            filtered = self._evidence_service.filter_candidates(
-                raw_candidates,
+            self._record_branch_candidates(
+                path=path,
+                raw_candidates=raw_candidates,
                 source_scope=source_scope,
                 access_policy=access_policy,
                 runtime_mode=runtime_mode,
                 query_understanding=query_understanding,
+                branches=branches,
+                branch_hits=branch_hits,
             )
-            limited = filtered[: path.limit]
-            branch_hits[path.branch] = len(limited)
-            if self._telemetry_service is not None:
-                self._telemetry_service.record_branch_usage(
-                    branch=path.branch,
-                    hit_count=len(limited),
-                    runtime_mode=runtime_mode.value,
-                )
-            if limited:
-                branches.append((path.branch, limited))
         return BranchCollectionResult(branches=branches, branch_hits=branch_hits, branch_limits=branch_limits)
+
+    def _collection_inputs(
+        self,
+        *,
+        plan: PlanningState,
+        branch_names: Sequence[str] | None,
+        skip_absorbed_sparse: bool,
+    ) -> tuple[tuple[RetrievalPath, ...], dict[str, int], set[str]]:
+        selected_paths = self._selected_paths(plan, branch_names)
+        branch_limits = {path.branch: path.limit for path in selected_paths}
+        skipped_branches = self._skipped_branches(plan) if skip_absorbed_sparse else set()
+        return selected_paths, branch_limits, skipped_branches
+
+    def _record_branch_candidates(
+        self,
+        *,
+        path: RetrievalPath,
+        raw_candidates: Sequence[CandidateLike],
+        source_scope: list[str],
+        access_policy: AccessPolicy,
+        runtime_mode: RuntimeMode,
+        query_understanding: QueryUnderstanding,
+        branches: list[tuple[str, list[CandidateLike]]],
+        branch_hits: dict[str, int],
+    ) -> None:
+        filtered = self._evidence_service.filter_candidates(
+            raw_candidates,
+            source_scope=source_scope,
+            access_policy=access_policy,
+            runtime_mode=runtime_mode,
+            query_understanding=query_understanding,
+        )
+        limited = filtered[: path.limit]
+        branch_hits[path.branch] = len(limited)
+        if self._telemetry_service is not None:
+            self._telemetry_service.record_branch_usage(
+                branch=path.branch,
+                hit_count=len(limited),
+                runtime_mode=runtime_mode.value,
+            )
+        if limited:
+            branches.append((path.branch, limited))
 
     def collect_web(
         self,
