@@ -11,6 +11,7 @@ from rag.agent.core.context import (
     RuntimeRegistry,
 )
 from rag.agent.core.definition import AgentDefinition, ModelPolicy, ToolPolicy
+from rag.agent.core.registry import AgentRegistry
 from rag.schema.runtime import AccessPolicy, ExecutionLocationPreference
 
 
@@ -186,3 +187,31 @@ class TestAgentDefinition:
         assert mp.fallback_model == "sonnet"
         assert mp.thinking is True
         assert mp.temperature == 0.0
+
+
+class TestAgentRegistry:
+    def test_register_and_get(self) -> None:
+        ad = AgentDefinition(
+            agent_type="test_research",
+            description="Test agent",
+            system_prompt="You are a test agent.",
+            allowed_tools=["search"],
+        )
+        AgentRegistry.register(ad)
+        retrieved = AgentRegistry.get("test_research")
+        assert retrieved is ad
+
+    def test_get_missing_raises(self) -> None:
+        with pytest.raises(KeyError, match="not found"):
+            AgentRegistry.get("nonexistent_agent_type")
+
+    def test_list_all(self) -> None:
+        ad1 = AgentDefinition(
+            agent_type="agent_a",
+            description="A",
+            system_prompt="A",
+            allowed_tools=[],
+        )
+        AgentRegistry.register(ad1)
+        all_agents = AgentRegistry.list_all()
+        assert ad1 in all_agents
