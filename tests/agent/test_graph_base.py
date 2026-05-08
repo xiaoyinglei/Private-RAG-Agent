@@ -52,12 +52,34 @@ _confirmation_spec = ToolSpec(
     requires_confirmation=True,
 )
 
+_costly_spec = ToolSpec(
+    name="costly",
+    description="Tool with non-zero budget cost",
+    input_model=EchoInput,
+    output_model=EchoOutput,
+    error_model=ToolError,
+    permissions=ToolPermissions(),
+    timeout_seconds=1.0,
+    token_budget_cost=50,
+)
+
 
 def _make_registry() -> ToolRegistry:
     registry = ToolRegistry()
     registry.register(_echo_spec)
     registry.register(_hidden_spec)
     registry.register(_confirmation_spec)
+    return registry
+
+
+def _make_registry_with_costly_runner(calls: list[str]) -> ToolRegistry:
+    registry = _make_registry()
+
+    def runner(payload: EchoInput) -> EchoOutput:
+        calls.append(payload.message)
+        return EchoOutput(message=payload.message)
+
+    registry.register(_costly_spec, runner=runner)
     return registry
 
 
@@ -72,11 +94,16 @@ def _make_registry_with_echo_runner() -> ToolRegistry:
     return registry
 
 
-def _make_config(*, run_id: str = "graph-test", max_parallel_calls: int = 4) -> AgentRunConfig:
+def _make_config(
+    *,
+    run_id: str = "graph-test",
+    max_parallel_calls: int = 4,
+    budget_total: int = 10000,
+) -> AgentRunConfig:
     return AgentRunConfig(
         run_id=run_id,
         thread_id=run_id,
-        budget_total=10000,
+        budget_total=budget_total,
         max_depth=2,
         access_policy=AccessPolicy.default(),
         execution_location_preference=ExecutionLocationPreference.LOCAL_FIRST,
@@ -258,6 +285,56 @@ class TestBaseGraph:
         [tool_result] = result["tool_results"]
         assert tool_result.status == "error"
         assert tool_result.error.code == "invalid_arguments"
+
+    @pytest.mark.anyio
+    async def test_budget_exhausted_records_failure_without_calling_runner(self) -> None:
+        runner_calls: list[str] = []
+        graph = _make_graph(
+            definition=_make_definition(allowed_tools=["costly"]),
+            tool_registry=_make_registry_with_costly_runner(runner_calls),
+        )
+        call = ToolCallPlan.create("costly", {"message": "hello"})
+        result = await graph.ainvoke(
+            _initial_state(
+                pending_tool_calls=[call],
+                config=_make_config(
+                    run_id="budget-too-low",
+                    max_parallel_calls=1,
+                    budget_total=10,
+                ),
+            ),
+            config={"configurable": {"thread_id": "budget-too-low"}},
+        )
+        [tool_result] = result["tool_results"]
+        assert tool_result.status == "error"
+        assert tool_result.error.code == "budget_exhausted"
+        assert runner_calls == []
+
+    @pytest.mark.anyio
+    async def test_successful_tool_commits_budget_cost(self) -> None:
+        runner_calls: list[str] = []
+        graph = _make_graph(
+            definition=_make_definition(allowed_tools=["costly"]),
+            tool_registry=_make_registry_with_costly_runner(runner_calls),
+        )
+        call = ToolCallPlan.create("costly", {"message": "hello"})
+        state = _initial_state(
+            pending_tool_calls=[call],
+            config=_make_config(
+                run_id="budget-commit",
+                max_parallel_calls=1,
+                budget_total=100,
+            ),
+        )
+
+        result = await graph.ainvoke(state, config={"configurable": {"thread_id": "budget-commit"}})
+
+        [tool_result] = result["tool_results"]
+        assert tool_result.status == "ok"
+        assert tool_result.token_used == 50
+        assert runner_calls == ["hello"]
+        remaining = await RuntimeRegistry.get("budget-commit").budget_ledger.remaining()
+        assert remaining == 50
 
     @pytest.mark.anyio
     async def test_missing_runtime_handles_fail_visibly(self) -> None:
