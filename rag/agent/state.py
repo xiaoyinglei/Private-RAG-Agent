@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 from typing_extensions import TypedDict
 
 from rag.agent.core.context import AgentRunConfig
+from rag.agent.memory.models import ContextBudgetSnapshot, ExtractedFact, WorkingSummary
 
 
 class ToolCallPlan(BaseModel):
@@ -33,32 +34,6 @@ class ThinkOutput(BaseModel):
     confidence: float = Field(default=1.0, ge=0.0, le=1.0)
     stop_reason: str | None = None
     needs_user_input: str | None = None
-
-
-class WorkingSummary(BaseModel):
-    summary: str
-    covered_message_ids: list[str]
-    updated_at: str
-    token_count: int
-
-
-class ExtractedFact(BaseModel):
-    fact_id: str
-    text: str
-    source_message_ids: list[str] = Field(default_factory=list)
-    evidence_ids: list[str] = Field(default_factory=list)
-    confidence: float = Field(default=1.0, ge=0.0, le=1.0)
-    stale: bool = False
-
-
-class ContextBudgetSnapshot(BaseModel):
-    max_context_tokens: int
-    system_tokens: int = 0
-    evidence_tokens: int = 0
-    working_memory_tokens: int = 0
-    recalled_memory_tokens: int = 0
-    message_tail_tokens: int = 0
-    tool_result_tokens: int = 0
 
 
 class AgentState(TypedDict):
