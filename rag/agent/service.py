@@ -98,14 +98,31 @@ class AgentService:
 
     def initial_state(self, request: AgentRunRequest) -> AgentState:
         run_config = request.to_run_config(self._definition)
+        return self.initial_state_from_config(
+            task=request.task,
+            run_config=run_config,
+            pending_tool_calls=request.pending_tool_calls,
+            confirmed_tool_call_ids=request.confirmed_tool_call_ids,
+            messages=request.messages,
+        )
+
+    def initial_state_from_config(
+        self,
+        *,
+        task: str,
+        run_config: AgentRunConfig,
+        pending_tool_calls: list[ToolCallPlan] | None = None,
+        confirmed_tool_call_ids: set[str] | None = None,
+        messages: list[BaseMessage] | None = None,
+    ) -> AgentState:
         RuntimeRegistry.remove(run_config.run_id)
         RuntimeRegistry.get_or_create(run_config)
         return {
-            "messages": list(request.messages),
+            "messages": list(messages or []),
             "evidence": [],
             "citations": [],
             "tool_results": [],
-            "task": request.task,
+            "task": task,
             "run_config": run_config,
             "plan": None,
             "iteration": 0,
@@ -113,8 +130,8 @@ class AgentService:
             "route_reason": None,
             "stop_reason": None,
             "needs_user_input": None,
-            "pending_tool_calls": list(request.pending_tool_calls),
-            "confirmed_tool_call_ids": set(request.confirmed_tool_call_ids),
+            "pending_tool_calls": list(pending_tool_calls or []),
+            "confirmed_tool_call_ids": set(confirmed_tool_call_ids or set()),
             "user_decision": None,
             "next_subtasks": None,
             "working_summary": None,
@@ -129,9 +146,32 @@ class AgentService:
         }
 
     async def run(self, request: AgentRunRequest) -> AgentRunResult:
+        run_config = request.to_run_config(self._definition)
+        return await self.run_with_config(
+            task=request.task,
+            run_config=run_config,
+            pending_tool_calls=request.pending_tool_calls,
+            confirmed_tool_call_ids=request.confirmed_tool_call_ids,
+            messages=request.messages,
+        )
+
+    async def run_with_config(
+        self,
+        *,
+        task: str,
+        run_config: AgentRunConfig,
+        pending_tool_calls: list[ToolCallPlan] | None = None,
+        confirmed_tool_call_ids: set[str] | None = None,
+        messages: list[BaseMessage] | None = None,
+    ) -> AgentRunResult:
         graph = self._compiler.compile(self._definition)
-        state = self.initial_state(request)
-        run_config = state["run_config"]
+        state = self.initial_state_from_config(
+            task=task,
+            run_config=run_config,
+            pending_tool_calls=pending_tool_calls,
+            confirmed_tool_call_ids=confirmed_tool_call_ids,
+            messages=messages,
+        )
         try:
             result_state = await graph.ainvoke(
                 state,
