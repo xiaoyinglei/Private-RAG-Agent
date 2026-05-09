@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pydantic import BaseModel
 
+from rag.agent.core.task import SubTaskResult, SubTaskStatus
 from rag.agent.state import AgentState
 from rag.agent.tools.spec import ToolResult
 
@@ -10,21 +11,27 @@ def synthesize_node(state: AgentState) -> dict:
     tool_results = state.get("tool_results", [])
     ok_results = [result for result in tool_results if result.status == "ok"]
     error_results = [result for result in tool_results if result.status == "error"]
+    subtask_results = list(state.get("subtask_results", {}).values())
     status = state.get("status")
     final_status = "failed" if status == "failed" else "done"
     return {
         "status": final_status,
-        "final_answer": _final_answer(ok_results, error_results),
-        "groundedness_flag": bool(ok_results),
+        "final_answer": _final_answer(ok_results, error_results, subtask_results),
+        "groundedness_flag": bool(ok_results) or _has_subtask_evidence(subtask_results),
         "insufficient_evidence_flag": (
             state.get("insufficient_evidence_flag", False)
             or bool(error_results)
+            or _has_failed_subtask(subtask_results)
             or _has_insufficient_output(ok_results)
         ),
     }
 
 
-def _final_answer(ok_results: list[ToolResult], error_results: list[ToolResult]) -> str:
+def _final_answer(
+    ok_results: list[ToolResult],
+    error_results: list[ToolResult],
+    subtask_results: list[SubTaskResult],
+) -> str:
     answer_parts = [
         text
         for result in ok_results
@@ -32,6 +39,15 @@ def _final_answer(ok_results: list[ToolResult], error_results: list[ToolResult])
     ]
     if answer_parts:
         return "\n\n".join(answer_parts)
+    subtask_findings = [
+        finding
+        for result in subtask_results
+        if result.status is SubTaskStatus.COMPLETED
+        for finding in result.findings
+        if finding.strip()
+    ]
+    if subtask_findings:
+        return "\n\n".join(subtask_findings)
     if error_results:
         error_codes = ", ".join(
             result.error.code for result in error_results if result.error is not None
@@ -39,6 +55,13 @@ def _final_answer(ok_results: list[ToolResult], error_results: list[ToolResult])
         if error_codes:
             return f"No answer was generated because tool execution failed: {error_codes}."
         return "No answer was generated because tool execution failed."
+    failed_subtasks = [
+        subtask_result.subtask.subtask_id
+        for subtask_result in subtask_results
+        if subtask_result.status is SubTaskStatus.FAILED
+    ]
+    if failed_subtasks:
+        return f"No answer was generated because subtask execution failed: {', '.join(failed_subtasks)}."
     return "No answer was generated because no tool results were available."
 
 
@@ -55,3 +78,11 @@ def _has_insufficient_output(ok_results: list[ToolResult]) -> bool:
         for result in ok_results
         if result.output is not None
     )
+
+
+def _has_subtask_evidence(subtask_results: list[SubTaskResult]) -> bool:
+    return any(result.evidence for result in subtask_results)
+
+
+def _has_failed_subtask(subtask_results: list[SubTaskResult]) -> bool:
+    return any(result.status is SubTaskStatus.FAILED for result in subtask_results)

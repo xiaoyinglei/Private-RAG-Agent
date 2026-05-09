@@ -331,6 +331,7 @@ class TestBaseGraph:
 
         assert result["status"] == "done"
         assert result["stop_reason"] == "all_subtasks_terminal"
+        assert result["final_answer"] == "done:s1"
         assert runner.calls == ["s1"]
         assert result["terminal_subtasks"] == {"s1"}
         assert result["successful_subtasks"] == {"s1"}
@@ -357,6 +358,8 @@ class TestBaseGraph:
         subtask_result = result["subtask_results"]["s1"]
         assert subtask_result.status is SubTaskStatus.FAILED
         assert subtask_result.error_message == "subagent_runner_missing"
+        assert result["final_answer"] == "No answer was generated because subtask execution failed: s1."
+        assert result["insufficient_evidence_flag"] is True
         assert result["terminal_subtasks"] == {"s1"}
         assert result["successful_subtasks"] == set()
 
@@ -387,6 +390,7 @@ class TestBaseGraph:
 
         assert result["status"] == "done"
         assert result["stop_reason"] == "all_subtasks_terminal"
+        assert result["final_answer"] == "done:s1"
         assert plan_provider.calls == 1
         assert runner.calls == ["s1"]
         assert result["plan"] == TaskDAG(subtasks=[subtask])
