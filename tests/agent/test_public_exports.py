@@ -11,6 +11,7 @@ def test_agent_package_exports_new_contract_surface_only() -> None:
     assert hasattr(agent, "AgentRunResult")
     assert hasattr(agent, "AgentService")
     assert hasattr(agent, "AgentState")
+    assert hasattr(agent, "AgentAsToolRunner")
     assert hasattr(agent, "AgentToolSpec")
     assert hasattr(agent, "ToolRegistry")
     assert hasattr(agent, "ToolSpec")

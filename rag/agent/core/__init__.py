@@ -1,6 +1,6 @@
 """Agent core contracts: config, registry, definition, compiler."""
 
-from rag.agent.core.agent_as_tool import AgentToolSpec
+from rag.agent.core.agent_as_tool import AgentAsToolRunner, AgentToolSpec
 from rag.agent.core.compiler import AgentGraphCompiler
 from rag.agent.core.context import AgentRunConfig, BudgetLedger, RuntimeRegistry, derive_child_config
 from rag.agent.core.definition import AgentDefinition, ModelPolicy, ToolPolicy
@@ -12,6 +12,7 @@ __all__ = [
     "AgentGraphCompiler",
     "AgentRegistry",
     "AgentRunConfig",
+    "AgentAsToolRunner",
     "AgentToolSpec",
     "BudgetLedger",
     "ModelPolicy",
