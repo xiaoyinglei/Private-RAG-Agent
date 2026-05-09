@@ -135,6 +135,15 @@ class _FailedStatusRunner:
         )
 
 
+class _RecordingRunner(_SuccessfulRunner):
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def run_subtask(self, *, subtask: SubTaskNode, parent_state: AgentState) -> AgentRunResult:
+        self.calls += 1
+        return await super().run_subtask(subtask=subtask, parent_state=parent_state)
+
+
 @pytest.mark.anyio
 async def test_execute_subagent_success_commits_budget_and_marks_successful() -> None:
     subtask = _subtask()
@@ -190,3 +199,17 @@ async def test_execute_subagent_failed_result_marks_subtask_failed_without_refun
     assert "successful_subtasks" not in update
     assert await handles.budget_ledger.remaining() == 93
     RuntimeRegistry.remove("subagent-result-failed")
+
+
+@pytest.mark.anyio
+async def test_execute_subagent_missing_runtime_handles_fails_before_running_child() -> None:
+    subtask = _subtask()
+    state = _state("subagent-runtime-missing", subtask)
+    RuntimeRegistry.remove("subagent-runtime-missing")
+    runner = _RecordingRunner()
+
+    update = await execute_subagent_node(state, subagent_runner=runner)
+
+    assert update["status"] == "failed"
+    assert update["stop_reason"] == "runtime_handles_missing"
+    assert runner.calls == 0

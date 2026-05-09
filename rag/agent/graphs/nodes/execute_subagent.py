@@ -43,10 +43,18 @@ async def execute_subagent_node(
 
     run_config = state["run_config"]
     try:
+        handles = RuntimeRegistry.get(run_config.run_id)
+    except KeyError:
+        return {
+            "status": "failed",
+            "stop_reason": "runtime_handles_missing",
+        }
+
+    try:
         raw_result = subagent_runner.run_subtask(subtask=subtask, parent_state=state)
         result = await raw_result if isawaitable(raw_result) else raw_result
     except Exception as exc:
-        await RuntimeRegistry.get(run_config.run_id).budget_ledger.refund(subtask.subtask_id)
+        await handles.budget_ledger.refund(subtask.subtask_id)
         return {
             "subtask_results": {
                 subtask.subtask_id: SubTaskResult(
@@ -59,7 +67,7 @@ async def execute_subagent_node(
         }
 
     actual_tokens = sum(tool_result.token_used for tool_result in result.tool_results)
-    await RuntimeRegistry.get(run_config.run_id).budget_ledger.commit(
+    await handles.budget_ledger.commit(
         subtask.subtask_id,
         actual_tokens,
     )
