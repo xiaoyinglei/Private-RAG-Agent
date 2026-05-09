@@ -191,14 +191,17 @@ def _make_graph(
     *,
     definition: AgentDefinition | None = None,
     tool_registry: ToolRegistry | None = None,
+    query_understanding_service: object | None = None,
     evaluate_decision_provider: object | None = None,
+    plan_provider: object | None = None,
     subagent_runner: object | None = None,
 ):
     return build_agent_graph(
         definition=definition or _make_definition(),
         tool_registry=tool_registry or _make_registry(),
-        query_understanding_service=_research_service(),
+        query_understanding_service=query_understanding_service or _research_service(),
         evaluate_decision_provider=evaluate_decision_provider,
+        plan_provider=plan_provider,
         subagent_runner=subagent_runner,
     )
 
@@ -234,6 +237,17 @@ class _SuccessfulSubAgentRunner:
             status="done",
             final_answer=f"done:{subtask.subtask_id}",
         )
+
+
+class _ScriptedPlanProvider:
+    def __init__(self, plan: TaskDAG) -> None:
+        self._plan = plan
+        self.calls = 0
+
+    async def create_plan(self, state: AgentState, *, definition: AgentDefinition) -> TaskDAG:
+        del state, definition
+        self.calls += 1
+        return self._plan
 
 
 class TestBaseGraph:
@@ -345,6 +359,53 @@ class TestBaseGraph:
         assert subtask_result.error_message == "subagent_runner_missing"
         assert result["terminal_subtasks"] == {"s1"}
         assert result["successful_subtasks"] == set()
+
+    @pytest.mark.anyio
+    async def test_decompose_route_uses_plan_provider_and_executes_subagent(self) -> None:
+        subtask = SubTaskNode(
+            subtask_id="s1",
+            agent_type="research",
+            prompt="Research",
+            priority=1,
+            estimated_tokens=10,
+        )
+        plan_provider = _ScriptedPlanProvider(TaskDAG(subtasks=[subtask]))
+        runner = _SuccessfulSubAgentRunner()
+        graph = _make_graph(
+            query_understanding_service=_FakeUnderstandingService(
+                QueryUnderstanding(task_type=TaskType.COMPARISON, query_type="comparison")
+            ),
+            plan_provider=plan_provider,
+            subagent_runner=runner,
+        )
+        state = _initial_state(config=_make_config(run_id="graph-plan", budget_total=100))
+
+        result = await graph.ainvoke(
+            state,
+            config={"configurable": {"thread_id": "graph-plan"}},
+        )
+
+        assert result["status"] == "done"
+        assert result["stop_reason"] == "all_subtasks_terminal"
+        assert plan_provider.calls == 1
+        assert runner.calls == ["s1"]
+        assert result["plan"] == TaskDAG(subtasks=[subtask])
+
+    @pytest.mark.anyio
+    async def test_decompose_route_without_plan_provider_fails_closed(self) -> None:
+        graph = _make_graph(
+            query_understanding_service=_FakeUnderstandingService(
+                QueryUnderstanding(task_type=TaskType.COMPARISON, query_type="comparison")
+            ),
+        )
+
+        result = await graph.ainvoke(
+            _initial_state(config=_make_config(run_id="graph-plan-missing", budget_total=100)),
+            config={"configurable": {"thread_id": "graph-plan-missing"}},
+        )
+
+        assert result["status"] == "failed"
+        assert result["stop_reason"] == "plan_provider_missing"
 
     @pytest.mark.anyio
     async def test_registered_tool_without_runner_fails_closed(self) -> None:

@@ -10,6 +10,7 @@ from rag.agent.core.context import AgentRunConfig, RuntimeRegistry
 from rag.agent.core.definition import AgentDefinition
 from rag.agent.graphs.nodes.evaluate import EvaluateDecisionProvider
 from rag.agent.graphs.nodes.execute_subagent import SubAgentRunner
+from rag.agent.graphs.nodes.plan import PlanProvider
 from rag.agent.state import AgentState, ToolCallPlan
 from rag.agent.tools.registry import ToolRegistry
 from rag.agent.tools.spec import ToolResult
@@ -83,6 +84,7 @@ class AgentService:
         tool_registry: ToolRegistry,
         query_understanding_service: object | None = None,
         evaluate_decision_provider: EvaluateDecisionProvider | None = None,
+        plan_provider: PlanProvider | None = None,
         subagent_runner: SubAgentRunner | None = None,
     ) -> None:
         self._definition = definition
@@ -90,6 +92,7 @@ class AgentService:
             tool_registry=tool_registry,
             query_understanding_service=query_understanding_service,
             evaluate_decision_provider=evaluate_decision_provider,
+            plan_provider=plan_provider,
             subagent_runner=subagent_runner,
         )
 

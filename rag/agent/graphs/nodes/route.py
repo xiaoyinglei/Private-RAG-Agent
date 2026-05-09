@@ -38,4 +38,6 @@ def route_after_route(state: AgentState) -> str:
         return "synthesize"
     if state.get("status") == "failed":
         return "synthesize"
+    if state.get("status") == "decompose":
+        return "plan"
     return "execute"

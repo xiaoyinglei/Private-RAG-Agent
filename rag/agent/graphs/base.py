@@ -17,6 +17,7 @@ from rag.agent.graphs.nodes.execute_subagent import (
 )
 from rag.agent.graphs.nodes.observe import observe_node
 from rag.agent.graphs.nodes.pause import pause_node
+from rag.agent.graphs.nodes.plan import PlanProvider, plan_node, route_after_plan
 from rag.agent.graphs.nodes.route import route_after_route, route_node
 from rag.agent.graphs.nodes.synthesize import synthesize_node
 from rag.agent.state import AgentState
@@ -41,6 +42,7 @@ def build_agent_graph(
     tool_registry: ToolRegistry,
     query_understanding_service: object | None = None,
     evaluate_decision_provider: EvaluateDecisionProvider | None = None,
+    plan_provider: PlanProvider | None = None,
     subagent_runner: SubAgentRunner | None = None,
 ):
     graph = StateGraph(AgentState)
@@ -64,7 +66,15 @@ def build_agent_graph(
             decision_provider=evaluate_decision_provider,
         )
 
+    async def bound_plan_node(state: AgentState) -> dict:
+        return await plan_node(
+            state,
+            definition=definition,
+            plan_provider=plan_provider,
+        )
+
     graph.add_node("route", bound_route_node)
+    graph.add_node("plan", bound_plan_node)
     graph.add_node("execute", bound_execute_node)
     graph.add_node("execute_subagent", bound_execute_subagent_node)
     graph.add_node("observe", observe_node)
@@ -78,6 +88,15 @@ def build_agent_graph(
         route_after_route,
         {
             "execute": "execute",
+            "plan": "plan",
+            "synthesize": "synthesize",
+        },
+    )
+    graph.add_conditional_edges(
+        "plan",
+        route_after_plan,
+        {
+            "evaluate": "evaluate",
             "synthesize": "synthesize",
         },
     )
