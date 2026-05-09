@@ -6,8 +6,16 @@ from typing import Protocol
 
 from rag.agent.core.context import RuntimeRegistry
 from rag.agent.core.task import SubTaskNode, SubTaskResult, SubTaskStatus
-from rag.agent.service import AgentRunResult
 from rag.agent.state import AgentState
+from rag.agent.tools.spec import ToolResult
+from rag.schema.query import AnswerCitation, EvidenceItem
+
+
+class SubAgentRunResult(Protocol):
+    final_answer: str | None
+    tool_results: list[ToolResult]
+    evidence: list[EvidenceItem]
+    citations: list[AnswerCitation]
 
 
 class SubAgentRunner(Protocol):
@@ -16,7 +24,7 @@ class SubAgentRunner(Protocol):
         *,
         subtask: SubTaskNode,
         parent_state: AgentState,
-    ) -> AgentRunResult | Awaitable[AgentRunResult]: ...
+    ) -> SubAgentRunResult | Awaitable[SubAgentRunResult]: ...
 
 
 async def execute_subagent_node(

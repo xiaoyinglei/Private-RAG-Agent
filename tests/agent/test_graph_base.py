@@ -5,8 +5,10 @@ from pydantic import BaseModel
 
 from rag.agent.core.context import AgentRunConfig, RuntimeRegistry
 from rag.agent.core.definition import AgentDefinition, ToolPolicy
+from rag.agent.core.task import SubTaskNode, SubTaskStatus, TaskDAG
 from rag.agent.graphs.base import build_agent_graph
 from rag.agent.memory.models import InjectedContext
+from rag.agent.service import AgentRunResult
 from rag.agent.state import AgentState, ThinkOutput, ToolCallPlan
 from rag.agent.tools.registry import ToolRegistry
 from rag.agent.tools.spec import ToolError, ToolPermissions, ToolSpec
@@ -190,12 +192,14 @@ def _make_graph(
     definition: AgentDefinition | None = None,
     tool_registry: ToolRegistry | None = None,
     evaluate_decision_provider: object | None = None,
+    subagent_runner: object | None = None,
 ):
     return build_agent_graph(
         definition=definition or _make_definition(),
         tool_registry=tool_registry or _make_registry(),
         query_understanding_service=_research_service(),
         evaluate_decision_provider=evaluate_decision_provider,
+        subagent_runner=subagent_runner,
     )
 
 
@@ -215,6 +219,21 @@ class _ScriptedDecisionProvider:
         del state, definition, budget_remaining, context
         self.calls += 1
         return self._decisions.pop(0)
+
+
+class _SuccessfulSubAgentRunner:
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    async def run_subtask(self, *, subtask: SubTaskNode, parent_state: AgentState) -> AgentRunResult:
+        del parent_state
+        self.calls.append(subtask.subtask_id)
+        return AgentRunResult(
+            run_id=f"child-{subtask.subtask_id}",
+            thread_id=f"child-{subtask.subtask_id}",
+            status="done",
+            final_answer=f"done:{subtask.subtask_id}",
+        )
 
 
 class TestBaseGraph:
@@ -276,6 +295,56 @@ class TestBaseGraph:
         assert result["status"] == "paused"
         assert result["needs_user_input"] == "Choose a data source"
         assert result["final_answer"] is None
+
+    @pytest.mark.anyio
+    async def test_task_dag_send_executes_subagent_and_re_evaluates_to_done(self) -> None:
+        subtask = SubTaskNode(
+            subtask_id="s1",
+            agent_type="research",
+            prompt="Research",
+            priority=1,
+            estimated_tokens=10,
+        )
+        runner = _SuccessfulSubAgentRunner()
+        graph = _make_graph(subagent_runner=runner)
+        state = _initial_state(config=_make_config(run_id="graph-subagent", budget_total=100))
+        state["plan"] = TaskDAG(subtasks=[subtask])
+
+        result = await graph.ainvoke(
+            state,
+            config={"configurable": {"thread_id": "graph-subagent"}},
+        )
+
+        assert result["status"] == "done"
+        assert result["stop_reason"] == "all_subtasks_terminal"
+        assert runner.calls == ["s1"]
+        assert result["terminal_subtasks"] == {"s1"}
+        assert result["successful_subtasks"] == {"s1"}
+        assert result["subtask_results"]["s1"].findings == ["done:s1"]
+
+    @pytest.mark.anyio
+    async def test_task_dag_without_subagent_runner_records_failed_subtask(self) -> None:
+        subtask = SubTaskNode(
+            subtask_id="s1",
+            agent_type="research",
+            prompt="Research",
+            priority=1,
+            estimated_tokens=10,
+        )
+        graph = _make_graph()
+        state = _initial_state(config=_make_config(run_id="graph-subagent-missing", budget_total=100))
+        state["plan"] = TaskDAG(subtasks=[subtask])
+
+        result = await graph.ainvoke(
+            state,
+            config={"configurable": {"thread_id": "graph-subagent-missing"}},
+        )
+
+        subtask_result = result["subtask_results"]["s1"]
+        assert subtask_result.status is SubTaskStatus.FAILED
+        assert subtask_result.error_message == "subagent_runner_missing"
+        assert result["terminal_subtasks"] == {"s1"}
+        assert result["successful_subtasks"] == set()
 
     @pytest.mark.anyio
     async def test_registered_tool_without_runner_fails_closed(self) -> None:

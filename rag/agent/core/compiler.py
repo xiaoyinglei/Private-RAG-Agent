@@ -3,6 +3,7 @@ from __future__ import annotations
 from rag.agent.core.definition import AgentDefinition
 from rag.agent.graphs.base import build_agent_graph
 from rag.agent.graphs.nodes.evaluate import EvaluateDecisionProvider
+from rag.agent.graphs.nodes.execute_subagent import SubAgentRunner
 from rag.agent.tools.registry import ToolRegistry
 
 
@@ -15,10 +16,12 @@ class AgentGraphCompiler:
         tool_registry: ToolRegistry,
         query_understanding_service: object | None = None,
         evaluate_decision_provider: EvaluateDecisionProvider | None = None,
+        subagent_runner: SubAgentRunner | None = None,
     ) -> None:
         self._tool_registry = tool_registry
         self._query_understanding_service = query_understanding_service
         self._evaluate_decision_provider = evaluate_decision_provider
+        self._subagent_runner = subagent_runner
 
     def compile(self, definition: AgentDefinition) -> object:
         missing_tools = self._missing_allowed_tools(definition)
@@ -29,6 +32,7 @@ class AgentGraphCompiler:
             tool_registry=self._tool_registry,
             query_understanding_service=self._query_understanding_service,
             evaluate_decision_provider=self._evaluate_decision_provider,
+            subagent_runner=self._subagent_runner,
         )
 
     def _missing_allowed_tools(self, definition: AgentDefinition) -> list[str]:
