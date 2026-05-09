@@ -2,7 +2,7 @@
 
 from rag.agent.core.agent_as_tool import AgentToolSpec
 from rag.agent.core.compiler import AgentGraphCompiler
-from rag.agent.core.context import AgentRunConfig, BudgetLedger, RuntimeRegistry
+from rag.agent.core.context import AgentRunConfig, BudgetLedger, RuntimeRegistry, derive_child_config
 from rag.agent.core.definition import AgentDefinition, ModelPolicy, ToolPolicy
 from rag.agent.core.registry import AgentRegistry
 from rag.agent.core.task import SubTaskNode, SubTaskResult, SubTaskStatus, TaskDAG, TaskEdge
@@ -47,4 +47,5 @@ __all__ = [
     "ToolResult",
     "ToolSpec",
     "WorkingSummary",
+    "derive_child_config",
 ]

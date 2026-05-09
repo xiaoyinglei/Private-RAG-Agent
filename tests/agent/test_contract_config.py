@@ -9,10 +9,11 @@ from rag.agent.core.context import (
     AgentRuntimeHandles,
     BudgetLedger,
     RuntimeRegistry,
+    derive_child_config,
 )
 from rag.agent.core.definition import AgentDefinition, ModelPolicy, ToolPolicy
 from rag.agent.core.registry import AgentRegistry
-from rag.schema.runtime import AccessPolicy, ExecutionLocationPreference
+from rag.schema.runtime import AccessPolicy, ExecutionLocationPreference, ExternalRetrievalPolicy
 
 
 class TestBudgetLedger:
@@ -89,6 +90,82 @@ class TestAgentRunConfig:
         assert cfg.deadline_iso is None
         assert cfg.budget_committed == 0
         assert isinstance(cfg.tool_policy, ToolPolicy)
+
+
+class TestDeriveChildConfig:
+    def test_derive_child_config_inherits_parent_runtime_scope(self) -> None:
+        parent = AgentRunConfig(
+            run_id="parent",
+            thread_id="parent-thread",
+            budget_total=20000,
+            max_depth=2,
+            access_policy=AccessPolicy.default(),
+            execution_location_preference=ExecutionLocationPreference.LOCAL_FIRST,
+            source_scope=("doc-a", "doc-b"),
+        )
+        child_def = AgentDefinition(
+            agent_type="research",
+            description="Research",
+            system_prompt="Research",
+            allowed_tools=["vector_search"],
+            estimated_token_budget=3500,
+            tool_policy=ToolPolicy(max_parallel_calls=1),
+        )
+
+        child = derive_child_config(parent, child_def)
+
+        assert child.run_id
+        assert child.run_id != parent.run_id
+        assert child.thread_id == child.run_id
+        assert child.parent_run_id == parent.run_id
+        assert child.source_scope == parent.source_scope
+        assert child.access_policy == parent.access_policy
+        assert child.execution_location_preference is parent.execution_location_preference
+        assert child.max_depth == 1
+        assert child.budget_total == 3500
+        assert child.budget_committed == 0
+        assert child.budget_reserved == {}
+        assert child.tool_policy.max_parallel_calls == 1
+
+    def test_derive_child_config_narrows_child_access_policy(self) -> None:
+        parent = AgentRunConfig(
+            run_id="parent-policy",
+            thread_id="parent-policy-thread",
+            budget_total=10000,
+            max_depth=2,
+            access_policy=AccessPolicy.default(),
+            execution_location_preference=ExecutionLocationPreference.LOCAL_FIRST,
+        )
+        child_def = AgentDefinition(
+            agent_type="local_research",
+            description="Local only",
+            system_prompt="Local only",
+            allowed_tools=[],
+            access_policy=AccessPolicy(external_retrieval=ExternalRetrievalPolicy.DENY),
+        )
+
+        child = derive_child_config(parent, child_def)
+
+        assert child.access_policy.external_retrieval is ExternalRetrievalPolicy.DENY
+
+    def test_derive_child_config_rejects_exhausted_depth(self) -> None:
+        parent = AgentRunConfig(
+            run_id="parent-depth",
+            thread_id="parent-depth-thread",
+            budget_total=10000,
+            max_depth=0,
+            access_policy=AccessPolicy.default(),
+            execution_location_preference=ExecutionLocationPreference.LOCAL_FIRST,
+        )
+        child_def = AgentDefinition(
+            agent_type="research",
+            description="Research",
+            system_prompt="Research",
+            allowed_tools=[],
+        )
+
+        with pytest.raises(RuntimeError, match="Agent nesting depth exceeded"):
+            derive_child_config(parent, child_def)
 
 
 class TestRuntimeRegistry:

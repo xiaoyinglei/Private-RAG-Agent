@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
+from uuid import uuid4
 
-from rag.agent.core.definition import ToolPolicy
+from rag.agent.core.definition import AgentDefinition, ToolPolicy
 from rag.schema.runtime import AccessPolicy, ExecutionLocationPreference
 
 
@@ -22,6 +23,27 @@ class AgentRunConfig:
     budget_committed: int = 0
     budget_reserved: dict[str, int] = field(default_factory=dict)
     tool_policy: ToolPolicy = field(default_factory=ToolPolicy)
+
+
+def derive_child_config(parent: AgentRunConfig, child_def: AgentDefinition) -> AgentRunConfig:
+    if parent.max_depth <= 0:
+        raise RuntimeError(f"Agent nesting depth exceeded for {child_def.agent_type}")
+    child_id = str(uuid4())
+    return AgentRunConfig(
+        run_id=child_id,
+        thread_id=child_id,
+        parent_run_id=parent.run_id,
+        access_policy=(
+            parent.access_policy.narrow(child_def.access_policy)
+            if child_def.access_policy is not None
+            else parent.access_policy
+        ),
+        source_scope=parent.source_scope,
+        execution_location_preference=parent.execution_location_preference,
+        max_depth=parent.max_depth - 1,
+        budget_total=child_def.estimated_token_budget,
+        tool_policy=child_def.tool_policy,
+    )
 
 
 class BudgetLedger:
