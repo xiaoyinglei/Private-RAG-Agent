@@ -8,7 +8,7 @@ from rag.agent.core.task import SubTaskNode, SubTaskStatus
 from rag.agent.graphs.nodes.execute_subagent import execute_subagent_node
 from rag.agent.service import AgentRunResult
 from rag.agent.state import AgentState
-from rag.agent.tools.spec import ToolResult
+from rag.agent.tools.spec import ToolError, ToolResult
 from rag.schema.query import AnswerCitation, EvidenceItem
 from rag.schema.runtime import AccessPolicy, ExecutionLocationPreference
 
@@ -110,6 +110,31 @@ class _FailingRunner:
         raise RuntimeError("child failed")
 
 
+class _FailedStatusRunner:
+    async def run_subtask(self, *, subtask: SubTaskNode, parent_state: AgentState) -> AgentRunResult:
+        del parent_state
+        return AgentRunResult(
+            run_id=f"child-{subtask.subtask_id}",
+            thread_id=f"child-{subtask.subtask_id}",
+            status="failed",
+            stop_reason="budget_exhausted",
+            tool_results=[
+                ToolResult(
+                    tool_call_id="tc-failed",
+                    tool_name="llm_summarize",
+                    status="error",
+                    error=ToolError(
+                        code="budget_exhausted",
+                        message="child budget exhausted",
+                        retryable=False,
+                    ),
+                    latency_ms=1,
+                    token_used=7,
+                )
+            ],
+        )
+
+
 @pytest.mark.anyio
 async def test_execute_subagent_success_commits_budget_and_marks_successful() -> None:
     subtask = _subtask()
@@ -147,3 +172,21 @@ async def test_execute_subagent_failure_refunds_budget_and_does_not_mark_success
     assert "successful_subtasks" not in update
     assert await handles.budget_ledger.remaining() == 100
     RuntimeRegistry.remove("subagent-failure")
+
+
+@pytest.mark.anyio
+async def test_execute_subagent_failed_result_marks_subtask_failed_without_refund() -> None:
+    subtask = _subtask()
+    state = _state("subagent-result-failed", subtask)
+    handles = RuntimeRegistry.get("subagent-result-failed")
+    assert await handles.budget_ledger.reserve(subtask.subtask_id, subtask.estimated_tokens or 0)
+
+    update = await execute_subagent_node(state, subagent_runner=_FailedStatusRunner())
+
+    result = update["subtask_results"][subtask.subtask_id]
+    assert result.status is SubTaskStatus.FAILED
+    assert result.error_message == "Subagent failed: budget_exhausted"
+    assert update["terminal_subtasks"] == {"s1"}
+    assert "successful_subtasks" not in update
+    assert await handles.budget_ledger.remaining() == 93
+    RuntimeRegistry.remove("subagent-result-failed")

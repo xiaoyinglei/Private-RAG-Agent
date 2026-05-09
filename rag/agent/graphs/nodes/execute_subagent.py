@@ -12,7 +12,9 @@ from rag.schema.query import AnswerCitation, EvidenceItem
 
 
 class SubAgentRunResult(Protocol):
+    status: str
     final_answer: str | None
+    stop_reason: str | None
     tool_results: list[ToolResult]
     evidence: list[EvidenceItem]
     citations: list[AnswerCitation]
@@ -61,6 +63,18 @@ async def execute_subagent_node(
         subtask.subtask_id,
         actual_tokens,
     )
+    if result.status != "done":
+        return {
+            "subtask_results": {
+                subtask.subtask_id: SubTaskResult(
+                    subtask=subtask,
+                    status=SubTaskStatus.FAILED,
+                    error_message=_subagent_failure_message(result),
+                )
+            },
+            "terminal_subtasks": {subtask.subtask_id},
+        }
+
     subtask_result = SubTaskResult(
         subtask=subtask,
         status=SubTaskStatus.COMPLETED,
@@ -75,3 +89,8 @@ async def execute_subagent_node(
         "terminal_subtasks": {subtask.subtask_id},
         "successful_subtasks": {subtask.subtask_id},
     }
+
+
+def _subagent_failure_message(result: SubAgentRunResult) -> str:
+    reason = result.stop_reason or result.status
+    return f"Subagent failed: {reason}"
