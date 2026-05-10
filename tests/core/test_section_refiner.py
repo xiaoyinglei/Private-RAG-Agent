@@ -3,7 +3,7 @@ from __future__ import annotations
 from rag.assembly import TokenAccountingService, TokenizerContract
 from rag.ingest.asset_anchors import asset_anchor
 from rag.ingest.section_refiner import SectionRefiner
-from rag.schema.core import DocumentType, ParsedDocument, ParsedSection, SourceType
+from rag.schema.core import ParsedDocument, ParsedSection, SourceType
 
 
 def _token_accounting(*, chunk_size: int = 24, overlap: int = 4) -> TokenAccountingService:
@@ -44,7 +44,7 @@ def test_section_refiner_splits_oversized_sections_without_losing_raw_spans() ->
     parsed = ParsedDocument(
         title="Generic Long Document",
         source_type=SourceType.PLAIN_TEXT,
-        doc_type=DocumentType.UNKNOWN,
+
         authors=["tester"],
         language="en",
         visible_text=text,
@@ -81,7 +81,7 @@ def test_section_refiner_keeps_existing_small_sections_unchanged() -> None:
     parsed = ParsedDocument(
         title="Structured",
         source_type=SourceType.MARKDOWN,
-        doc_type=DocumentType.UNKNOWN,
+
         authors=["tester"],
         language="en",
         visible_text=visible_text,
@@ -118,7 +118,7 @@ def test_section_refiner_preserves_asset_anchor_when_token_offsets_split_anchor(
     parsed = ParsedDocument(
         title="Anchored",
         source_type=SourceType.PLAIN_TEXT,
-        doc_type=DocumentType.UNKNOWN,
+
         authors=["tester"],
         language="en",
         visible_text=text,

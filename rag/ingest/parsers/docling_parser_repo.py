@@ -20,7 +20,7 @@ from docling_core.types.doc.labels import DocItemLabel
 
 from rag.ingest.asset_anchors import asset_anchor
 from rag.ingest.parsers.util import default_title_from_location, normalize_whitespace, slugify
-from rag.schema.core import DocumentType, ParsedDocument, ParsedElement, ParsedSection, SourceType
+from rag.schema.core import ParsedDocument, ParsedElement, ParsedSection, SourceType
 from rag.schema.model_protocols import VisualDescriptionRepo
 
 _DOCLING_TABLE_IMAGE_DEPRECATION = (
@@ -108,7 +108,6 @@ class DoclingParserRepo:
         return ParsedDocument(
             title=resolved_title,
             source_type=source_type,
-            doc_type=DocumentType.UNKNOWN,
             authors=[owner],
             language=None, 
             sections=sections,

@@ -14,7 +14,6 @@ from rag.ingest.section_refiner import SectionRefiner
 from rag.schema.core import (
     AssetRecord,
     Document,
-    DocumentType,
     LayoutMetaCacheRecord,
     ParsedDocument,
     ParsedElement,
@@ -208,7 +207,7 @@ def test_asset_anchor_binds_table_to_refined_section_and_indexes_asset_text(tmp_
     parsed_doc = ParsedDocument(
         title="Policy",
         source_type=SourceType.DOCX,
-        doc_type=DocumentType.UNKNOWN,
+
         authors=["tester"],
         language="zh",
         visible_text=section_text,
@@ -301,7 +300,7 @@ def test_large_table_assets_store_table_policy_and_sample_summary_input(tmp_path
     parsed_doc = ParsedDocument(
         title="Policy",
         source_type=SourceType.DOCX,
-        doc_type=DocumentType.UNKNOWN,
+
         authors=["tester"],
         language="zh",
         visible_text=f"Large table follows {table_anchor}",
@@ -393,7 +392,7 @@ def test_compute_only_excel_asset_uses_raw_workbook_storage_and_top_level_table_
     parsed_doc = ParsedDocument(
         title="Ledger",
         source_type=SourceType.XLSX,
-        doc_type=DocumentType.UNKNOWN,
+
         authors=["tester"],
         language="zh",
         visible_text=f"Ledger table {table_anchor}",
@@ -482,7 +481,7 @@ def test_doc_summary_reduces_generated_section_and_asset_summaries(tmp_path: Pat
     parsed_doc = ParsedDocument(
         title="Policy",
         source_type=SourceType.DOCX,
-        doc_type=DocumentType.UNKNOWN,
+
         authors=["tester"],
         language="zh",
         visible_text=visible_text,

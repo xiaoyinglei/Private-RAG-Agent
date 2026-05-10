@@ -26,7 +26,6 @@ from rag.schema.core import (
     DocSummaryRecord,
     Document,
     DocumentStatus,
-    DocumentType,
     IndexingMode,
     LayoutMetaCacheRecord,
     ParsedDocument,
@@ -549,7 +548,6 @@ class IngestPipeline:
         return ParsedDocument(
             title=title,
             source_type=source_type,
-            doc_type=DocumentType.UNKNOWN,
             authors=[request.owner],
             language=None,
             sections=[section],
@@ -590,7 +588,6 @@ class IngestPipeline:
         return Document(
             source_id=source.source_id,
             title=parsed_doc.title,
-            doc_type=parsed_doc.doc_type if parsed_doc.doc_type else DocumentType.UNKNOWN,
             language=parsed_doc.language,
             authors=list(parsed_doc.authors),
             file_hash=content_hash,

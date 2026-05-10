@@ -8,7 +8,6 @@ import pytest
 from rag.schema.core import (
     AssetRecord,
     Document,
-    DocumentType,
     ProcessingStateRecord,
     SectionLocatorRecord,
     SectionRecord,
@@ -209,7 +208,7 @@ def _build_document(*, doc_id: int = 99, file_hash: str = "hash-1") -> Document:
         doc_id=doc_id,
         source_id=10,
         title="Call 13812345678",
-        doc_type=DocumentType.REPORT,
+
         language="zh",
         authors=["alice"],
         file_hash=file_hash,

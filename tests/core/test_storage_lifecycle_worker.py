@@ -76,7 +76,6 @@ def _document(*, doc_id: int, storage_tier: StorageTier, is_active: bool, doc_st
         doc_id=doc_id,
         source_id=doc_id + 100,
         title=f"Doc {doc_id}",
-        doc_type="article",
         file_hash=f"hash-{doc_id}",
         storage_tier=storage_tier,
         is_active=is_active,

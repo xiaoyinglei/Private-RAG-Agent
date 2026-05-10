@@ -3,7 +3,7 @@ from __future__ import annotations
 from bs4 import BeautifulSoup
 
 from rag.ingest.parsers.util import default_title_from_location, normalize_whitespace, slugify
-from rag.schema.core import DocumentType, ParsedDocument, ParsedSection, SourceType
+from rag.schema.core import ParsedDocument, ParsedSection, SourceType
 
 
 class WebParserRepo:
@@ -106,7 +106,6 @@ class WebParserRepo:
         return ParsedDocument(
             title=document_title,
             source_type=SourceType.WEB,
-            doc_type=DocumentType.ARTICLE,
             authors=[owner],
             language="en",
             sections=sections,

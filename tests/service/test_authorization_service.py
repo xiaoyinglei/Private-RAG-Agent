@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from rag.retrieval.authorization_service import AuthorizationService
-from rag.schema.core import Document, DocumentType, Source, SourceType
+from rag.schema.core import Document, Source, SourceType
 from rag.schema.runtime import AccessPolicy, ExecutionLocation, Residency
 
 
@@ -47,8 +47,8 @@ class _MetadataFallbackResolver:
     def list_documents(self, source_id=None, *, active_only: bool = False):
         del source_id, active_only
         return [
-            Document(source_id=7, doc_id=42, doc_type=DocumentType.REPORT, file_hash="hash-42", version_group_id=42),
-            Document(source_id=8, doc_id=99, doc_type=DocumentType.REPORT, file_hash="hash-99", version_group_id=99),
+            Document(source_id=7, doc_id=42, file_hash="hash-42", version_group_id=42),
+            Document(source_id=8, doc_id=99, file_hash="hash-99", version_group_id=99),
         ]
 
 

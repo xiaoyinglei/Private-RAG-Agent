@@ -24,17 +24,6 @@ class SourceType(StrEnum):
     BROWSER_CLIP = "browser_clip"
 
 
-class DocumentType(StrEnum):
-    """知识的业务体裁 (指挥 L3 意图过滤与大模型 Prompt)"""
-    POLICY = "policy"           # 规章制度 / 规范
-    REPORT = "report"           # 财务报告 / 研报
-    MANUAL = "manual"           # 操作手册 / 指南
-    CONTRACT = "contract"       # 合同 / 协议
-    ARTICLE = "article"         # 新闻 / 软文
-    NOTE = "note"               # 会议记录 / 笔记
-    UNKNOWN = "unknown"         # 未知/兜底体裁
-
-
 class DocumentStatus(StrEnum):
     DRAFT = "draft"
     PUBLISHED = "published"
@@ -99,7 +88,6 @@ class Document(BaseModel):
     doc_id: int = 0
     source_id: int
     title: str | None = None
-    doc_type: DocumentType
     language: str | None = None
     authors: list[str] = Field(default_factory=list)
     file_hash: str
@@ -192,7 +180,6 @@ class ParsedElement:
 class ParsedDocument:
     title: str
     source_type: SourceType
-    doc_type: DocumentType
     authors: list[str]
     language: str
     sections: list[ParsedSection]
@@ -543,7 +530,6 @@ __all__ = [
     "DocumentFeatures",
     "DocumentStatus",
     "DocumentProcessingPackage",
-    "DocumentType",
     "IndexingMode",
     "OcrRegion",
     "OcrResult",

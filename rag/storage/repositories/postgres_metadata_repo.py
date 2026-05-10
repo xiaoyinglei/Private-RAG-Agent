@@ -207,7 +207,6 @@ class PostgresMetadataRepo:
                 doc_id,
                 source_id,
                 title,
-                doc_type,
                 language,
                 authors,
                 file_hash,
@@ -238,12 +237,11 @@ class PostgresMetadataRepo:
                 metadata_json
             )
             VALUES (
-                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                 %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
             )
             ON CONFLICT (source_id, file_hash, version_no) DO UPDATE SET
                 title = EXCLUDED.title,
-                doc_type = EXCLUDED.doc_type,
                 language = EXCLUDED.language,
                 authors = EXCLUDED.authors,
                 doc_status = EXCLUDED.doc_status,
@@ -274,7 +272,6 @@ class PostgresMetadataRepo:
                 saved_document.doc_id,
                 saved_document.source_id,
                 saved_document.title,
-                saved_document.doc_type.value,
                 saved_document.language,
                 self._json_dumps(saved_document.authors),
                 saved_document.file_hash,
@@ -1003,7 +1000,6 @@ class PostgresMetadataRepo:
                 doc_id BIGINT PRIMARY KEY,
                 source_id BIGINT NOT NULL REFERENCES {self._schema}.sources(source_id) ON DELETE CASCADE,
                 title TEXT,
-                doc_type VARCHAR(32) NOT NULL,
                 language VARCHAR(16),
                 authors JSONB NOT NULL DEFAULT '[]',
                 file_hash VARCHAR(64) NOT NULL,
