@@ -8,7 +8,7 @@ from rag.ingest.asset_anchors import asset_anchor
 from rag.ingest.header_detector import HeaderKind, detect_header
 from rag.ingest.parsers.util import default_title_from_location, normalize_whitespace, slugify
 from rag.ingest.table_sampler import profile_table_data
-from rag.schema.core import DocumentType, ParsedDocument, ParsedElement, ParsedSection, SourceType
+from rag.schema.core import ParsedDocument, ParsedElement, ParsedSection, SourceType
 
 _MIN_DETECT_CONFIDENCE = 0.5
 
@@ -161,7 +161,6 @@ class ExcelParserRepo:
         return ParsedDocument(
             title=doc_title,
             source_type=SourceType.XLSX,
-            doc_type=DocumentType.UNKNOWN,
             authors=[owner],
             language=None,
             sections=sections,

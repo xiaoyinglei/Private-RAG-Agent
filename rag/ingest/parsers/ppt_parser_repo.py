@@ -7,7 +7,7 @@ from pptx import Presentation
 
 from rag.ingest.asset_anchors import asset_anchor
 from rag.ingest.parsers.util import default_title_from_location, normalize_whitespace, slugify
-from rag.schema.core import DocumentType, ParsedDocument, ParsedElement, ParsedSection, SourceType
+from rag.schema.core import ParsedDocument, ParsedElement, ParsedSection, SourceType
 
 
 class PptxParserRepo:
@@ -161,7 +161,6 @@ class PptxParserRepo:
         return ParsedDocument(
             title=doc_title,
             source_type=SourceType.PPTX,
-            doc_type=DocumentType.UNKNOWN,
             authors=[doc_author],
             language=None,
             sections=sections,

@@ -5,7 +5,7 @@ from typing import Any
 
 import pytest
 
-from rag.schema.core import AssetRecord, Document, DocumentType, ProcessingStateRecord, SectionRecord, Source, SourceType
+from rag.schema.core import AssetRecord, Document, ProcessingStateRecord, SectionRecord, Source, SourceType
 from rag.storage.repositories.postgres_metadata_repo import PostgresMetadataRepo
 
 
@@ -107,7 +107,6 @@ def test_postgres_metadata_repo_saves_v1_records(monkeypatch: pytest.MonkeyPatch
                     "doc_id": 11,
                     "source_id": 7,
                     "title": "Storage Blueprint",
-                    "doc_type": "report",
                     "language": "zh",
                     "authors": ["alice"],
                     "file_hash": "doc-hash",
@@ -233,7 +232,7 @@ def test_postgres_metadata_repo_saves_v1_records(monkeypatch: pytest.MonkeyPatch
         Document(
             source_id=source.source_id,
             title="Storage Blueprint",
-            doc_type=DocumentType.REPORT,
+
             language="zh",
             authors=["alice"],
             file_hash="doc-hash",

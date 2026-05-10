@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from rag.retrieval.synthesis_service import SynthesisService
-from rag.schema.core import Document, DocumentType
+from rag.schema.core import Document
 from rag.schema.query import EvidenceItem
 from rag.schema.runtime import AccessPolicy
 
@@ -20,7 +20,7 @@ def _document(doc_id: int) -> Document:
     return Document(
         doc_id=doc_id,
         source_id=1,
-        doc_type=DocumentType.REPORT,
+
         file_hash=f"hash-{doc_id}",
         version_group_id=doc_id,
         is_active=True,

@@ -6,7 +6,7 @@ from typing import cast
 from PIL import Image
 
 from rag.ingest.parsers.util import default_title_from_location, normalize_whitespace, slugify
-from rag.schema.core import DocumentType, ParsedDocument, ParsedElement, ParsedSection, SourceType
+from rag.schema.core import ParsedDocument, ParsedElement, ParsedSection, SourceType
 from rag.schema.model_protocols import OcrVisionRepo
 
 
@@ -84,7 +84,6 @@ class ImageParserRepo:
         return ParsedDocument(
             title=document_title,
             source_type=SourceType.IMAGE,
-            doc_type=DocumentType.UNKNOWN,
             authors=[owner],
             language=None,
             sections=[section],
