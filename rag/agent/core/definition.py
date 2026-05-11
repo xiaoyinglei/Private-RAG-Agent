@@ -8,11 +8,16 @@ from rag.schema.runtime import AccessPolicy
 
 
 @dataclass(frozen=True)
-class ModelPolicy:
-    model_alias: str = "opus"
-    fallback_model: str | None = "sonnet"
+class ModelSelectionPolicy:
+    """每个 Agent 节点的模型选择策略。None = 使用 ModelRegistry.default_model。"""
+
+    route_model: str | None = None
+    evaluate_model: str | None = None
+    plan_model: str | None = None
     thinking: bool = True
-    temperature: float = 0.0
+    route_temperature: float = 0.0
+    evaluate_temperature: float = 0.0
+    plan_temperature: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -30,7 +35,7 @@ class AgentDefinition:
     allowed_tools: list[str]
     access_policy: AccessPolicy | None = None
     estimated_token_budget: int = 8000
-    model_policy: ModelPolicy = field(default_factory=ModelPolicy)
+    model_selection: ModelSelectionPolicy = field(default_factory=ModelSelectionPolicy)
     output_model: type[BaseModel] | None = None
     max_iterations: int = 10
     max_depth: int = 2

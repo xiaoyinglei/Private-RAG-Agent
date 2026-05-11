@@ -125,7 +125,7 @@ class AgentExecutor:
         access_policy: AccessPolicy,
         execution_location_preference: ExecutionLocationPreference,
     ) -> RetrievalResult:
-        retrieve = getattr(self._retrieval_service, "retrieve")
+        retrieve = self._retrieval_service.retrieve
         return retrieve(
             retrieval_query,
             access_policy=access_policy,

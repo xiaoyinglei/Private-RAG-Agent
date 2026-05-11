@@ -48,13 +48,15 @@ class MLXGenerator(Generator):
         top_p = float(kwargs.pop("top_p", 0.95))
 
         try:
-            from mlx_lm import generate
+            from mlx_lm import generate  # noqa: F811
+            from mlx_lm.sample_utils import make_sampler
         except ImportError as exc:
             raise RuntimeError(
                 "mlx_lm is not installed. Please install mlx-lm before using MLXGenerator."
             ) from exc
 
         formatted_prompt = self._render_chat_prompt(self._tokenizer, prompt)
+        sampler = make_sampler(temp=temperature, top_p=top_p)
 
         try:
             result = generate(
@@ -62,8 +64,7 @@ class MLXGenerator(Generator):
                 self._tokenizer,
                 prompt=formatted_prompt,
                 max_tokens=max_tokens,
-                temp=temperature,
-                top_p=top_p,
+                sampler=sampler,
                 verbose=False,
             )
         except Exception as exc:

@@ -67,7 +67,8 @@ def _state() -> AgentState:
         "stop_reason": None,
         "needs_user_input": None,
         "pending_tool_calls": [],
-        "confirmed_tool_call_ids": set(),
+        "approved_tool_call_ids": [],
+        "denied_tool_call_ids": [],
         "user_decision": None,
         "next_subtasks": None,
         "working_summary": WorkingSummary(

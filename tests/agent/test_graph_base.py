@@ -141,7 +141,8 @@ def _initial_state(
         "iteration": 0,
         "status": "running",
         "pending_tool_calls": pending_tool_calls or [],
-        "confirmed_tool_call_ids": set(),
+        "approved_tool_call_ids": [],
+        "denied_tool_call_ids": [],
         "user_decision": None,
         "next_subtasks": None,
         "working_summary": None,
@@ -454,7 +455,9 @@ class TestBaseGraph:
             config={"configurable": {"thread_id": "graph-test"}},
         )
         assert result["status"] == "paused"
-        assert result["needs_user_input"] == "Confirm tool execution: ['confirm_me']"
+        assert "confirm_me" in result["needs_user_input"]
+        assert result["human_input_request"] is not None
+        assert result["human_input_request"].kind == "tool_approval"
         assert result["tool_results"] == []
         assert result["pending_tool_calls"] == [call]
 

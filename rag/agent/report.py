@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from rag.agent.schema import (
     AgentFinalReport,
     EvidenceMapEntry,
@@ -10,7 +12,6 @@ from rag.agent.schema import (
     SubTaskResult,
     SubTaskStatus,
 )
-from typing import Any
 
 
 class AgentReportBuilder:

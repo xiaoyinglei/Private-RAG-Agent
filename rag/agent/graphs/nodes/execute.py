@@ -6,6 +6,7 @@ from typing import Any
 
 from pydantic import ValidationError
 
+from rag.agent.core.approval_policy import ApprovalDecision, ApprovalPolicy, merge_approval_requests
 from rag.agent.core.context import AgentRunConfig, RuntimeRegistry
 from rag.agent.state import AgentState, ToolCallPlan
 from rag.agent.tools.registry import (
@@ -82,31 +83,77 @@ async def execute_node(
             continue
         rest.append(call)
 
-    confirmed = state.get("confirmed_tool_call_ids", set())
-    needs_confirmation = [
-        call
-        for call in rest
-        if (
-            call.tool_name in tool_policy.require_confirmation_for
-            or specs_by_name[call.tool_name].requires_confirmation
+    approved_ids = set(state.get("approved_tool_call_ids", []))
+    denied_ids = set(state.get("denied_tool_call_ids", []))
+    approval_policy = ApprovalPolicy()
+
+    executables: list[ToolCallPlan] = []
+    ask_decisions: list[ApprovalDecision] = []
+
+    for call in rest:
+        spec = specs_by_name.get(call.tool_name)
+        decision = approval_policy.decide(
+            tool_name=call.tool_name, arguments=call.arguments, spec=spec,
         )
-        and call.tool_call_id not in confirmed
-    ]
-    if needs_confirmation:
+
+        if decision.action == "deny":
+            results.append(
+                ToolResult(
+                    tool_call_id=call.tool_call_id,
+                    tool_name=call.tool_name,
+                    status="error",
+                    error=ToolError(code="tool_denied", message=decision.reason, retryable=False),
+                    latency_ms=0,
+                )
+            )
+        elif decision.action == "ask":
+            if call.tool_call_id in approved_ids:
+                executables.append(call)
+            elif call.tool_call_id in denied_ids:
+                results.append(
+                    ToolResult(
+                        tool_call_id=call.tool_call_id,
+                        tool_name=call.tool_name,
+                        status="error",
+                        error=ToolError(code="tool_denied", message=decision.reason, retryable=False),
+                        latency_ms=0,
+                    )
+                )
+            else:
+                ask_decisions.append(decision)
+        else:  # allow
+            if call.tool_call_id in denied_ids:
+                results.append(
+                    ToolResult(
+                        tool_call_id=call.tool_call_id,
+                        tool_name=call.tool_name,
+                        status="error",
+                        error=ToolError(code="tool_denied", message=decision.reason, retryable=False),
+                        latency_ms=0,
+                    )
+                )
+            else:
+                executables.append(call)
+
+    # 有新的 ASK 工具 → 保守暂停，不执行任何工具
+    if ask_decisions:
+        request = merge_approval_requests(ask_decisions)
         return {
             "status": "paused",
-            "needs_user_input": f"Confirm tool execution: {[call.tool_name for call in needs_confirmation]}",
-            "pending_tool_calls": needs_confirmation,
+            "human_input_request": request,
+            "needs_user_input": request.question,
+            "pending_tool_calls": pending,
             "tool_results": results,
         }
 
-    executables = rest[: tool_policy.max_parallel_calls]
-    excess = rest[tool_policy.max_parallel_calls :]
+    # 全部允许 / 已批准 → 执行
+    batch = executables[: tool_policy.max_parallel_calls]
+    excess = executables[tool_policy.max_parallel_calls :]
 
     gathered = await asyncio.gather(
         *[
             _execute_one_tool(call, run_config=state["run_config"], tool_registry=tool_registry)
-            for call in executables
+            for call in batch
         ],
         return_exceptions=True,
     )
@@ -114,8 +161,8 @@ async def execute_node(
         if isinstance(result_or_exc, Exception):
             results.append(
                 ToolResult(
-                    tool_call_id=executables[index].tool_call_id,
-                    tool_name=executables[index].tool_name,
+                    tool_call_id=batch[index].tool_call_id,
+                    tool_name=batch[index].tool_name,
                     status="error",
                     error=ToolError(code="internal", message=str(result_or_exc), retryable=True),
                     latency_ms=0,

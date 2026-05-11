@@ -6,5 +6,4 @@ contract. New synthesis behavior lives in rag.agent.graphs.nodes.synthesize.
 
 from __future__ import annotations
 
-
 __all__: list[str] = []

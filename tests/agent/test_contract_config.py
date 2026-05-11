@@ -11,7 +11,7 @@ from rag.agent.core.context import (
     RuntimeRegistry,
     derive_child_config,
 )
-from rag.agent.core.definition import AgentDefinition, ModelPolicy, ToolPolicy
+from rag.agent.core.definition import AgentDefinition, ModelSelectionPolicy, ToolPolicy
 from rag.agent.core.registry import AgentRegistry
 from rag.schema.runtime import AccessPolicy, ExecutionLocationPreference, ExternalRetrievalPolicy
 
@@ -224,7 +224,7 @@ class TestAgentDefinition:
         )
         assert ad.agent_type == "research"
         assert ad.allowed_tools == ["vector_search", "grounding"]
-        assert ad.model_policy.model_alias == "opus"
+        assert ad.model_selection.route_model is None  # 默认不绑定特定模型
         assert ad.max_iterations == 10
         assert ad.max_depth == 2
         assert ad.estimated_token_budget == 8000
@@ -258,12 +258,15 @@ class TestAgentDefinition:
         assert "web_search" in tp.deny_tools
         assert tp.max_parallel_calls == 2
 
-    def test_model_policy_defaults(self) -> None:
-        mp = ModelPolicy()
-        assert mp.model_alias == "opus"
-        assert mp.fallback_model == "sonnet"
-        assert mp.thinking is True
-        assert mp.temperature == 0.0
+    def test_model_selection_defaults(self) -> None:
+        ms = ModelSelectionPolicy()
+        assert ms.route_model is None
+        assert ms.evaluate_model is None
+        assert ms.plan_model is None
+        assert ms.thinking is True
+        assert ms.route_temperature == 0.0
+        assert ms.evaluate_temperature == 0.0
+        assert ms.plan_temperature == 0.0
 
 
 class TestAgentRegistry:

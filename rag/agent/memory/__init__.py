@@ -5,8 +5,8 @@ from rag.agent.memory.injector import ContextInjector
 from rag.agent.memory.models import (
     ContextBudgetSnapshot,
     ContextSection,
-    InjectedContext,
     ExtractedFact,
+    InjectedContext,
     WorkingMemoryDehydration,
     WorkingSummary,
 )

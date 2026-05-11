@@ -3,7 +3,7 @@
 from rag.agent.core.agent_as_tool import AgentAsToolRunner, AgentToolSpec
 from rag.agent.core.compiler import AgentGraphCompiler
 from rag.agent.core.context import AgentRunConfig, BudgetLedger, RuntimeRegistry, derive_child_config
-from rag.agent.core.definition import AgentDefinition, ModelPolicy, ToolPolicy
+from rag.agent.core.definition import AgentDefinition, ModelSelectionPolicy, ToolPolicy
 from rag.agent.core.registry import AgentRegistry
 from rag.agent.core.task import SubTaskNode, SubTaskResult, SubTaskStatus, TaskDAG, TaskEdge
 from rag.agent.service import AgentRunRequest, AgentRunResult, AgentService
@@ -15,8 +15,8 @@ from rag.agent.state import (
     ToolCallPlan,
     WorkingSummary,
 )
-from rag.agent.tools.spec import ToolError, ToolPermissions, ToolResult, ToolSpec
 from rag.agent.tools.registry import ToolRegistry
+from rag.agent.tools.spec import ToolError, ToolPermissions, ToolResult, ToolSpec
 
 __all__ = [
     "AgentDefinition",
@@ -32,7 +32,7 @@ __all__ = [
     "BudgetLedger",
     "ContextBudgetSnapshot",
     "ExtractedFact",
-    "ModelPolicy",
+    "ModelSelectionPolicy",
     "RuntimeRegistry",
     "SubTaskNode",
     "SubTaskResult",

@@ -5,7 +5,6 @@ from typing import Literal
 from langgraph.graph.message import BaseMessage
 from pydantic import BaseModel, ConfigDict, Field
 
-
 ContextSectionName = Literal[
     "system",
     "policy_hints",
