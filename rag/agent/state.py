@@ -10,6 +10,7 @@ from typing_extensions import TypedDict
 from rag.agent.core.context import AgentRunConfig
 from rag.agent.core.task import SubTaskResult, TaskDAG
 from rag.agent.memory.models import ContextBudgetSnapshot, ExtractedFact, WorkingSummary
+from rag.schema.query import RetrievalSignals
 
 
 class ToolCallPlan(BaseModel):
@@ -43,6 +44,7 @@ class AgentState(TypedDict):
     citations: Annotated[list, _merge_citations]
     tool_results: Annotated[list, _merge_tool_results]
     task: str
+    retrieval_signals: RetrievalSignals
     run_config: AgentRunConfig
     plan: TaskDAG | None
     iteration: int

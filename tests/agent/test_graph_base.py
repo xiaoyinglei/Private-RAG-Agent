@@ -135,6 +135,7 @@ def _initial_state(
         "citations": [],
         "tool_results": [],
         "task": "research task requiring the agent loop",
+        "retrieval_signals": RetrievalSignals(),
         "run_config": config or _make_config(),
         "plan": None,
         "iteration": 0,
@@ -167,24 +168,6 @@ def _initial_state_without_runtime_handles(
     RuntimeRegistry.remove(state["run_config"].run_id)
     return state
 
-
-class _FakeUnderstandingService:
-    def __init__(self, understanding: RetrievalSignals) -> None:
-        self.understanding = understanding
-
-    def analyze(
-        self,
-        query: str,
-        *,
-        access_policy: object | None = None,
-        execution_location_preference: object | None = None,
-    ) -> RetrievalSignals:
-        del query, access_policy, execution_location_preference
-        return self.understanding
-
-
-def _research_service() -> _FakeUnderstandingService:
-    return _FakeUnderstandingService(RetrievalSignals())
 
 
 def _make_graph(
@@ -373,12 +356,11 @@ class TestBaseGraph:
         plan_provider = _ScriptedPlanProvider(TaskDAG(subtasks=[subtask]))
         runner = _SuccessfulSubAgentRunner()
         graph = _make_graph(
-
-
             plan_provider=plan_provider,
             subagent_runner=runner,
         )
         state = _initial_state(config=_make_config(run_id="graph-plan", budget_total=100))
+        state["retrieval_signals"] = RetrievalSignals(allow_graph_expansion=True)
 
         result = await graph.ainvoke(
             state,
@@ -398,9 +380,11 @@ class TestBaseGraph:
 
 
         )
+        state = _initial_state(config=_make_config(run_id="graph-plan-missing", budget_total=100))
+        state["retrieval_signals"] = RetrievalSignals(allow_graph_expansion=True)
 
         result = await graph.ainvoke(
-            _initial_state(config=_make_config(run_id="graph-plan-missing", budget_total=100)),
+            state,
             config={"configurable": {"thread_id": "graph-plan-missing"}},
         )
 

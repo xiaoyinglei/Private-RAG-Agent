@@ -265,10 +265,6 @@ class BenchmarkPerQueryResult:
     reciprocal_rank: float
     ndcg: float
     latency_ms: float
-    query_understanding_latency_ms: float | None = None
-    query_understanding_provider: str | None = None
-    query_understanding_model: str | None = None
-
     def as_json(self) -> dict[str, object]:
         return {
             "run_id": self.run_id,
@@ -282,11 +278,6 @@ class BenchmarkPerQueryResult:
             "reciprocal_rank": round(self.reciprocal_rank, 6),
             "ndcg": round(self.ndcg, 6),
             "latency_ms": round(self.latency_ms, 3),
-            "query_understanding_latency_ms": (
-                None if self.query_understanding_latency_ms is None else round(self.query_understanding_latency_ms, 3)
-            ),
-            "query_understanding_provider": self.query_understanding_provider,
-            "query_understanding_model": self.query_understanding_model,
         }
 
 
@@ -307,11 +298,6 @@ class BenchmarkRunSummary:
     ndcg_at_10: float
     avg_latency_ms: float
     p95_latency_ms: float
-    avg_query_understanding_latency_ms: float | None = None
-    p95_query_understanding_latency_ms: float | None = None
-    query_understanding_provider: str | None = None
-    query_understanding_model: str | None = None
-
     @property
     def queries_per_second(self) -> float:
         if self.avg_latency_ms <= 0:
@@ -342,18 +328,6 @@ class BenchmarkRunSummary:
                 "split": self.split,
                 "evidence_top_k": self.evidence_top_k,
                 "profile_id": self.profile_id,
-                "avg_query_understanding_latency_ms": (
-                    None
-                    if self.avg_query_understanding_latency_ms is None
-                    else round(self.avg_query_understanding_latency_ms, 3)
-                ),
-                "p95_query_understanding_latency_ms": (
-                    None
-                    if self.p95_query_understanding_latency_ms is None
-                    else round(self.p95_query_understanding_latency_ms, 3)
-                ),
-                "query_understanding_provider": self.query_understanding_provider,
-                "query_understanding_model": self.query_understanding_model,
             }
         )
         return payload
@@ -410,9 +384,6 @@ class RetrievalBenchmarkEvaluator:
         cumulative_per_query_path = eval_dir / "per_query.jsonl"
         per_query_results: list[BenchmarkPerQueryResult] = []
         latencies: list[float] = []
-        understanding_latencies: list[float] = []
-        understanding_provider: str | None = None
-        understanding_model: str | None = None
 
         with per_query_path.open("w", encoding="utf-8") as handle:
             for query_record in _progress(
@@ -446,16 +417,6 @@ class RetrievalBenchmarkEvaluator:
                     gold_relevances=gold,
                     top_k=self.top_k,
                 )
-                diagnostics = retrieval_result.diagnostics.retrieval_signals_debug
-                qu_latency = _coerce_float(diagnostics.get("llm_latency_ms"))
-                qu_provider = _coerce_str(diagnostics.get("llm_provider"))
-                qu_model = _coerce_str(diagnostics.get("llm_model"))
-                if qu_latency is not None:
-                    understanding_latencies.append(qu_latency)
-                if understanding_provider is None and qu_provider:
-                    understanding_provider = qu_provider
-                if understanding_model is None and qu_model:
-                    understanding_model = qu_model
                 result = BenchmarkPerQueryResult(
                     run_id=run_id,
                     dataset=self.dataset,
@@ -468,9 +429,6 @@ class RetrievalBenchmarkEvaluator:
                     reciprocal_rank=metrics["mrr_at_10"],
                     ndcg=metrics["ndcg_at_10"],
                     latency_ms=latency_ms,
-                    query_understanding_latency_ms=qu_latency,
-                    query_understanding_provider=qu_provider,
-                    query_understanding_model=qu_model,
                 )
                 handle.write(json.dumps(result.as_json(), ensure_ascii=False) + "\n")
                 per_query_results.append(result)
@@ -492,14 +450,6 @@ class RetrievalBenchmarkEvaluator:
             ndcg_at_10=_mean(result.ndcg for result in per_query_results),
             avg_latency_ms=_mean(latencies),
             p95_latency_ms=_p95(latencies),
-            avg_query_understanding_latency_ms=(
-                None if not understanding_latencies else _mean(understanding_latencies)
-            ),
-            p95_query_understanding_latency_ms=(
-                None if not understanding_latencies else _p95(understanding_latencies)
-            ),
-            query_understanding_provider=understanding_provider,
-            query_understanding_model=understanding_model,
         )
         append_baseline_row(eval_dir / "baseline.csv", summary)
         summary_payload = summary.as_json()
