@@ -1156,7 +1156,140 @@ rag agent resume <run_id>               # 恢复暂停的 Agent 运行
 
 ---
 
-## 18. Change Log
+## 18. RAG / Agent 解耦（已完成 & 待完成）
+
+### 18.1 架构目标
+
+RAG 是独立、稳定、可复用的知识处理底座。Agent 是决策和编排层。
+
+```
+Agent（决策层）
+  │
+  │  产出 RetrievalSignals
+  ▼
+RAG（能力底座）
+  │
+  │  ingest / encode / retrieve / rerank / ground / generate
+  ▼
+GroundedAnswer + EvidenceItem
+```
+
+RAG 不负责理解用户意图。RAG 只接收会真实改变检索行为的结构化参数。
+
+### 18.2 新合约：`RetrievalSignals`
+
+定义在 `rag/schema/query.py`：
+
+```python
+class RetrievalSignals(BaseModel):
+    metadata_filters: MetadataFilters       # 页码/来源类型/文档名过滤
+    structure_constraints: StructureConstraints  # 章节/标题匹配
+    special_targets: list[str]              # table/figure/caption/formula
+    quoted_terms: list[str]                 # 精确匹配词
+    allow_graph_expansion: bool = False     # Agent 驱动图扩展+复杂分解
+```
+
+5 个字段，每个都对应 RAG 管线的真实执行路径。不含 `task_type`、`needs_*` 布尔、`PolicyHints` 等意图分类残留。
+
+### 18.3 已完成工作
+
+**PR1 — QueryUnderstanding → RetrievalSignals**
+- RAG 检索核心链路（planning_graph, graph, evidence, rerank, generation, adapter）全部切到 `RetrievalSignals`
+- `QueryUnderstanding` 只作为旧 agent 入口的临时桥接保留
+
+**PR2 — 删除意图分类层**
+- `rag/retrieval/analysis.py` 整文件删除（~530 行）
+- `QueryUnderstandingService` / `QueryUnderstandingDiagnostics` / `RoutingService` 删除
+- `QueryUnderstanding` 类删除
+- `TaskType` 枚举删除（agent 改用 LLM 自由字符串）
+- `RoutingDecision.task_type` 字段删除
+- RAG engine/orchestrator 不再内部 classify/route，接受外部传入的 `RetrievalSignals` + `RoutingDecision`
+- CLI `--enable-query-understanding-llm` flag 删除
+
+**PR3 — AgentState 集成 + 清理**
+- `AgentState` 加入 `retrieval_signals: RetrievalSignals` 字段
+- `route_node` 读取 `retrieval_signals.allow_graph_expansion` 触发 decompose 路径
+- benchmarks `query_understanding_*` 诊断字段清理
+- 324 tests passed
+
+### 18.4 待完成：Agent 产出 RetrievalSignals 的完整回路
+
+当前 `AgentState.retrieval_signals` 默认是空的 `RetrievalSignals()`。Agent LLM 产出了 `TaskUnderstanding`，但还没有产出 `RetrievalSignals`。
+
+从用户查询到 RAG 检索的完整链路缺最后一段：
+
+```
+用户 query
+  │
+  ▼
+TaskUnderstandingService (LLM)
+  │  产出: TaskUnderstanding { task_type, decomposition_required, ... }
+  │  缺失: RetrievalSignals { special_targets, metadata_filters, ... }
+  │
+  ▼
+route_node
+  │  当前: 读取 retrieval_signals.allow_graph_expansion → 路由
+  │  缺失: 将 LLM 输出翻译为 RetrievalSignals 写入 state
+  │
+  ▼
+RAG tool (rag_search)
+  │  当前: tool input 未对接 RetrievalSignals
+  │  目标: tool arguments 接受 RetrievalSignals 字段
+  │
+  ▼
+RAG engine
+  ✅ 已支持 RetrievalSignals 作为入参
+```
+
+**具体待改项：**
+
+1. **`TaskUnderstandingService` 的 LLM prompt 扩展**
+   - 当前只输出 `task_type`, `decomposition_required` 等
+   - 需要同时输出检索信号：`special_targets`, `metadata_filters`, `quoted_terms`, `allow_graph_expansion`
+   - 或分两次 LLM 调用：先理解任务，再规划检索策略
+
+2. **`route_node` 写入 `retrieval_signals` 到 state**
+   - 当前 route_node 只读取 state 中已有的 `retrieval_signals`
+   - 需要新增逻辑：如果 LLM 产出了检索信号，写入 `state["retrieval_signals"]`
+
+3. **`rag_tools.py` 的 RAG tool input 对接**
+   - 当前 `SearchInput` 只有 `query` + `top_k`
+   - 需要扩展为 `RAGSearchInput`，包含 `RetrievalSignals` 的字段
+   - tool runner 将 input 转换为 `RAGSearchRequest` 传给 RAG engine
+
+4. **`orchestrator.py` 默认值替换**
+   - 当前默认构造 `RoutingDecision(runtime_mode=FAST, rerank_required=True)`
+   - 当 agent 产出 RS 后，`allow_graph_expansion=True` 应驱动 `runtime_mode=DEEP`
+   - 需要将 `RetrievalSignals` 映射到 `RoutingDecision` 的逻辑
+
+**设计约束：**
+- 不调用 RAG Core 的任何 classify/understand 服务
+- Agent 使用自己的 LLM（通过 `ChatCapabilityBinding`）做判断
+- 检索信号作为 LLM structured output 的一部分，或通过 evaluator 二次决策
+- RAG 只接收信号，不反向依赖 Agent
+
+### 18.5 已完成删除的旧符号清单
+
+| 符号 | 原位置 | 状态 |
+|------|--------|------|
+| `DocumentType` | `rag/schema/core.py` | 已删除 |
+| `IndexingMode` | `rag/schema/core.py` | 已删除 |
+| `PiiStatus` | `rag/schema/core.py` | 已删除 |
+| `AssetRelationType` | `rag/schema/core.py` | 已删除 |
+| `DocumentFeatures` | `rag/schema/core.py` | 已删除 |
+| `DocumentProcessingPackage` | `rag/schema/core.py` | 已删除 |
+| `QueryRequest` / `QueryResponse` / `ExecutionPolicy` | `rag/schema/query.py` | 已删除 |
+| `query_type` field | `rag/schema/query.py` | 已删除 |
+| `QueryUnderstanding` | `rag/schema/query.py` | 已删除 |
+| `TaskType` | `rag/schema/query.py` | 已删除 |
+| `QueryUnderstandingService` | `rag/retrieval/analysis.py` | 已删除（整文件） |
+| `RoutingService` | `rag/retrieval/analysis.py` | 已删除（整文件） |
+| `RoutingDecision.task_type` | `rag/retrieval/runtime_coordinator.py` | 字段已删除 |
+| `--enable-query-understanding-llm` | `rag/cli.py` | 已删除 |
+
+---
+
+## 19. Change Log
 
 | Version | Key Changes |
 |---------|-------------|
@@ -1168,4 +1301,5 @@ rag agent resume <run_id>               # 恢复暂停的 Agent 运行
 | **v6** | AgentDefinition 加 access_policy/estimated_token_budget；confirmed_tool_call_ids 防无限 pause；Command(goto='pause')；next_subtasks/subtask 入 state；commit() 不截断超支 |
 | **v7** | AgentRunConfig 字段顺序修正；RuntimeRegistry.get_or_create() 保证 handles 初始化；tool_policy 复制到 AgentRunConfig；evaluate_node 预算不足写 terminal_subtasks(非 completed_subtasks)；数据流图统一 terminal/successful_subtasks |
 | **v8** | 增加 Memory + Context Management；Phase A 收敛为 Working Memory compaction/injection；Semantic Memory 复用 ArtifactRepo/GraphRepo candidate 路径；Episodic Memory 与 TelemetryService 边界明确 |
-| **v9** (current) | AgentToolSpec 改为组合模式(非 frozen 继承)；SubTaskNode 增加 estimated_tokens；两个 evaluate_node 合并说明；confirmed_tool_call_ids 序列化注释 |
+| **v9** | AgentToolSpec 改为组合模式(非 frozen 继承)；SubTaskNode 增加 estimated_tokens；两个 evaluate_node 合并说明；confirmed_tool_call_ids 序列化注释 |
+| **v10** | RAG/Agent 解耦：删除 `QueryUnderstandingService`/`RoutingService`/`analysis.py`；引入 `RetrievalSignals` 合约；RAG engine 不再内部 classify/route；`TaskType` 枚举删除；AgentState 增加 `retrieval_signals` 字段 |
