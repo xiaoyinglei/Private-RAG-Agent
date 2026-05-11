@@ -30,38 +30,28 @@ class DocumentStatus(StrEnum):
     RETIRED = "retired"
 
 
-class PiiStatus(StrEnum):
-    UNKNOWN = "unknown"
-    CLEAN = "clean"
-    MASKED = "masked"
-    RESTRICTED = "restricted"
-
-
-class IndexingMode(StrEnum):
-    EAGER = "eager"
-    LAZY = "lazy"
-
-
 class StorageTier(StrEnum):
+    """文档的存储层级，指示文档在存储系统中的访问速度和成本。分为热存储（hot）和冷存储（cold）。"""
+    HOT = "hot"
+    COLD = "cold"
+
+class PartitionKey(StrEnum):
+    """索引层分区键，当前与文档生命周期存储层级保持相同取值。"""
     HOT = "hot"
     COLD = "cold"
 
 
-# Index partitions intentionally mirror lifecycle storage tiers.
-PartitionKey = StorageTier
-
-
-class AssetRelationType(StrEnum):
-    CAPTION_OF = "caption_of"
-    TABLE_OF = "table_of"
-    FIGURE_OF = "figure_of"
-    REFERENCE_BY = "reference_by"
 
 # ==========================================
 # L0: 元数据与来源定义
 # ==========================================
 
 class Source(BaseModel):
+    """
+    原始数据源元数据：
+    记录数据源类型、原始位置、文件名、对象存储地址、内容哈希、文件大小、MIME 类型、
+    所属用户、入库版本、PII 状态、访问策略、创建/更新时间和扩展元数据。
+    """
     model_config = ConfigDict(frozen=True)
 
     source_id: int = 0
@@ -75,7 +65,6 @@ class Source(BaseModel):
     mime_type: str | None = None
     owner_id: str | None = None
     ingest_version: int = 1
-    pii_status: PiiStatus = PiiStatus.UNKNOWN
     effective_access_policy: AccessPolicy = Field(default_factory=AccessPolicy.default)
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
@@ -83,6 +72,10 @@ class Source(BaseModel):
 
 
 class Document(BaseModel):
+    """文档主记录：记录来源 ID、标题、语言、作者、文件哈希、版本信息、生命周期状态、
+    生效时间、索引状态、索引优先级、冷热层级、PII 状态、引用次数、页数、
+    租户/部门/权限标签、Embedding 模型、索引时间/错误、访问策略、创建/更新时间和扩展元数据。"""
+
     model_config = ConfigDict(frozen=True)
 
     doc_id: int = 0
@@ -99,9 +92,7 @@ class Document(BaseModel):
     is_indexed: bool = False
     index_ready: bool = False
     index_priority: str = "high"
-    indexing_mode: IndexingMode = IndexingMode.EAGER
     storage_tier: StorageTier = StorageTier.HOT
-    pii_status: PiiStatus = PiiStatus.UNKNOWN
     reference_count: int = 1
     page_count: int | None = None
     tenant_id: str | None = None
@@ -120,24 +111,9 @@ class Document(BaseModel):
 # 解析器 (Parser) 输出契约
 # ==========================================
 
-class DocumentFeatures(BaseModel):
-    model_config = ConfigDict(frozen=True)
-
-    source_type: SourceType
-    section_count: int
-    word_count: int
-    heading_count: int
-    table_count: int
-    figure_count: int
-    caption_count: int
-    ocr_region_count: int
-    structure_depth: int
-    has_dense_structure: bool
-    metadata: dict[str, str] = Field(default_factory=dict)
-
-
 @dataclass(frozen=True)
 class ParsedSection:
+    """ParsedSection 是 Parser 输出的核心结构之一，表示文档中的一个章节或段落。它包含以下字段："""
     toc_path: tuple[str, ...]
     heading_level: int | None
     page_range: tuple[int, int] | None
@@ -165,6 +141,7 @@ class ParsedSection:
 
 @dataclass(frozen=True)
 class ParsedElement:
+    """ParsedElement 表示文档中的一个结构化元素，如表格、图表、图片等。它包含以下字段："""
     element_id: str
     kind: str
     text: str
@@ -178,6 +155,7 @@ class ParsedElement:
 
 @dataclass(frozen=True)
 class ParsedDocument:
+    """ParsedDocument 是 Parser 输出的最终结果，表示整个文档的结构化解析结果。它包含以下字段："""
     title: str
     source_type: SourceType
     authors: list[str]
@@ -208,16 +186,6 @@ class OcrResult:
 # L1: 物理拆解与原文记录 (PostgreSQL 存储)
 # ==========================================
 class SectionLocatorRecord(BaseModel):
-    """
-    Section 正式物理定位锚点。
-
-    这版设计是“强约束版”：
-    - visible_text_key 必填
-    - char range 必填
-    - byte range 必填
-    - 不允许半套 locator
-    - 不允许非法区间
-    """
 
     model_config = ConfigDict(frozen=True)
 
@@ -349,7 +317,6 @@ class AssetRecord(BaseModel):
     doc_id: int
     source_id: int
     section_id: int | None = None
-    relation_type: AssetRelationType | None = None
 
     asset_type: str
     element_ref: str | None = None
@@ -495,49 +462,15 @@ class ProcessingStateRecord(BaseModel):
     metadata_json: dict[str, Any] = Field(default_factory=dict)
 
 
-# ==========================================
-# Ingest 阶段输出: 终极包裹
-# ==========================================
-
-class DocumentProcessingPackage(BaseModel):
-    """
-    更新后的包裹：完全基于 L1 (Record) 和 L2 (Summary) 的装载舱。
-    Ingest Pipeline 跑完后，将产生这个包裹，并交由 Storage 写入数据库。
-    """
-    model_config = ConfigDict(frozen=True)
-
-    source: Source
-    document: Document
-    analysis: DocumentFeatures
-    
-    # L1 物理数据
-    sections: list[SectionRecord]
-    assets: list[AssetRecord]
-    
-    # L2 索引数据
-    doc_summary: DocSummaryRecord | None = None
-    section_summaries: list[SectionSummaryRecord] = Field(default_factory=list)
-    asset_summaries: list[AssetSummaryRecord] = Field(default_factory=list)
-    
-    # Infra 缓存与状态 (补齐防断链标志)
-    layout_cache: LayoutMetaCacheRecord | None = None
-    processing_state: ProcessingStateRecord | None = None
-    metadata_summary: dict[str, Any] = Field(default_factory=dict)
-
-
 __all__ = [
     "Document",
-    "DocumentFeatures",
     "DocumentStatus",
-    "DocumentProcessingPackage",
-    "IndexingMode",
     "OcrRegion",
     "OcrResult",
     "ParsedDocument",
     "ParsedElement",
     "ParsedSection",
     "PartitionKey",
-    "PiiStatus",
     "Source",
     "SourceType",
     "StorageTier",

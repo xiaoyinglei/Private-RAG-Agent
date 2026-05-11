@@ -21,7 +21,7 @@ class _ResearchUnderstandingService:
         execution_location_preference: object | None = None,
     ) -> QueryUnderstanding:
         del query, access_policy, execution_location_preference
-        return QueryUnderstanding(task_type=TaskType.RESEARCH, query_type="research")
+        return QueryUnderstanding(task_type=TaskType.RESEARCH)
 
 
 def _service_with_registry(runners: dict | None = None) -> AgentService:

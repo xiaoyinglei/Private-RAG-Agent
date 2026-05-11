@@ -26,13 +26,11 @@ from rag.schema.core import (
     DocSummaryRecord,
     Document,
     DocumentStatus,
-    IndexingMode,
     LayoutMetaCacheRecord,
     ParsedDocument,
     ParsedElement,
     ParsedSection,
     PartitionKey,
-    PiiStatus,
     ProcessingStateRecord,
     SectionLocatorRecord,
     SectionRecord,
@@ -573,7 +571,6 @@ class IngestPipeline:
             content_hash=content_hash,
             file_size_bytes=len(raw_bytes),
             owner_id=request.owner,
-            pii_status=PiiStatus.UNKNOWN,
             effective_access_policy=AccessPolicy.default(),
             metadata_json={str(key): str(value) for key, value in request.metadata.items()},
         )
@@ -599,9 +596,7 @@ class IngestPipeline:
             is_indexed=False,
             index_ready=False,
             index_priority="high",
-            indexing_mode=IndexingMode.EAGER,
             storage_tier=StorageTier.HOT,
-            pii_status=PiiStatus.UNKNOWN,
             reference_count=1,
             page_count=parsed_doc.page_count,
             tenant_id=None,
@@ -890,13 +885,6 @@ class IngestPipeline:
             fallback_storage_key=content_storage_key,
         )
 
-        relation_type = None
-        if parsed_element.kind == "caption":
-            relation_type = "caption_of"
-        elif parsed_element.kind == "table":
-            relation_type = "table_of"
-        elif parsed_element.kind in {"figure", "image_summary"}:
-            relation_type = "figure_of"
         metadata_json = dict(parsed_element.metadata)
         if parsed_element.element_id:
             metadata_json["asset_anchor_ref"] = parsed_element.element_id
@@ -926,7 +914,6 @@ class IngestPipeline:
             doc_id=document.doc_id,
             source_id=source.source_id,
             section_id=section_id,
-            relation_type=relation_type,
             asset_type=parsed_element.kind,
             element_ref=parsed_element.element_id,
             page_no=parsed_element.page_no or 1,

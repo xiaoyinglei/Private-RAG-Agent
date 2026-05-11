@@ -11,6 +11,7 @@ from rag.schema.query import (
     MetadataFilters,
     PolicyHints,
     QueryUnderstanding,
+    RetrievalSignals,
     StructureConstraints,
     TaskType,
 )
@@ -44,14 +45,11 @@ If the query explicitly mentions page numbers, page ranges, file names, document
 quoted phrases, heading or section hints, extract them.
 Use enum values exactly:
 - task_type: lookup | single_doc_qa | comparison | synthesis | timeline | research
-- query_type: lookup | scoped_lookup | structure_lookup | section_lookup | special_lookup
-  | comparison | summary | process | research
 - structure_constraints.match_strategy: none | semantic | heading
 - special_targets values: table | figure | ocr_region | image_summary | caption | formula
 Return JSON matching this schema:
 {
   "task_type": "lookup",
-  "query_type": "lookup",
   "needs_special": false,
   "needs_structure": false,
   "needs_metadata": false,
@@ -98,7 +96,7 @@ Important guidance:
 - Most user queries will NOT include page numbers, exact file names, or exact document titles.
 - Treat page numbers, page ranges, file names, document titles, and quoted phrases as OPTIONAL low-frequency explicit constraints.
 - Do NOT over-focus on metadata extraction when the real signal is task intent, structure intent, or special-object intent.
-- If the user asks about a process, architecture, evaluation, conclusion, comparison, or summary, reflect that in task_type, query_type, needs_structure, and structure_constraints.focus_terms.
+- If the user asks about a process, architecture, evaluation, conclusion, comparison, or summary, reflect that in task_type, needs_structure, and structure_constraints.focus_terms.
 - If the user clearly refers to tables, figures, captions, OCR text, image summaries, or formulas, mark needs_special=true and populate special_targets.
 - Only set metadata filters when they are explicitly stated or clearly implied by the query.
 - Do not guess hidden facts outside the query.
@@ -140,14 +138,12 @@ Structure guidance:
 
 Use enum values exactly:
 - task_type: lookup | single_doc_qa | comparison | synthesis | timeline | research
-- query_type: lookup | scoped_lookup | structure_lookup | section_lookup | special_lookup | comparison | summary | process | research
 - structure_constraints.match_strategy: none | semantic | heading
 - special_targets values: table | figure | ocr_region | image_summary | caption | formula
 
 Return JSON matching exactly this schema:
 {
   "task_type": "lookup",
-  "query_type": "lookup",
   "needs_special": false,
   "needs_structure": false,
   "needs_metadata": false,
@@ -413,7 +409,6 @@ class QueryUnderstandingService:
     def _fallback_understanding() -> QueryUnderstanding:
         return QueryUnderstanding(
             task_type=TaskType.LOOKUP,
-            query_type="lookup",
         )
 
 
@@ -422,38 +417,34 @@ class RoutingService:
         self,
         query: str,
         *,
-        query_understanding: QueryUnderstanding,
+        retrieval_signals: RetrievalSignals,
         source_scope: Sequence[str] = (),
         access_policy: AccessPolicy | None = None,
     ) -> RoutingDecision:
         del query
-        task_type = query_understanding.task_type
-        runtime_mode = self._runtime_mode(task_type, source_scope, query_understanding)
+        runtime_mode = self._runtime_mode(retrieval_signals, source_scope)
         allow_external = (
             True
             if access_policy is None
             else access_policy.external_retrieval is not ExternalRetrievalPolicy.DENY
         )
         return RoutingDecision(
-            task_type=task_type,
+            task_type=TaskType.RESEARCH if retrieval_signals.allow_graph_expansion else TaskType.LOOKUP,
             runtime_mode=runtime_mode,
             source_scope=list(source_scope),
-            web_search_allowed=allow_external and not source_scope and task_type in _DEEP_TASK_TYPES,
-            graph_expansion_allowed=(runtime_mode is RuntimeMode.DEEP and query_understanding.needs_graph_expansion),
+            web_search_allowed=allow_external and not source_scope and retrieval_signals.allow_graph_expansion,
+            graph_expansion_allowed=(runtime_mode is RuntimeMode.DEEP and retrieval_signals.allow_graph_expansion),
             rerank_required=True,
         )
 
     @staticmethod
     def _runtime_mode(
-        task_type: TaskType,
+        signals: RetrievalSignals,
         source_scope: Sequence[str],
-        query_understanding: QueryUnderstanding,
     ) -> RuntimeMode:
-        if query_understanding.needs_graph_expansion:
+        if signals.allow_graph_expansion:
             return RuntimeMode.DEEP
-        if task_type in {TaskType.COMPARISON, TaskType.TIMELINE, TaskType.RESEARCH}:
-            return RuntimeMode.DEEP
-        if task_type is TaskType.SYNTHESIS and len(source_scope) != 1:
+        if signals.has_constraints() and len(source_scope) != 1:
             return RuntimeMode.DEEP
         return RuntimeMode.FAST
 

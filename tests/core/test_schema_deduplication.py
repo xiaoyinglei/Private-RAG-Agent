@@ -66,7 +66,8 @@ def test_report_citation_reuses_answer_citation_contract() -> None:
     assert citations[0].record_type == "section"
 
 
-def test_partition_key_is_storage_tier_alias() -> None:
-    assert PartitionKey is StorageTier
-    assert PartitionKey.HOT is StorageTier.HOT
+def test_partition_key_is_independent_index_layer_enum() -> None:
+    assert PartitionKey is not StorageTier
+    assert PartitionKey.HOT is not StorageTier.HOT
+    assert PartitionKey.HOT.value == StorageTier.HOT.value
     assert PartitionKey.COLD.value == "cold"

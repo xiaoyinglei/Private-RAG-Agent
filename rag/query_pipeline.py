@@ -651,7 +651,7 @@ class _QueryPipeline:
         grounded_candidate = self.answer_generator.grounded_candidate(
             query,
             context_evidence_items,
-            query_understanding=retrieval.diagnostics.query_understanding,
+            retrieval_signals=retrieval.diagnostics.retrieval_signals,
         )
         return self.prompt_builder.build(
             query=query,

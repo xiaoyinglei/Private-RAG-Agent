@@ -1456,30 +1456,42 @@ Expected: ImportError
 
 ```python
 from __future__ import annotations
+from typing import Literal
 
-from rag.agent.state import AgentState
+from pydantic import BaseModel, Field
+
+from rag.agent.state import AgentState, ToolCallPlan
+from rag.schema.query import RetrievalSignals
+
+
+class AgentRouteDecision(BaseModel):
+    route: Literal["fast_path", "decompose", "direct"]
+    reason: str
+    retrieval_signals: RetrievalSignals = Field(default_factory=RetrievalSignals)
+    tool_calls: list[ToolCallPlan] = Field(default_factory=list)
 
 
 def route_node(state: AgentState) -> dict:
-    task = state.get("task", "")
-    complexity = _classify_complexity(task)
+    """
+    Agent route 节点负责将用户任务翻译成：
+    1. Agent 执行路径：fast_path / decompose / direct
+    2. RAG 可执行检索信号：RetrievalSignals
 
-    if complexity == "simple":
-        return {"status": "fast_path", "route_reason": "simple_lookup"}
-    elif complexity == "decompose":
-        return {"status": "decompose", "route_reason": "multi_hop_or_compare"}
-    else:
-        return {"status": "direct", "route_reason": "single_agent_research"}
+    不调用 RAG Core 的 QueryUnderstandingService。
+    不依赖 RAG 的 TaskType。
+    """
+    decision = agent_route_decider.decide(
+        task=state["task"],
+        run_config=state["run_config"],
+        messages=state.get("messages", []),
+    )
 
-
-def _classify_complexity(task: str) -> str:
-    compare_keywords = ("compare", "对比", "diff", "区别", "vs", "versus", "or")
-    multi_hop_keywords = ("timeline", "时间线", "history", "how did", "why did")
-    if any(kw in task.lower() for kw in compare_keywords):
-        return "decompose"
-    if any(kw in task.lower() for kw in multi_hop_keywords):
-        return "decompose"
-    return "direct"
+    return {
+        "status": decision.route,
+        "route_reason": decision.reason,
+        "retrieval_signals": decision.retrieval_signals,
+        "pending_tool_calls": decision.tool_calls,
+    }
 
 
 def route_after_route(state: AgentState) -> str:
@@ -1487,6 +1499,15 @@ def route_after_route(state: AgentState) -> str:
     if status == "fast_path":
         return "synthesize"  # skip agent loop, go straight to answer
     return "execute"
+```
+
+路由标准按执行需求定义，不按固定任务枚举：
+
+- `fast_path`：单次 RAG 检索 + grounded generation 足够，不需要拆分子任务、并行子 Agent、用户确认或外部副作用。
+- `decompose`：需要多个独立检索问题、多个证据维度、比较多个对象/版本/方案，或需要并行子 Agent / 任务 DAG。
+- `direct`：需要普通 Agent loop 调工具，或需要先执行非 RAG 工具、多轮 evaluate、用户确认。
+
+Agent route 可以使用 LLM structured output、确定性规则、历史上下文或 evaluator，但不得调用 RAG Core 的 `QueryUnderstandingService`；RAG 只接收 `RetrievalSignals`，不接收任务类型。
 ```
 
 - [ ] **Step 6: Implement `rag/agent/graphs/nodes/execute.py`**

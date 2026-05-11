@@ -474,30 +474,49 @@ Edges:
   pause ──normal───────▶ evaluate          (用户响应后→重新评估)
 ```
 
-### 7.1 route 节点（复杂度分检）
+### 7.1 route 节点（Agent 决策与 RAG 信号生成）
 
-简单查询走快路径，避免无效编排开销：
+route 节点负责把用户任务翻译成 Agent 执行路径和 RAG 可消费的结构化检索信号。它不调用 RAG Core 的 `QueryUnderstandingService`，也不依赖 RAG 侧的 `TaskType`。简单任务可走快路径，避免无效编排开销：
 
 ```python
+from typing import Literal
+
+from pydantic import BaseModel, Field
+
+from rag.agent.state import AgentState, ToolCallPlan
+from rag.schema.query import RetrievalSignals
+
+
+class AgentRouteDecision(BaseModel):
+    route: Literal["fast_path", "decompose", "direct"]
+    reason: str
+    retrieval_signals: RetrievalSignals = Field(default_factory=RetrievalSignals)
+    tool_calls: list[ToolCallPlan] = Field(default_factory=list)
+
+
 def route_node(state: AgentState) -> dict:
     task = state["task"]
-    understanding = _classify_complexity(task)
+    decision = agent_route_decider.decide(
+        task=task,
+        run_config=state["run_config"],
+        messages=state.get("messages", []),
+    )
 
-    if understanding["complexity"] == "simple":
-        # 不进入 Agent Loop，直接调 L3-L4-L5-L6 管线
-        return {"status": "fast_path", "route_reason": "simple_lookup"}
-    elif understanding["complexity"] == "decompose":
-        return {"status": "decompose", "route_reason": "multi_hop_or_compare"}
-    else:
-        return {"status": "direct", "route_reason": "single_agent_research"}
-
-def _classify_complexity(task: str) -> dict:
-    """不用 LLM，用 query_understanding_service 做语义分流"""
-    # 复用现有的 QueryUnderstandingService.analyze()
-    # task_type=lookup → simple
-    # task_type=comparison/synthesis/timeline → decompose
-    # 其他 → direct
+    return {
+        "status": decision.route,
+        "route_reason": decision.reason,
+        "retrieval_signals": decision.retrieval_signals,
+        "pending_tool_calls": decision.tool_calls,
+    }
 ```
+
+路由标准按执行需求定义，而不是按固定任务枚举定义：
+
+- `fast_path`：单次 RAG 检索 + grounded generation 足够，不需要拆分子任务、并行子 Agent、用户确认或外部副作用。
+- `decompose`：需要多个独立检索问题、多个证据维度、比较多个对象/版本/方案，或需要并行子 Agent / 任务 DAG。
+- `direct`：需要普通 Agent loop 调工具，或需要先执行非 RAG 工具、多轮 evaluate、用户确认。
+
+Agent route 可以使用 LLM structured output、确定性规则、历史上下文或 evaluator，但不得调用 RAG Core 的 `QueryUnderstandingService`；RAG 只接收 `RetrievalSignals`，不接收任务类型。
 
 **fast_path 实现**：不创建 Agent Loop，直接调用 `rag_search_answer` Tool（一次性 L3→L4→L5→L6），延迟 <2s。
 
@@ -1113,7 +1132,7 @@ rag agent resume <run_id>               # 恢复暂停的 Agent 运行
 | Agent 循环失控 | `max_iterations` + `BudgetLedger.remaining()` 双重保护 |
 | LLM 输出不遵循 ThinkOutput schema | `ValidationError` → fallback 评估逻辑 |
 | KG 写工具滥用 | 五层防护：permissions + confirmation + idempotent + access_policy + provenance |
-| 快路径误判复杂查询 | route 节点使用确定性规则 + `QueryUnderstandingService`，不用 LLM |
+| 快路径误判复杂查询 | route 节点使用 Agent 自有决策逻辑产出 `AgentRouteDecision` 和 `RetrievalSignals`；复杂度无法确认时保守进入 `direct` 或 `decompose` |
 | messages 膨胀导致上下文溢出 | Phase A 引入 WorkingMemoryDehydrator，保留 bounded tail window，不切断 tool_use/tool_result 对 |
 | memory 被当成事实权威 | ContextInjector 明确 `RAG evidence > memory`；冲突时 evidence 胜出，memory 标记 STALE/CONFLICTED |
 | Semantic Memory 形成第二事实源 | 不新建 semantic store；只写入 `ArtifactRepo` / `GraphRepo` candidate 路径 |

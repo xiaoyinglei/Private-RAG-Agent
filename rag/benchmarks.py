@@ -446,7 +446,7 @@ class RetrievalBenchmarkEvaluator:
                     gold_relevances=gold,
                     top_k=self.top_k,
                 )
-                diagnostics = retrieval_result.diagnostics.query_understanding_debug
+                diagnostics = retrieval_result.diagnostics.retrieval_signals_debug
                 qu_latency = _coerce_float(diagnostics.get("llm_latency_ms"))
                 qu_provider = _coerce_str(diagnostics.get("llm_provider"))
                 qu_model = _coerce_str(diagnostics.get("llm_model"))

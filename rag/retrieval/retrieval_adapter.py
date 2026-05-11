@@ -7,7 +7,7 @@ from typing import Protocol
 
 from rag.retrieval.evidence import CandidateLike, EvidenceService
 from rag.retrieval.planning_graph import FallbackStep, PlanningState, QueryVariant, RetrievalPath
-from rag.schema.query import QueryUnderstanding
+from rag.schema.query import RetrievalSignals
 from rag.schema.runtime import AccessPolicy, RuntimeMode
 from rag.utils.telemetry import TelemetryService
 
@@ -17,7 +17,7 @@ class BranchRetriever(Protocol):
         self,
         query: str,
         source_scope: list[str],
-        query_understanding: QueryUnderstanding,
+        retrieval_signals: RetrievalSignals,
     ) -> Sequence[CandidateLike]: ...
 
 
@@ -27,7 +27,7 @@ class PlanAwareRetriever(Protocol):
         *,
         query: str,
         source_scope: list[str],
-        query_understanding: QueryUnderstanding,
+        retrieval_signals: RetrievalSignals,
         plan: PlanningState,
     ) -> Sequence[CandidateLike]: ...
 
@@ -40,7 +40,7 @@ class BranchRetrieverRegistry(Protocol):
         *,
         query: str,
         source_scope: list[str],
-        query_understanding: QueryUnderstanding,
+        retrieval_signals: RetrievalSignals,
     ) -> list[CandidateLike]: ...
 
 
@@ -70,14 +70,14 @@ class RetrievalAdapter:
         source_scope: list[str],
         access_policy: AccessPolicy,
         runtime_mode: RuntimeMode,
-        query_understanding: QueryUnderstanding,
+        retrieval_signals: RetrievalSignals,
     ) -> BranchCollectionResult:
         return self._collect_sync(
             plan=plan,
             source_scope=source_scope,
             access_policy=access_policy,
             runtime_mode=runtime_mode,
-            query_understanding=query_understanding,
+            retrieval_signals=retrieval_signals,
             branch_names=None,
             skip_absorbed_sparse=True,
         )
@@ -89,14 +89,14 @@ class RetrievalAdapter:
         source_scope: list[str],
         access_policy: AccessPolicy,
         runtime_mode: RuntimeMode,
-        query_understanding: QueryUnderstanding,
+        retrieval_signals: RetrievalSignals,
     ) -> BranchCollectionResult:
         return await self._collect_async(
             plan=plan,
             source_scope=source_scope,
             access_policy=access_policy,
             runtime_mode=runtime_mode,
-            query_understanding=query_understanding,
+            retrieval_signals=retrieval_signals,
             branch_names=None,
             skip_absorbed_sparse=True,
         )
@@ -109,7 +109,7 @@ class RetrievalAdapter:
         source_scope: list[str],
         access_policy: AccessPolicy,
         runtime_mode: RuntimeMode,
-        query_understanding: QueryUnderstanding,
+        retrieval_signals: RetrievalSignals,
         skip_absorbed_sparse: bool = False,
     ) -> BranchCollectionResult:
         return await self._collect_async(
@@ -117,7 +117,7 @@ class RetrievalAdapter:
             source_scope=source_scope,
             access_policy=access_policy,
             runtime_mode=runtime_mode,
-            query_understanding=query_understanding,
+            retrieval_signals=retrieval_signals,
             branch_names=branch_names,
             skip_absorbed_sparse=skip_absorbed_sparse,
         )
@@ -129,7 +129,7 @@ class RetrievalAdapter:
         source_scope: list[str],
         access_policy: AccessPolicy,
         runtime_mode: RuntimeMode,
-        query_understanding: QueryUnderstanding,
+        retrieval_signals: RetrievalSignals,
         branch_names: Sequence[str] | None,
         skip_absorbed_sparse: bool,
     ) -> BranchCollectionResult:
@@ -151,7 +151,7 @@ class RetrievalAdapter:
                     retriever=retriever,
                     query=branch_query,
                     source_scope=source_scope,
-                    query_understanding=query_understanding,
+                    retrieval_signals=retrieval_signals,
                     plan=plan,
                 )
             )
@@ -161,7 +161,7 @@ class RetrievalAdapter:
                 source_scope=source_scope,
                 access_policy=access_policy,
                 runtime_mode=runtime_mode,
-                query_understanding=query_understanding,
+                retrieval_signals=retrieval_signals,
                 branches=branches,
                 branch_hits=branch_hits,
             )
@@ -174,7 +174,7 @@ class RetrievalAdapter:
         source_scope: list[str],
         access_policy: AccessPolicy,
         runtime_mode: RuntimeMode,
-        query_understanding: QueryUnderstanding,
+        retrieval_signals: RetrievalSignals,
         branch_names: Sequence[str] | None,
         skip_absorbed_sparse: bool,
     ) -> BranchCollectionResult:
@@ -196,7 +196,7 @@ class RetrievalAdapter:
                     retriever=retriever,
                     query=branch_query,
                     source_scope=source_scope,
-                    query_understanding=query_understanding,
+                    retrieval_signals=retrieval_signals,
                     plan=plan,
                 )
             )
@@ -206,7 +206,7 @@ class RetrievalAdapter:
                 source_scope=source_scope,
                 access_policy=access_policy,
                 runtime_mode=runtime_mode,
-                query_understanding=query_understanding,
+                retrieval_signals=retrieval_signals,
                 branches=branches,
                 branch_hits=branch_hits,
             )
@@ -232,7 +232,7 @@ class RetrievalAdapter:
         source_scope: list[str],
         access_policy: AccessPolicy,
         runtime_mode: RuntimeMode,
-        query_understanding: QueryUnderstanding,
+        retrieval_signals: RetrievalSignals,
         branches: list[tuple[str, list[CandidateLike]]],
         branch_hits: dict[str, int],
     ) -> None:
@@ -241,7 +241,7 @@ class RetrievalAdapter:
             source_scope=source_scope,
             access_policy=access_policy,
             runtime_mode=runtime_mode,
-            query_understanding=query_understanding,
+            retrieval_signals=retrieval_signals,
         )
         limited = filtered[: path.limit]
         branch_hits[path.branch] = len(limited)
@@ -261,19 +261,19 @@ class RetrievalAdapter:
         source_scope: list[str],
         access_policy: AccessPolicy,
         runtime_mode: RuntimeMode,
-        query_understanding: QueryUnderstanding,
+        retrieval_signals: RetrievalSignals,
         limit: int,
     ) -> list[CandidateLike]:
         filtered = self._evidence_service.filter_candidates(
             self._branch_registry.collect_web(
                 query=plan.rewritten_query,
                 source_scope=self._effective_scope(source_scope, plan=plan, supports_plan=False),
-                query_understanding=query_understanding,
+                retrieval_signals=retrieval_signals,
             ),
             source_scope=source_scope,
             access_policy=access_policy,
             runtime_mode=runtime_mode,
-            query_understanding=query_understanding,
+            retrieval_signals=retrieval_signals,
         )
         limited = filtered[:limit]
         if self._telemetry_service is not None:
@@ -291,7 +291,7 @@ class RetrievalAdapter:
         source_scope: list[str],
         access_policy: AccessPolicy,
         runtime_mode: RuntimeMode,
-        query_understanding: QueryUnderstanding,
+        retrieval_signals: RetrievalSignals,
         limit: int,
     ) -> list[CandidateLike]:
         return self.collect_web(
@@ -299,7 +299,7 @@ class RetrievalAdapter:
             source_scope=source_scope,
             access_policy=access_policy,
             runtime_mode=runtime_mode,
-            query_understanding=query_understanding,
+            retrieval_signals=retrieval_signals,
             limit=limit,
         )
 
@@ -309,7 +309,7 @@ class RetrievalAdapter:
         retriever: BranchRetriever,
         query: str,
         source_scope: list[str],
-        query_understanding: QueryUnderstanding,
+        retrieval_signals: RetrievalSignals,
         plan: PlanningState,
     ) -> Sequence[CandidateLike]:
         retrieve_with_plan = getattr(retriever, "retrieve_with_plan", None)
@@ -319,10 +319,10 @@ class RetrievalAdapter:
             return retrieve_with_plan(
                 query=query,
                 source_scope=effective_scope,
-                query_understanding=query_understanding,
+                retrieval_signals=retrieval_signals,
                 plan=plan,
             )
-        return retriever(query, effective_scope, query_understanding)
+        return retriever(query, effective_scope, retrieval_signals)
 
     async def _acall_branch(
         self,
@@ -330,7 +330,7 @@ class RetrievalAdapter:
         retriever: BranchRetriever,
         query: str,
         source_scope: list[str],
-        query_understanding: QueryUnderstanding,
+        retrieval_signals: RetrievalSignals,
         plan: PlanningState,
     ) -> Sequence[CandidateLike]:
         aretrieve_with_plan = getattr(retriever, "aretrieve_with_plan", None)
@@ -341,20 +341,20 @@ class RetrievalAdapter:
             return await aretrieve_with_plan(
                 query=query,
                 source_scope=effective_scope,
-                query_understanding=query_understanding,
+                retrieval_signals=retrieval_signals,
                 plan=plan,
             )
         if callable(retrieve_with_plan):
             result = retrieve_with_plan(
                 query=query,
                 source_scope=effective_scope,
-                query_understanding=query_understanding,
+                retrieval_signals=retrieval_signals,
                 plan=plan,
             )
             if inspect.isawaitable(result):
                 return await result
             return result
-        result = retriever(query, effective_scope, query_understanding)
+        result = retriever(query, effective_scope, retrieval_signals)
         if inspect.isawaitable(result):
             return await result
         return result

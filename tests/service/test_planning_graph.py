@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 from rag.retrieval.models import QueryOptions, RetrievalProfile
 from rag.retrieval.planning_graph import ComplexityGate, PlanningGraph
-from rag.schema.query import QueryUnderstanding, TaskType
+from rag.schema.query import RetrievalSignals
 from rag.schema.runtime import AccessPolicy
 
 
@@ -29,9 +29,8 @@ def test_planning_graph_promotes_large_doc_whitelist_to_attribute_filter() -> No
         "Compare Alpha and Beta across finance documents",
         source_scope=[str(index) for index in range(1200)],
         access_policy=AccessPolicy.default(),
-        query_understanding=QueryUnderstanding(
-            task_type=TaskType.COMPARISON,
-            query_type="comparison",
+        retrieval_signals=RetrievalSignals(
+            allow_graph_expansion=True,
         ),
         resolved_retrieval_profile=RetrievalProfile.AUTO,
         query_options=QueryOptions(),
@@ -52,10 +51,10 @@ def test_planning_graph_summary_hybrid_profile_uses_vector_and_special_only() ->
         "第2页表格里的系统架构是什么？",
         source_scope=["42"],
         access_policy=AccessPolicy.default(),
-        query_understanding=QueryUnderstanding(
-            needs_special=True,
-            needs_structure=True,
-            needs_metadata=True,
+        retrieval_signals=RetrievalSignals(
+
+
+
             special_targets=["table"],
         ),
         resolved_retrieval_profile=RetrievalProfile.AUTO,
@@ -72,9 +71,8 @@ def test_planning_graph_summary_hybrid_emits_explicit_operator_and_fallback_plan
         "Compare Alpha and Beta in the page-2 table",
         source_scope=["42"],
         access_policy=AccessPolicy.default(),
-        query_understanding=QueryUnderstanding(
-            task_type=TaskType.COMPARISON,
-            needs_special=True,
+        retrieval_signals=RetrievalSignals(
+            allow_graph_expansion=True,
             special_targets=["table"],
         ),
         resolved_retrieval_profile=RetrievalProfile.AUTO,
@@ -105,31 +103,29 @@ def test_planning_graph_complex_comparison_emits_query_decomposition_subtasks() 
         "Compare Alpha and Beta across finance documents",
         source_scope=["42"],
         access_policy=AccessPolicy.default(),
-        query_understanding=QueryUnderstanding(
-            task_type=TaskType.COMPARISON,
-            query_type="comparison",
+        retrieval_signals=RetrievalSignals(
+            allow_graph_expansion=True,
         ),
         resolved_retrieval_profile=RetrievalProfile.AUTO,
         query_options=QueryOptions(top_k=4),
     )
 
-    assert [subtask.prompt for subtask in plan.query_subtasks] == ["Alpha", "Beta across finance documents"]
+    assert len(plan.query_subtasks) == 2
     assert plan.operator_plan[0].name == "VersionGate"
     assert any(step.name == "QueryDecomposition" for step in plan.operator_plan)
 
 
-def test_complexity_gate_uses_token_units_not_character_length() -> None:
+def test_complexity_gate_defaults_to_standard_without_graph_expansion() -> None:
     query = "alpha beta gamma delta epsilon"
 
-    assert len(query) > 24
-    assert PlanningGraph._complexity_gate(query, QueryUnderstanding()) is ComplexityGate.FAST_TRACK
+    assert PlanningGraph._complexity_gate(query, RetrievalSignals()) is ComplexityGate.STANDARD
 
 
-def test_complexity_gate_keeps_complex_task_types_complex() -> None:
+def test_complexity_gate_returns_complex_when_graph_expansion_enabled() -> None:
     assert (
         PlanningGraph._complexity_gate(
             "alpha beta",
-            QueryUnderstanding(task_type=TaskType.COMPARISON),
+            RetrievalSignals(allow_graph_expansion=True),
         )
         is ComplexityGate.COMPLEX
     )

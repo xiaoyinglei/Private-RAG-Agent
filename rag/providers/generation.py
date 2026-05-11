@@ -16,7 +16,7 @@ from rag.schema.query import (
     AnswerSection,
     EvidenceItem,
     GroundedAnswer,
-    QueryUnderstanding,
+    RetrievalSignals,
 )
 from rag.schema.runtime import (
     AccessPolicy,
@@ -713,23 +713,23 @@ class AnswerGenerator:
         query: str,
         evidence_pack: Sequence[EvidenceItem],
         *,
-        query_understanding: QueryUnderstanding | None = None,
+        retrieval_signals: RetrievalSignals | None = None,
     ) -> str:
         hits = [item for item in evidence_pack if item.text.strip()]
         if not hits:
             return "Insufficient evidence in indexed sources."
 
-        if query_understanding is not None and query_understanding.special_targets:
-            special_candidate = self._special_aware_conclusion(hits, query_understanding)
+        if retrieval_signals is not None and retrieval_signals.special_targets:
+            special_candidate = self._special_aware_conclusion(hits, retrieval_signals)
             if special_candidate is not None:
                 return special_candidate
 
-        if query_understanding is not None and query_understanding.needs_structure:
-            structure_candidate = self._structure_aware_conclusion(hits, query_understanding)
+        if retrieval_signals is not None and retrieval_signals.structure_constraints.has_constraints():
+            structure_candidate = self._structure_aware_conclusion(hits, retrieval_signals)
             if structure_candidate is not None:
                 return structure_candidate
 
-        return self._best_overlap_sentence(query, hits, query_understanding)
+        return self._best_overlap_sentence(query, hits, retrieval_signals)
 
     async def generate(
         self,
@@ -962,9 +962,9 @@ class AnswerGenerator:
     @staticmethod
     def _special_aware_conclusion(
         hits: Sequence[EvidenceItem],
-        understanding: QueryUnderstanding,
+        signals: RetrievalSignals,
     ) -> str | None:
-        preferred_targets = set(understanding.special_targets)
+        preferred_targets = set(signals.special_targets)
         ranked_hits = sorted(
             hits[:8],
             key=lambda item: (
@@ -984,9 +984,9 @@ class AnswerGenerator:
     @staticmethod
     def _structure_aware_conclusion(
         hits: Sequence[EvidenceItem],
-        understanding: QueryUnderstanding,
+        signals: RetrievalSignals,
     ) -> str | None:
-        query_focus_terms = understanding.structure_constraints.focus_terms or understanding.quoted_terms
+        query_focus_terms = signals.structure_constraints.focus_terms or signals.quoted_terms
         ranked_hits = sorted(
             hits[:8],
             key=lambda item: (
@@ -1025,12 +1025,12 @@ class AnswerGenerator:
     def _best_overlap_sentence(
         query: str,
         hits: Sequence[EvidenceItem],
-        understanding: QueryUnderstanding | None,
+        signals: RetrievalSignals | None,
     ) -> str:
         query_terms = search_terms(query)
         query_focus_terms = (
-            list(understanding.structure_constraints.focus_terms)
-            if understanding is not None and understanding.structure_constraints.focus_terms
+            list(signals.structure_constraints.focus_terms)
+            if signals is not None and signals.structure_constraints.focus_terms
             else _answer_focus_terms(query)
         )
         normalized_query = query.strip().lower()
@@ -1046,7 +1046,7 @@ class AnswerGenerator:
             command_penalty = 0 if looks_command_like(sentence) else 1
             structure_priority = (
                 keyword_overlap(query_focus_terms, sentence)
-                if understanding is not None and understanding.needs_structure
+                if signals is not None and signals.structure_constraints.has_constraints()
                 else 0
             )
             return (

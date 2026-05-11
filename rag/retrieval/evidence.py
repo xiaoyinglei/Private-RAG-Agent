@@ -8,7 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from rag.schema.query import (
     EvidenceItem,
-    QueryUnderstanding,
+    RetrievalSignals,
     TaskType,
 )
 from rag.schema.runtime import AccessPolicy, RuntimeMode
@@ -122,7 +122,7 @@ class EvidenceService:
         source_scope: Sequence[str],
         access_policy: AccessPolicy,
         runtime_mode: RuntimeMode,
-        query_understanding: QueryUnderstanding | None = None,
+        retrieval_signals: RetrievalSignals | None = None,
     ) -> list[CandidateLike]:
         allowed_scope = set(source_scope)
         filtered: list[CandidateLike] = []
@@ -137,28 +137,28 @@ class EvidenceService:
                     continue
                 if not (candidate_policy.allowed_locations & access_policy.allowed_locations):
                     continue
-            if query_understanding is not None and not self._matches_explicit_constraints(
-                candidate, query_understanding
+            if retrieval_signals is not None and not self._matches_explicit_constraints(
+                candidate, retrieval_signals
             ):
                 continue
             filtered.append(candidate)
         return filtered
 
     @staticmethod
-    def _matches_explicit_constraints(candidate: CandidateLike, query_understanding: QueryUnderstanding) -> bool:
+    def _matches_explicit_constraints(candidate: CandidateLike, retrieval_signals: RetrievalSignals) -> bool:
         if getattr(candidate, "source_kind", "internal") == "external":
             return True
-        if not query_understanding.has_explicit_constraints():
+        if not retrieval_signals.has_constraints():
             return True
-        if not EvidenceService._matches_metadata_constraints(candidate, query_understanding):
+        if not EvidenceService._matches_metadata_constraints(candidate, retrieval_signals):
             return False
-        if not EvidenceService._matches_structure_constraints(candidate, query_understanding):
+        if not EvidenceService._matches_structure_constraints(candidate, retrieval_signals):
             return False
         return True
 
     @staticmethod
-    def _matches_metadata_constraints(candidate: CandidateLike, query_understanding: QueryUnderstanding) -> bool:
-        metadata_filters = query_understanding.metadata_filters
+    def _matches_metadata_constraints(candidate: CandidateLike, retrieval_signals: RetrievalSignals) -> bool:
+        metadata_filters = retrieval_signals.metadata_filters
         candidate_metadata = getattr(candidate, "metadata", {}) or {}
         candidate_source_type = getattr(candidate, "source_type", None) or candidate_metadata.get("source_type")
         if metadata_filters.source_types and candidate_source_type is not None:
@@ -192,8 +192,8 @@ class EvidenceService:
         return True
 
     @staticmethod
-    def _matches_structure_constraints(candidate: CandidateLike, query_understanding: QueryUnderstanding) -> bool:
-        constraints = query_understanding.structure_constraints
+    def _matches_structure_constraints(candidate: CandidateLike, retrieval_signals: RetrievalSignals) -> bool:
+        constraints = retrieval_signals.structure_constraints
         if not constraints.requires_structure_match:
             return True
         section_path = tuple(getattr(candidate, "section_path", ()) or ())

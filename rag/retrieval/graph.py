@@ -11,7 +11,7 @@ from rag.assembly import EmbeddingCapabilityBinding
 from rag.retrieval.analysis import special_target_aliases
 from rag.retrieval.evidence import CandidateLike, EvidenceBundle
 from rag.schema.core import AssetRecord, Document, SectionRecord, Source
-from rag.schema.query import GroundingTarget, QueryUnderstanding
+from rag.schema.query import GroundingTarget, RetrievalSignals
 from rag.schema.runtime import (
     AccessPolicy,
     ExecutionLocationPreference,
@@ -126,9 +126,9 @@ class EmptyGraphRetriever:
         self,
         query: str,
         source_scope: list[str],
-        query_understanding: QueryUnderstanding,
+        retrieval_signals: RetrievalSignals,
     ) -> list[RetrievedCandidate]:
-        del query, source_scope, query_understanding
+        del query, source_scope, retrieval_signals
         return []
 
 
@@ -171,9 +171,9 @@ class MultiProviderBackedVectorRetriever:
         self,
         query: str,
         source_scope: list[str],
-        query_understanding: QueryUnderstanding,
+        retrieval_signals: RetrievalSignals,
     ) -> list[RetrievedCandidate]:
-        del query_understanding
+        del retrieval_signals
         self.last_provider = None
         self.last_attempts = []
         ordered_bindings = self._ordered_bindings()
@@ -279,10 +279,10 @@ class MilvusSummaryHybridRetriever:
         *,
         query: str,
         source_scope: list[str],
-        query_understanding: QueryUnderstanding,
+        retrieval_signals: RetrievalSignals,
         plan: object,
     ) -> list[RetrievedCandidate]:
-        del query_understanding
+        del retrieval_signals
         try:
             asyncio.get_running_loop()
         except RuntimeError:
@@ -295,9 +295,9 @@ class MilvusSummaryHybridRetriever:
         query: str,
         source_scope: list[str],
         plan: object,
-        query_understanding: QueryUnderstanding | None = None,
+        retrieval_signals: RetrievalSignals | None = None,
     ) -> list[RetrievedCandidate]:
-        del query_understanding
+        del retrieval_signals
         self.last_provider = None
         self.last_attempts = []
         ordered_bindings = self._ordered_bindings()
@@ -525,10 +525,10 @@ class SearchBackedRetrievalFactory:
         self,
         query: str,
         source_scope: list[str],
-        query_understanding: QueryUnderstanding,
+        retrieval_signals: RetrievalSignals,
     ) -> list[RetrievedCandidate]:
         query_terms = search_terms(query)
-        constraints = query_understanding.structure_constraints
+        constraints = retrieval_signals.structure_constraints
         focus_terms = {term for term in constraints.focus_terms if term}
         if not focus_terms:
             return []
@@ -561,13 +561,13 @@ class SearchBackedRetrievalFactory:
         self,
         query: str,
         source_scope: list[str],
-        query_understanding: QueryUnderstanding,
+        retrieval_signals: RetrievalSignals,
     ) -> list[RetrievedCandidate]:
         query_terms = search_terms(query)
         lowered = query.lower()
         target_aliases = {
             target: set(special_target_aliases(target))
-            for target in query_understanding.special_targets
+            for target in retrieval_signals.special_targets
         }
         if not target_aliases:
             return []
@@ -598,16 +598,16 @@ class SearchBackedRetrievalFactory:
         self,
         query: str,
         source_scope: list[str],
-        query_understanding: QueryUnderstanding,
+        retrieval_signals: RetrievalSignals,
     ) -> list[RetrievedCandidate]:
         del query
-        page_numbers = set(query_understanding.metadata_filters.page_numbers)
-        page_ranges = list(query_understanding.metadata_filters.page_ranges)
-        source_types = set(query_understanding.metadata_filters.source_types)
-        focus_terms = set(query_understanding.structure_constraints.focus_terms)
-        document_titles = set(query_understanding.metadata_filters.document_titles)
-        file_names = set(query_understanding.metadata_filters.file_names)
-        special_targets = set(query_understanding.special_targets)
+        page_numbers = set(retrieval_signals.metadata_filters.page_numbers)
+        page_ranges = list(retrieval_signals.metadata_filters.page_ranges)
+        source_types = set(retrieval_signals.metadata_filters.source_types)
+        focus_terms = set(retrieval_signals.structure_constraints.focus_terms)
+        document_titles = set(retrieval_signals.metadata_filters.document_titles)
+        file_names = set(retrieval_signals.metadata_filters.file_names)
+        special_targets = set(retrieval_signals.special_targets)
         if not (page_numbers or page_ranges or source_types or focus_terms or document_titles or file_names or special_targets):
             return []
 
@@ -670,9 +670,9 @@ class SearchBackedRetrievalFactory:
         self,
         query: str,
         source_scope: list[str],
-        query_understanding: QueryUnderstanding,
+        retrieval_signals: RetrievalSignals,
     ) -> list[RetrievedCandidate]:
-        del source_scope, query_understanding
+        del source_scope, retrieval_signals
         return [
             RetrievedCandidate(
                 evidence_id=f"web-{index}",

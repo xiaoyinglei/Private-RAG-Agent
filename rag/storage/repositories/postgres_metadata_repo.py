@@ -78,7 +78,6 @@ class PostgresMetadataRepo:
                 mime_type,
                 owner_id,
                 ingest_version,
-                pii_status,
                 residency,
                 external_retrieval,
                 sensitivity_tags,
@@ -86,7 +85,7 @@ class PostgresMetadataRepo:
                 updated_at,
                 metadata_json
             )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (location, content_hash, ingest_version) DO UPDATE SET
                 source_type = EXCLUDED.source_type,
                 original_file_name = EXCLUDED.original_file_name,
@@ -95,7 +94,6 @@ class PostgresMetadataRepo:
                 file_size_bytes = EXCLUDED.file_size_bytes,
                 mime_type = EXCLUDED.mime_type,
                 owner_id = EXCLUDED.owner_id,
-                pii_status = EXCLUDED.pii_status,
                 residency = EXCLUDED.residency,
                 external_retrieval = EXCLUDED.external_retrieval,
                 sensitivity_tags = EXCLUDED.sensitivity_tags,
@@ -115,7 +113,6 @@ class PostgresMetadataRepo:
                 saved_source.mime_type,
                 saved_source.owner_id,
                 saved_source.ingest_version,
-                saved_source.pii_status.value,
                 saved_source.effective_access_policy.residency.value,
                 saved_source.effective_access_policy.external_retrieval.value,
                 self._json_dumps(sorted(saved_source.effective_access_policy.sensitivity_tags)),
@@ -218,9 +215,7 @@ class PostgresMetadataRepo:
                 is_indexed,
                 index_ready,
                 index_priority,
-                indexing_mode,
                 storage_tier,
-                pii_status,
                 reference_count,
                 page_count,
                 tenant_id,
@@ -238,7 +233,7 @@ class PostgresMetadataRepo:
             )
             VALUES (
                 %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
             )
             ON CONFLICT (source_id, file_hash, version_no) DO UPDATE SET
                 title = EXCLUDED.title,
@@ -250,9 +245,7 @@ class PostgresMetadataRepo:
                 is_indexed = EXCLUDED.is_indexed,
                 index_ready = EXCLUDED.index_ready,
                 index_priority = EXCLUDED.index_priority,
-                indexing_mode = EXCLUDED.indexing_mode,
                 storage_tier = EXCLUDED.storage_tier,
-                pii_status = EXCLUDED.pii_status,
                 reference_count = EXCLUDED.reference_count,
                 page_count = EXCLUDED.page_count,
                 tenant_id = EXCLUDED.tenant_id,
@@ -283,9 +276,7 @@ class PostgresMetadataRepo:
                 saved_document.is_indexed,
                 saved_document.index_ready,
                 saved_document.index_priority,
-                saved_document.indexing_mode.value,
                 saved_document.storage_tier.value,
-                saved_document.pii_status.value,
                 saved_document.reference_count,
                 saved_document.page_count,
                 saved_document.tenant_id,
@@ -975,7 +966,6 @@ class PostgresMetadataRepo:
                 mime_type VARCHAR(128),
                 owner_id VARCHAR(128),
                 ingest_version INT NOT NULL DEFAULT 1,
-                pii_status VARCHAR(32) NOT NULL DEFAULT 'unknown',
                 residency VARCHAR(32) NOT NULL,
                 external_retrieval VARCHAR(16) NOT NULL,
                 sensitivity_tags JSONB NOT NULL DEFAULT '[]',
@@ -1011,9 +1001,7 @@ class PostgresMetadataRepo:
                 is_indexed BOOLEAN NOT NULL DEFAULT FALSE,
                 index_ready BOOLEAN NOT NULL DEFAULT FALSE,
                 index_priority VARCHAR(16) NOT NULL DEFAULT 'high',
-                indexing_mode VARCHAR(16) NOT NULL DEFAULT 'eager',
                 storage_tier VARCHAR(16) NOT NULL DEFAULT 'hot',
-                pii_status VARCHAR(32) NOT NULL DEFAULT 'unknown',
                 reference_count INT NOT NULL DEFAULT 1,
                 page_count INT,
                 tenant_id VARCHAR(64),

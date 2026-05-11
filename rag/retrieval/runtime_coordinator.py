@@ -8,7 +8,7 @@ from typing import TypeVar
 from rag.retrieval.analysis import RoutingDecision
 from rag.retrieval.evidence import CandidateLike, EvidenceBundle, SelfCheckResult
 from rag.retrieval.models import RetrievalResult
-from rag.schema.query import QueryUnderstanding
+from rag.schema.query import RetrievalSignals
 from rag.schema.runtime import ProviderAttempt, RetrievalDiagnostics
 
 T = TypeVar("T")
@@ -41,8 +41,8 @@ class CoreRetrievalPayload:
     fusion_alpha: float | None = None
     fusion_input_count: int = 0
     fused_count: int = 0
-    query_understanding: QueryUnderstanding | None = None
-    query_understanding_debug: dict[str, object] = field(default_factory=dict)
+    retrieval_signals: RetrievalSignals | None = None
+    retrieval_signals_debug: dict[str, object] = field(default_factory=dict)
     pre_rerank_count: int = 0
     post_cleanup_count: int = 0
     top1_confidence: float | None = None
@@ -88,8 +88,8 @@ def build_retrieval_diagnostics(payload: CoreRetrievalPayload) -> RetrievalDiagn
         fusion_input_count=payload.fusion_input_count,
         fused_count=payload.fused_count,
         graph_expanded=bool(payload.graph_expanded),
-        query_understanding=payload.query_understanding,
-        query_understanding_debug=dict(payload.query_understanding_debug or {}),
+        retrieval_signals=payload.retrieval_signals,
+        retrieval_signals_debug=dict(payload.retrieval_signals_debug or {}),
         pre_rerank_count=payload.pre_rerank_count,
         post_cleanup_count=payload.post_cleanup_count,
         top1_confidence=payload.top1_confidence,

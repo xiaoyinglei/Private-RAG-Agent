@@ -33,7 +33,7 @@ from rag.retrieval.runtime_coordinator import (
     to_retrieval_result,
 )
 from rag.schema.model_protocols import Reranker as ModelReranker
-from rag.schema.query import QueryUnderstanding
+from rag.schema.query import RetrievalSignals
 from rag.schema.runtime import AccessPolicy, ExecutionLocationPreference, ProviderAttempt
 from rag.utils.telemetry import TelemetryService
 
@@ -55,7 +55,7 @@ class RetrieverFn(Protocol):
         self,
         query: str,
         source_scope: list[str],
-        query_understanding: QueryUnderstanding,
+        retrieval_signals: RetrievalSignals,
     ) -> Sequence[CandidateLike]: ...
 
 
@@ -83,9 +83,9 @@ class BranchRetrieverRegistry:
         *,
         query: str,
         source_scope: list[str],
-        query_understanding: QueryUnderstanding,
+        retrieval_signals: RetrievalSignals,
     ) -> list[CandidateLike]:
-        return list(self.web_retriever(query, source_scope, query_understanding))
+        return list(self.web_retriever(query, source_scope, retrieval_signals))
 
     def get(self, branch: str) -> RetrieverFn:
         return {
@@ -450,7 +450,7 @@ class RetrievalService:
         source_scope: Sequence[str] = (),
         execution_location_preference: ExecutionLocationPreference | None = None,
         query_options: QueryOptions | None = None,
-    ) -> tuple[QueryUnderstanding, AccessPolicy, RoutingDecision, PlanningState]:
+    ) -> tuple[RetrievalSignals, AccessPolicy, RoutingDecision, PlanningState]:
         scope = list(source_scope)
         retrieval_profile = (
             query_options.resolved_retrieval_profile
@@ -464,10 +464,11 @@ class RetrievalService:
                 execution_location_preference or ExecutionLocationPreference.LOCAL_FIRST
             ),
         )
+        retrieval_signals = RetrievalSignals.from_query_understanding(query_understanding)
         effective_access_policy = narrow_access_policy_for_query(access_policy, query_understanding)
         decision = self.routing_service.route(
             query,
-            query_understanding=query_understanding,
+            retrieval_signals=retrieval_signals,
             source_scope=scope,
             access_policy=effective_access_policy,
         )
@@ -476,12 +477,12 @@ class RetrievalService:
                 query,
                 source_scope=scope,
                 access_policy=effective_access_policy,
-                query_understanding=query_understanding,
+                retrieval_signals=retrieval_signals,
                 resolved_retrieval_profile=retrieval_profile,
                 query_options=query_options,
             )
         )
-        return query_understanding, effective_access_policy, decision, plan
+        return retrieval_signals, effective_access_policy, decision, plan
 
     def collect_internal_branches(
         self,
@@ -490,7 +491,7 @@ class RetrievalService:
         source_scope: Sequence[str],
         access_policy: AccessPolicy,
         runtime_mode: ExecutionLocationPreference | str | object,
-        query_understanding: QueryUnderstanding,
+        retrieval_signals: RetrievalSignals,
     ) -> object:
         return self.runtime_coordinator.run_sync(
             self.retrieval_adapter.acollect_internal(
@@ -498,7 +499,7 @@ class RetrievalService:
                 source_scope=list(source_scope),
                 access_policy=access_policy,
                 runtime_mode=runtime_mode,
-                query_understanding=query_understanding,
+                retrieval_signals=retrieval_signals,
             )
         )
 
@@ -507,7 +508,7 @@ class RetrievalService:
         *,
         branch: str,
         plan: PlanningState,
-        query_understanding: QueryUnderstanding,
+        retrieval_signals: RetrievalSignals,
         source_scope: Sequence[str],
         access_policy: AccessPolicy,
         runtime_mode: object,
@@ -521,7 +522,7 @@ class RetrievalService:
                 retriever=retriever,
                 query=branch_query,
                 source_scope=list(source_scope),
-                query_understanding=query_understanding,
+                retrieval_signals=retrieval_signals,
                 plan=plan,
             )
         )
@@ -530,7 +531,7 @@ class RetrievalService:
             source_scope=source_scope,
             access_policy=access_policy,
             runtime_mode=runtime_mode,
-            query_understanding=query_understanding,
+            retrieval_signals=retrieval_signals,
         )
         return filtered[:limit]
 

@@ -8,6 +8,7 @@ from rag.retrieval.analysis import (
     RoutingService,
     narrow_access_policy_for_query,
 )
+from rag.schema.query import RetrievalSignals
 from rag.retrieval.evidence import (
     CandidateLike,
     EvidenceBundle,
@@ -77,10 +78,11 @@ class L3L4RetrievalEngine:
                 execution_location_preference or ExecutionLocationPreference.LOCAL_FIRST
             ),
         )
+        retrieval_signals = RetrievalSignals.from_query_understanding(query_understanding)
         effective_access_policy = narrow_access_policy_for_query(access_policy, query_understanding)
         decision = self.routing_service.route(
             query,
-            query_understanding=query_understanding,
+            retrieval_signals=retrieval_signals,
             source_scope=scope,
             access_policy=effective_access_policy,
         )
@@ -88,13 +90,13 @@ class L3L4RetrievalEngine:
             return self._run_bypass_mode(
                 query=query,
                 decision=decision,
-                query_understanding=query_understanding,
+                retrieval_signals=retrieval_signals,
             )
         plan = await self.planning_graph.aplan(
             query,
             source_scope=scope,
             access_policy=effective_access_policy,
-            query_understanding=query_understanding,
+            retrieval_signals=retrieval_signals,
             resolved_retrieval_profile=retrieval_profile,
             query_options=query_options,
         )
@@ -103,7 +105,7 @@ class L3L4RetrievalEngine:
             source_scope=scope,
             access_policy=effective_access_policy,
             decision=decision,
-            query_understanding=query_understanding,
+            retrieval_signals=retrieval_signals,
             query_options=query_options,
             plan=plan,
         )
@@ -115,7 +117,7 @@ class L3L4RetrievalEngine:
         source_scope: list[str],
         access_policy: AccessPolicy,
         decision: RoutingDecision,
-        query_understanding: QueryUnderstanding,
+        retrieval_signals: RetrievalSignals,
         query_options: QueryOptions | None,
         plan: PlanningState,
     ) -> CoreRetrievalPayload:
@@ -124,7 +126,7 @@ class L3L4RetrievalEngine:
             source_scope=source_scope,
             access_policy=access_policy,
             runtime_mode=decision.runtime_mode,
-            query_understanding=query_understanding,
+            retrieval_signals=retrieval_signals,
         )
         rank_result = await self._rank_branches(
             query=query,
@@ -132,7 +134,7 @@ class L3L4RetrievalEngine:
             branches=collection.branches,
             query_options=query_options,
             rerank_required=decision.rerank_required,
-            query_understanding=query_understanding,
+            retrieval_signals=retrieval_signals,
         )
         reranked_candidates = rank_result.candidates
         evidence = self.evidence_service.assemble_bundle(reranked_candidates)
@@ -157,7 +159,7 @@ class L3L4RetrievalEngine:
                 source_scope=source_scope,
                 access_policy=access_policy,
                 runtime_mode=decision.runtime_mode,
-                query_understanding=query_understanding,
+                retrieval_signals=retrieval_signals,
                 skip_absorbed_sparse=False,
             )
             collection = self._merge_branch_collection(collection, supplemental)
@@ -167,7 +169,7 @@ class L3L4RetrievalEngine:
                 branches=collection.branches,
                 query_options=query_options,
                 rerank_required=decision.rerank_required,
-                query_understanding=query_understanding,
+                retrieval_signals=retrieval_signals,
             )
             reranked_candidates = rank_result.candidates
             evidence = self.evidence_service.assemble_bundle(reranked_candidates)
@@ -191,7 +193,7 @@ class L3L4RetrievalEngine:
                 source_scope=source_scope,
                 access_policy=access_policy,
                 runtime_mode=decision.runtime_mode,
-                query_understanding=query_understanding,
+                retrieval_signals=retrieval_signals,
                 limit=plan.web_limit,
             )
             collection.branch_hits["web"] = len(web_candidates)
@@ -203,7 +205,7 @@ class L3L4RetrievalEngine:
                     branches=[*collection.branches, ("web", web_candidates)],
                     query_options=query_options,
                     rerank_required=decision.rerank_required,
-                    query_understanding=query_understanding,
+                    retrieval_signals=retrieval_signals,
                 )
                 reranked_candidates = rank_result.candidates
                 evidence = self.evidence_service.assemble_bundle(reranked_candidates)
@@ -269,8 +271,8 @@ class L3L4RetrievalEngine:
             fusion_alpha=plan.fusion_alpha,
             fusion_input_count=rank_result.candidate_count + len(web_candidates),
             fused_count=len(reranked_candidates),
-            query_understanding=query_understanding,
-            query_understanding_debug=self.query_understanding_service.diagnostics_payload(),
+            retrieval_signals=retrieval_signals,
+            retrieval_signals_debug=self.query_understanding_service.diagnostics_payload(),
             pre_rerank_count=rank_result.pre_rerank_count,
             post_cleanup_count=rank_result.post_cleanup_count,
             top1_confidence=rank_result.top1_confidence,
@@ -326,7 +328,7 @@ class L3L4RetrievalEngine:
         *,
         query: str,
         decision: RoutingDecision,
-        query_understanding: QueryUnderstanding,
+        retrieval_signals: RetrievalSignals,
     ) -> CoreRetrievalPayload:
         del query
         return CoreRetrievalPayload(
@@ -351,8 +353,8 @@ class L3L4RetrievalEngine:
             branch_limits={},
             fusion_input_count=0,
             fused_count=0,
-            query_understanding=query_understanding,
-            query_understanding_debug={},
+            retrieval_signals=retrieval_signals,
+            retrieval_signals_debug={},
             collapsed_candidate_count=0,
         )
 
@@ -364,7 +366,7 @@ class L3L4RetrievalEngine:
         branches: list[tuple[str, list[CandidateLike]]],
         query_options: QueryOptions | None,
         rerank_required: bool,
-        query_understanding: QueryUnderstanding | None = None,
+        retrieval_signals: RetrievalSignals | None = None,
     ) -> RankPipelineResult:
         candidate_count = sum(len(branch) for _, branch in branches)
         fused_candidates = self.fusion.fuse(
@@ -388,7 +390,7 @@ class L3L4RetrievalEngine:
             rerank_required=rerank_required and (query_options is None or query_options.enable_rerank),
             rerank_pool_k=(query_options.rerank_pool_k if query_options is not None else None),
             allow_asset_fallback=plan.semantic_route in {"asset_first", "text_plus_asset"},
-            query_understanding=query_understanding,
+            retrieval_signals=retrieval_signals,
             min_output_candidates=query_options.resolved_candidate_top_k if query_options is not None else None,
         )
         reranked_candidates = rerank_result.ranked_candidates

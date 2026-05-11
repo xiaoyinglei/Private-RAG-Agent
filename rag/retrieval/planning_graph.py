@@ -10,9 +10,8 @@ from langgraph.graph import END, START, StateGraph
 from typing_extensions import TypedDict
 
 from rag.retrieval.models import QueryOptions, RetrievalProfile, normalize_retrieval_profile
-from rag.schema.query import QueryUnderstanding, TaskType
+from rag.schema.query import RetrievalSignals
 from rag.schema.runtime import AccessPolicy
-from rag.utils.text import text_unit_count
 
 
 class ComplexityGate(StrEnum):
@@ -83,7 +82,7 @@ class _PlannerState(TypedDict, total=False):
     query: str
     source_scope: tuple[str, ...]
     access_policy: AccessPolicy
-    query_understanding: QueryUnderstanding
+    retrieval_signals: RetrievalSignals
     retrieval_profile: RetrievalProfile
     retrieval_limit: int
     final_limit: int
@@ -155,7 +154,7 @@ class PlanningGraph:
         *,
         source_scope: Sequence[str],
         access_policy: AccessPolicy,
-        query_understanding: QueryUnderstanding,
+        retrieval_signals: RetrievalSignals,
         resolved_retrieval_profile: RetrievalProfile | str | None,
         query_options: QueryOptions | None,
     ) -> PlanningState:
@@ -167,7 +166,7 @@ class PlanningGraph:
                     query,
                     source_scope=source_scope,
                     access_policy=access_policy,
-                    query_understanding=query_understanding,
+                    retrieval_signals=retrieval_signals,
                     resolved_retrieval_profile=resolved_retrieval_profile,
                     query_options=query_options,
                 )
@@ -180,7 +179,7 @@ class PlanningGraph:
         *,
         source_scope: Sequence[str],
         access_policy: AccessPolicy,
-        query_understanding: QueryUnderstanding,
+        retrieval_signals: RetrievalSignals,
         resolved_retrieval_profile: RetrievalProfile | str | None,
         query_options: QueryOptions | None,
     ) -> PlanningState:
@@ -189,7 +188,7 @@ class PlanningGraph:
                 query=query,
                 source_scope=source_scope,
                 access_policy=access_policy,
-                query_understanding=query_understanding,
+                retrieval_signals=retrieval_signals,
                 resolved_retrieval_profile=resolved_retrieval_profile,
                 query_options=query_options,
             )
@@ -254,7 +253,7 @@ class PlanningGraph:
         query: str,
         source_scope: Sequence[str],
         access_policy: AccessPolicy,
-        query_understanding: QueryUnderstanding,
+        retrieval_signals: RetrievalSignals,
         resolved_retrieval_profile: RetrievalProfile | str | None,
         query_options: QueryOptions | None,
     ) -> _PlannerState:
@@ -270,7 +269,7 @@ class PlanningGraph:
             "query": query,
             "source_scope": tuple(source_scope),
             "access_policy": access_policy,
-            "query_understanding": query_understanding,
+            "retrieval_signals": retrieval_signals,
             "retrieval_profile": retrieval_profile,
             "retrieval_limit": retrieval_limit,
             "final_limit": final_limit,
@@ -278,36 +277,36 @@ class PlanningGraph:
 
     async def _node_complexity_gate(self, state: dict[str, Any]) -> dict[str, Any]:
         query = str(state["query"])
-        query_understanding = state["query_understanding"]
-        complexity_gate = self._complexity_gate(query, query_understanding)
+        retrieval_signals = state["retrieval_signals"]
+        complexity_gate = self._complexity_gate(query, retrieval_signals)
         return {"complexity_gate": complexity_gate}
 
     async def _node_query_decompose(self, state: dict[str, Any]) -> dict[str, Any]:
         query = str(state["query"])
-        query_understanding = state["query_understanding"]
+        retrieval_signals = state["retrieval_signals"]
         complexity_gate = state["complexity_gate"]
         return {
-            "query_subtasks": self._decompose_query(query, query_understanding, complexity_gate),
+            "query_subtasks": self._decompose_query(query, retrieval_signals, complexity_gate),
         }
 
     async def _node_query_variants(self, state: dict[str, Any]) -> dict[str, Any]:
         query = str(state["query"])
-        query_understanding = state["query_understanding"]
+        retrieval_signals = state["retrieval_signals"]
         complexity_gate = state["complexity_gate"]
         query_subtasks = tuple(state.get("query_subtasks", ()) or ())
-        rewritten_query = self._rewrite_query(query, query_understanding, complexity_gate)
+        rewritten_query = self._rewrite_query(query, retrieval_signals, complexity_gate)
         if query_subtasks:
             rewritten_query = " ".join(
                 _ordered_unique([rewritten_query, *[subtask.prompt for subtask in query_subtasks if subtask.prompt]])
             )
         return {
             "rewritten_query": rewritten_query,
-            "sparse_query": self._sparse_query(query, query_understanding, rewritten_query, complexity_gate),
+            "sparse_query": self._sparse_query(query, retrieval_signals, rewritten_query, complexity_gate),
         }
 
     async def _node_semantic_route(self, state: dict[str, Any]) -> dict[str, Any]:
-        query_understanding = state["query_understanding"]
-        semantic_route = self._semantic_route(query_understanding)
+        retrieval_signals = state["retrieval_signals"]
+        semantic_route = self._semantic_route(retrieval_signals)
         return {
             "semantic_route": semantic_route,
             "target_collections": self._target_collections(
@@ -320,7 +319,7 @@ class PlanningGraph:
         return {
             "predicate_plan": self._predicate_plan(
                 state.get("version_gate_doc_ids") or state["source_scope"],
-                query_understanding=state["query_understanding"],
+                retrieval_signals=state["retrieval_signals"],
                 version_gate_expression=state.get("version_gate_expression"),
             )
         }
@@ -334,7 +333,7 @@ class PlanningGraph:
         }
 
     async def _node_execution_plan(self, state: dict[str, Any]) -> dict[str, Any]:
-        query_understanding = state["query_understanding"]
+        retrieval_signals = state["retrieval_signals"]
         semantic_route = str(state["semantic_route"])
         retrieval_limit = int(state["retrieval_limit"])
         final_limit = int(state["final_limit"])
@@ -343,7 +342,7 @@ class PlanningGraph:
         retrieval_paths = self._retrieval_paths(
             retrieval_profile=retrieval_profile,
             retrieval_limit=retrieval_limit,
-            query_understanding=query_understanding,
+            retrieval_signals=retrieval_signals,
             semantic_route=semantic_route,
         )
         return {
@@ -352,18 +351,18 @@ class PlanningGraph:
                 retrieval_limit=retrieval_limit,
                 final_limit=final_limit,
                 semantic_route=semantic_route,
-                query_understanding=query_understanding,
+                retrieval_signals=retrieval_signals,
             ),
             "fallback_plan": self._fallback_plan(
                 retrieval_limit=retrieval_limit,
                 semantic_route=semantic_route,
-                query_understanding=query_understanding,
+                retrieval_signals=retrieval_signals,
                 enabled=self._use_summary_hybrid_paths,
             ),
             "operator_plan": self._operator_plan(
                 complexity_gate=complexity_gate,
                 semantic_route=semantic_route,
-                query_understanding=query_understanding,
+                retrieval_signals=retrieval_signals,
             ),
             "allow_web": True,
             "allow_graph_expansion": False if self._use_summary_hybrid_paths else True,
@@ -378,20 +377,15 @@ class PlanningGraph:
         return "decompose" if state.get("complexity_gate") is ComplexityGate.COMPLEX else "rewrite"
 
     @staticmethod
-    def _complexity_gate(query: str, understanding: QueryUnderstanding) -> ComplexityGate:
-        query_tokens = text_unit_count(query.strip())
-        if understanding.task_type in {TaskType.COMPARISON, TaskType.TIMELINE, TaskType.RESEARCH}:
+    def _complexity_gate(query: str, signals: RetrievalSignals) -> ComplexityGate:
+        if signals.allow_graph_expansion:
             return ComplexityGate.COMPLEX
-        if query_tokens <= 24 and not understanding.has_explicit_constraints():
-            return ComplexityGate.FAST_TRACK
-        if query_tokens <= 72 and not understanding.needs_graph_expansion:
-            return ComplexityGate.STANDARD
-        return ComplexityGate.COMPLEX
+        return ComplexityGate.STANDARD
 
     @staticmethod
     def _rewrite_query(
         query: str,
-        understanding: QueryUnderstanding,
+        signals: RetrievalSignals,
         complexity_gate: ComplexityGate,
     ) -> str:
         base = query.strip()
@@ -399,8 +393,8 @@ class PlanningGraph:
             return base
         extras = _ordered_unique(
             [
-                *understanding.structure_constraints.focus_terms,
-                *understanding.quoted_terms,
+                *signals.structure_constraints.focus_terms,
+                *signals.quoted_terms,
             ]
         )
         if not extras:
@@ -410,7 +404,7 @@ class PlanningGraph:
     @staticmethod
     def _sparse_query(
         query: str,
-        understanding: QueryUnderstanding,
+        signals: RetrievalSignals,
         rewritten_query: str,
         complexity_gate: ComplexityGate,
     ) -> str:
@@ -418,9 +412,9 @@ class PlanningGraph:
             return query.strip()
         sparse_terms = _ordered_unique(
             [
-                *understanding.quoted_terms,
-                *understanding.structure_constraints.focus_terms,
-                *[str(page) for page in understanding.metadata_filters.page_numbers],
+                *signals.quoted_terms,
+                *signals.structure_constraints.focus_terms,
+                *[str(page) for page in signals.metadata_filters.page_numbers],
             ]
         )
         if not sparse_terms:
@@ -429,14 +423,12 @@ class PlanningGraph:
         return combined if combined.strip() else (rewritten_query or query.strip())
 
     @staticmethod
-    def _semantic_route(understanding: QueryUnderstanding) -> str:
-        source_types = {source_type.lower() for source_type in understanding.metadata_filters.source_types}
+    def _semantic_route(signals: RetrievalSignals) -> str:
+        source_types = {source_type.lower() for source_type in signals.metadata_filters.source_types}
         asset_source_types = {"pptx", "xlsx", "image", "pdf"}
-        if understanding.needs_special:
-            return "asset_first" if not understanding.needs_structure else "text_plus_asset"
-        if understanding.special_targets:
-            return "text_plus_asset"
-        if source_types & asset_source_types and understanding.metadata_filters.page_numbers:
+        if signals.special_targets:
+            return "asset_first" if not signals.structure_constraints.has_constraints() else "text_plus_asset"
+        if source_types & asset_source_types and signals.metadata_filters.page_numbers:
             return "text_plus_asset"
         return "text_first"
 
@@ -444,11 +436,11 @@ class PlanningGraph:
         self,
         source_scope: Sequence[str],
         *,
-        query_understanding: QueryUnderstanding,
+        retrieval_signals: RetrievalSignals,
         version_gate_expression: str | None = None,
     ) -> PredicatePlan:
         doc_ids = tuple(_ordered_unique(source_scope))
-        weak_clauses = self._weak_collection_clauses(query_understanding)
+        weak_clauses = self._weak_collection_clauses(retrieval_signals)
         if not doc_ids:
             return PredicatePlan(
                 strategy="version_gate" if version_gate_expression else "none",
@@ -512,9 +504,9 @@ class PlanningGraph:
         normalized = tuple(_ordered_unique(gated_doc_ids or source_scope))
         return normalized, None
 
-    def _weak_collection_clauses(self, understanding: QueryUnderstanding) -> dict[str, str]:
+    def _weak_collection_clauses(self, signals: RetrievalSignals) -> dict[str, str]:
         clauses: dict[str, list[str]] = {}
-        source_types = tuple(_ordered_unique(understanding.metadata_filters.source_types))
+        source_types = tuple(_ordered_unique(signals.metadata_filters.source_types))
         if source_types:
             clauses.setdefault("doc_summary", []).append(
                 f"source_type in [{', '.join(_format_expr_value(item) for item in source_types)}]"
@@ -522,7 +514,7 @@ class PlanningGraph:
             clauses.setdefault("section_summary", []).append(
                 f"source_type in [{', '.join(_format_expr_value(item) for item in source_types)}]"
             )
-        page_numbers = sorted({page for page in understanding.metadata_filters.page_numbers if isinstance(page, int)})
+        page_numbers = sorted({page for page in signals.metadata_filters.page_numbers if isinstance(page, int)})
         if page_numbers:
             page_expr = " or ".join(
                 f"(page_start <= {page_no} and page_end >= {page_no})" for page_no in page_numbers
@@ -531,7 +523,7 @@ class PlanningGraph:
             clauses.setdefault("asset_summary", []).append(
                 f"page_no in [{', '.join(str(page_no) for page_no in page_numbers)}]"
             )
-        page_ranges = [page_range for page_range in understanding.metadata_filters.page_ranges]
+        page_ranges = [page_range for page_range in signals.metadata_filters.page_ranges]
         if page_ranges:
             section_ranges = " or ".join(
                 f"(page_start <= {page_range.end} and page_end >= {page_range.start})" for page_range in page_ranges
@@ -541,10 +533,10 @@ class PlanningGraph:
             )
             clauses.setdefault("section_summary", []).append(section_ranges)
             clauses.setdefault("asset_summary", []).append(asset_ranges)
-        if understanding.special_targets:
+        if signals.special_targets:
             targets = ", ".join(
                 _format_expr_value(item)
-                for item in _ordered_unique(understanding.special_targets)
+                for item in _ordered_unique(signals.special_targets)
             )
             clauses.setdefault("asset_summary", []).append(
                 f"asset_type in [{targets}]"
@@ -612,7 +604,7 @@ class PlanningGraph:
         *,
         retrieval_profile: RetrievalProfile,
         retrieval_limit: int,
-        query_understanding: QueryUnderstanding,
+        retrieval_signals: RetrievalSignals,
         semantic_route: str,
     ) -> tuple[RetrievalPath, ...]:
         if self._use_summary_hybrid_paths:
@@ -620,19 +612,19 @@ class PlanningGraph:
             paths = [RetrievalPath("vector", vector_limit, QueryVariant.DENSE)]
             if (
                 retrieval_profile is RetrievalProfile.ASSET
-                or query_understanding.needs_special
+                or bool(retrieval_signals.special_targets)
                 or semantic_route in {"asset_first", "text_plus_asset"}
             ):
                 paths.append(RetrievalPath("special", retrieval_limit, QueryVariant.DENSE))
             return tuple(paths)
         aux_paths = [
             RetrievalPath("section", retrieval_limit, QueryVariant.SPARSE)
-            for enabled in [query_understanding.needs_structure]
+            for enabled in [retrieval_signals.structure_constraints.has_constraints()]
             if enabled
         ]
-        if query_understanding.needs_metadata:
+        if retrieval_signals.metadata_filters.has_constraints():
             aux_paths.append(RetrievalPath("metadata", retrieval_limit, QueryVariant.SPARSE))
-        if query_understanding.needs_special or semantic_route in {"asset_first", "text_plus_asset"}:
+        if bool(retrieval_signals.special_targets) or semantic_route in {"asset_first", "text_plus_asset"}:
             aux_paths.append(RetrievalPath("special", retrieval_limit, QueryVariant.DENSE))
         if retrieval_profile is RetrievalProfile.FAST:
             return (RetrievalPath("vector", retrieval_limit * 2, QueryVariant.DENSE),)
@@ -663,7 +655,7 @@ class PlanningGraph:
         retrieval_limit: int,
         final_limit: int,
         semantic_route: str,
-        query_understanding: QueryUnderstanding,
+        retrieval_signals: RetrievalSignals,
     ) -> tuple[BranchStagePlan, ...]:
         if not self._use_summary_hybrid_paths:
             return ()
@@ -688,7 +680,7 @@ class PlanningGraph:
                 ),
             )
         ]
-        if query_understanding.needs_special or semantic_route in {"asset_first", "text_plus_asset"}:
+        if bool(retrieval_signals.special_targets) or semantic_route in {"asset_first", "text_plus_asset"}:
             stage_plans.append(
                 BranchStagePlan(
                     branch="special",
@@ -709,13 +701,13 @@ class PlanningGraph:
         *,
         retrieval_limit: int,
         semantic_route: str,
-        query_understanding: QueryUnderstanding,
+        retrieval_signals: RetrievalSignals,
         enabled: bool,
     ) -> tuple[FallbackStep, ...]:
         if not enabled:
             return ()
         steps: list[FallbackStep] = []
-        if query_understanding.needs_special or semantic_route in {"asset_first", "text_plus_asset"}:
+        if bool(retrieval_signals.special_targets) or semantic_route in {"asset_first", "text_plus_asset"}:
             steps.append(
                 FallbackStep(
                     trigger="asset_fallback",
@@ -731,7 +723,7 @@ class PlanningGraph:
         *,
         complexity_gate: ComplexityGate,
         semantic_route: str,
-        query_understanding: QueryUnderstanding,
+        retrieval_signals: RetrievalSignals,
     ) -> tuple[OperatorStep, ...]:
         steps: list[OperatorStep] = [
             OperatorStep("VersionGate"),
@@ -743,7 +735,7 @@ class PlanningGraph:
         if complexity_gate is ComplexityGate.COMPLEX:
             steps.append(OperatorStep("QueryDecomposition"))
             steps.append(OperatorStep("DocFallback", branch="vector", collection="doc_summary"))
-        if query_understanding.needs_special or semantic_route in {"asset_first", "text_plus_asset"}:
+        if bool(retrieval_signals.special_targets) or semantic_route in {"asset_first", "text_plus_asset"}:
             steps.append(OperatorStep("AssetSearch", branch="special", collection="asset_summary", required=False))
         steps.extend(
             [
@@ -758,25 +750,13 @@ class PlanningGraph:
     @staticmethod
     def _decompose_query(
         query: str,
-        understanding: QueryUnderstanding,
+        signals: RetrievalSignals,
         complexity_gate: ComplexityGate,
     ) -> tuple[QuerySubTask, ...]:
         if complexity_gate is not ComplexityGate.COMPLEX:
             return ()
         normalized = query.strip()
-        if understanding.task_type is TaskType.COMPARISON:
-            for separator in (" 和 ", " 与 ", " and ", " vs ", " VS ", " versus ", " compare ", "对比"):
-                if separator not in normalized:
-                    continue
-                left, right = normalized.split(separator, 1)
-                left = left.replace("Compare", "").replace("compare", "").strip(" ：:，,。")
-                right = right.strip(" ：:，,。")
-                if left and right:
-                    return (
-                        QuerySubTask(prompt=left, purpose="collect_left_side_evidence"),
-                        QuerySubTask(prompt=right, purpose="collect_right_side_evidence"),
-                    )
-        if understanding.task_type in {TaskType.RESEARCH, TaskType.TIMELINE}:
+        if signals.allow_graph_expansion:
             return (
                 QuerySubTask(prompt=normalized, purpose="collect_primary_evidence"),
                 QuerySubTask(prompt=normalized, purpose="collect_supporting_context"),

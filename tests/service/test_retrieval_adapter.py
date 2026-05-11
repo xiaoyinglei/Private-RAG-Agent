@@ -7,7 +7,7 @@ from rag.retrieval.evidence import EvidenceService
 from rag.retrieval.models import RetrievalProfile
 from rag.retrieval.planning_graph import ComplexityGate, PlanningState, PredicatePlan, QueryVariant, RetrievalPath
 from rag.retrieval.retrieval_adapter import RetrievalAdapter
-from rag.schema.query import QueryUnderstanding
+from rag.schema.query import RetrievalSignals
 from rag.schema.runtime import AccessPolicy, RuntimeMode
 
 
@@ -42,7 +42,7 @@ class _AsyncVectorRetriever:
 
 
 class _FullTextRetriever:
-    def __call__(self, query: str, source_scope: list[str], query_understanding: QueryUnderstanding):
+    def __call__(self, query: str, source_scope: list[str], retrieval_signals: RetrievalSignals):
         raise AssertionError("full_text branch should be skipped when vector hybrid absorbs sparse recall")
 
 
@@ -61,7 +61,7 @@ class _BranchRegistry:
         *,
         query: str,
         source_scope: list[str],
-        query_understanding: QueryUnderstanding,
+        retrieval_signals: RetrievalSignals,
     ) -> list[_FakeCandidate]:
         del query, source_scope, query_understanding
         return []
@@ -101,7 +101,7 @@ def test_retrieval_adapter_awaits_async_plan_aware_vector_and_skips_full_text() 
             source_scope=[],
             access_policy=AccessPolicy.default(),
             runtime_mode=RuntimeMode.FAST,
-            query_understanding=QueryUnderstanding(),
+            retrieval_signals=RetrievalSignals(),
         )
     )
 

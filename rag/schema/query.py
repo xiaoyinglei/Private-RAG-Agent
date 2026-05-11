@@ -5,8 +5,6 @@ from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from rag.schema.runtime import AccessPolicy, ExecutionLocationPreference, QueryDiagnostics, RuntimeMode
-
 
 class TaskType(StrEnum):
     LOOKUP = "lookup"
@@ -17,13 +15,6 @@ class TaskType(StrEnum):
     RESEARCH = "research"
 
 
-class QueryRequest(BaseModel):
-    model_config = ConfigDict(frozen=True)
-
-    query: str
-    preferred_runtime: str | None = None
-    source_scope: list[str] = Field(default_factory=list)
-    metadata_filters: dict[str, str] = Field(default_factory=dict)
 
 
 class PageRangeConstraint(BaseModel):
@@ -84,11 +75,40 @@ class PolicyHints(BaseModel):
         return any((self.disable_external_retrieval, self.local_only, bool(self.source_type_scope)))
 
 
+class RetrievalSignals(BaseModel):
+    """RAG 检索层消费的结构化信号，由 Agent 或上层调用方产出。"""
+    model_config = ConfigDict(frozen=True)
+
+    metadata_filters: MetadataFilters = Field(default_factory=MetadataFilters)
+    structure_constraints: StructureConstraints = Field(default_factory=StructureConstraints)
+    special_targets: list[str] = Field(default_factory=list)
+    quoted_terms: list[str] = Field(default_factory=list)
+    allow_graph_expansion: bool = False
+
+    def has_constraints(self) -> bool:
+        return any((
+            self.metadata_filters.has_constraints(),
+            self.structure_constraints.has_constraints(),
+            bool(self.special_targets),
+            bool(self.quoted_terms),
+            self.allow_graph_expansion,
+        ))
+
+    @staticmethod
+    def from_query_understanding(qu: QueryUnderstanding) -> RetrievalSignals:
+        return RetrievalSignals(
+            metadata_filters=qu.metadata_filters,
+            structure_constraints=qu.structure_constraints,
+            special_targets=qu.special_targets,
+            quoted_terms=qu.quoted_terms,
+            allow_graph_expansion=qu.needs_graph_expansion,
+        )
+
+
 class QueryUnderstanding(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     task_type: TaskType = TaskType.LOOKUP
-    query_type: str = "lookup"
 
     needs_special: bool = False
     needs_structure: bool = False
@@ -210,40 +230,6 @@ class EvidenceItem(BaseModel):
     grounding_target: GroundingTarget | None = None
 
 
-class QueryResponse(BaseModel):
-    model_config = ConfigDict(frozen=True)
-
-    conclusion: str
-    evidence: list[EvidenceItem]
-    differences_or_conflicts: list[str] = Field(default_factory=list)
-    uncertainty: str
-    
-    runtime_mode: RuntimeMode
-    diagnostics: QueryDiagnostics = Field(default_factory=QueryDiagnostics)
-    answer_text: str | None = None
-    answer_sections: list[AnswerSection] = Field(default_factory=list)
-    citations: list[AnswerCitation] = Field(default_factory=list)
-    evidence_links: list[AnswerEvidenceLink] = Field(default_factory=list)
-    groundedness_flag: bool = False
-    insufficient_evidence_flag: bool = False
-
-
-class ExecutionPolicy(BaseModel):
-    model_config = ConfigDict(frozen=True)
-
-    effective_access_policy: AccessPolicy
-    task_type: TaskType
-    latency_budget: int
-    cost_budget: float
-    token_budget: int | None = None
-    execution_location_preference: ExecutionLocationPreference
-    fallback_allowed: bool
-    source_scope: list[str] = Field(default_factory=list)
-    allowed_runtimes: frozenset[RuntimeMode] = Field(
-        default_factory=lambda: frozenset({RuntimeMode.FAST, RuntimeMode.DEEP})
-    )
-
-
 class ArtifactStatus(StrEnum):
     SUGGESTED = "suggested"
     APPROVED = "approved"
@@ -272,7 +258,10 @@ def _rebuild_runtime_schema_refs() -> None:
     import rag.schema.runtime as _runtime_schema
 
     _runtime_schema.RetrievalDiagnostics.model_rebuild(
-        _types_namespace={"QueryUnderstanding": QueryUnderstanding}
+        _types_namespace={
+            "QueryUnderstanding": QueryUnderstanding,
+            "RetrievalSignals": RetrievalSignals,
+        }
     )
 
 
@@ -285,16 +274,14 @@ __all__ = [
     "AnswerSection",
     "ArtifactStatus",
     "EvidenceItem",
-    "ExecutionPolicy",
     "GroundedAnswer",
     "GroundingTarget",
     "KnowledgeArtifact",
     "MetadataFilters",
     "PageRangeConstraint",
     "PolicyHints",
-    "QueryRequest",
-    "QueryResponse",
     "QueryUnderstanding",
+    "RetrievalSignals",
     "StructureConstraints",
     "TaskType",
 ]

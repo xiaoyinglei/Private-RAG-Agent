@@ -21,7 +21,7 @@ if TYPE_CHECKING:
         Source,
     )
     from rag.schema.graph import GraphEdge, GraphNode
-    from rag.schema.query import KnowledgeArtifact, QueryUnderstanding
+    from rag.schema.query import KnowledgeArtifact, RetrievalSignals
 
 
 class Residency(StrEnum):
@@ -147,8 +147,8 @@ class RetrievalDiagnostics(BaseModel):
     fusion_input_count: int = 0
     fused_count: int = 0
     graph_expanded: bool = False
-    query_understanding: QueryUnderstanding | None = None
-    query_understanding_debug: dict[str, object] = Field(default_factory=dict)
+    retrieval_signals: RetrievalSignals | None = None
+    retrieval_signals_debug: dict[str, object] = Field(default_factory=dict)
     pre_rerank_count: int = 0
     post_cleanup_count: int = 0
     top1_confidence: float | None = None

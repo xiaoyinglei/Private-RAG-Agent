@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol
 
 from rag.schema.model_protocols import Reranker
-from rag.schema.query import GroundingTarget, QueryUnderstanding
+from rag.schema.query import GroundingTarget, RetrievalSignals
 from rag.utils.text import keyword_overlap, search_terms
 
 CandidateKind = Literal[
@@ -282,7 +282,7 @@ class IndustrialRerankService:
         rerank_required: bool,
         rerank_pool_k: int | None,
         allow_asset_fallback: bool,
-        query_understanding: QueryUnderstanding | None = None,
+        retrieval_signals: RetrievalSignals | None = None,
         min_output_candidates: int | None = None,
     ) -> IndustrialRerankResult:
         clean_candidates = self._normalize_candidates(fused_candidates)
@@ -291,7 +291,7 @@ class IndustrialRerankService:
             min_output_candidates=min_output_candidates,
         )
         working, model_truncated_count = self._truncate_for_model(working)
-        self._apply_feature_scores(query=query, candidates=working, query_understanding=query_understanding)
+        self._apply_feature_scores(query=query, candidates=working, retrieval_signals=retrieval_signals)
         diagnostics = _update_diagnostics(diagnostics, model_truncated_count, len(working))
 
         if rerank_required:
@@ -325,7 +325,7 @@ class IndustrialRerankService:
         rerank_required: bool,
         rerank_pool_k: int | None,
         allow_asset_fallback: bool,
-        query_understanding: QueryUnderstanding | None = None,
+        retrieval_signals: RetrievalSignals | None = None,
         min_output_candidates: int | None = None,
     ) -> IndustrialRerankResult:
         clean_candidates = self._normalize_candidates(fused_candidates)
@@ -334,7 +334,7 @@ class IndustrialRerankService:
             min_output_candidates=min_output_candidates,
         )
         working, model_truncated_count = self._truncate_for_model(working)
-        self._apply_feature_scores(query=query, candidates=working, query_understanding=query_understanding)
+        self._apply_feature_scores(query=query, candidates=working, retrieval_signals=retrieval_signals)
         diagnostics = _update_diagnostics(diagnostics, model_truncated_count, len(working))
 
         if rerank_required:
@@ -524,19 +524,19 @@ class IndustrialRerankService:
         *,
         query: str,
         candidates: Sequence[_ScoredCandidate],
-        query_understanding: QueryUnderstanding | None,
+        retrieval_signals: RetrievalSignals | None,
     ) -> None:
         query_terms = search_terms(query)
         focus_terms = []
         special_targets: set[str] = set()
         requested_pages: set[str] = set()
-        if query_understanding is not None:
+        if retrieval_signals is not None:
             focus_terms = list(
-                query_understanding.structure_constraints.focus_terms
-                or query_understanding.quoted_terms
+                retrieval_signals.structure_constraints.focus_terms
+                or retrieval_signals.quoted_terms
             )
-            special_targets = set(query_understanding.special_targets)
-            requested_pages = {str(page) for page in query_understanding.metadata_filters.page_numbers}
+            special_targets = set(retrieval_signals.special_targets)
+            requested_pages = {str(page) for page in retrieval_signals.metadata_filters.page_numbers}
         for candidate in candidates:
             text = self._render_candidate_text(candidate)
             section_text = " ".join(candidate.candidate.section_path)

@@ -184,7 +184,7 @@ class _FakeUnderstandingService:
 
 
 def _research_service() -> _FakeUnderstandingService:
-    return _FakeUnderstandingService(QueryUnderstanding(task_type=TaskType.RESEARCH, query_type="research"))
+    return _FakeUnderstandingService(QueryUnderstanding(task_type=TaskType.RESEARCH))
 
 
 def _make_graph(
@@ -376,7 +376,7 @@ class TestBaseGraph:
         runner = _SuccessfulSubAgentRunner()
         graph = _make_graph(
             query_understanding_service=_FakeUnderstandingService(
-                QueryUnderstanding(task_type=TaskType.COMPARISON, query_type="comparison")
+                QueryUnderstanding(task_type=TaskType.COMPARISON)
             ),
             plan_provider=plan_provider,
             subagent_runner=runner,
@@ -399,7 +399,7 @@ class TestBaseGraph:
     async def test_decompose_route_without_plan_provider_fails_closed(self) -> None:
         graph = _make_graph(
             query_understanding_service=_FakeUnderstandingService(
-                QueryUnderstanding(task_type=TaskType.COMPARISON, query_type="comparison")
+                QueryUnderstanding(task_type=TaskType.COMPARISON)
             ),
         )
 
@@ -585,7 +585,7 @@ class TestBaseGraph:
     @pytest.mark.anyio
     async def test_route_uses_query_understanding_service(self) -> None:
         service = _FakeUnderstandingService(
-            QueryUnderstanding(task_type=TaskType.COMPARISON, query_type="comparison")
+            QueryUnderstanding(task_type=TaskType.COMPARISON)
         )
         graph = build_agent_graph(
             definition=_make_definition(),
