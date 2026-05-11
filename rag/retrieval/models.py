@@ -12,8 +12,8 @@ from rag.schema.query import EvidenceItem, GroundedAnswer, GroundingTarget
 from rag.schema.runtime import AccessPolicy, ExecutionLocationPreference, ProviderAttempt, RetrievalDiagnostics
 
 if TYPE_CHECKING:
-    from rag.retrieval.analysis import RoutingDecision
     from rag.retrieval.evidence import EvidenceBundle, SelfCheckResult
+    from rag.retrieval.runtime_coordinator import RoutingDecision
 
 
 class RetrievalProfile(StrEnum):
@@ -171,8 +171,8 @@ class PublicQueryResult(BaseModel):
     generation_attempts: list[ProviderAttempt] = Field(default_factory=list)
 
 def _rebuild_retrieval_result_refs() -> None:
-    from rag.retrieval.analysis import RoutingDecision
     from rag.retrieval.evidence import EvidenceBundle, SelfCheckResult
+    from rag.retrieval.runtime_coordinator import RoutingDecision
 
     RetrievalResult.model_rebuild(
         _types_namespace={

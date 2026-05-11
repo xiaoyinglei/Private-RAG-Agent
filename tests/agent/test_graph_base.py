@@ -12,7 +12,7 @@ from rag.agent.service import AgentRunResult
 from rag.agent.state import AgentState, ThinkOutput, ToolCallPlan
 from rag.agent.tools.registry import ToolRegistry
 from rag.agent.tools.spec import ToolError, ToolPermissions, ToolSpec
-from rag.schema.query import QueryUnderstanding, TaskType
+from rag.schema.query import RetrievalSignals
 from rag.schema.runtime import AccessPolicy, ExecutionLocationPreference
 
 
@@ -169,7 +169,7 @@ def _initial_state_without_runtime_handles(
 
 
 class _FakeUnderstandingService:
-    def __init__(self, understanding: QueryUnderstanding) -> None:
+    def __init__(self, understanding: RetrievalSignals) -> None:
         self.understanding = understanding
 
     def analyze(
@@ -178,20 +178,19 @@ class _FakeUnderstandingService:
         *,
         access_policy: object | None = None,
         execution_location_preference: object | None = None,
-    ) -> QueryUnderstanding:
+    ) -> RetrievalSignals:
         del query, access_policy, execution_location_preference
         return self.understanding
 
 
 def _research_service() -> _FakeUnderstandingService:
-    return _FakeUnderstandingService(QueryUnderstanding(task_type=TaskType.RESEARCH))
+    return _FakeUnderstandingService(RetrievalSignals())
 
 
 def _make_graph(
     *,
     definition: AgentDefinition | None = None,
     tool_registry: ToolRegistry | None = None,
-    query_understanding_service: object | None = None,
     evaluate_decision_provider: object | None = None,
     plan_provider: object | None = None,
     subagent_runner: object | None = None,
@@ -199,7 +198,6 @@ def _make_graph(
     return build_agent_graph(
         definition=definition or _make_definition(),
         tool_registry=tool_registry or _make_registry(),
-        query_understanding_service=query_understanding_service or _research_service(),
         evaluate_decision_provider=evaluate_decision_provider,
         plan_provider=plan_provider,
         subagent_runner=subagent_runner,
@@ -375,9 +373,8 @@ class TestBaseGraph:
         plan_provider = _ScriptedPlanProvider(TaskDAG(subtasks=[subtask]))
         runner = _SuccessfulSubAgentRunner()
         graph = _make_graph(
-            query_understanding_service=_FakeUnderstandingService(
-                QueryUnderstanding(task_type=TaskType.COMPARISON)
-            ),
+
+
             plan_provider=plan_provider,
             subagent_runner=runner,
         )
@@ -398,9 +395,8 @@ class TestBaseGraph:
     @pytest.mark.anyio
     async def test_decompose_route_without_plan_provider_fails_closed(self) -> None:
         graph = _make_graph(
-            query_understanding_service=_FakeUnderstandingService(
-                QueryUnderstanding(task_type=TaskType.COMPARISON)
-            ),
+
+
         )
 
         result = await graph.ainvoke(
@@ -583,14 +579,11 @@ class TestBaseGraph:
         assert result["stop_reason"] == "max_iterations"
 
     @pytest.mark.anyio
-    async def test_route_uses_query_understanding_service(self) -> None:
-        service = _FakeUnderstandingService(
-            QueryUnderstanding(task_type=TaskType.COMPARISON)
-        )
+    async def test_route_node_defaults_to_direct(self) -> None:
         graph = build_agent_graph(
             definition=_make_definition(),
             tool_registry=_make_registry(),
-            query_understanding_service=service,
+
         )
         result = await graph.ainvoke(_initial_state(), config={"configurable": {"thread_id": "graph-test"}})
-        assert result["route_reason"] == "multi_hop_or_compare"
+        assert result["route_reason"] == "agent_research"

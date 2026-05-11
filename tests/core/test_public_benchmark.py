@@ -27,10 +27,10 @@ from rag.benchmarks import (
     prepared_document_to_ingest_request,
     write_dataset_baseline_summary,
 )
-from rag.retrieval.analysis import RoutingDecision
 from rag.retrieval.evidence import EvidenceBundle, SelfCheckResult
+from rag.retrieval.runtime_coordinator import RoutingDecision
 from rag.retrieval.models import RetrievalResult
-from rag.schema.query import TaskType
+
 from rag.schema.runtime import ExternalRetrievalPolicy, Residency, RuntimeMode
 from tests.support import make_runtime
 
@@ -805,7 +805,6 @@ def test_benchmark_evaluator_reads_benchmark_doc_ids_from_retrieval_result(
             def retrieve(self, *args, **kwargs) -> RetrievalResult:
                 return RetrievalResult(
                     decision=RoutingDecision(
-                        task_type=TaskType.LOOKUP,
                         runtime_mode=RuntimeMode.FAST,
                     ),
                     evidence=EvidenceBundle(),
@@ -866,7 +865,6 @@ def test_benchmark_evaluator_appends_run_history_instead_of_overwriting(tmp_path
             def retrieve(self, *args, **kwargs) -> RetrievalResult:
                 return RetrievalResult(
                     decision=RoutingDecision(
-                        task_type=TaskType.LOOKUP,
                         runtime_mode=RuntimeMode.FAST,
                     ),
                     evidence=EvidenceBundle(),

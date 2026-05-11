@@ -6,15 +6,6 @@ from enum import StrEnum
 from pydantic import BaseModel, ConfigDict, Field
 
 
-class TaskType(StrEnum):
-    LOOKUP = "lookup"
-    SINGLE_DOC_QA = "single_doc_qa"
-    COMPARISON = "comparison"
-    SYNTHESIS = "synthesis"
-    TIMELINE = "timeline"
-    RESEARCH = "research"
-
-
 
 
 class PageRangeConstraint(BaseModel):
@@ -94,50 +85,6 @@ class RetrievalSignals(BaseModel):
             self.allow_graph_expansion,
         ))
 
-    @staticmethod
-    def from_query_understanding(qu: QueryUnderstanding) -> RetrievalSignals:
-        return RetrievalSignals(
-            metadata_filters=qu.metadata_filters,
-            structure_constraints=qu.structure_constraints,
-            special_targets=qu.special_targets,
-            quoted_terms=qu.quoted_terms,
-            allow_graph_expansion=qu.needs_graph_expansion,
-        )
-
-
-class QueryUnderstanding(BaseModel):
-    model_config = ConfigDict(frozen=True)
-
-    task_type: TaskType = TaskType.LOOKUP
-
-    needs_special: bool = False
-    needs_structure: bool = False
-    needs_metadata: bool = False
-    needs_graph_expansion: bool = False
-
-    structure_constraints: StructureConstraints = Field(default_factory=StructureConstraints)
-    metadata_filters: MetadataFilters = Field(default_factory=MetadataFilters)
-
-    special_targets: list[str] = Field(default_factory=list)
-    source_scope_hints: list[str] = Field(default_factory=list)
-    quoted_terms: list[str] = Field(default_factory=list)
-    policy_hints: PolicyHints = Field(default_factory=PolicyHints)
-
-    def has_explicit_constraints(self) -> bool:
-        return any(
-            (
-                self.needs_special,
-                self.needs_structure,
-                self.needs_metadata,
-                self.needs_graph_expansion,
-                self.structure_constraints.has_constraints(),
-                self.metadata_filters.has_constraints(),
-                bool(self.special_targets),
-                bool(self.source_scope_hints),
-                bool(self.quoted_terms),
-                self.policy_hints.has_hints(),
-            )
-        )
 
 
 class AnswerCitation(BaseModel):
@@ -258,10 +205,7 @@ def _rebuild_runtime_schema_refs() -> None:
     import rag.schema.runtime as _runtime_schema
 
     _runtime_schema.RetrievalDiagnostics.model_rebuild(
-        _types_namespace={
-            "QueryUnderstanding": QueryUnderstanding,
-            "RetrievalSignals": RetrievalSignals,
-        }
+        _types_namespace={"RetrievalSignals": RetrievalSignals}
     )
 
 
@@ -280,8 +224,6 @@ __all__ = [
     "MetadataFilters",
     "PageRangeConstraint",
     "PolicyHints",
-    "QueryUnderstanding",
     "RetrievalSignals",
     "StructureConstraints",
-    "TaskType",
 ]

@@ -4,10 +4,8 @@ from .query import (
     GroundingTarget,
     MetadataFilters,
     PolicyHints,
-    QueryUnderstanding,
     RetrievalSignals,
     StructureConstraints,
-    TaskType,
 )
 from .runtime import AccessPolicy, RuntimeMode
 
@@ -18,11 +16,9 @@ __all__ = [
     "GroundingTarget",
     "MetadataFilters",
     "PolicyHints",
-    "QueryUnderstanding",
     "RetrievalSignals",
     "RuntimeMode",
     "Source",
     "SourceType",
     "StructureConstraints",
-    "TaskType",
 ]

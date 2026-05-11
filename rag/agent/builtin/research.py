@@ -47,7 +47,6 @@ RESEARCH_AGENT = AgentDefinition(
 def create_research_agent_service(
     *,
     runners: Mapping[str, ToolRunner] | None = None,
-    query_understanding_service: object | None = None,
     evaluate_decision_provider: EvaluateDecisionProvider | None = None,
     plan_provider: PlanProvider | None = None,
     subagent_runner: SubAgentRunner | None = None,
@@ -55,7 +54,6 @@ def create_research_agent_service(
     return AgentService(
         definition=RESEARCH_AGENT,
         tool_registry=create_builtin_tool_registry(runners=runners),
-        query_understanding_service=query_understanding_service,
         evaluate_decision_provider=evaluate_decision_provider,
         plan_provider=plan_provider,
         subagent_runner=subagent_runner,

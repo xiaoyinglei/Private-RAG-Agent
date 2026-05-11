@@ -1,36 +1,22 @@
 from __future__ import annotations
 
-from typing import Protocol
-
 from rag.agent.state import AgentState
-from rag.schema.query import QueryUnderstanding, TaskType
 
 
-class QueryUnderstandingLike(Protocol):
-    def analyze(
-        self,
-        query: str,
-        *,
-        access_policy: object | None = None,
-        execution_location_preference: object | None = None,
-    ) -> QueryUnderstanding: ...
+def route_node(state: AgentState) -> dict:
+    """Agent route 节点。基于 AgentState 中的 task 和 retrieval_signals 做路由。
 
-
-def route_node(state: AgentState, *, query_understanding_service: QueryUnderstandingLike) -> dict:
+    不调用 RAG Core 的 QueryUnderstandingService。
+    路由标准按执行需求定义，不按固定任务枚举。
+    """
     if state.get("pending_tool_calls"):
         return {"status": "direct", "route_reason": "pending_tool_calls"}
 
-    understanding = query_understanding_service.analyze(
-        state.get("task", ""),
-        access_policy=state["run_config"].access_policy,
-        execution_location_preference=state["run_config"].execution_location_preference,
-    )
-    task_type = understanding.task_type
-    if task_type in {TaskType.LOOKUP, TaskType.SINGLE_DOC_QA}:
-        return {"status": "fast_path", "route_reason": "simple_lookup"}
-    if task_type in {TaskType.COMPARISON, TaskType.SYNTHESIS, TaskType.TIMELINE}:
-        return {"status": "decompose", "route_reason": "multi_hop_or_compare"}
-    return {"status": "direct", "route_reason": "single_agent_research"}
+    retrieval_signals = state.get("retrieval_signals")
+    if retrieval_signals is not None and retrieval_signals.allow_graph_expansion:
+        return {"status": "decompose", "route_reason": "graph_expansion_requested"}
+
+    return {"status": "direct", "route_reason": "agent_research"}
 
 
 def route_after_route(state: AgentState) -> str:

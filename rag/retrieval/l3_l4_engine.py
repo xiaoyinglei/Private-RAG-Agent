@@ -2,12 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from rag.retrieval.analysis import (
-    QueryUnderstandingService,
-    RoutingDecision,
-    RoutingService,
-    narrow_access_policy_for_query,
-)
+from rag.retrieval.runtime_coordinator import RoutingDecision
 from rag.schema.query import RetrievalSignals
 from rag.retrieval.evidence import (
     CandidateLike,
@@ -21,7 +16,7 @@ from rag.retrieval.planning_graph import PlanningGraph, PlanningState
 from rag.retrieval.rerank_service import IndustrialRerankService
 from rag.retrieval.retrieval_adapter import RetrievalAdapter
 from rag.retrieval.runtime_coordinator import CoreRetrievalPayload
-from rag.schema.query import QueryUnderstanding
+
 from rag.schema.runtime import AccessPolicy, ExecutionLocationPreference, ProviderAttempt
 from rag.utils.telemetry import TelemetryService
 
@@ -31,8 +26,6 @@ class L3L4RetrievalEngine:
         self,
         *,
         branch_registry: object,
-        routing_service: RoutingService,
-        query_understanding_service: QueryUnderstandingService,
         evidence_service: EvidenceService,
         graph_expansion_service: GraphExpansionService,
         telemetry_service: TelemetryService | None,
@@ -44,8 +37,6 @@ class L3L4RetrievalEngine:
         graph_expander: object,
     ) -> None:
         self.branch_registry = branch_registry
-        self.routing_service = routing_service
-        self.query_understanding_service = query_understanding_service
         self.evidence_service = evidence_service
         self.graph_expansion_service = graph_expansion_service
         self.telemetry_service = telemetry_service
@@ -61,6 +52,8 @@ class L3L4RetrievalEngine:
         query: str,
         *,
         access_policy: AccessPolicy,
+        retrieval_signals: RetrievalSignals,
+        decision: RoutingDecision,
         source_scope: Sequence[str] = (),
         execution_location_preference: ExecutionLocationPreference | None = None,
         query_options: QueryOptions | None = None,
@@ -71,21 +64,6 @@ class L3L4RetrievalEngine:
             if query_options is not None
             else RetrievalProfile.AUTO
         )
-        query_understanding = self.query_understanding_service.analyze(
-            query,
-            access_policy=access_policy,
-            execution_location_preference=(
-                execution_location_preference or ExecutionLocationPreference.LOCAL_FIRST
-            ),
-        )
-        retrieval_signals = RetrievalSignals.from_query_understanding(query_understanding)
-        effective_access_policy = narrow_access_policy_for_query(access_policy, query_understanding)
-        decision = self.routing_service.route(
-            query,
-            retrieval_signals=retrieval_signals,
-            source_scope=scope,
-            access_policy=effective_access_policy,
-        )
         if retrieval_profile is RetrievalProfile.BYPASS:
             return self._run_bypass_mode(
                 query=query,
@@ -95,7 +73,7 @@ class L3L4RetrievalEngine:
         plan = await self.planning_graph.aplan(
             query,
             source_scope=scope,
-            access_policy=effective_access_policy,
+            access_policy=access_policy,
             retrieval_signals=retrieval_signals,
             resolved_retrieval_profile=retrieval_profile,
             query_options=query_options,
@@ -103,7 +81,7 @@ class L3L4RetrievalEngine:
         return await self._execute_mode_async(
             query=query,
             source_scope=scope,
-            access_policy=effective_access_policy,
+            access_policy=access_policy,
             decision=decision,
             retrieval_signals=retrieval_signals,
             query_options=query_options,
@@ -176,7 +154,7 @@ class L3L4RetrievalEngine:
 
         self_check = self.evidence_service.evaluate_self_check(
             bundle=evidence,
-            task_type=decision.task_type,
+
             runtime_mode=decision.runtime_mode,
         )
 
@@ -240,7 +218,7 @@ class L3L4RetrievalEngine:
 
         self_check = self.evidence_service.evaluate_self_check(
             bundle=evidence,
-            task_type=decision.task_type,
+
             runtime_mode=decision.runtime_mode,
         )
         reranked_benchmark_doc_ids = self._benchmark_doc_ids(reranked_candidates)
@@ -272,7 +250,7 @@ class L3L4RetrievalEngine:
             fusion_input_count=rank_result.candidate_count + len(web_candidates),
             fused_count=len(reranked_candidates),
             retrieval_signals=retrieval_signals,
-            retrieval_signals_debug=self.query_understanding_service.diagnostics_payload(),
+            retrieval_signals_debug={},
             pre_rerank_count=rank_result.pre_rerank_count,
             post_cleanup_count=rank_result.post_cleanup_count,
             top1_confidence=rank_result.top1_confidence,

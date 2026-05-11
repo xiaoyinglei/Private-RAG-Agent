@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 from rag.retrieval.orchestrator import RetrievalService, RetrievalServiceConfig
-from rag.schema.query import QueryUnderstanding
+from rag.schema.query import RetrievalSignals
 
 
-def _empty_retriever(query: str, source_scope: list[str], query_understanding: QueryUnderstanding) -> list[object]:
-    del query, source_scope, query_understanding
+def _empty_retriever(query: str, source_scope: list[str], retrieval_signals: RetrievalSignals) -> list[object]:
+    del query, source_scope, retrieval_signals
     return []
 
 

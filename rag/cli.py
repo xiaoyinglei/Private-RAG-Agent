@@ -377,9 +377,6 @@ def benchmark_evaluate(
     rerank_provider: Annotated[str | None, typer.Option("--rerank-provider")] = None,
     rerank_model: Annotated[str | None, typer.Option("--rerank-model")] = None,
     rerank_model_path: Annotated[str | None, typer.Option("--rerank-model-path")] = None,
-    enable_query_understanding_llm: Annotated[
-        bool, typer.Option("--enable-query-understanding-llm/--disable-query-understanding-llm")
-    ] = False,
     chat_provider: Annotated[str | None, typer.Option("--chat-provider")] = None,
     chat_model: Annotated[str | None, typer.Option("--chat-model")] = None,
     chat_model_path: Annotated[str | None, typer.Option("--chat-model-path")] = None,
@@ -405,7 +402,7 @@ def benchmark_evaluate(
     runtime = build_runtime_for_benchmark(
         storage_root=storage_root or paths.index_variant_dir(variant),
         profile_id=profile_id,
-        require_chat=enable_query_understanding_llm,
+        require_chat=False,
         require_rerank=rerank_enabled,
         embedding_provider_kind=embedding_provider,
         embedding_model=embedding_model,
@@ -423,7 +420,6 @@ def benchmark_evaluate(
         vector_collection_prefix=vector_collection_prefix,
     )
     try:
-        runtime.retrieval_service.query_understanding_service._enable_llm = enable_query_understanding_llm
         summary = RetrievalBenchmarkEvaluator(
             runtime=runtime,
             dataset=dataset,
