@@ -11,10 +11,12 @@ import typer
 from pydantic import BaseModel
 
 from rag import AssemblyRequest, CapabilityRequirements, RAGRuntime, StorageComponentConfig, StorageConfig
+from rag.agent.cli import agent_app
 from rag.retrieval import QueryOptions, RetrievalProfile
 from rag.schema.core import SourceType
 
 app = typer.Typer(add_completion=False, no_args_is_help=True)
+app.add_typer(agent_app, name="agent")
 DEFAULT_STORAGE_ROOT = Path(".rag")
 DEFAULT_VECTOR_BACKEND = "milvus"
 DEFAULT_VECTOR_DSN = "http://127.0.0.1:19530"
