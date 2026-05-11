@@ -7,7 +7,7 @@ from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from rag.schema.query import AnswerCitation, EvidenceItem, MetadataFilters, PolicyHints, TaskType
+from rag.schema.query import AnswerCitation, EvidenceItem, MetadataFilters, PolicyHints
 
 
 class CriticAction(StrEnum):
@@ -43,7 +43,7 @@ class AgentTaskRequest(BaseModel):
 class TaskUnderstanding(BaseModel):
     model_config = ConfigDict(frozen=True)
 
-    task_type: TaskType = TaskType.RESEARCH
+    task_type: str = "research"
     deliverable_type: str = "analysis_report"
     decomposition_required: bool = True
     needs_external_evidence: bool = False

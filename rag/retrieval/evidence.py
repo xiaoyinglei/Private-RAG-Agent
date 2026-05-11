@@ -9,7 +9,6 @@ from pydantic import BaseModel, ConfigDict, Field
 from rag.schema.query import (
     EvidenceItem,
     RetrievalSignals,
-    TaskType,
 )
 from rag.schema.runtime import AccessPolicy, RuntimeMode
 
@@ -278,14 +277,13 @@ class EvidenceService:
         self,
         *,
         bundle: EvidenceBundle,
-        task_type: TaskType,
-        runtime_mode: RuntimeMode,
+        runtime_mode: RuntimeMode = RuntimeMode.FAST,
     ) -> SelfCheckResult:
         internal = bundle.internal
         section_keys = {item.citation_anchor if item.citation_anchor else item.evidence_id for item in internal}
         doc_ids = {item.doc_id for item in internal}
 
-        if runtime_mode is RuntimeMode.FAST or task_type in {TaskType.LOOKUP, TaskType.SINGLE_DOC_QA}:
+        if runtime_mode is RuntimeMode.FAST:
             evidence_sufficient = (
                 len(internal) >= self._thresholds.fast_min_evidence_items
                 and len(section_keys) >= self._thresholds.fast_min_sections

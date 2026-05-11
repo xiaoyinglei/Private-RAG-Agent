@@ -4,12 +4,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, fields, replace
 from typing import Any, Protocol
 
-from rag.retrieval.analysis import (
-    QueryUnderstandingService,
-    RoutingDecision,
-    RoutingService,
-    narrow_access_policy_for_query,
-)
+from rag.retrieval.runtime_coordinator import RoutingDecision
 from rag.retrieval.evidence import (
     CandidateLike,
     EvidenceService,
@@ -34,7 +29,7 @@ from rag.retrieval.runtime_coordinator import (
 )
 from rag.schema.model_protocols import Reranker as ModelReranker
 from rag.schema.query import RetrievalSignals
-from rag.schema.runtime import AccessPolicy, ExecutionLocationPreference, ProviderAttempt
+from rag.schema.runtime import AccessPolicy, ExecutionLocationPreference, ProviderAttempt, RuntimeMode
 from rag.utils.telemetry import TelemetryService
 
 
@@ -137,8 +132,6 @@ class RetrievalServiceConfig:
     graph_expander: GraphExpander | None = None
     web_retriever: RetrieverFn | None = None
     reranker: ModelReranker | None = None
-    routing_service: RoutingService | None = None
-    query_understanding_service: QueryUnderstandingService | None = None
     evidence_service: EvidenceService | None = None
     graph_expansion_service: GraphExpansionService | None = None
     telemetry_service: TelemetryService | None = None
@@ -292,8 +285,6 @@ class RetrievalService:
         self._graph_expander: GraphExpander = config.graph_expander or (lambda _query, _scope, _evidence: [])
         self._web_retriever: RetrieverFn = config.web_retriever or (lambda _query, _scope, _understanding: [])
         self._reranker = config.reranker
-        self._routing_service = config.routing_service or RoutingService()
-        self._query_understanding_service = config.query_understanding_service or QueryUnderstandingService()
         self._evidence_service = config.evidence_service or EvidenceService(config.evidence_thresholds)
         self._graph_expansion_service = config.graph_expansion_service or GraphExpansionService()
         self._telemetry_service = config.telemetry_service
@@ -322,8 +313,6 @@ class RetrievalService:
         self._runtime_coordinator = RuntimeCoordinator()
         self._l3_l4_engine = L3L4RetrievalEngine(
             branch_registry=self._branch_registry,
-            routing_service=self._routing_service,
-            query_understanding_service=self._query_understanding_service,
             evidence_service=self._evidence_service,
             graph_expansion_service=self._graph_expansion_service,
             telemetry_service=self._telemetry_service,
@@ -335,8 +324,6 @@ class RetrievalService:
             graph_expander=self._graph_expander,
         )
         self.branch_registry = self._branch_registry
-        self.routing_service = self._routing_service
-        self.query_understanding_service = self._query_understanding_service
         self.evidence_service = self._evidence_service
         self.graph_expansion_service = self._graph_expansion_service
         self.fusion = self._fusion
@@ -377,6 +364,11 @@ class RetrievalService:
             self.l3_l4_engine.arun(
                 query,
                 access_policy=access_policy,
+                retrieval_signals=RetrievalSignals(),
+                decision=RoutingDecision(
+                    runtime_mode=RuntimeMode.FAST,
+                    rerank_required=True,
+                ),
                 source_scope=source_scope,
                 execution_location_preference=execution_location_preference,
                 query_options=query_options,
@@ -397,6 +389,12 @@ class RetrievalService:
         payload = await self.l3_l4_engine.arun(
             query,
             access_policy=access_policy,
+            retrieval_signals=RetrievalSignals(),
+            decision=RoutingDecision(
+
+                runtime_mode=RuntimeMode.FAST,
+                rerank_required=True,
+            ),
             source_scope=source_scope,
             execution_location_preference=execution_location_preference,
             query_options=query_options,
@@ -447,8 +445,9 @@ class RetrievalService:
         *,
         query: str,
         access_policy: AccessPolicy,
+        retrieval_signals: RetrievalSignals | None = None,
+        decision: RoutingDecision | None = None,
         source_scope: Sequence[str] = (),
-        execution_location_preference: ExecutionLocationPreference | None = None,
         query_options: QueryOptions | None = None,
     ) -> tuple[RetrievalSignals, AccessPolicy, RoutingDecision, PlanningState]:
         scope = list(source_scope)
@@ -457,32 +456,22 @@ class RetrievalService:
             if query_options is not None
             else RetrievalProfile.AUTO
         )
-        query_understanding = self.query_understanding_service.analyze(
-            query,
-            access_policy=access_policy,
-            execution_location_preference=(
-                execution_location_preference or ExecutionLocationPreference.LOCAL_FIRST
-            ),
-        )
-        retrieval_signals = RetrievalSignals.from_query_understanding(query_understanding)
-        effective_access_policy = narrow_access_policy_for_query(access_policy, query_understanding)
-        decision = self.routing_service.route(
-            query,
-            retrieval_signals=retrieval_signals,
-            source_scope=scope,
-            access_policy=effective_access_policy,
+        signals = retrieval_signals or RetrievalSignals()
+        routing = decision or RoutingDecision(
+            runtime_mode=RuntimeMode.FAST,
+            rerank_required=True,
         )
         plan = self.runtime_coordinator.run_sync(
             self.planning_graph.aplan(
                 query,
                 source_scope=scope,
-                access_policy=effective_access_policy,
-                retrieval_signals=retrieval_signals,
+                access_policy=access_policy,
+                retrieval_signals=signals,
                 resolved_retrieval_profile=retrieval_profile,
                 query_options=query_options,
             )
         )
-        return retrieval_signals, effective_access_policy, decision, plan
+        return signals, access_policy, routing, plan
 
     def collect_internal_branches(
         self,

@@ -82,7 +82,6 @@ class AgentService:
         *,
         definition: AgentDefinition,
         tool_registry: ToolRegistry,
-        query_understanding_service: object | None = None,
         evaluate_decision_provider: EvaluateDecisionProvider | None = None,
         plan_provider: PlanProvider | None = None,
         subagent_runner: SubAgentRunner | None = None,
@@ -90,7 +89,6 @@ class AgentService:
         self._definition = definition
         self._compiler = AgentGraphCompiler(
             tool_registry=tool_registry,
-            query_understanding_service=query_understanding_service,
             evaluate_decision_provider=evaluate_decision_provider,
             plan_provider=plan_provider,
             subagent_runner=subagent_runner,

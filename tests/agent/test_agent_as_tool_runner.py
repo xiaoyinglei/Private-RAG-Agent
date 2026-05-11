@@ -10,7 +10,7 @@ from rag.agent.core.task import SubTaskNode
 from rag.agent.state import AgentState, ThinkOutput, ToolCallPlan
 from rag.agent.tools.builtin_registry import create_builtin_tool_registry
 from rag.agent.tools.llm_tools import LLMTextOutput
-from rag.schema.query import QueryUnderstanding, TaskType
+from rag.schema.query import RetrievalSignals
 from rag.schema.runtime import AccessPolicy, ExecutionLocationPreference
 
 
@@ -21,9 +21,9 @@ class _ResearchUnderstandingService:
         *,
         access_policy: object | None = None,
         execution_location_preference: object | None = None,
-    ) -> QueryUnderstanding:
+    ) -> RetrievalSignals:
         del query, access_policy, execution_location_preference
-        return QueryUnderstanding(task_type=TaskType.RESEARCH)
+        return RetrievalSignals()
 
 
 class _ChildDecisionProvider:
@@ -127,7 +127,7 @@ async def test_agent_as_tool_runner_executes_registered_child_with_derived_confi
                 )
             }
         ),
-        query_understanding_service=_ResearchUnderstandingService(),
+
         evaluate_decision_provider=decision_provider,
     )
 
@@ -165,7 +165,7 @@ async def test_agent_as_tool_runner_rejects_exhausted_parent_depth() -> None:
     AgentRegistry.register(child_def)
     runner = AgentAsToolRunner(
         tool_registry=create_builtin_tool_registry(),
-        query_understanding_service=_ResearchUnderstandingService(),
+
     )
 
     with pytest.raises(RuntimeError, match="Agent nesting depth exceeded"):

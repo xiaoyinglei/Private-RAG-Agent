@@ -22,7 +22,6 @@ from rag.agent.graphs.nodes.route import route_after_route, route_node
 from rag.agent.graphs.nodes.synthesize import synthesize_node
 from rag.agent.state import AgentState
 from rag.agent.tools.registry import ToolRegistry
-from rag.retrieval.analysis import QueryUnderstandingService
 
 
 class _MissingSubAgentRunner:
@@ -40,18 +39,16 @@ def build_agent_graph(
     *,
     definition: AgentDefinition,
     tool_registry: ToolRegistry,
-    query_understanding_service: object | None = None,
     evaluate_decision_provider: EvaluateDecisionProvider | None = None,
     plan_provider: PlanProvider | None = None,
     subagent_runner: SubAgentRunner | None = None,
 ):
     graph = StateGraph(AgentState)
-    understanding_service = query_understanding_service or QueryUnderstandingService(enable_llm=False)
     allowed_tools = frozenset(definition.allowed_tools)
     effective_subagent_runner = subagent_runner or _MissingSubAgentRunner()
 
     def bound_route_node(state: AgentState) -> dict:
-        return route_node(state, query_understanding_service=understanding_service)
+        return route_node(state)
 
     async def bound_execute_node(state: AgentState) -> dict:
         return await execute_node(state, tool_registry=tool_registry, allowed_tools=allowed_tools)

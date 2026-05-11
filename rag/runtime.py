@@ -39,7 +39,7 @@ from rag.ingest.section_refiner import SectionRefiner
 from rag.ingest.table_executor import TableExecutor
 from rag.providers.generation import AnswerGenerationService, AnswerGenerator, GeneratorBinding
 from rag.query_pipeline import _QueryPipeline
-from rag.retrieval.analysis import QueryUnderstandingService, RoutingService
+
 from rag.retrieval.authorization_service import AuthorizationService
 from rag.retrieval.context import (
     ContextPromptBuilder,
@@ -760,7 +760,6 @@ class RAGRuntime:
 
     def _build_retrieval_service(self) -> RetrievalService:
         bundle = self.capability_bundle
-        query_understanding_service = QueryUnderstandingService(chat_bindings=bundle.chat_bindings)
         retrieval_factory = SearchBackedRetrievalFactory(
             metadata_repo=self.stores.metadata_repo,
             graph_repo=self.stores.graph_repo,
@@ -794,8 +793,6 @@ class RAGRuntime:
                 graph_expander=retrieval_factory.graph_expander,
                 web_retriever=retrieval_factory.web_retriever,
                 reranker=instrumented_reranker,
-                routing_service=RoutingService(),
-                query_understanding_service=query_understanding_service,
                 evidence_service=EvidenceService(),
                 graph_expansion_service=GraphExpansionService(),
                 telemetry_service=self.telemetry_service,

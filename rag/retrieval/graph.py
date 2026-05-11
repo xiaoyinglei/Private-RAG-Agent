@@ -8,7 +8,6 @@ from pathlib import Path
 from typing import Protocol
 
 from rag.assembly import EmbeddingCapabilityBinding
-from rag.retrieval.analysis import special_target_aliases
 from rag.retrieval.evidence import CandidateLike, EvidenceBundle
 from rag.schema.core import AssetRecord, Document, SectionRecord, Source
 from rag.schema.query import GroundingTarget, RetrievalSignals
@@ -1146,6 +1145,11 @@ class GraphExpansionService:
             expanded.append(candidate)
             seen.add(candidate.evidence_id)
         return expanded
+
+
+def special_target_aliases(target: str) -> tuple[str, ...]:
+    normalized = target.strip().lower()
+    return (normalized,) if normalized else ()
 
 
 __all__ = [

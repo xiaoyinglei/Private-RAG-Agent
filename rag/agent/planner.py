@@ -5,7 +5,6 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 from rag.agent.schema import AgentTaskRequest, SubTask, TaskUnderstanding
-from rag.schema.query import TaskType
 
 
 class AgentPlanner:
@@ -24,7 +23,7 @@ class AgentPlanner:
         ]
 
     def _fallback_plan(self, *, request: AgentTaskRequest, understanding: TaskUnderstanding) -> list[SubTask]:
-        if understanding.task_type is TaskType.COMPARISON or understanding.needs_comparison:
+        if understanding.task_type == "comparison" or understanding.needs_comparison:
             return self._comparison_plan(request=request, understanding=understanding)
         if understanding.needs_timeline:
             return self._timeline_research_plan(request=request, understanding=understanding)

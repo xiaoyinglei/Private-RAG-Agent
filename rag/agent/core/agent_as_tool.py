@@ -30,13 +30,11 @@ class AgentAsToolRunner:
         *,
         tool_registry: ToolRegistry,
         agent_registry: type[AgentRegistry] = AgentRegistry,
-        query_understanding_service: object | None = None,
         evaluate_decision_provider: EvaluateDecisionProvider | None = None,
         plan_provider: PlanProvider | None = None,
     ) -> None:
         self._tool_registry = tool_registry
         self._agent_registry = agent_registry
-        self._query_understanding_service = query_understanding_service
         self._evaluate_decision_provider = evaluate_decision_provider
         self._plan_provider = plan_provider
 
@@ -57,7 +55,6 @@ class AgentAsToolRunner:
         service = AgentService(
             definition=child_definition,
             tool_registry=self._tool_registry,
-            query_understanding_service=self._query_understanding_service,
             evaluate_decision_provider=self._evaluate_decision_provider,
             plan_provider=self._plan_provider,
             subagent_runner=self,

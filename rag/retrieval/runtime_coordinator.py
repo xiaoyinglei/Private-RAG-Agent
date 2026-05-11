@@ -5,13 +5,24 @@ from collections.abc import Awaitable
 from dataclasses import dataclass, field
 from typing import TypeVar
 
-from rag.retrieval.analysis import RoutingDecision
+from pydantic import BaseModel, ConfigDict, Field
+
 from rag.retrieval.evidence import CandidateLike, EvidenceBundle, SelfCheckResult
 from rag.retrieval.models import RetrievalResult
 from rag.schema.query import RetrievalSignals
-from rag.schema.runtime import ProviderAttempt, RetrievalDiagnostics
+from rag.schema.runtime import ProviderAttempt, RetrievalDiagnostics, RuntimeMode
 
 T = TypeVar("T")
+
+
+class RoutingDecision(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    runtime_mode: RuntimeMode
+    source_scope: list[str] = Field(default_factory=list)
+    web_search_allowed: bool = False
+    graph_expansion_allowed: bool = False
+    rerank_required: bool = True
 
 
 @dataclass(frozen=True, slots=True)
