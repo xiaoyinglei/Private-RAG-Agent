@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
 
 from rag.agent.core.definition import AgentDefinition
@@ -18,7 +19,7 @@ from rag.agent.graphs.nodes.execute_subagent import (
 from rag.agent.graphs.nodes.observe import observe_node
 from rag.agent.graphs.nodes.pause import pause_node
 from rag.agent.graphs.nodes.plan import PlanProvider, plan_node, route_after_plan
-from rag.agent.graphs.nodes.route import route_after_route, route_node
+from rag.agent.graphs.nodes.route import RouteProvider, route_after_route, route_node
 from rag.agent.graphs.nodes.synthesize import synthesize_node
 from rag.agent.state import AgentState
 from rag.agent.tools.registry import ToolRegistry
@@ -41,13 +42,21 @@ def build_agent_graph(
     tool_registry: ToolRegistry,
     evaluate_decision_provider: EvaluateDecisionProvider | None = None,
     plan_provider: PlanProvider | None = None,
+    route_provider: RouteProvider | None = None,
     subagent_runner: SubAgentRunner | None = None,
+    checkpointer: MemorySaver | None = None,
 ):
     graph = StateGraph(AgentState)
     allowed_tools = frozenset(definition.allowed_tools)
     effective_subagent_runner = subagent_runner or _MissingSubAgentRunner()
+    effective_route_provider = route_provider
 
-    def bound_route_node(state: AgentState) -> dict:
+    async def bound_route_node(state: AgentState) -> dict:
+        if effective_route_provider is not None:
+            result = effective_route_provider.route(state)
+            if hasattr(result, "__await__"):
+                result = await result
+            return result
         return route_node(state)
 
     async def bound_execute_node(state: AgentState) -> dict:
@@ -117,13 +126,31 @@ def build_agent_graph(
             "synthesize": "synthesize",
         },
     )
-    graph.add_edge("pause", END)
+    graph.add_conditional_edges(
+        "pause",
+        route_after_pause,
+        {
+            "execute": "execute",
+            "evaluate": "evaluate",
+            "end": END,
+        },
+    )
     graph.add_edge("synthesize", END)
 
-    return graph.compile()
+    return graph.compile(checkpointer=checkpointer)
 
 
 def route_after_execute(state: AgentState) -> str:
     if state.get("status") == "paused":
         return "pause"
     return "observe"
+
+
+def route_after_pause(state: AgentState) -> str:
+    decision = state.get("user_decision", "")
+    if decision == "allow_once":
+        return "execute"
+    if decision == "abort":
+        return "end"
+    # deny, continue, 及其他 → 重新评估
+    return "evaluate"

@@ -1,6 +1,18 @@
 from __future__ import annotations
 
+from collections.abc import Awaitable
+from typing import Protocol
+
 from rag.agent.state import AgentState
+
+
+class RouteProvider(Protocol):
+    """route 节点的 LLM 决策注入点。返回 state update dict。"""
+
+    def route(
+        self,
+        state: AgentState,
+    ) -> dict | Awaitable[dict]: ...
 
 
 def route_node(state: AgentState) -> dict:

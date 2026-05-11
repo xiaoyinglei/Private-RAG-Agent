@@ -7,7 +7,6 @@ from pydantic import BaseModel, ValidationError
 
 from rag.agent.tools.spec import ToolSpec
 
-
 ToolRunnerResult = BaseModel | dict[str, object]
 ToolRunner = Callable[[BaseModel], ToolRunnerResult | Awaitable[ToolRunnerResult]]
 

@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 from typing_extensions import TypedDict
 
 from rag.agent.core.context import AgentRunConfig
+from rag.agent.core.human_input import HumanInputRequest, HumanInputResponse
 from rag.agent.core.task import SubTaskResult, TaskDAG
 from rag.agent.memory.models import ContextBudgetSnapshot, ExtractedFact, WorkingSummary
 from rag.schema.query import RetrievalSignals
@@ -53,8 +54,12 @@ class AgentState(TypedDict):
     stop_reason: str | None
     needs_user_input: str | None
     pending_tool_calls: list[ToolCallPlan]
-    confirmed_tool_call_ids: set[str]
+    approved_tool_call_ids: list[str]
+    denied_tool_call_ids: list[str]
     user_decision: str | None
+    user_message: str | None
+    human_input_request: HumanInputRequest | None
+    human_input_response: HumanInputResponse | None
     next_subtasks: list[object] | None
     working_summary: WorkingSummary | None
     extracted_facts: list[ExtractedFact]

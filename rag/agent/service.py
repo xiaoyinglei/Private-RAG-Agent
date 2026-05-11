@@ -8,9 +8,12 @@ from pydantic import BaseModel, ConfigDict, Field
 from rag.agent.core.compiler import AgentGraphCompiler
 from rag.agent.core.context import AgentRunConfig, RuntimeRegistry
 from rag.agent.core.definition import AgentDefinition
+from rag.agent.core.human_input import HumanInputResponse
+from rag.agent.core.llm_registry import ModelRegistry
 from rag.agent.graphs.nodes.evaluate import EvaluateDecisionProvider
 from rag.agent.graphs.nodes.execute_subagent import SubAgentRunner
 from rag.agent.graphs.nodes.plan import PlanProvider
+from rag.agent.graphs.nodes.route import RouteProvider
 from rag.agent.state import AgentState, ToolCallPlan
 from rag.agent.tools.registry import ToolRegistry
 from rag.agent.tools.spec import ToolResult
@@ -27,7 +30,8 @@ class AgentRunRequest(BaseModel):
     budget_total: int | None = Field(default=None, gt=0)
     max_depth: int | None = Field(default=None, ge=0)
     pending_tool_calls: list[ToolCallPlan] = Field(default_factory=list)
-    confirmed_tool_call_ids: set[str] = Field(default_factory=set)
+    approved_tool_call_ids: list[str] = Field(default_factory=list)
+    denied_tool_call_ids: list[str] = Field(default_factory=list)
     messages: list[BaseMessage] = Field(default_factory=list)
 
     def to_run_config(self, definition: AgentDefinition) -> AgentRunConfig:
@@ -57,10 +61,15 @@ class AgentRunResult(BaseModel):
     iteration: int = 0
     groundedness_flag: bool = False
     insufficient_evidence_flag: bool = False
+    needs_user_input: str | None = None
+    human_input_request: object | None = None
+    pending_tool_calls_summary: list[dict[str, object]] = Field(default_factory=list)
 
     @classmethod
     def from_state(cls, state: AgentState) -> AgentRunResult:
         run_config = state["run_config"]
+        human_request = state.get("human_input_request")
+        pending = state.get("pending_tool_calls", [])
         return cls(
             run_id=run_config.run_id,
             thread_id=run_config.thread_id,
@@ -73,6 +82,12 @@ class AgentRunResult(BaseModel):
             iteration=state.get("iteration", 0),
             groundedness_flag=state.get("groundedness_flag", False),
             insufficient_evidence_flag=state.get("insufficient_evidence_flag", False),
+            needs_user_input=state.get("needs_user_input"),
+            human_input_request=human_request,
+            pending_tool_calls_summary=[
+                {"tool_call_id": tc.tool_call_id, "tool_name": tc.tool_name}
+                for tc in pending
+            ],
         )
 
 
@@ -84,14 +99,18 @@ class AgentService:
         tool_registry: ToolRegistry,
         evaluate_decision_provider: EvaluateDecisionProvider | None = None,
         plan_provider: PlanProvider | None = None,
+        route_provider: RouteProvider | None = None,
         subagent_runner: SubAgentRunner | None = None,
+        model_registry: ModelRegistry | None = None,
     ) -> None:
         self._definition = definition
         self._compiler = AgentGraphCompiler(
             tool_registry=tool_registry,
             evaluate_decision_provider=evaluate_decision_provider,
             plan_provider=plan_provider,
+            route_provider=route_provider,
             subagent_runner=subagent_runner,
+            model_registry=model_registry,
         )
 
     def initial_state(self, request: AgentRunRequest) -> AgentState:
@@ -100,7 +119,8 @@ class AgentService:
             task=request.task,
             run_config=run_config,
             pending_tool_calls=request.pending_tool_calls,
-            confirmed_tool_call_ids=request.confirmed_tool_call_ids,
+            approved_tool_call_ids=request.approved_tool_call_ids,
+            denied_tool_call_ids=request.denied_tool_call_ids,
             messages=request.messages,
         )
 
@@ -110,7 +130,8 @@ class AgentService:
         task: str,
         run_config: AgentRunConfig,
         pending_tool_calls: list[ToolCallPlan] | None = None,
-        confirmed_tool_call_ids: set[str] | None = None,
+        approved_tool_call_ids: list[str] | None = None,
+        denied_tool_call_ids: list[str] | None = None,
         messages: list[BaseMessage] | None = None,
     ) -> AgentState:
         RuntimeRegistry.remove(run_config.run_id)
@@ -129,8 +150,12 @@ class AgentService:
             "stop_reason": None,
             "needs_user_input": None,
             "pending_tool_calls": list(pending_tool_calls or []),
-            "confirmed_tool_call_ids": set(confirmed_tool_call_ids or set()),
+            "approved_tool_call_ids": list(approved_tool_call_ids or []),
+            "denied_tool_call_ids": list(denied_tool_call_ids or []),
             "user_decision": None,
+            "user_message": None,
+            "human_input_request": None,
+            "human_input_response": None,
             "next_subtasks": None,
             "working_summary": None,
             "extracted_facts": [],
@@ -149,7 +174,8 @@ class AgentService:
             task=request.task,
             run_config=run_config,
             pending_tool_calls=request.pending_tool_calls,
-            confirmed_tool_call_ids=request.confirmed_tool_call_ids,
+            approved_tool_call_ids=request.approved_tool_call_ids,
+            denied_tool_call_ids=request.denied_tool_call_ids,
             messages=request.messages,
         )
 
@@ -159,7 +185,8 @@ class AgentService:
         task: str,
         run_config: AgentRunConfig,
         pending_tool_calls: list[ToolCallPlan] | None = None,
-        confirmed_tool_call_ids: set[str] | None = None,
+        approved_tool_call_ids: list[str] | None = None,
+        denied_tool_call_ids: list[str] | None = None,
         messages: list[BaseMessage] | None = None,
     ) -> AgentRunResult:
         graph = self._compiler.compile(self._definition)
@@ -167,7 +194,8 @@ class AgentService:
             task=task,
             run_config=run_config,
             pending_tool_calls=pending_tool_calls,
-            confirmed_tool_call_ids=confirmed_tool_call_ids,
+            approved_tool_call_ids=approved_tool_call_ids,
+            denied_tool_call_ids=denied_tool_call_ids,
             messages=messages,
         )
         try:
@@ -180,6 +208,25 @@ class AgentService:
             raise
         if result_state.get("status") in {"done", "failed"}:
             RuntimeRegistry.remove(run_config.run_id)
+        return AgentRunResult.from_state(result_state)
+
+
+    async def resume(
+        self,
+        *,
+        run_id: str,
+        response: HumanInputResponse,
+    ) -> AgentRunResult:
+        """从中断点恢复。response 对应 HumanInputRequest 的用户响应。"""
+        from langgraph.types import Command
+
+        graph = self._compiler.compile(self._definition)
+        result_state = await graph.ainvoke(
+            Command(resume=response.model_dump(mode="json")),
+            config={"configurable": {"thread_id": run_id}},
+        )
+        if result_state.get("status") in {"done", "failed"}:
+            RuntimeRegistry.remove(run_id)
         return AgentRunResult.from_state(result_state)
 
 
