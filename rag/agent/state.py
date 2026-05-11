@@ -46,6 +46,7 @@ class AgentState(TypedDict):
     tool_results: Annotated[list, _merge_tool_results]
     task: str
     retrieval_signals: RetrievalSignals
+    retrieval_signals_debug: dict[str, object] | None
     run_config: AgentRunConfig
     plan: TaskDAG | None
     iteration: int

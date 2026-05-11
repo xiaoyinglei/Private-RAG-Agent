@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from collections.abc import Awaitable
 from typing import Any
 
@@ -18,6 +19,82 @@ from rag.agent.graphs.nodes.plan import PlanProvider
 from rag.agent.graphs.nodes.route import RouteProvider
 from rag.agent.memory.models import InjectedContext
 from rag.agent.state import AgentState, ThinkOutput
+from rag.schema.query import RetrievalSignals
+
+
+_QUOTED_TERM_RE = re.compile(
+    r"""["“”]([^"“”]+?)["“”]|"""
+    r"""['‘’]([^'‘’]+?)['‘’]""",
+)
+
+
+def _extract_quoted_terms(text: str) -> list[str]:
+    """从 query 中提取所有引号内的内容作为 quoted_terms。"""
+    terms: list[str] = []
+    seen: set[str] = set()
+    for match in _QUOTED_TERM_RE.finditer(text):
+        term = (match.group(1) or match.group(2)).strip()
+        if term and term.lower() not in seen:
+            terms.append(term)
+            seen.add(term.lower())
+    return terms
+
+
+def _merge_quoted_terms(llm_terms: list[str], rule_terms: list[str]) -> list[str]:
+    """融合规则提取和 LLM 输出的 quoted_terms。规则优先，去重且过滤空字符串。"""
+    merged: list[str] = []
+    seen: set[str] = set()
+    for term in rule_terms + llm_terms:
+        cleaned = term.strip()
+        if cleaned and cleaned.lower() not in seen:
+            merged.append(cleaned)
+            seen.add(cleaned.lower())
+    return merged
+
+
+def _filter_non_empty(items: list[str]) -> list[str]:
+    """过滤空字符串，保留有意义的 term。"""
+    return [t for t in items if t.strip()]
+
+
+def _validate_retrieval_signals(
+    raw: dict[str, object] | None,
+) -> tuple[RetrievalSignals, str]:
+    """校验 LLM 输出为合法 RetrievalSignals。
+
+    Returns:
+        (signals, source) — source ∈ {"llm", "validation_failed", "rule_fallback"}
+    """
+    if raw is None or not isinstance(raw, dict):
+        return RetrievalSignals(), "rule_fallback"
+
+    validation_errors: list[str] = []
+    allowed = {"special_targets", "quoted_terms", "allow_graph_expansion"}
+    filtered: dict[str, object] = {
+        k: v for k, v in raw.items() if k in allowed and v is not None
+    }
+
+    if "quoted_terms" in filtered:
+        if not isinstance(filtered["quoted_terms"], list):
+            validation_errors.append("quoted_terms is not a list")
+            filtered["quoted_terms"] = []
+    if "special_targets" in filtered:
+        if not isinstance(filtered["special_targets"], list):
+            validation_errors.append("special_targets is not a list")
+            filtered["special_targets"] = []
+    if "allow_graph_expansion" in filtered:
+        if not isinstance(filtered["allow_graph_expansion"], bool):
+            validation_errors.append("allow_graph_expansion is not a bool")
+            filtered["allow_graph_expansion"] = False
+
+    if validation_errors:
+        return RetrievalSignals(), "validation_failed"
+
+    try:
+        signals = RetrievalSignals.model_validate(filtered)
+        return signals, "llm"
+    except Exception:
+        return RetrievalSignals(), "validation_failed"
 
 
 def _generate_structured[T: BaseModel](
@@ -44,6 +121,7 @@ def _generate_structured[T: BaseModel](
 class RouteDecision(BaseModel):
     route: str  # "fast_path" | "decompose" | "direct"
     reason: str
+    retrieval_signals: dict[str, object] | None = None
 
 
 class LLMRouteProvider(RouteProvider):
@@ -54,13 +132,55 @@ class LLMRouteProvider(RouteProvider):
         self._kwargs = kwargs or {}
 
     def route(self, state: AgentState) -> dict[Any, Any]:
+        task = state.get("task", "")
         prompt = build_route_prompt(state)
         decision = _generate_structured(
             self._generator, prompt, RouteDecision, kwargs=self._kwargs
         )
-        if decision is None or decision.route not in {"fast_path", "decompose", "direct"}:
-            return {"status": "direct", "route_reason": "agent_research"}
-        return {"status": decision.route, "route_reason": decision.reason}
+
+        # 规则提取 quoted_terms（从原始 query），过滤空字符串
+        rule_quoted_terms = _filter_non_empty(_extract_quoted_terms(task))
+
+        # 校验 LLM 输出的 retrieval_signals，返回 (signals, source)
+        signals, signals_source = _validate_retrieval_signals(
+            decision.retrieval_signals if decision is not None else None
+        )
+
+        # 融合 quoted_terms：规则优先，过滤空字符串
+        llm_quoted = _filter_non_empty(list(signals.quoted_terms))
+        merged_quoted = _merge_quoted_terms(llm_quoted, rule_quoted_terms)
+
+        # 用 model_copy 保留 metadata_filters / structure_constraints 等字段
+        # _validate_retrieval_signals 只过滤了 LLM 字段，其余字段保持不变
+        clean_special = _filter_non_empty(list(signals.special_targets))
+        signals = signals.model_copy(update={
+            "special_targets": clean_special,
+            "quoted_terms": merged_quoted,
+        })
+
+        signals_debug: dict[str, object] = {
+            "signals_source": signals_source,
+            "special_targets": list(signals.special_targets),
+            "quoted_terms": list(signals.quoted_terms),
+            "allow_graph_expansion": signals.allow_graph_expansion,
+            "has_metadata_filters": signals.metadata_filters.has_constraints(),
+            "has_structure_constraints": signals.structure_constraints.has_constraints(),
+            "rule_quoted_terms_count": len(rule_quoted_terms),
+            "llm_quoted_terms_count": len(llm_quoted),
+        }
+
+        route = decision.route if decision is not None else "direct"
+        reason = decision.reason if decision is not None else "agent_research"
+        if decision is None or route not in {"fast_path", "decompose", "direct"}:
+            route = "direct"
+            reason = "agent_research"
+
+        return {
+            "status": route,
+            "route_reason": reason,
+            "retrieval_signals": signals,
+            "retrieval_signals_debug": signals_debug,
+        }
 
 
 # ── Evaluator ──
