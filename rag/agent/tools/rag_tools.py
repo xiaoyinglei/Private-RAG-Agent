@@ -1,13 +1,22 @@
 from __future__ import annotations
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 
 from rag.agent.tools.spec import ToolError, ToolPermissions, ToolSpec
+from rag.schema.query import RetrievalSignals
 
 
 class SearchInput(BaseModel):
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
     query: str
     top_k: int = 8
+    retrieval_signals: RetrievalSignals | None = Field(default=None)
+
+
+RAG_SIGNAL_AWARE_TOOLS = frozenset({
+    "vector_search", "keyword_search", "grounding", "rerank", "graph_expand",
+})
 
 
 class SearchOutput(BaseModel):

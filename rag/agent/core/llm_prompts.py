@@ -7,22 +7,9 @@ from rag.agent.state import AgentState
 
 def build_route_prompt(state: AgentState) -> str:
     task = state.get("task", "")
-    retrieval_signals = state.get("retrieval_signals")
     pending_count = len(state.get("pending_tool_calls", []))
 
-    signals_desc = "无特殊检索信号"
-    if retrieval_signals is not None:
-        parts = []
-        if retrieval_signals.special_targets:
-            parts.append(f"目标类型: {', '.join(retrieval_signals.special_targets)}")
-        if retrieval_signals.quoted_terms:
-            parts.append(f"精确词: {', '.join(retrieval_signals.quoted_terms)}")
-        if retrieval_signals.allow_graph_expansion:
-            parts.append("知识图谱扩展已启用")
-        if parts:
-            signals_desc = "; ".join(parts)
-
-    return f"""你是任务路由器。根据用户任务判断应走哪条执行路径。
+    return f"""你是任务路由器。根据用户任务判断应走哪条执行路径，并生成结构化检索信号。
 
 路由标准（按执行需求，不按固定分类）：
 
@@ -31,11 +18,28 @@ def build_route_prompt(state: AgentState) -> str:
 - direct：需要 Agent 循环调用工具（search/grounding/rerank 等），或需要多轮 evaluate、用户确认。
 
 当前任务: {task}
-检索信号: {signals_desc}
 待执行工具数: {pending_count}
 
-请判断路由。返回 JSON:
-{{"route": "fast_path" | "decompose" | "direct", "reason": "判断依据"}}"""
+请判断路由并生成检索信号。返回 JSON:
+{{
+    "route": "fast_path | decompose | direct",
+    "reason": "判断依据",
+    "retrieval_signals": {{
+        "special_targets": ["table"] 或 [],
+        "quoted_terms": ["精确词1", "精确词2"] 或 [],
+        "allow_graph_expansion": true 或 false
+    }}
+}}
+
+检索信号字段说明：
+- special_targets：任务是否专门针对 table/figure/caption/formula 等特殊元素。如果不是，填空数组。
+- quoted_terms：任务中需要精确匹配的关键词（专有名词、编号、代码等）。从任务原文中提取，不要编造。
+- allow_graph_expansion：是否需要展开知识图谱进行多跳推理。涉及关联关系、实体间查询时设为 true。
+
+重要约束：
+- 不要编造 doc_id、file_name、page_number、document_title。
+- 不要填写 metadata_filters。
+- quoted_terms 只从任务原文提取，不要凭空生成。"""
 
 
 # ── Evaluator prompt ──

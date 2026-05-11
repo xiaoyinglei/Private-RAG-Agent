@@ -17,7 +17,7 @@ from rag.agent.graphs.nodes.route import RouteProvider
 from rag.agent.state import AgentState, ToolCallPlan
 from rag.agent.tools.registry import ToolRegistry
 from rag.agent.tools.spec import ToolResult
-from rag.schema.query import AnswerCitation, EvidenceItem
+from rag.schema.query import AnswerCitation, EvidenceItem, RetrievalSignals
 from rag.schema.runtime import AccessPolicy, ExecutionLocationPreference
 
 
@@ -142,6 +142,8 @@ class AgentService:
             "citations": [],
             "tool_results": [],
             "task": task,
+            "retrieval_signals": RetrievalSignals(),
+            "retrieval_signals_debug": None,
             "run_config": run_config,
             "plan": None,
             "iteration": 0,

@@ -9,6 +9,7 @@ from pydantic import ValidationError
 from rag.agent.core.approval_policy import ApprovalDecision, ApprovalPolicy, merge_approval_requests
 from rag.agent.core.context import AgentRunConfig, RuntimeRegistry
 from rag.agent.state import AgentState, ToolCallPlan
+from rag.agent.tools.rag_tools import RAG_SIGNAL_AWARE_TOOLS
 from rag.agent.tools.registry import (
     ToolInputValidationError,
     ToolOutputValidationError,
@@ -149,6 +150,16 @@ async def execute_node(
     # 全部允许 / 已批准 → 执行
     batch = executables[: tool_policy.max_parallel_calls]
     excess = executables[tool_policy.max_parallel_calls :]
+
+    # 对 RAG_SIGNAL_AWARE_TOOLS 注入 retrieval_signals
+    signals = state.get("retrieval_signals")
+    for call in batch:
+        if call.tool_name in RAG_SIGNAL_AWARE_TOOLS:
+            if "retrieval_signals" not in call.arguments:
+                call.arguments["retrieval_signals"] = (
+                    signals.model_dump(mode="json") if signals is not None
+                    else {}
+                )
 
     gathered = await asyncio.gather(
         *[
