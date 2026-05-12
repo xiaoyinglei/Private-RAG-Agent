@@ -17,6 +17,7 @@ from rag.providers.fallback import FallbackEmbeddingRepo
 from rag.providers.huggingface.embedder import BgeM3Embedder, HuggingFaceEmbedder
 from rag.providers.huggingface.generator import HuggingFaceGenerator
 from rag.providers.huggingface.rerank import FlagEmbeddingReranker
+from rag.providers.mlx.embedder import MLXEmbedder
 from rag.providers.mlx.generator import MLXGenerator
 from rag.providers.ollama.embedder import OllamaEmbedder
 from rag.providers.ollama.generator import OllamaGenerator
@@ -574,6 +575,18 @@ def local_retrieval_provider(
     local_bge: ProviderConfig | None,
     ollama: ProviderConfig | None,
 ) -> ProviderConfig:
+    # MLX embedding 优先（如果通过 env 启用）
+    mlx_enabled = (
+        env_bool("PKP_MLX_EMBEDDING__ENABLED", "RAG_MLX_EMBEDDING_ENABLED") is True
+    )
+    if mlx_enabled:
+        mlx_model = first_env("PKP_MLX_EMBEDDING__MODEL", "RAG_MLX_EMBEDDING_MODEL")
+        if mlx_model:
+            return ProviderConfig(
+                provider_kind="mlx-embedding",
+                location="local",
+                embedding_model=mlx_model,
+            )
     if local_bge is not None:
         return _strip_profile(local_bge)
     if ollama is not None and ollama.base_url and ollama.embedding_model:
@@ -665,6 +678,24 @@ def build_provider(provider_config: ProviderConfig) -> object:
         return _CompositeProvider(
             provider_name="local-hf",
             generator=generator,
+        )
+    if kind == "mlx-embedding":
+        embedding_model_ref = first_non_blank(
+            provider_config.embedding_model,
+            provider_config.embedding_model_path,
+        )
+        if embedding_model_ref is None:
+            return _UnavailableProvider(
+                provider_name="mlx-embedding",
+                reason="mlx-embedding provider requires embedding_model or embedding_model_path",
+            )
+        embedder = MLXEmbedder(
+            model_name_or_path=embedding_model_ref,
+            batch_size=provider_config.embedding_batch_size or 8,
+        )
+        return _CompositeProvider(
+            provider_name="mlx-embedding",
+            embedder=embedder,
         )
     if kind == "local-bge":
         embedder = None
