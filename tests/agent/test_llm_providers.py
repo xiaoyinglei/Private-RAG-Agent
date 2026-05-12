@@ -140,6 +140,7 @@ class TestLLMRouteProvider:
         provider = LLMRouteProvider(gen)
         result = provider.route(_make_state(task="简单查询"))
         assert result["status"] == "fast_path"
+        assert result["execution_mode"] == "fast_path"
         assert result["route_reason"] == "simple query"
 
     def test_routes_decompose(self) -> None:
@@ -147,13 +148,15 @@ class TestLLMRouteProvider:
         provider = LLMRouteProvider(gen, decompose_enabled=True)
         result = provider.route(_make_state(task="对比 A 和 B"))
         assert result["status"] == "decompose"
+        assert result["execution_mode"] == "decompose"
 
     def test_decompose_downgrades_when_disabled(self) -> None:
-        """子 Agent 编排未启用时，decompose → direct"""
+        """子 Agent 编排未启用时，decompose → direct，execution_mode 同步降级"""
         gen = _StubGenerator([{"route": "decompose", "reason": "multi-hop"}])
-        provider = LLMRouteProvider(gen)  # decompose_enabled=False
+        provider = LLMRouteProvider(gen)
         result = provider.route(_make_state(task="对比 A 和 B"))
         assert result["status"] == "direct"
+        assert result["execution_mode"] == "direct"
         assert result["decompose_disabled_single_agent_mode"] is True
         assert "decompose_disabled" in result["route_reason"]
 
@@ -161,6 +164,8 @@ class TestLLMRouteProvider:
         gen = _StubGenerator([{"route": "direct", "reason": "needs tools"}])
         provider = LLMRouteProvider(gen)
         result = provider.route(_make_state())
+        assert result["status"] == "direct"
+        assert result["execution_mode"] == "direct"
         assert result["status"] == "direct"
 
     def test_unparseable_falls_back_to_direct(self) -> None:

@@ -9,6 +9,19 @@ from rag.agent.tools.spec import ToolResult
 
 def synthesize_node(state: AgentState) -> dict:
     tool_results = state.get("tool_results", [])
+    evidence = state.get("evidence", [])
+
+    # fast_path 无检索结果 → 不可空 synthesize
+    if state.get("execution_mode") == "fast_path":
+        has_content = evidence or any(tr.status == "ok" for tr in tool_results)
+        if not has_content:
+            return {
+                "status": "failed",
+                "stop_reason": "insufficient_evidence",
+                "final_answer": "当前无检索证据，无法生成回答。请重试或提供更多信息。",
+                "insufficient_evidence_flag": True,
+            }
+
     ok_results = [result for result in tool_results if result.status == "ok"]
     error_results = [result for result in tool_results if result.status == "error"]
     subtask_results = list(state.get("subtask_results", {}).values())

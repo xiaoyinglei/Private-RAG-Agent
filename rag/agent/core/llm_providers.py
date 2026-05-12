@@ -184,18 +184,26 @@ class LLMRouteProvider(RouteProvider):
             route = "direct"
             reason = "agent_research"
 
+        # execution_mode 初始等于 route，decompose 降级时同步覆盖
+        execution_mode: str = route
+
+        # decompose 降级：子 Agent 编排未启用时 → direct 循环
+        if route == "decompose" and not self._decompose_enabled:
+            route = "direct"
+            reason = f"decompose_disabled: {reason}"
+            execution_mode = "direct"
+
         update: dict[str, Any] = {
             "status": route,
+            "execution_mode": execution_mode,
             "route_reason": reason,
             "retrieval_signals": signals,
             "retrieval_signals_debug": signals_debug,
         }
 
-        # decompose 降级：子 Agent 编排未启用时 → direct 循环
-        if route == "decompose" and not self._decompose_enabled:
-            update["status"] = "direct"
-            update["route_reason"] = f"decompose_disabled: {reason}"
-            update["decompose_disabled_single_agent_mode"] = True
+        if route == "direct" and execution_mode == "direct" and not self._decompose_enabled:
+            if decision is not None and decision.route == "decompose":
+                update["decompose_disabled_single_agent_mode"] = True
 
         return update
 

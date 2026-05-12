@@ -22,24 +22,25 @@ def route_node(state: AgentState) -> dict:
     路由标准按执行需求定义，不按固定任务枚举。
     """
     if state.get("pending_tool_calls"):
-        return {"status": "direct", "route_reason": "pending_tool_calls"}
+        return {"status": "direct", "execution_mode": "direct", "route_reason": "pending_tool_calls"}
 
     retrieval_signals = state.get("retrieval_signals")
     if retrieval_signals is not None and retrieval_signals.allow_graph_expansion:
-        return {"status": "decompose", "route_reason": "graph_expansion_requested"}
+        return {
+            "status": "decompose", "execution_mode": "decompose",
+            "route_reason": "graph_expansion_requested",
+        }
 
-    return {"status": "direct", "route_reason": "agent_research"}
+    return {"status": "direct", "execution_mode": "direct", "route_reason": "agent_research"}
 
 
 def route_after_route(state: AgentState) -> str:
-    # fast_path 暂走 execute 路径（fast_path_node 未实现，直接 synthesize 无数据）
-    if state.get("status") == "fast_path":
+    if state.get("status") in {"fast_path", "direct"}:
         return "execute"
-    if state.get("status") == "failed":
-        return "synthesize"
     if state.get("status") == "decompose":
-        # decompose 降级：subagent_runner 未配置时走 direct 循环
         if state.get("decompose_disabled_single_agent_mode"):
             return "execute"
         return "plan"
+    if state.get("status") == "failed":
+        return "synthesize"
     return "execute"
