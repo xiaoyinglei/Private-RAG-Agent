@@ -13,7 +13,7 @@ def synthesize_node(state: AgentState) -> dict:
 
     # fast_path 无检索结果 → 不可空 synthesize
     if state.get("execution_mode") == "fast_path":
-        has_content = evidence or any(tr.status == "ok" for tr in tool_results)
+        has_content = bool(evidence) or any(tr.status == "ok" for tr in tool_results)
         if not has_content:
             return {
                 "status": "failed",
