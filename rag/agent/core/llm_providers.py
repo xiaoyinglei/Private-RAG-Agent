@@ -125,11 +125,21 @@ class RouteDecision(BaseModel):
 
 
 class LLMRouteProvider(RouteProvider):
-    """LLM 驱动的路由决策。失败时退回 direct。"""
+    """LLM 驱动的路由决策。失败时退回 direct。
 
-    def __init__(self, generator: Any, *, kwargs: dict[str, Any] | None = None) -> None:
+    decompose_enabled: 子 Agent 编排是否可用。False 时 decompose 降级为 direct。
+    """
+
+    def __init__(
+        self,
+        generator: Any,
+        *,
+        kwargs: dict[str, Any] | None = None,
+        decompose_enabled: bool = False,
+    ) -> None:
         self._generator = generator
         self._kwargs = kwargs or {}
+        self._decompose_enabled = decompose_enabled
 
     def route(self, state: AgentState) -> dict[Any, Any]:
         task = state.get("task", "")
@@ -151,7 +161,6 @@ class LLMRouteProvider(RouteProvider):
         merged_quoted = _merge_quoted_terms(llm_quoted, rule_quoted_terms)
 
         # 用 model_copy 保留 metadata_filters / structure_constraints 等字段
-        # _validate_retrieval_signals 只过滤了 LLM 字段，其余字段保持不变
         clean_special = _filter_non_empty(list(signals.special_targets))
         signals = signals.model_copy(update={
             "special_targets": clean_special,
@@ -175,12 +184,20 @@ class LLMRouteProvider(RouteProvider):
             route = "direct"
             reason = "agent_research"
 
-        return {
+        update: dict[str, Any] = {
             "status": route,
             "route_reason": reason,
             "retrieval_signals": signals,
             "retrieval_signals_debug": signals_debug,
         }
+
+        # decompose 降级：子 Agent 编排未启用时 → direct 循环
+        if route == "decompose" and not self._decompose_enabled:
+            update["status"] = "direct"
+            update["route_reason"] = f"decompose_disabled: {reason}"
+            update["decompose_disabled_single_agent_mode"] = True
+
+        return update
 
 
 # ── Evaluator ──

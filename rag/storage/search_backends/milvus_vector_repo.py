@@ -705,16 +705,14 @@ class MilvusVectorRepo:
         self._validate_item_kind(item_kind)
         dense_vector = [float(value) for value in query_vector]
         has_sparse_query = bool(sparse_query.strip())
-        has_external_sparse = sparse_query_vector is not None and len(sparse_query_vector) > 0
-        if not dense_vector or (not has_sparse_query and not has_external_sparse):
+        if not dense_vector or not has_sparse_query:
             return []
         self._flush_dirty_collections()
         if not self._has_collection(item_kind=item_kind, embedding_space=embedding_space):
             return []
         collection = self._collection(item_kind=item_kind, embedding_space=embedding_space)
         supports_bm25 = self._supports_bm25_schema(collection)
-        supports_external = self._supports_external_sparse_schema(collection)
-        if not supports_bm25 and not supports_external:
+        if not supports_bm25:
             return self.search(
                 dense_vector,
                 limit=limit,
@@ -741,36 +739,23 @@ class MilvusVectorRepo:
         requests.append(dense_request)
 
         # BM25 request: 字段 bm25_sparse_embedding，输入 sparse_query（文本），metric BM25
-        if has_sparse_query:
-            if not supports_bm25:
-                raise RuntimeError(
-                    "BM25 hybrid search requested but collection schema does not have "
-                    "bm25_sparse_embedding field. Please rebuild the index with a new storage_root."
-                )
-            bm25_request = AnnSearchRequest(
-                data=[sparse_query],
-                anns_field="bm25_sparse_embedding",
-                param=self._bm25_search_params(),
-                limit=limit,
-                expr=final_expr,
+        if not supports_bm25:
+            raise RuntimeError(
+                "BM25 hybrid search requested but collection schema does not have "
+                "bm25_sparse_embedding field. Please rebuild the index with a new storage_root."
             )
-            requests.append(bm25_request)
+        bm25_request = AnnSearchRequest(
+            data=[sparse_query],
+            anns_field="bm25_sparse_embedding",
+            param=self._bm25_search_params(),
+            limit=limit,
+            expr=final_expr,
+        )
+        requests.append(bm25_request)
 
-        # External sparse request: 字段 external_sparse_embedding，输入 sparse_query_vector，metric IP
-        if has_external_sparse:
-            if not supports_external:
-                raise RuntimeError(
-                    "External sparse embedding is enabled but collection schema does not have "
-                    "external_sparse_embedding field. Please rebuild the index with a new storage_root."
-                )
-            external_request = AnnSearchRequest(
-                data=[sparse_query_vector],
-                anns_field="external_sparse_embedding",
-                param=self._external_sparse_search_params(),
-                limit=limit,
-                expr=final_expr,
-            )
-            requests.append(external_request)
+        # TODO: external_sparse_embedding 路径预留。
+        # 第一版不实现：文档侧暂无 external sparse embedding 生成逻辑。
+        # 即使 query 侧 BGE-M3 产出了 sparse_query_vector，也不创建 external sparse 搜索。
 
         ranker = self._hybrid_ranker(
             fusion_strategy=fusion_strategy,

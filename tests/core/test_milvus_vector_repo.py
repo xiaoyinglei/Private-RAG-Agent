@@ -484,10 +484,12 @@ def test_milvus_vector_repo_accepts_sparse_query_vector_for_dual_mode_sparse_pat
 
     class _FakeAsyncClient:
         async def hybrid_search(self, **kwargs):
-            # reqs: [dense, bm25, external_sparse]
-            external_request = kwargs["reqs"][2]
-            assert external_request.kwargs["data"] == [{1: 0.4, 7: 0.9}]
-            assert external_request.kwargs["param"] == {"metric_type": "IP", "params": {}}
+            # 第一版：即使传了 sparse_query_vector，也只创建 dense + BM25 请求
+            assert len(kwargs["reqs"]) == 2  # dense + bm25，无 external sparse
+            bm25_request = kwargs["reqs"][1]
+            assert bm25_request.kwargs["anns_field"] == "bm25_sparse_embedding"
+            assert bm25_request.kwargs["data"] == ["alpha policy"]
+            assert bm25_request.kwargs["param"] == {"metric_type": "BM25", "params": {}}
             return []
 
     repo = MilvusVectorRepo("http://127.0.0.1:19530")
@@ -495,7 +497,6 @@ def test_milvus_vector_repo_accepts_sparse_query_vector_for_dual_mode_sparse_pat
     monkeypatch.setattr(repo, "_has_collection", lambda **kwargs: True)
     monkeypatch.setattr(repo, "_collection", lambda **kwargs: fake_collection)
     monkeypatch.setattr(repo, "_supports_bm25_schema", lambda collection: True)
-    monkeypatch.setattr(repo, "_supports_external_sparse_schema", lambda collection: True)
     monkeypatch.setattr(repo, "_get_async_client", lambda: _FakeAsyncClient())
     repo._collections[fake_collection.name] = fake_collection
     try:

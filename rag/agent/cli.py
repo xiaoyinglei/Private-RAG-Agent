@@ -15,7 +15,6 @@ from rag.agent.tools.llm_tools import (
     LLMSummarizeInput,
     LLMTextOutput,
 )
-from rag.agent.tools.rag_tools import SearchInput, SearchOutput
 from rag.agent.tools.registry import ToolRunner
 
 agent_app = typer.Typer(add_completion=False, no_args_is_help=True)
@@ -32,28 +31,16 @@ def _build_agent_service(runtime) -> AgentService:
 
     runners: dict[str, ToolRunner] = {}
 
-    # RAG tools — 通过 asyncio.to_thread 避开 runtime.query() 内部 asyncio.run()
-    import asyncio as _asyncio
-    from rag.retrieval import QueryOptions
+    # RAG tools — AsyncRAGToolRunner（aretrieve_payload → to_thread fallback）
+    from rag.agent.tools.rag_tool_runner import AsyncRAGToolRunner
 
-    async def _run_rag(payload: SearchInput) -> SearchOutput:
-        result = await _asyncio.to_thread(
-            runtime.query, payload.query,
-            options=QueryOptions(max_context_tokens=4096),
-        )
-        items: list[dict[str, object]] = []
-        if hasattr(result, "evidence") and result.evidence:
-            for item in result.evidence:
-                items.append({"text": getattr(item, "text", ""), "score": getattr(item, "score", 0.0)})
-        if not items and hasattr(result, "answer"):
-            for section in getattr(result.answer, "answer_sections", []):
-                text = getattr(section, "text", "")
-                if text:
-                    items.append({"text": text})
-        return SearchOutput(items=items)
-
+    rag_runner = AsyncRAGToolRunner(
+        runtime=runtime,
+        retrieval_service=runtime.retrieval_service,
+        max_context_tokens=4096,
+    )
     for name in ("vector_search", "keyword_search", "grounding", "rerank", "graph_expand"):
-        runners[name] = _run_rag
+        runners[name] = rag_runner.retrieve_evidence
 
     # LLM tools
     if primary_chat is not None:

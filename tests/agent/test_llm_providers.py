@@ -144,9 +144,18 @@ class TestLLMRouteProvider:
 
     def test_routes_decompose(self) -> None:
         gen = _StubGenerator([{"route": "decompose", "reason": "multi-hop"}])
-        provider = LLMRouteProvider(gen)
+        provider = LLMRouteProvider(gen, decompose_enabled=True)
         result = provider.route(_make_state(task="对比 A 和 B"))
         assert result["status"] == "decompose"
+
+    def test_decompose_downgrades_when_disabled(self) -> None:
+        """子 Agent 编排未启用时，decompose → direct"""
+        gen = _StubGenerator([{"route": "decompose", "reason": "multi-hop"}])
+        provider = LLMRouteProvider(gen)  # decompose_enabled=False
+        result = provider.route(_make_state(task="对比 A 和 B"))
+        assert result["status"] == "direct"
+        assert result["decompose_disabled_single_agent_mode"] is True
+        assert "decompose_disabled" in result["route_reason"]
 
     def test_routes_direct(self) -> None:
         gen = _StubGenerator([{"route": "direct", "reason": "needs tools"}])

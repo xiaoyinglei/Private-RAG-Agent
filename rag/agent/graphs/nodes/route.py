@@ -38,5 +38,8 @@ def route_after_route(state: AgentState) -> str:
     if state.get("status") == "failed":
         return "synthesize"
     if state.get("status") == "decompose":
+        # decompose 降级：subagent_runner 未配置时走 direct 循环
+        if state.get("decompose_disabled_single_agent_mode"):
+            return "execute"
         return "plan"
     return "execute"
