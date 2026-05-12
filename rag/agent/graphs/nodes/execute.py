@@ -26,6 +26,21 @@ async def execute_node(
     allowed_tools: frozenset[str],
 ) -> dict:
     pending = state.get("pending_tool_calls", [])
+
+    # fast_path 无 pending tool calls 时自动补一个轻量 RAG 检索
+    if not pending and state.get("execution_mode") == "fast_path":
+        signals = state.get("retrieval_signals")
+        signals_dump = signals.model_dump(mode="json") if signals is not None else {}
+        auto_call = ToolCallPlan.create(
+            "vector_search",
+            {
+                "query": state["task"],
+                "top_k": 8,
+                "retrieval_signals": signals_dump,
+            },
+        )
+        pending = [auto_call]
+
     if not pending:
         return {}
 

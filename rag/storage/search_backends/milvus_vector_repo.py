@@ -713,13 +713,10 @@ class MilvusVectorRepo:
         collection = self._collection(item_kind=item_kind, embedding_space=embedding_space)
         supports_bm25 = self._supports_bm25_schema(collection)
         if not supports_bm25:
-            return self.search(
-                dense_vector,
-                limit=limit,
-                doc_ids=doc_ids,
-                expr=expr,
-                embedding_space=embedding_space,
-                item_kind=item_kind,
+            raise RuntimeError(
+                "Milvus collection schema is incompatible with the current sparse layout. "
+                "This collection uses the old sparse_embedding field. "
+                "Please rebuild the index with a new storage_root or collection prefix."
             )
         final_expr = self._search_expr(doc_ids=doc_ids, user_expr=expr)
         output_fields = self._output_fields(item_kind=item_kind, include_embedding=False)

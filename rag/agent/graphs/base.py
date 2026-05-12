@@ -143,6 +143,11 @@ def build_agent_graph(
 def route_after_execute(state: AgentState) -> str:
     if state.get("status") == "paused":
         return "pause"
+    if state.get("status") == "failed":
+        return "synthesize"
+    # fast_path：单轮 RAG 后直接 synthesize，不进入 evaluate 循环
+    if state.get("execution_mode") == "fast_path":
+        return "synthesize"
     return "observe"
 
 
