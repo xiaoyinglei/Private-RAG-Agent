@@ -116,6 +116,38 @@ class _CompositeProvider:
         return backend
 
 
+class _OpenAICompatibleChatGenerator:
+    """OpenAI-compatible chat API wrapper.  Does not expose api_key in repr."""
+
+    def __init__(self, *, model: str, base_url: str, api_key: str | None = None) -> None:
+        from openai import OpenAI
+
+        self.chat_model_name = model
+        self._base_url = base_url
+        self._client = OpenAI(base_url=base_url, api_key=api_key or "not-needed")
+
+    def generate_text(
+        self, *, prompt: str, system_prompt: str | None = None, **kwargs: object
+    ) -> str:
+        messages: list[dict[str, str]] = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": prompt})
+        response = self._client.chat.completions.create(
+            model=self.chat_model_name,
+            messages=messages,
+            **kwargs,
+        )
+        content = response.choices[0].message.content
+        return str(content) if content is not None else ""
+
+    def __repr__(self) -> str:
+        return (
+            f"_OpenAICompatibleChatGenerator(model={self.chat_model_name!r}, "
+            f"base_url={self._base_url!r})"
+        )
+
+
 def _backend_model_name(backend: object | None, capability: str) -> str | None:
     if backend is None:
         return None
@@ -621,14 +653,27 @@ def _provider_or_default(
 def build_provider(provider_config: ProviderConfig) -> object:
     kind = provider_config.provider_kind
     if kind == "openai-compatible":
-        return _UnavailableProvider(
+        chat_model = provider_config.chat_model
+        if not chat_model:
+            return _UnavailableProvider(
+                provider_name="openai-compatible",
+                reason="openai-compatible provider requires chat_model",
+            )
+        base_url = provider_config.base_url
+        if not base_url:
+            return _UnavailableProvider(
+                provider_name="openai-compatible",
+                reason="openai-compatible provider requires base_url",
+                chat_model_name=chat_model,
+            )
+        generator = _OpenAICompatibleChatGenerator(
+            model=chat_model,
+            base_url=base_url,
+            api_key=provider_config.api_key,
+        )
+        return _CompositeProvider(
             provider_name="openai-compatible",
-            reason=(
-                "openai-compatible provider is not implemented in the new provider stack. "
-                "Use a local huggingface/mlx/ollama backend or add a real openai provider module."
-            ),
-            chat_model_name=provider_config.chat_model,
-            embedding_model_name=provider_config.embedding_model,
+            generator=generator,
         )
     if kind == "ollama":
         generator = (

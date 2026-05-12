@@ -1,0 +1,40 @@
+# Model catalog: single source of truth for all model configuration.
+# Business code MUST NOT reference model names, providers, base_url, or api_key directly.
+# Always resolve models via rag.models.runtime.resolve_runtime_config().
+
+models:
+  qwen_local:
+    capability: chat
+    provider: openai_compatible
+    model: mlx-community/Qwen3-14B-4bit
+    base_url: http://127.0.0.1:8080/v1
+
+  deepseek:
+    capability: chat
+    provider: openai_compatible
+    model: deepseek-chat
+    base_url: https://api.deepseek.com/v1
+    api_key_env: DEEPSEEK_API_KEY
+
+  deepseek_reasoner:
+    capability: chat
+    provider: openai_compatible
+    model: deepseek-reasoner
+    base_url: https://api.deepseek.com/v1
+    api_key_env: DEEPSEEK_API_KEY
+
+  qwen_embedding_mlx:
+    capability: embedding
+    provider: mlx_embedding
+    model: mlx-community/Qwen3-Embedding-8B-4bit-DWQ
+    embedding_space: mlx/Qwen3-Embedding-8B-4bit-DWQ
+
+  qwen3_reranker:
+    capability: reranker
+    provider: sentence_transformers
+    model: Qwen/Qwen3-Reranker-4B
+
+defaults:
+  primary_model: qwen_local
+  embedding_model: qwen_embedding_mlx
+  reranker_model: qwen3_reranker

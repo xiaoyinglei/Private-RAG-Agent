@@ -7,7 +7,7 @@ from rag import RAGRuntime, StorageConfig
 from rag.assembly import AssemblyConfig, CapabilityAssemblyService, CapabilityRequirements, ProviderConfig
 from rag.retrieval import QueryOptions
 from rag.retrieval.models import PublicQueryResult, RetrievalResult
-from rag.runtime import DEFAULT_SUMMARY_MODEL, DEFAULT_SUMMARY_PROVIDER_KIND
+from rag.runtime import _LazySummaryGeneratorAdapter
 from rag.schema.query import EvidenceItem, GroundingTarget
 
 
@@ -86,7 +86,8 @@ def test_runtime_catalog_lists_recommended_profiles(monkeypatch: pytest.MonkeyPa
     assert {"local_full", "local_retrieval_cloud_chat", "cloud_full", "test_minimal"} <= profile_ids
 
 
-def test_runtime_default_summary_generator_is_not_chat_binding(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_runtime_summary_generator_follows_chat_binding(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Summary generator 的模型来自 capability bundle 的 chat binding，不再独立配置。"""
     service = _assembly_service(monkeypatch)
     runtime = RAGRuntime.from_profile(
         storage=StorageConfig.in_memory(),
@@ -95,12 +96,10 @@ def test_runtime_default_summary_generator_is_not_chat_binding(monkeypatch: pyte
     )
     try:
         info = runtime.ingest_pipeline._summarizer.generator_info()
+        chat_binding = runtime.capability_bundle.chat_bindings[0]
+        assert info["model_name"] == chat_binding.model_name
     finally:
         runtime.close()
-
-    assert info["provider_name"] == DEFAULT_SUMMARY_PROVIDER_KIND
-    assert info["model_name"] == DEFAULT_SUMMARY_MODEL
-    assert info["model_name"] != "cloud-chat"
 
 
 def test_public_retrieval_result_excludes_old_preservation_contract() -> None:

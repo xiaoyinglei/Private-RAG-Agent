@@ -69,9 +69,6 @@ from rag.utils.telemetry import TelemetryService
 
 _RUNTIME_CONTRACT_NAMESPACE = "rag_runtime"
 _RUNTIME_CONTRACT_KEY = "core_contract_v1"
-DEFAULT_SUMMARY_PROVIDER_KIND = "local-hf"
-DEFAULT_SUMMARY_MODEL = "Qwen/Qwen3-8B-MLX-4bit"
-DEFAULT_SUMMARY_BACKEND = "mlx"
 
 
 def _supports_data_contract_metadata_repo(repo: object) -> bool:
@@ -146,51 +143,24 @@ class _ChatGeneratorAdapter:
 
 
 class _LazySummaryGeneratorAdapter:
-    def __init__(
-        self,
-        *,
-        provider_builder: Callable[[ProviderConfig], object] = build_provider,
-        provider_kind: str = DEFAULT_SUMMARY_PROVIDER_KIND,
-        model: str | None = DEFAULT_SUMMARY_MODEL,
-        model_path: str | None = None,
-        backend: str | None = DEFAULT_SUMMARY_BACKEND,
-    ) -> None:
-        self._provider_builder = provider_builder
-        self._provider_kind = provider_kind
-        self._model = model
-        self._model_path = model_path
-        self._backend = backend
-        self._adapter: _ChatGeneratorAdapter | None = None
+    def __init__(self, *, binding: object) -> None:
+        if binding is None:
+            raise RuntimeError("Summary generator requires a chat binding from the capability bundle")
+        self._adapter = _ChatGeneratorAdapter(binding)
 
     @property
     def provider_name(self) -> str | None:
-        return self._adapter.provider_name if self._adapter is not None else self._provider_kind
+        return self._adapter.provider_name
 
     @property
     def model_name(self) -> str | None:
-        if self._adapter is not None and self._adapter.model_name:
-            return self._adapter.model_name
-        return self._model or self._model_path
-
-    def _ensure_adapter(self) -> _ChatGeneratorAdapter:
-        if self._adapter is None:
-            provider_config = ProviderConfig(
-                provider_kind=self._provider_kind,
-                location="local",
-                chat_model=self._model,
-                chat_model_path=self._model_path,
-                chat_backend=self._backend,
-            )
-            provider = self._provider_builder(provider_config)
-            binding = ChatCapabilityBinding(provider, location=provider_config.location)
-            self._adapter = _ChatGeneratorAdapter(binding)
-        return self._adapter
+        return self._adapter.model_name
 
     def generate_text(self, *, prompt: str) -> str:
-        return self._ensure_adapter().generate_text(prompt=prompt)
+        return self._adapter.generate_text(prompt=prompt)
 
     def generate_structured(self, *, prompt: str, schema: type[Any], **kwargs: Any) -> Any:
-        return self._ensure_adapter().generate_structured(prompt=prompt, schema=schema, **kwargs)
+        return self._adapter.generate_structured(prompt=prompt, schema=schema, **kwargs)
 
 
 def _generator_bindings_from_chat_bindings(chat_bindings: Sequence[object]) -> tuple[GeneratorBinding, ...]:
@@ -669,12 +639,11 @@ class RAGRuntime:
             pptx_parser=PptxParserRepo(),
             image_parser=ImageParserRepo(ocr_repo),
         )
+        chat_binding = self.capability_bundle.chat_bindings[0] if self.capability_bundle.chat_bindings else None
         self.ingest_pipeline = IngestPipeline(
             dispatcher=dispatcher,
             summarizer=RetrievalSummarizer(
-                llm_client=_LazySummaryGeneratorAdapter(
-                    provider_builder=self.assembly_service._build_provider,
-                ),
+                llm_client=_LazySummaryGeneratorAdapter(binding=chat_binding),
                 token_accounting=self.token_accounting,
             ),
             embedder=embedding_binding,

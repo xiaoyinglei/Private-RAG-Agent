@@ -180,14 +180,40 @@ def agent_chat(
         Path, typer.Option("--storage-root", help="RAG 存储根目录")
     ] = Path(".rag"),
     profile: Annotated[
-        str | None, typer.Option("--profile", help="Assembly profile")
+        str | None,
+        typer.Option(
+            "--profile",
+            help="运行行为 / 装配策略（local_full 等），不再控制模型选择。模型由 --model / configs/models.yaml 决定。",
+        ),
+    ] = None,
+    model: Annotated[
+        str | None,
+        typer.Option("--model", help="主生成模型别名，对应 configs/models.yaml 中 capability=chat 的条目"),
+    ] = None,
+    embedding_model: Annotated[
+        str | None,
+        typer.Option("--embedding-model", help="Embedding 模型别名，对应 configs/models.yaml 中 capability=embedding 的条目"),
+    ] = None,
+    reranker_model: Annotated[
+        str | None,
+        typer.Option("--reranker-model", help="Reranker 模型别名，对应 configs/models.yaml 中 capability=reranker 的条目"),
     ] = None,
 ) -> None:
     """交互式 Agent 对话。暂停时支持工具审批。"""
     from rag import AssemblyRequest, CapabilityRequirements, RAGRuntime, StorageComponentConfig, StorageConfig
+    from rag.models.assembly_adapter import to_assembly_overrides
+    from rag.models.runtime import RuntimeOverrides, resolve_runtime_config
     from rag.retrieval import QueryOptions
 
-    # 构建 RAGRuntime
+    runtime_config = resolve_runtime_config(
+        RuntimeOverrides(
+            model_alias=model,
+            embedding_model_alias=embedding_model,
+            reranker_model_alias=reranker_model,
+        )
+    )
+    assembly_overrides = to_assembly_overrides(runtime_config)
+
     storage = StorageConfig(
         root=storage_root,
         vectors=StorageComponentConfig(backend="milvus", dsn="http://127.0.0.1:19530"),
@@ -196,20 +222,23 @@ def agent_chat(
         require_chat=True,
         default_context_tokens=QueryOptions().max_context_tokens,
     )
-    if profile:
-        runtime = RAGRuntime.from_profile(storage=storage, profile_id=profile, requirements=requirements)
-    else:
-        runtime = RAGRuntime.from_request(
-            storage=storage,
-            request=AssemblyRequest(requirements=requirements),
-        )
+    # profile 先加载（提供 base strategy），overrides 后覆盖（--model 永远覆盖 profile 中的旧模型配置）。
+    # 合并顺序由 CapabilityAssemblyService._capability_candidates 保证：explicit > profile > config > compat_env。
+    runtime = RAGRuntime.from_request(
+        storage=storage,
+        request=AssemblyRequest(
+            requirements=requirements,
+            profile_id=profile,
+            overrides=assembly_overrides,
+        ),
+    )
 
     with runtime:
         service = _build_agent_service(runtime)
         run_id = f"chat_{id(service):x}"
         verbose = False
 
-        _print_startup_banner("local_main")
+        _print_startup_banner(runtime_config.primary_model.alias)
 
         while True:
             try:
