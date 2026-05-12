@@ -319,7 +319,7 @@ class MilvusVectorRepo:
             FieldSchema(name="metadata_json", dtype=DataType.VARCHAR, max_length=65535),
             FieldSchema(name="embedding", dtype=DataType.FLOAT_VECTOR, dim=dimension),
             FieldSchema(name="bm25_sparse_embedding", dtype=DataType.SPARSE_FLOAT_VECTOR),
-            FieldSchema(name="external_sparse_embedding", dtype=DataType.SPARSE_FLOAT_VECTOR),
+            FieldSchema(name="external_sparse_embedding", dtype=DataType.SPARSE_FLOAT_VECTOR, nullable=True),
         ]
         if item_kind == "doc_summary":
             return common + [
