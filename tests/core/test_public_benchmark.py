@@ -31,7 +31,7 @@ from rag.retrieval.evidence import EvidenceBundle, SelfCheckResult
 from rag.retrieval.runtime_coordinator import RoutingDecision
 from rag.retrieval.models import RetrievalResult
 
-from rag.schema.runtime import ExternalRetrievalPolicy, Residency, RuntimeMode
+from rag.schema.runtime import ExternalRetrievalPolicy, RuntimeMode
 from tests.support import make_runtime
 
 
@@ -331,7 +331,6 @@ def test_write_dataset_baseline_summary_includes_priority_deltas(tmp_path: Path)
 def test_benchmark_access_policy_forces_local_retrieval_only() -> None:
     policy = benchmark_access_policy()
 
-    assert policy.residency is Residency.LOCAL_REQUIRED
     assert policy.external_retrieval is ExternalRetrievalPolicy.DENY
     assert policy.local_only is True
 

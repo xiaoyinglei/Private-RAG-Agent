@@ -78,7 +78,6 @@ class PostgresMetadataRepo:
                 mime_type,
                 owner_id,
                 ingest_version,
-                residency,
                 external_retrieval,
                 sensitivity_tags,
                 created_at,
@@ -94,7 +93,6 @@ class PostgresMetadataRepo:
                 file_size_bytes = EXCLUDED.file_size_bytes,
                 mime_type = EXCLUDED.mime_type,
                 owner_id = EXCLUDED.owner_id,
-                residency = EXCLUDED.residency,
                 external_retrieval = EXCLUDED.external_retrieval,
                 sensitivity_tags = EXCLUDED.sensitivity_tags,
                 updated_at = EXCLUDED.updated_at,
@@ -113,7 +111,7 @@ class PostgresMetadataRepo:
                 saved_source.mime_type,
                 saved_source.owner_id,
                 saved_source.ingest_version,
-                saved_source.effective_access_policy.residency.value,
+                "local_required",  # was policy.residency.value, now hardcoded
                 saved_source.effective_access_policy.external_retrieval.value,
                 self._json_dumps(sorted(saved_source.effective_access_policy.sensitivity_tags)),
                 saved_source.created_at,
@@ -224,7 +222,6 @@ class PostgresMetadataRepo:
                 embedding_model_id,
                 indexed_at,
                 last_index_error,
-                residency,
                 external_retrieval,
                 sensitivity_tags,
                 created_at,
@@ -254,7 +251,6 @@ class PostgresMetadataRepo:
                 embedding_model_id = EXCLUDED.embedding_model_id,
                 indexed_at = EXCLUDED.indexed_at,
                 last_index_error = EXCLUDED.last_index_error,
-                residency = EXCLUDED.residency,
                 external_retrieval = EXCLUDED.external_retrieval,
                 sensitivity_tags = EXCLUDED.sensitivity_tags,
                 updated_at = EXCLUDED.updated_at,
@@ -285,7 +281,7 @@ class PostgresMetadataRepo:
                 saved_document.embedding_model_id,
                 saved_document.indexed_at,
                 saved_document.last_index_error,
-                saved_document.effective_access_policy.residency.value,
+                "local_required",  # was policy.residency.value, now hardcoded
                 saved_document.effective_access_policy.external_retrieval.value,
                 self._json_dumps(sorted(saved_document.effective_access_policy.sensitivity_tags)),
                 saved_document.created_at,
@@ -966,7 +962,7 @@ class PostgresMetadataRepo:
                 mime_type VARCHAR(128),
                 owner_id VARCHAR(128),
                 ingest_version INT NOT NULL DEFAULT 1,
-                residency VARCHAR(32) NOT NULL,
+                residency VARCHAR(32) NOT NULL,  -- deprecated, no longer written by runtime
                 external_retrieval VARCHAR(16) NOT NULL,
                 sensitivity_tags JSONB NOT NULL DEFAULT '[]',
                 created_at TIMESTAMPTZ NOT NULL,
@@ -1010,7 +1006,7 @@ class PostgresMetadataRepo:
                 embedding_model_id VARCHAR(64) NOT NULL DEFAULT 'default',
                 indexed_at TIMESTAMPTZ,
                 last_index_error TEXT,
-                residency VARCHAR(32) NOT NULL,
+                residency VARCHAR(32) NOT NULL,  -- deprecated, no longer written by runtime
                 external_retrieval VARCHAR(16) NOT NULL,
                 sensitivity_tags JSONB NOT NULL DEFAULT '[]',
                 created_at TIMESTAMPTZ NOT NULL,
@@ -1216,7 +1212,6 @@ class PostgresMetadataRepo:
     def _with_access_policy(self, row: dict[str, Any]) -> dict[str, Any]:
         data = dict(row)
         data["effective_access_policy"] = AccessPolicy(
-            residency=str(data.pop("residency")),
             external_retrieval=str(data.pop("external_retrieval")),
             sensitivity_tags=frozenset(str(item) for item in self._json_list(data.pop("sensitivity_tags", []))),
         )

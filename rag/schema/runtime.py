@@ -24,12 +24,6 @@ if TYPE_CHECKING:
     from rag.schema.query import KnowledgeArtifact, RetrievalSignals
 
 
-class Residency(StrEnum):
-    CLOUD_ALLOWED = "cloud_allowed"
-    LOCAL_PREFERRED = "local_preferred"
-    LOCAL_REQUIRED = "local_required"
-
-
 class ExternalRetrievalPolicy(StrEnum):
     ALLOW = "allow"
     DENY = "deny"
@@ -51,17 +45,9 @@ class ExecutionLocationPreference(StrEnum):
     LOCAL_ONLY = "local_only"
 
 
-_RESIDENCY_ORDER: dict[Residency, int] = {
-    Residency.CLOUD_ALLOWED: 0,
-    Residency.LOCAL_PREFERRED: 1,
-    Residency.LOCAL_REQUIRED: 2,
-}
-
-
 class AccessPolicy(BaseModel):
     model_config = ConfigDict(frozen=True)
 
-    residency: Residency = Residency.CLOUD_ALLOWED
     external_retrieval: ExternalRetrievalPolicy = ExternalRetrievalPolicy.ALLOW
     allowed_runtimes: frozenset[RuntimeMode] = Field(
         default_factory=lambda: frozenset({RuntimeMode.FAST, RuntimeMode.DEEP})
@@ -82,14 +68,12 @@ class AccessPolicy(BaseModel):
         allowed_locations = self.allowed_locations & other.allowed_locations
         if not allowed_locations:
             raise ValueError("allowed_locations cannot become empty during narrowing")
-        residency = max((self.residency, other.residency), key=_RESIDENCY_ORDER.__getitem__)
         external_retrieval = (
             ExternalRetrievalPolicy.DENY
             if ExternalRetrievalPolicy.DENY in {self.external_retrieval, other.external_retrieval}
             else ExternalRetrievalPolicy.ALLOW
         )
         return AccessPolicy(
-            residency=residency,
             external_retrieval=external_retrieval,
             allowed_runtimes=allowed_runtimes,
             allowed_locations=allowed_locations,
@@ -98,7 +82,7 @@ class AccessPolicy(BaseModel):
 
     @property
     def local_only(self) -> bool:
-        return self.residency is Residency.LOCAL_REQUIRED
+        return self.external_retrieval is ExternalRetrievalPolicy.DENY
 
     def allows_runtime(self, mode: RuntimeMode) -> bool:
         return mode in self.allowed_runtimes
@@ -352,14 +336,6 @@ class WebSearchRepo(Protocol):
     def search(self, query: str, *, limit: int = 5) -> list[SearchResult]: ...
 
 
-class ModelProviderRepo(Protocol):
-    def embed(self, texts: Sequence[str]) -> list[list[float]]: ...
-
-    def chat(self, prompt: str) -> str: ...
-
-    def rerank(self, query: str, documents: Sequence[str]) -> list[float]: ...
-
-
 class VectorRepo(Protocol):
     def upsert(
         self,
@@ -443,41 +419,6 @@ class MetadataRepo(Protocol):
     def close(self) -> None: ...
 
 
-class DocumentActivationRepo(Protocol):
-    def is_document_active(self, doc_id: int) -> bool: ...
-
-    def get_active_document_by_location_and_hash(self, location: str, content_hash: str) -> Document | None: ...
-
-    def get_latest_document_for_location(self, location: str) -> Document | None: ...
-
-    def deactivate_documents_for_location(self, location: str) -> None: ...
-
-    def set_document_active(self, doc_id: int, *, active: bool) -> None: ...
-
-
-class ArtifactRepo(Protocol):
-    def save_artifact(self, artifact: KnowledgeArtifact) -> None: ...
-
-    def get_artifact(self, artifact_id: str) -> KnowledgeArtifact | None: ...
-
-    def list_artifacts(self) -> list[KnowledgeArtifact]: ...
-
-
-class DocumentStatusRepo(Protocol):
-    def save_document_status(self, status: DocumentStatusRecord) -> DocumentStatusRecord: ...
-
-    def get_document_status(self, doc_id: int) -> DocumentStatusRecord | None: ...
-
-    def list_document_statuses(
-        self,
-        *,
-        source_id: int | None = None,
-        status: str | None = None,
-    ) -> list[DocumentStatusRecord]: ...
-
-    def delete_document_status(self, doc_id: int) -> None: ...
-
-
 class GroundingMetadataRepo(Protocol):
     def get_section(self, section_id: int) -> SectionRecord | None: ...
 
@@ -494,10 +435,6 @@ class GroundingMetadataRepo(Protocol):
     ) -> list[AssetRecord]: ...
 
     def get_layout_meta_cache(self, doc_id: int) -> LayoutMetaCacheRecord | None: ...
-
-
-class LayoutMetadataWriterRepo(Protocol):
-    def save_layout_meta_cache(self, record: LayoutMetaCacheRecord) -> LayoutMetaCacheRecord: ...
 
 
 class ProcessingStateRepo(Protocol):
@@ -538,6 +475,21 @@ class DataContractMetadataRepo(MetadataRepo, GroundingMetadataRepo, ProcessingSt
     ) -> Document: ...
 
     def set_document_storage_tier(self, doc_id: int, *, storage_tier: Any) -> Document: ...
+
+    # ── merged from deleted DocumentStatusRepo ──
+
+    def save_document_status(self, status: DocumentStatusRecord) -> DocumentStatusRecord: ...
+
+    def get_document_status(self, doc_id: int) -> DocumentStatusRecord | None: ...
+
+    def list_document_statuses(
+        self,
+        *,
+        source_id: int | None = None,
+        status: str | None = None,
+    ) -> list[DocumentStatusRecord]: ...
+
+    def delete_document_status(self, doc_id: int) -> None: ...
 
 
 class CacheRepo(Protocol):
