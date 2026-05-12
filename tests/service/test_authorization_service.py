@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 from rag.retrieval.authorization_service import AuthorizationService
 from rag.schema.core import Document, Source, SourceType
-from rag.schema.runtime import AccessPolicy, ExecutionLocation, Residency
+from rag.schema.runtime import AccessPolicy, ExecutionLocation
 
 
 @dataclass
@@ -16,7 +16,6 @@ class _Resolver:
         if user_id != "alice":
             return None
         return AccessPolicy(
-            residency=Residency.LOCAL_REQUIRED,
             allowed_locations=frozenset({ExecutionLocation.LOCAL}),
         )
 
