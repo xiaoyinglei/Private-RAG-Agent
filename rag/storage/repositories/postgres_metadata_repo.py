@@ -84,7 +84,7 @@ class PostgresMetadataRepo:
                 updated_at,
                 metadata_json
             )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (location, content_hash, ingest_version) DO UPDATE SET
                 source_type = EXCLUDED.source_type,
                 original_file_name = EXCLUDED.original_file_name,
@@ -111,7 +111,6 @@ class PostgresMetadataRepo:
                 saved_source.mime_type,
                 saved_source.owner_id,
                 saved_source.ingest_version,
-                "local_required",  # was policy.residency.value, now hardcoded
                 saved_source.effective_access_policy.external_retrieval.value,
                 self._json_dumps(sorted(saved_source.effective_access_policy.sensitivity_tags)),
                 saved_source.created_at,
@@ -281,7 +280,6 @@ class PostgresMetadataRepo:
                 saved_document.embedding_model_id,
                 saved_document.indexed_at,
                 saved_document.last_index_error,
-                "local_required",  # was policy.residency.value, now hardcoded
                 saved_document.effective_access_policy.external_retrieval.value,
                 self._json_dumps(sorted(saved_document.effective_access_policy.sensitivity_tags)),
                 saved_document.created_at,
@@ -962,7 +960,6 @@ class PostgresMetadataRepo:
                 mime_type VARCHAR(128),
                 owner_id VARCHAR(128),
                 ingest_version INT NOT NULL DEFAULT 1,
-                residency VARCHAR(32) NOT NULL,  -- deprecated, no longer written by runtime
                 external_retrieval VARCHAR(16) NOT NULL,
                 sensitivity_tags JSONB NOT NULL DEFAULT '[]',
                 created_at TIMESTAMPTZ NOT NULL,
@@ -1006,7 +1003,6 @@ class PostgresMetadataRepo:
                 embedding_model_id VARCHAR(64) NOT NULL DEFAULT 'default',
                 indexed_at TIMESTAMPTZ,
                 last_index_error TEXT,
-                residency VARCHAR(32) NOT NULL,  -- deprecated, no longer written by runtime
                 external_retrieval VARCHAR(16) NOT NULL,
                 sensitivity_tags JSONB NOT NULL DEFAULT '[]',
                 created_at TIMESTAMPTZ NOT NULL,

@@ -589,7 +589,6 @@ __all__ = [
     "ProviderHealth",
     "ProcessingStateRepo",
     "QueryDiagnostics",
-    "Residency",
     "RetrievalDiagnostics",
     "RetrievalRecord",
     "RuntimeMode",
