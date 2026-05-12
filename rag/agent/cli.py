@@ -32,10 +32,15 @@ def _build_agent_service(runtime) -> AgentService:
 
     runners: dict[str, ToolRunner] = {}
 
-    # RAG tools — 统一通过 runtime.query() 执行检索
-    def _run_rag(payload: SearchInput) -> SearchOutput:
-        from rag.retrieval import QueryOptions
-        result = runtime.query(payload.query, options=QueryOptions(max_context_tokens=4096))
+    # RAG tools — 通过 asyncio.to_thread 避开 runtime.query() 内部 asyncio.run()
+    import asyncio as _asyncio
+    from rag.retrieval import QueryOptions
+
+    async def _run_rag(payload: SearchInput) -> SearchOutput:
+        result = await _asyncio.to_thread(
+            runtime.query, payload.query,
+            options=QueryOptions(max_context_tokens=4096),
+        )
         items: list[dict[str, object]] = []
         if hasattr(result, "evidence") and result.evidence:
             for item in result.evidence:
@@ -80,6 +85,7 @@ def _build_agent_service(runtime) -> AgentService:
         runners["llm_summarize"] = _llm_summarize
         runners["llm_compare"] = _llm_compare
 
+    # SubAgentRunner 暂缺（TODO: 多 Agent 编排阶段实现）
     return create_research_agent_service(runners=runners)
 
 
@@ -197,7 +203,7 @@ def agent_chat(
     # 构建 RAGRuntime
     storage = StorageConfig(
         root=storage_root,
-        vector=StorageComponentConfig(backend="milvus", dsn="http://127.0.0.1:19530"),
+        vectors=StorageComponentConfig(backend="milvus", dsn="http://127.0.0.1:19530"),
     )
     requirements = CapabilityRequirements(
         require_chat=True,
@@ -278,7 +284,7 @@ def agent_run(
 
     storage = StorageConfig(
         root=storage_root,
-        vector=StorageComponentConfig(backend="milvus", dsn="http://127.0.0.1:19530"),
+        vectors=StorageComponentConfig(backend="milvus", dsn="http://127.0.0.1:19530"),
     )
     requirements = CapabilityRequirements(
         require_chat=True,

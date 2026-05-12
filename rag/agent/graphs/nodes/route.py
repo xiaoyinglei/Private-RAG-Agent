@@ -32,8 +32,9 @@ def route_node(state: AgentState) -> dict:
 
 
 def route_after_route(state: AgentState) -> str:
+    # fast_path 暂走 execute 路径（fast_path_node 未实现，直接 synthesize 无数据）
     if state.get("status") == "fast_path":
-        return "synthesize"
+        return "execute"
     if state.get("status") == "failed":
         return "synthesize"
     if state.get("status") == "decompose":

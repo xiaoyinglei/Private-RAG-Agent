@@ -278,7 +278,7 @@ def test_milvus_vector_repo_hybrid_search_passes_expr_to_every_ann_request(
     fake_async_client = _FakeAsyncClient()
     monkeypatch.setattr(repo, "_has_collection", lambda **kwargs: True)
     monkeypatch.setattr(repo, "_collection", lambda **kwargs: fake_collection)
-    monkeypatch.setattr(repo, "_supports_hybrid_schema", lambda collection: True)
+    monkeypatch.setattr(repo, "_supports_bm25_schema", lambda collection: True)
     monkeypatch.setattr(repo, "_get_async_client", lambda: fake_async_client)
     repo._collections[fake_collection.name] = fake_collection
     try:
@@ -367,7 +367,7 @@ def test_milvus_vector_repo_does_not_reuse_async_client_across_event_loops(
     fake_collection = _FakeCollection()
     monkeypatch.setattr(repo, "_has_collection", lambda **kwargs: True)
     monkeypatch.setattr(repo, "_collection", lambda **kwargs: fake_collection)
-    monkeypatch.setattr(repo, "_supports_hybrid_schema", lambda collection: True)
+    monkeypatch.setattr(repo, "_supports_bm25_schema", lambda collection: True)
     repo._collections[fake_collection.name] = fake_collection
     try:
         for _ in range(2):
@@ -433,7 +433,7 @@ def test_milvus_vector_repo_weighted_hybrid_ranker_uses_alpha_when_available(
     fake_collection = _FakeCollection()
     monkeypatch.setattr(repo, "_has_collection", lambda **kwargs: True)
     monkeypatch.setattr(repo, "_collection", lambda **kwargs: fake_collection)
-    monkeypatch.setattr(repo, "_supports_hybrid_schema", lambda collection: True)
+    monkeypatch.setattr(repo, "_supports_bm25_schema", lambda collection: True)
     monkeypatch.setattr(repo, "_get_async_client", lambda: _FakeAsyncClient())
     repo._collections[fake_collection.name] = fake_collection
     try:
@@ -484,16 +484,18 @@ def test_milvus_vector_repo_accepts_sparse_query_vector_for_dual_mode_sparse_pat
 
     class _FakeAsyncClient:
         async def hybrid_search(self, **kwargs):
-            sparse_request = kwargs["reqs"][1]
-            assert sparse_request.kwargs["data"] == [{1: 0.4, 7: 0.9}]
-            assert sparse_request.kwargs["param"] == {"metric_type": "IP", "params": {}}
+            # reqs: [dense, bm25, external_sparse]
+            external_request = kwargs["reqs"][2]
+            assert external_request.kwargs["data"] == [{1: 0.4, 7: 0.9}]
+            assert external_request.kwargs["param"] == {"metric_type": "IP", "params": {}}
             return []
 
     repo = MilvusVectorRepo("http://127.0.0.1:19530")
     fake_collection = _FakeCollection()
     monkeypatch.setattr(repo, "_has_collection", lambda **kwargs: True)
     monkeypatch.setattr(repo, "_collection", lambda **kwargs: fake_collection)
-    monkeypatch.setattr(repo, "_supports_hybrid_schema", lambda collection: True)
+    monkeypatch.setattr(repo, "_supports_bm25_schema", lambda collection: True)
+    monkeypatch.setattr(repo, "_supports_external_sparse_schema", lambda collection: True)
     monkeypatch.setattr(repo, "_get_async_client", lambda: _FakeAsyncClient())
     repo._collections[fake_collection.name] = fake_collection
     try:

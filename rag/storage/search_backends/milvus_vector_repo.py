@@ -318,7 +318,8 @@ class MilvusVectorRepo:
             FieldSchema(name="bm25_text", dtype=DataType.VARCHAR, max_length=65535, enable_match=True, enable_analyzer=True),
             FieldSchema(name="metadata_json", dtype=DataType.VARCHAR, max_length=65535),
             FieldSchema(name="embedding", dtype=DataType.FLOAT_VECTOR, dim=dimension),
-            FieldSchema(name="sparse_embedding", dtype=DataType.SPARSE_FLOAT_VECTOR),
+            FieldSchema(name="bm25_sparse_embedding", dtype=DataType.SPARSE_FLOAT_VECTOR),
+            FieldSchema(name="external_sparse_embedding", dtype=DataType.SPARSE_FLOAT_VECTOR),
         ]
         if item_kind == "doc_summary":
             return common + [
@@ -352,7 +353,7 @@ class MilvusVectorRepo:
                 name="bm25_summary_text",
                 function_type=FunctionType.BM25,
                 input_field_names=["bm25_text"],
-                output_field_names=["sparse_embedding"],
+                output_field_names=["bm25_sparse_embedding"],
             )
         ]
 
@@ -381,8 +382,13 @@ class MilvusVectorRepo:
         self._safe_create_index(collection, "partition_key", {"index_type": "INVERTED"})
         self._safe_create_index(
             collection,
-            "sparse_embedding",
+            "bm25_sparse_embedding",
             {"index_type": "SPARSE_INVERTED_INDEX", "metric_type": "BM25", "params": {}},
+        )
+        self._safe_create_index(
+            collection,
+            "external_sparse_embedding",
+            {"index_type": "SPARSE_INVERTED_INDEX", "metric_type": "IP", "params": {}},
         )
 
     def _safe_create_index(self, collection: Any, field_name: str, index_params: dict[str, Any]) -> None:
@@ -698,13 +704,17 @@ class MilvusVectorRepo:
     ) -> list[VectorSearchResult]:
         self._validate_item_kind(item_kind)
         dense_vector = [float(value) for value in query_vector]
-        if not dense_vector or (not sparse_query.strip() and not sparse_query_vector):
+        has_sparse_query = bool(sparse_query.strip())
+        has_external_sparse = sparse_query_vector is not None and len(sparse_query_vector) > 0
+        if not dense_vector or (not has_sparse_query and not has_external_sparse):
             return []
         self._flush_dirty_collections()
         if not self._has_collection(item_kind=item_kind, embedding_space=embedding_space):
             return []
         collection = self._collection(item_kind=item_kind, embedding_space=embedding_space)
-        if not self._supports_hybrid_schema(collection):
+        supports_bm25 = self._supports_bm25_schema(collection)
+        supports_external = self._supports_external_sparse_schema(collection)
+        if not supports_bm25 and not supports_external:
             return self.search(
                 dense_vector,
                 limit=limit,
@@ -718,6 +728,9 @@ class MilvusVectorRepo:
         async_client = self._get_async_client()
         from pymilvus import AnnSearchRequest, RRFRanker
 
+        requests: list[AnnSearchRequest] = []
+
+        # dense request: 始终创建
         dense_request = AnnSearchRequest(
             data=[dense_vector],
             anns_field="embedding",
@@ -725,13 +738,40 @@ class MilvusVectorRepo:
             limit=limit,
             expr=final_expr,
         )
-        sparse_request = AnnSearchRequest(
-            data=[sparse_query_vector or sparse_query],
-            anns_field="sparse_embedding",
-            param=self._sparse_search_params(sparse_query_vector is not None),
-            limit=limit,
-            expr=final_expr,
-        )
+        requests.append(dense_request)
+
+        # BM25 request: 字段 bm25_sparse_embedding，输入 sparse_query（文本），metric BM25
+        if has_sparse_query:
+            if not supports_bm25:
+                raise RuntimeError(
+                    "BM25 hybrid search requested but collection schema does not have "
+                    "bm25_sparse_embedding field. Please rebuild the index with a new storage_root."
+                )
+            bm25_request = AnnSearchRequest(
+                data=[sparse_query],
+                anns_field="bm25_sparse_embedding",
+                param=self._bm25_search_params(),
+                limit=limit,
+                expr=final_expr,
+            )
+            requests.append(bm25_request)
+
+        # External sparse request: 字段 external_sparse_embedding，输入 sparse_query_vector，metric IP
+        if has_external_sparse:
+            if not supports_external:
+                raise RuntimeError(
+                    "External sparse embedding is enabled but collection schema does not have "
+                    "external_sparse_embedding field. Please rebuild the index with a new storage_root."
+                )
+            external_request = AnnSearchRequest(
+                data=[sparse_query_vector],
+                anns_field="external_sparse_embedding",
+                param=self._external_sparse_search_params(),
+                limit=limit,
+                expr=final_expr,
+            )
+            requests.append(external_request)
+
         ranker = self._hybrid_ranker(
             fusion_strategy=fusion_strategy,
             alpha=alpha,
@@ -740,7 +780,7 @@ class MilvusVectorRepo:
         try:
             hits = await async_client.hybrid_search(
                 collection_name=collection.name,
-                reqs=[dense_request, sparse_request],
+                reqs=requests,
                 ranker=ranker,
                 limit=limit,
                 output_fields=output_fields,
@@ -750,7 +790,7 @@ class MilvusVectorRepo:
             if not hits:
                 hits = await async_client.hybrid_search(
                     collection_name=collection.name,
-                    reqs=[dense_request, sparse_request],
+                    reqs=requests,
                     ranker=ranker,
                     limit=limit,
                     output_fields=output_fields,
@@ -789,10 +829,14 @@ class MilvusVectorRepo:
         return RRFRanker()
 
     @staticmethod
-    def _sparse_search_params(use_sparse_vector: bool) -> dict[str, Any]:
-        if use_sparse_vector:
-            return {"metric_type": "IP", "params": {}}
+    def _bm25_search_params() -> dict[str, Any]:
+        """bm25_sparse_embedding 字段的搜索参数。字段→metric 一一对应。"""
         return {"metric_type": "BM25", "params": {}}
+
+    @staticmethod
+    def _external_sparse_search_params() -> dict[str, Any]:
+        """external_sparse_embedding 字段的搜索参数。字段→metric 一一对应。"""
+        return {"metric_type": "IP", "params": {}}
 
     def _get_async_client(self) -> Any:
         from pymilvus import AsyncMilvusClient
@@ -816,13 +860,22 @@ class MilvusVectorRepo:
                 await result
 
     @staticmethod
-    def _supports_hybrid_schema(collection: Any) -> bool:
+    def _supports_bm25_schema(collection: Any) -> bool:
         schema = getattr(collection, "schema", None)
         fields = getattr(schema, "fields", None)
         if not isinstance(fields, list):
             return False
         field_names = {getattr(field, "name", None) for field in fields}
-        return {"bm25_text", "sparse_embedding", "embedding"} <= field_names
+        return {"bm25_text", "bm25_sparse_embedding", "embedding"} <= field_names
+
+    @staticmethod
+    def _supports_external_sparse_schema(collection: Any) -> bool:
+        schema = getattr(collection, "schema", None)
+        fields = getattr(schema, "fields", None)
+        if not isinstance(fields, list):
+            return False
+        field_names = {getattr(field, "name", None) for field in fields}
+        return "external_sparse_embedding" in field_names
 
     @classmethod
     def _vector_result_from_client_hit(cls, hit: dict[str, Any], *, item_kind: str) -> VectorSearchResult:
