@@ -11,6 +11,7 @@ class ModelProvider(StrEnum):
 
     MLX = "mlx"
     OLLAMA = "ollama"
+    OPENAI_COMPATIBLE = "openai_compatible"
 
 
 class ModelSpec(BaseModel):
