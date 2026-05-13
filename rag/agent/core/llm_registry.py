@@ -31,7 +31,7 @@ class ModelRegistry:
     加载顺序：RAG_AGENT_MODELS_PATH(YAML) > RAG_AGENT_MODELS(JSON) > models.yaml 内置默认
     """
 
-    _BUNDLED_CONFIG_PATH = Path(__file__).resolve().parent.parent / "models.yaml"
+    _BUNDLED_CONFIG_PATH = Path("configs/models.yaml")
 
     def __init__(self, config: AgentModelsConfig) -> None:
         self._config = config
@@ -77,7 +77,34 @@ class ModelRegistry:
 
         with open(path, encoding="utf-8") as fh:
             data = yaml.safe_load(fh)
-        return AgentModelsConfig.model_validate(data)
+
+        # Support new configs/models.yaml format: { models: { alias: { capability, provider, ... } }, defaults: { ... } }
+        raw_models = data.get("models", {})
+        defaults = data.get("defaults", {})
+
+        agent_models: dict[str, dict[str, object]] = {}
+        for alias, entry in raw_models.items():
+            if not isinstance(entry, dict):
+                continue
+            if entry.get("capability") != "chat":
+                continue
+            agent_models[alias] = {
+                "provider": entry["provider"],
+                "model": entry["model"],
+                "max_tokens": entry.get("max_tokens", 2048),
+                "base_url": entry.get("base_url"),
+            }
+
+        default_model = defaults.get("primary_model", "")
+        if not default_model and agent_models:
+            default_model = next(iter(agent_models))
+
+        return AgentModelsConfig.model_validate({
+            "version": data.get("version", 1),
+            "models": agent_models,
+            "default_model": default_model,
+            "fallback_model": data.get("fallback_model", default_model),
+        })
 
     def resolve(self, alias: str) -> ResolvedModel:
         """别名 → (Generator, kwargs)。按 alias 缓存，同 alias 多次调用返回同一 Generator。"""
@@ -138,6 +165,12 @@ class ModelRegistry:
             return ProviderConfig(
                 provider_kind="ollama",
                 base_url=spec.base_url or "http://localhost:11434",
+                chat_model=spec.model,
+            )
+        if spec.provider == ModelProvider.OPENAI_COMPATIBLE:
+            return ProviderConfig(
+                provider_kind="openai-compatible",
+                base_url=spec.base_url or "http://127.0.0.1:8080/v1",
                 chat_model=spec.model,
             )
         raise ValueError(f"Unsupported provider: {spec.provider}")
