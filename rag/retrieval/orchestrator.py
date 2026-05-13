@@ -34,17 +34,6 @@ from rag.schema.runtime import AccessPolicy, ProviderAttempt, RuntimeMode
 from rag.utils.telemetry import TelemetryService
 
 
-class RetrievalExecutor(Protocol):
-    def retrieve(
-        self,
-        query: str,
-        *,
-        access_policy: AccessPolicy,
-        source_scope: Sequence[str] = (),
-        query_options: QueryOptions | None = None,
-    ) -> RetrievalResult: ...
-
-
 class RetrieverFn(Protocol):
     def __call__(
         self,
@@ -83,14 +72,18 @@ class BranchRetrieverRegistry:
         return list(self.web_retriever(query, source_scope, retrieval_signals))
 
     def get(self, branch: str) -> RetrieverFn:
-        return {
+        mapping = {
             "vector": self.vector_retriever,
             "section": self.section_retriever,
             "special": self.special_retriever,
             "metadata": self.metadata_retriever,
             "local": self.local_retriever,
             "global": self.global_retriever,
-        }.get(branch, self.vector_retriever)
+            "web": self.web_retriever,
+        }
+        if branch not in mapping:
+            raise KeyError(f"Unknown branch {branch!r}. Valid: {sorted(mapping)}")
+        return mapping[branch]
 
 
 @dataclass(slots=True)
