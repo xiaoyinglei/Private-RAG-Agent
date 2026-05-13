@@ -10,6 +10,7 @@ from rag.retrieval.evidence import (
     EvidenceService,
     EvidenceThresholds,
 )
+from rag.retrieval.fusion import ReciprocalRankFusion
 from rag.retrieval.graph import GraphExpansionService
 from rag.retrieval.l3_l4_engine import L3L4RetrievalEngine
 from rag.retrieval.models import (
@@ -143,7 +144,7 @@ class RetrievalServiceConfig:
 
 
 @dataclass(slots=True)
-class ReciprocalRankFusion:
+class _UnusedReciprocalRankFusion:
     rank_constant: int = 60
     alpha: float = 0.65
 
@@ -287,8 +288,9 @@ class RetrievalService:
         self._evidence_service = config.evidence_service or EvidenceService(config.evidence_thresholds)
         self._graph_expansion_service = config.graph_expansion_service or GraphExpansionService()
         self._telemetry_service = config.telemetry_service
-        self._fusion = ReciprocalRankFusion(alpha=config.fusion_alpha)
+        self._fusion = ReciprocalRankFusion(alpha=config.fusion_alpha)  # imported from rag.retrieval.fusion
         self._unified_reranker = UnifiedReranker(reranker=self._reranker)
+        # ── debug-only — main path must not depend on mutable instance state ──
         self.last_result: RetrievalResult | None = None
         self.last_payload: CoreRetrievalPayload | None = None
         self._branch_registry = BranchRetrieverRegistry(
@@ -335,21 +337,6 @@ class RetrievalService:
         self.runtime_coordinator = self._runtime_coordinator
         self.l3_l4_engine = self._l3_l4_engine
 
-    @staticmethod
-    def _benchmark_doc_ids(candidates: Sequence[CandidateLike]) -> list[str]:
-        ranked_doc_ids: list[str] = []
-        seen: set[str] = set()
-        for candidate in candidates:
-            benchmark_doc_id = getattr(candidate, "benchmark_doc_id", None)
-            if not isinstance(benchmark_doc_id, str):
-                continue
-            normalized = benchmark_doc_id.strip()
-            if not normalized or normalized in seen:
-                continue
-            seen.add(normalized)
-            ranked_doc_ids.append(normalized)
-        return ranked_doc_ids
-
     def retrieve_payload(
         self,
         query: str,
@@ -359,14 +346,9 @@ class RetrievalService:
         query_options: QueryOptions | None = None,
     ) -> CoreRetrievalPayload:
         payload = self.runtime_coordinator.run_sync(
-            self.l3_l4_engine.arun(
+            self.aretrieve_payload(
                 query,
                 access_policy=access_policy,
-                retrieval_signals=RetrievalSignals(),
-                decision=RoutingDecision(
-                    runtime_mode=RuntimeMode.FAST,
-                    rerank_required=True,
-                ),
                 source_scope=source_scope,
                 query_options=query_options,
             )
@@ -431,137 +413,6 @@ class RetrievalService:
             )
         )
 
-    def plan_query(
-        self,
-        *,
-        query: str,
-        access_policy: AccessPolicy,
-        retrieval_signals: RetrievalSignals | None = None,
-        decision: RoutingDecision | None = None,
-        source_scope: Sequence[str] = (),
-        query_options: QueryOptions | None = None,
-    ) -> tuple[RetrievalSignals, AccessPolicy, RoutingDecision, PlanningState]:
-        scope = list(source_scope)
-        retrieval_profile = (
-            query_options.resolved_retrieval_profile
-            if query_options is not None
-            else RetrievalProfile.AUTO
-        )
-        signals = retrieval_signals or RetrievalSignals()
-        routing = decision or RoutingDecision(
-            runtime_mode=RuntimeMode.FAST,
-            rerank_required=True,
-        )
-        plan = self.runtime_coordinator.run_sync(
-            self.planning_graph.aplan(
-                query,
-                source_scope=scope,
-                access_policy=access_policy,
-                retrieval_signals=signals,
-                resolved_retrieval_profile=retrieval_profile,
-                query_options=query_options,
-            )
-        )
-        return signals, access_policy, routing, plan
-
-    def collect_internal_branches(
-        self,
-        *,
-        plan: PlanningState,
-        source_scope: Sequence[str],
-        access_policy: AccessPolicy,
-        runtime_mode: RuntimeMode | str | object,
-        retrieval_signals: RetrievalSignals,
-    ) -> object:
-        return self.runtime_coordinator.run_sync(
-            self.retrieval_adapter.acollect_internal(
-                plan=plan,
-                source_scope=list(source_scope),
-                access_policy=access_policy,
-                runtime_mode=runtime_mode,
-                retrieval_signals=retrieval_signals,
-            )
-        )
-
-    def collect_branch_candidates(
-        self,
-        *,
-        branch: str,
-        plan: PlanningState,
-        retrieval_signals: RetrievalSignals,
-        source_scope: Sequence[str],
-        access_policy: AccessPolicy,
-        runtime_mode: object,
-        limit: int,
-    ) -> list[CandidateLike]:
-        lexical_branches = {"section", "metadata"}
-        branch_query = plan.sparse_query if branch in lexical_branches else plan.rewritten_query
-        retriever = self.branch_registry.get(branch)
-        candidates = list(
-            self.retrieval_adapter._call_branch(
-                retriever=retriever,
-                query=branch_query,
-                source_scope=list(source_scope),
-                retrieval_signals=retrieval_signals,
-                plan=plan,
-            )
-        )
-        filtered = self.evidence_service.filter_candidates(
-            candidates,
-            source_scope=source_scope,
-            access_policy=access_policy,
-            runtime_mode=runtime_mode,
-            retrieval_signals=retrieval_signals,
-        )
-        return filtered[:limit]
-
-    def rank_plan_branches(
-        self,
-        *,
-        query: str,
-        plan: PlanningState,
-        branches: list[tuple[str, list[CandidateLike]]],
-        query_options: QueryOptions | None,
-        rerank_required: bool,
-    ) -> RankPipelineResult:
-        return self.runtime_coordinator.run_sync(
-            self.l3_l4_engine._rank_branches(
-                query=query,
-                plan=plan,
-                branches=branches,
-                query_options=query_options,
-                rerank_required=rerank_required,
-            )
-        )
-
-    def _embedding_provider(self) -> str | None:
-        for retriever in (
-            self.branch_registry.vector_retriever,
-            self.branch_registry.special_retriever,
-        ):
-            provider = getattr(retriever, "last_provider", None)
-            if isinstance(provider, str) and provider:
-                return provider
-        return None
-
-    def _provider_attempts(self) -> list[ProviderAttempt]:
-        attempts: list[ProviderAttempt] = []
-        for retriever in (
-            self.branch_registry.vector_retriever,
-            self.branch_registry.special_retriever,
-        ):
-            attempts.extend(
-                attempt
-                for attempt in getattr(retriever, "last_attempts", [])
-                if isinstance(attempt, ProviderAttempt)
-            )
-        attempts.extend(
-            attempt
-            for attempt in getattr(self.reranker.reranker, "last_attempts", [])
-            if isinstance(attempt, ProviderAttempt)
-        )
-        return attempts
-
     def retrieve(
         self,
         query: str,
@@ -570,14 +421,10 @@ class RetrievalService:
         source_scope: Sequence[str] = (),
         query_options: QueryOptions | None = None,
     ) -> RetrievalResult:
-        scope = list(source_scope)
-        self._prepare_retriever_policies(
-            access_policy=access_policy,
-        )
         result = self.run(
             query,
             access_policy=access_policy,
-            source_scope=scope,
+            source_scope=list(source_scope),
             query_options=query_options,
         )
         self.last_result = result
@@ -591,35 +438,14 @@ class RetrievalService:
         source_scope: Sequence[str] = (),
         query_options: QueryOptions | None = None,
     ) -> RetrievalResult:
-        scope = list(source_scope)
-        self._prepare_retriever_policies(
-            access_policy=access_policy,
-        )
         result = await self.arun(
             query,
             access_policy=access_policy,
-            source_scope=scope,
+            source_scope=list(source_scope),
             query_options=query_options,
         )
         self.last_result = result
         return result
-
-    def _prepare_retriever_policies(
-        self,
-        *,
-        access_policy: AccessPolicy,
-    ) -> None:
-        for retriever in (
-            self._vector_retriever,
-            self._local_retriever,
-            self._global_retriever,
-            self._special_retriever,
-        ):
-            prepare_for_policy = getattr(retriever, "prepare_for_policy", None)
-            if callable(prepare_for_policy):
-                prepare_for_policy(
-                    access_policy=access_policy,
-                    )
 
 
 __all__ = [
