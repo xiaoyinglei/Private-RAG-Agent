@@ -13,7 +13,7 @@ from rag.agent.core.context import (
 )
 from rag.agent.core.definition import AgentDefinition, ModelSelectionPolicy, ToolPolicy
 from rag.agent.core.registry import AgentRegistry
-from rag.schema.runtime import AccessPolicy, ExecutionLocationPreference, ExternalRetrievalPolicy
+from rag.schema.runtime import AccessPolicy, ExecutionLocationPreference, RuntimeMode
 
 
 class TestBudgetLedger:
@@ -127,7 +127,7 @@ class TestDeriveChildConfig:
         assert child.budget_reserved == {}
         assert child.tool_policy.max_parallel_calls == 1
 
-    def test_derive_child_config_narrows_child_access_policy(self) -> None:
+    def test_derive_child_config_inherits_parent_access_policy(self) -> None:
         parent = AgentRunConfig(
             run_id="parent-policy",
             thread_id="parent-policy-thread",
@@ -141,12 +141,12 @@ class TestDeriveChildConfig:
             description="Local only",
             system_prompt="Local only",
             allowed_tools=[],
-            access_policy=AccessPolicy(external_retrieval=ExternalRetrievalPolicy.DENY),
+            access_policy=AccessPolicy(allowed_runtimes=frozenset({RuntimeMode.DEEP})),
         )
 
         child = derive_child_config(parent, child_def)
 
-        assert child.access_policy.external_retrieval is ExternalRetrievalPolicy.DENY
+        assert child.access_policy.allowed_runtimes == frozenset({RuntimeMode.FAST, RuntimeMode.DEEP})
 
     def test_derive_child_config_rejects_exhausted_depth(self) -> None:
         parent = AgentRunConfig(

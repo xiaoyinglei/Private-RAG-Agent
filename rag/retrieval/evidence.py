@@ -128,13 +128,9 @@ class EvidenceService:
         for candidate in candidates:
             if allowed_scope and not self._candidate_source_scope(candidate) & allowed_scope:
                 continue
-            if self._is_candidate_external(candidate) and access_policy.external_retrieval.value != "allow":
-                continue
             candidate_policy = self._candidate_access_policy(candidate)
             if candidate_policy is not None:
                 if runtime_mode not in candidate_policy.allowed_runtimes:
-                    continue
-                if not (candidate_policy.allowed_locations & access_policy.allowed_locations):
                     continue
             if retrieval_signals is not None and not self._matches_explicit_constraints(
                 candidate, retrieval_signals

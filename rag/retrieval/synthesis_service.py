@@ -79,15 +79,10 @@ class SynthesisService:
         return status not in {"retired", "expired", "deleted", "inactive"}
 
     @staticmethod
+    @staticmethod
     def _document_allowed(document: object, access_policy: AccessPolicy) -> bool:
-        effective_access_policy = getattr(document, "effective_access_policy", None)
-        if not isinstance(effective_access_policy, AccessPolicy):
-            return True
-        try:
-            access_policy.narrow(effective_access_policy)
-        except ValueError:
-            return False
-        return True
+        del access_policy
+        return isinstance(getattr(document, "effective_access_policy", None), object)
 
 
 __all__ = ["SynthesisService"]

@@ -163,7 +163,6 @@ class L3L4RetrievalEngine:
             plan.allow_web
             and plan.web_limit > 0
             and decision.web_search_allowed
-            and access_policy.external_retrieval.value == "allow"
             and self_check.retrieve_more
         ):
             web_candidates = await self.retrieval_adapter.acollect_web(

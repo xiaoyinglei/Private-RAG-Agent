@@ -140,15 +140,12 @@ class MultiProviderBackedVectorRetriever:
         bindings: Sequence[EmbeddingCapabilityBinding],
         item_kind: str,
         candidate_builder: Callable[[str, list[VectorSearchResult], list[str]], list[RetrievedCandidate]],
-        default_preference: ExecutionLocationPreference = ExecutionLocationPreference.LOCAL_FIRST,
     ) -> None:
         self._factory = factory
         self._vector_repo = vector_repo
         self._bindings = tuple(bindings)
         self._item_kind = item_kind
         self._candidate_builder = candidate_builder
-        self._default_preference = default_preference
-        self._prepared_locations: tuple[str, ...] = ("local", "cloud")
         self.last_provider: str | None = None
         self.last_attempts: list[object] = []
 
@@ -158,13 +155,7 @@ class MultiProviderBackedVectorRetriever:
         access_policy: AccessPolicy,
         execution_location_preference: ExecutionLocationPreference | None,
     ) -> None:
-        preference = execution_location_preference or self._default_preference
-        if access_policy.local_only or preference is ExecutionLocationPreference.LOCAL_ONLY:
-            self._prepared_locations = ("local",)
-            return
-        self._prepared_locations = (
-            ("local", "cloud") if preference is ExecutionLocationPreference.LOCAL_FIRST else ("cloud", "local")
-        )
+        pass
 
     def __call__(
         self,
@@ -199,14 +190,7 @@ class MultiProviderBackedVectorRetriever:
         return []
 
     def _ordered_bindings(self) -> list[EmbeddingCapabilityBinding]:
-        ordered: list[EmbeddingCapabilityBinding] = []
-        remaining = list(self._bindings)
-        for location in self._prepared_locations:
-            matched = [binding for binding in remaining if binding.location == location]
-            ordered.extend(matched)
-            remaining = [binding for binding in remaining if binding.location != location]
-        ordered.extend(remaining)
-        return ordered
+        return list(self._bindings)
 
     def _search_binding(
         self,
@@ -247,15 +231,12 @@ class MilvusSummaryHybridRetriever:
         bindings: Sequence[EmbeddingCapabilityBinding],
         item_kinds: Sequence[str],
         branch_name: str,
-        default_preference: ExecutionLocationPreference = ExecutionLocationPreference.LOCAL_FIRST,
     ) -> None:
         self._factory = factory
         self._vector_repo = vector_repo
         self._bindings = tuple(bindings)
         self._item_kinds = tuple(item_kinds)
         self._branch_name = branch_name
-        self._default_preference = default_preference
-        self._prepared_locations: tuple[str, ...] = ("local", "cloud")
         self.last_provider: str | None = None
         self.last_attempts: list[object] = []
 
@@ -265,13 +246,7 @@ class MilvusSummaryHybridRetriever:
         access_policy: AccessPolicy,
         execution_location_preference: ExecutionLocationPreference | None,
     ) -> None:
-        preference = execution_location_preference or self._default_preference
-        if access_policy.local_only or preference is ExecutionLocationPreference.LOCAL_ONLY:
-            self._prepared_locations = ("local",)
-            return
-        self._prepared_locations = (
-            ("local", "cloud") if preference is ExecutionLocationPreference.LOCAL_FIRST else ("cloud", "local")
-        )
+        pass
 
     def retrieve_with_plan(
         self,
@@ -325,14 +300,7 @@ class MilvusSummaryHybridRetriever:
         return []
 
     def _ordered_bindings(self) -> list[EmbeddingCapabilityBinding]:
-        ordered: list[EmbeddingCapabilityBinding] = []
-        remaining = list(self._bindings)
-        for location in self._prepared_locations:
-            matched = [binding for binding in remaining if binding.location == location]
-            ordered.extend(matched)
-            remaining = [binding for binding in remaining if binding.location != location]
-        ordered.extend(remaining)
-        return ordered
+        return list(self._bindings)
 
     async def _search_binding(
         self,
@@ -695,8 +663,6 @@ class SearchBackedRetrievalFactory:
         self,
         vector_repo: VectorSearchRepoProtocol,
         bindings: Sequence[EmbeddingCapabilityBinding],
-        *,
-        default_preference: ExecutionLocationPreference = ExecutionLocationPreference.LOCAL_FIRST,
     ) -> MultiProviderBackedVectorRetriever | MilvusSummaryHybridRetriever:
         if self._supports_hybrid_vector_repo(vector_repo) and bindings:
             return MilvusSummaryHybridRetriever(
@@ -705,7 +671,6 @@ class SearchBackedRetrievalFactory:
                 bindings=bindings,
                 item_kinds=("section_summary", "doc_summary"),
                 branch_name="vector",
-                default_preference=default_preference,
             )
         return MultiProviderBackedVectorRetriever(
             factory=self,
@@ -713,35 +678,28 @@ class SearchBackedRetrievalFactory:
             bindings=bindings,
             item_kind="section_summary",
             candidate_builder=self.build_summary_candidates_from_vector_results,
-            default_preference=default_preference,
         )
 
     def local_retriever_from_repo(
         self,
         vector_repo: VectorSearchRepoProtocol,
         bindings: Sequence[EmbeddingCapabilityBinding],
-        *,
-        default_preference: ExecutionLocationPreference = ExecutionLocationPreference.LOCAL_FIRST,
     ) -> EmptyGraphRetriever:
-        del vector_repo, bindings, default_preference
+        del vector_repo, bindings
         return EmptyGraphRetriever()
 
     def global_retriever_from_repo(
         self,
         vector_repo: VectorSearchRepoProtocol,
         bindings: Sequence[EmbeddingCapabilityBinding],
-        *,
-        default_preference: ExecutionLocationPreference = ExecutionLocationPreference.LOCAL_FIRST,
     ) -> EmptyGraphRetriever:
-        del vector_repo, bindings, default_preference
+        del vector_repo, bindings
         return EmptyGraphRetriever()
 
     def special_retriever_from_repo(
         self,
         vector_repo: VectorSearchRepoProtocol,
         bindings: Sequence[EmbeddingCapabilityBinding],
-        *,
-        default_preference: ExecutionLocationPreference = ExecutionLocationPreference.LOCAL_FIRST,
     ) -> MultiProviderBackedVectorRetriever | MilvusSummaryHybridRetriever:
         if self._supports_hybrid_vector_repo(vector_repo) and bindings:
             return MilvusSummaryHybridRetriever(
@@ -750,7 +708,6 @@ class SearchBackedRetrievalFactory:
                 bindings=bindings,
                 item_kinds=("asset_summary",),
                 branch_name="special",
-                default_preference=default_preference,
             )
         return MultiProviderBackedVectorRetriever(
             factory=self,
@@ -758,7 +715,6 @@ class SearchBackedRetrievalFactory:
             bindings=bindings,
             item_kind="asset_summary",
             candidate_builder=self.build_summary_candidates_from_vector_results,
-            default_preference=default_preference,
         )
 
     @staticmethod
@@ -1133,8 +1089,6 @@ class GraphExpansionService:
         access_policy: AccessPolicy,
     ) -> list[CandidateLike]:
         del query
-        if access_policy.local_only:
-            return []
         seen = {item.evidence_id for item in evidence.all}
         expanded: list[CandidateLike] = []
         for candidate in graph_candidates:

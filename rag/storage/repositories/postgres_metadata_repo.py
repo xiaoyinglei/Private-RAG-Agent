@@ -78,13 +78,11 @@ class PostgresMetadataRepo:
                 mime_type,
                 owner_id,
                 ingest_version,
-                external_retrieval,
-                sensitivity_tags,
                 created_at,
                 updated_at,
                 metadata_json
             )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (location, content_hash, ingest_version) DO UPDATE SET
                 source_type = EXCLUDED.source_type,
                 original_file_name = EXCLUDED.original_file_name,
@@ -93,8 +91,6 @@ class PostgresMetadataRepo:
                 file_size_bytes = EXCLUDED.file_size_bytes,
                 mime_type = EXCLUDED.mime_type,
                 owner_id = EXCLUDED.owner_id,
-                external_retrieval = EXCLUDED.external_retrieval,
-                sensitivity_tags = EXCLUDED.sensitivity_tags,
                 updated_at = EXCLUDED.updated_at,
                 metadata_json = EXCLUDED.metadata_json
             RETURNING *
@@ -111,8 +107,6 @@ class PostgresMetadataRepo:
                 saved_source.mime_type,
                 saved_source.owner_id,
                 saved_source.ingest_version,
-                saved_source.effective_access_policy.external_retrieval.value,
-                self._json_dumps(sorted(saved_source.effective_access_policy.sensitivity_tags)),
                 saved_source.created_at,
                 saved_source.updated_at,
                 self._json_dumps(saved_source.metadata_json),
@@ -221,15 +215,13 @@ class PostgresMetadataRepo:
                 embedding_model_id,
                 indexed_at,
                 last_index_error,
-                external_retrieval,
-                sensitivity_tags,
                 created_at,
                 updated_at,
                 metadata_json
             )
             VALUES (
                 %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
             )
             ON CONFLICT (source_id, file_hash, version_no) DO UPDATE SET
                 title = EXCLUDED.title,
@@ -250,8 +242,6 @@ class PostgresMetadataRepo:
                 embedding_model_id = EXCLUDED.embedding_model_id,
                 indexed_at = EXCLUDED.indexed_at,
                 last_index_error = EXCLUDED.last_index_error,
-                external_retrieval = EXCLUDED.external_retrieval,
-                sensitivity_tags = EXCLUDED.sensitivity_tags,
                 updated_at = EXCLUDED.updated_at,
                 metadata_json = EXCLUDED.metadata_json
             RETURNING *
@@ -280,8 +270,6 @@ class PostgresMetadataRepo:
                 saved_document.embedding_model_id,
                 saved_document.indexed_at,
                 saved_document.last_index_error,
-                saved_document.effective_access_policy.external_retrieval.value,
-                self._json_dumps(sorted(saved_document.effective_access_policy.sensitivity_tags)),
                 saved_document.created_at,
                 saved_document.updated_at,
                 self._json_dumps(saved_document.metadata_json),
@@ -960,8 +948,6 @@ class PostgresMetadataRepo:
                 mime_type VARCHAR(128),
                 owner_id VARCHAR(128),
                 ingest_version INT NOT NULL DEFAULT 1,
-                external_retrieval VARCHAR(16) NOT NULL,
-                sensitivity_tags JSONB NOT NULL DEFAULT '[]',
                 created_at TIMESTAMPTZ NOT NULL,
                 updated_at TIMESTAMPTZ NOT NULL,
                 metadata_json JSONB NOT NULL DEFAULT '{{}}'::jsonb,
@@ -1003,8 +989,6 @@ class PostgresMetadataRepo:
                 embedding_model_id VARCHAR(64) NOT NULL DEFAULT 'default',
                 indexed_at TIMESTAMPTZ,
                 last_index_error TEXT,
-                external_retrieval VARCHAR(16) NOT NULL,
-                sensitivity_tags JSONB NOT NULL DEFAULT '[]',
                 created_at TIMESTAMPTZ NOT NULL,
                 updated_at TIMESTAMPTZ NOT NULL,
                 metadata_json JSONB NOT NULL DEFAULT '{{}}'::jsonb,
@@ -1208,8 +1192,6 @@ class PostgresMetadataRepo:
     def _with_access_policy(self, row: dict[str, Any]) -> dict[str, Any]:
         data = dict(row)
         data["effective_access_policy"] = AccessPolicy(
-            external_retrieval=str(data.pop("external_retrieval")),
-            sensitivity_tags=frozenset(str(item) for item in self._json_list(data.pop("sensitivity_tags", []))),
         )
         return data
 

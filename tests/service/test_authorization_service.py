@@ -32,7 +32,7 @@ def test_authorization_service_resolves_user_scoped_doc_ids_and_policy() -> None
     assert resolved.user_id == "alice"
     assert set(resolved.allowed_doc_ids) == {"42", "99"}
     assert set(resolved.source_scope) == {"42", "99"}
-    assert resolved.access_policy.local_only is True
+    # Web search permission will be managed by AgentToolPolicy, not AccessPolicy
 
 
 @dataclass

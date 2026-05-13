@@ -33,11 +33,7 @@ def derive_child_config(parent: AgentRunConfig, child_def: AgentDefinition) -> A
         run_id=child_id,
         thread_id=child_id,
         parent_run_id=parent.run_id,
-        access_policy=(
-            parent.access_policy.narrow(child_def.access_policy)
-            if child_def.access_policy is not None
-            else parent.access_policy
-        ),
+        access_policy=parent.access_policy,
         source_scope=parent.source_scope,
         execution_location_preference=parent.execution_location_preference,
         max_depth=parent.max_depth - 1,

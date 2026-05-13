@@ -24,11 +24,6 @@ if TYPE_CHECKING:
     from rag.schema.query import KnowledgeArtifact, RetrievalSignals
 
 
-class ExternalRetrievalPolicy(StrEnum):
-    ALLOW = "allow"
-    DENY = "deny"
-
-
 class RuntimeMode(StrEnum):
     FAST = "fast"
     DEEP = "deep"
@@ -45,50 +40,21 @@ class ExecutionLocationPreference(StrEnum):
     LOCAL_ONLY = "local_only"
 
 
+# TODO(agent): replace with AgentToolPolicy + WebSearchTool.
+# The Agent decides whether to call a tool; AccessPolicy controls tool execution.
 class AccessPolicy(BaseModel):
     model_config = ConfigDict(frozen=True)
 
-    external_retrieval: ExternalRetrievalPolicy = ExternalRetrievalPolicy.ALLOW
     allowed_runtimes: frozenset[RuntimeMode] = Field(
         default_factory=lambda: frozenset({RuntimeMode.FAST, RuntimeMode.DEEP})
     )
-    allowed_locations: frozenset[ExecutionLocation] = Field(
-        default_factory=lambda: frozenset({ExecutionLocation.CLOUD, ExecutionLocation.LOCAL})
-    )
-    sensitivity_tags: frozenset[str] = Field(default_factory=frozenset)
 
     @classmethod
     def default(cls) -> AccessPolicy:
         return cls()
 
-    def narrow(self, other: AccessPolicy) -> AccessPolicy:
-        allowed_runtimes = self.allowed_runtimes & other.allowed_runtimes
-        if not allowed_runtimes:
-            raise ValueError("allowed_runtimes cannot become empty during narrowing")
-        allowed_locations = self.allowed_locations & other.allowed_locations
-        if not allowed_locations:
-            raise ValueError("allowed_locations cannot become empty during narrowing")
-        external_retrieval = (
-            ExternalRetrievalPolicy.DENY
-            if ExternalRetrievalPolicy.DENY in {self.external_retrieval, other.external_retrieval}
-            else ExternalRetrievalPolicy.ALLOW
-        )
-        return AccessPolicy(
-            external_retrieval=external_retrieval,
-            allowed_runtimes=allowed_runtimes,
-            allowed_locations=allowed_locations,
-            sensitivity_tags=self.sensitivity_tags | other.sensitivity_tags,
-        )
-
-    @property
-    def local_only(self) -> bool:
-        return self.external_retrieval is ExternalRetrievalPolicy.DENY
-
     def allows_runtime(self, mode: RuntimeMode) -> bool:
         return mode in self.allowed_runtimes
-
-    def allows_location(self, location: ExecutionLocation) -> bool:
-        return location in self.allowed_locations
 
 
 class ProviderAttempt(BaseModel):
@@ -574,7 +540,6 @@ __all__ = [
     "EvaluationMetricSummary",
     "ExecutionLocation",
     "ExecutionLocationPreference",
-    "ExternalRetrievalPolicy",
     "GraphRepo",
     "GroundingMetadataRepo",
     "HealthReport",

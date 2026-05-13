@@ -745,7 +745,7 @@ class AnswerGenerator:
         del runtime_mode
         attempts: list[ProviderAttempt] = []
 
-        for binding in self._ordered_generators(access_policy, execution_location_preference):
+        for binding in self.generators:
             base_attempt = ProviderAttempt(
                 stage="generation",
                 capability="chat",
@@ -846,7 +846,7 @@ class AnswerGenerator:
         del query
         attempts: list[ProviderAttempt] = []
 
-        for binding in self._ordered_generators(access_policy, execution_location_preference):
+        for binding in self.generators:
             base_attempt = ProviderAttempt(
                 stage="generation",
                 capability="chat",
@@ -921,31 +921,6 @@ class AnswerGenerator:
             model=None,
             attempts=attempts,
         )
-
-    def _ordered_generators(
-        self,
-        access_policy: AccessPolicy,
-        execution_location_preference: ExecutionLocationPreference,
-    ) -> list[GeneratorBinding]:
-        if not self.generators:
-            return []
-
-        preferred_locations: tuple[str, ...]
-        if access_policy.local_only or execution_location_preference is ExecutionLocationPreference.LOCAL_ONLY:
-            preferred_locations = ("local",)
-        elif execution_location_preference is ExecutionLocationPreference.LOCAL_FIRST:
-            preferred_locations = ("local", "cloud")
-        else:
-            preferred_locations = ("cloud", "local")
-
-        ordered: list[GeneratorBinding] = []
-        remaining = list(self.generators)
-        for location in preferred_locations:
-            matched = [binding for binding in remaining if binding.location == location]
-            ordered.extend(self._dedupe_generators(matched))
-            remaining = [binding for binding in remaining if binding.location != location]
-        ordered.extend(self._dedupe_generators(remaining))
-        return ordered
 
     @staticmethod
     def _dedupe_generators(bindings: Sequence[GeneratorBinding]) -> list[GeneratorBinding]:

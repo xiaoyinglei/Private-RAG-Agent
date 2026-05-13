@@ -34,8 +34,7 @@ class AuthorizationService:
                 allowed_doc_ids=(),
                 resolved_user_view=False,
             )
-        resolver_policy = self._resolver_access_policy(user_id)
-        effective_access_policy = access_policy if resolver_policy is None else access_policy.narrow(resolver_policy)
+        effective_access_policy = access_policy
         allowed_doc_ids, resolved_user_view = self._allowed_doc_ids_for_user(user_id)
         if allowed_doc_ids:
             if source_scope:

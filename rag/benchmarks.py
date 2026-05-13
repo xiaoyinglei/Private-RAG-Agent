@@ -29,7 +29,6 @@ from rag.schema.runtime import (
     AccessPolicy,
     ExecutionLocation,
     ExecutionLocationPreference,
-    ExternalRetrievalPolicy,
     RuntimeMode,
 )
 
@@ -1870,7 +1869,6 @@ def profile_benchmark_ingest(
 
 def benchmark_access_policy() -> AccessPolicy:
     return AccessPolicy(
-        external_retrieval=ExternalRetrievalPolicy.DENY,
         allowed_runtimes=frozenset({RuntimeMode.FAST, RuntimeMode.DEEP}),
         allowed_locations=frozenset({ExecutionLocation.LOCAL}),
     )
