@@ -14,13 +14,10 @@ from rag.retrieval.fusion import ReciprocalRankFusion
 from rag.retrieval.graph import GraphExpansionService
 from rag.retrieval.l3_l4_engine import L3L4RetrievalEngine
 from rag.retrieval.models import (
-    FusedCandidateView,
     QueryOptions,
-    RankPipelineResult,
-    RetrievalProfile,
     RetrievalResult,
 )
-from rag.retrieval.planning_graph import PlanningGraph, PlanningState
+from rag.retrieval.planning_graph import PlanningGraph
 from rag.retrieval.rerank_service import IndustrialRerankService
 from rag.retrieval.retrieval_adapter import RetrievalAdapter
 from rag.retrieval.runtime_coordinator import (
@@ -30,7 +27,7 @@ from rag.retrieval.runtime_coordinator import (
 )
 from rag.schema.model_protocols import Reranker as ModelReranker
 from rag.schema.query import RetrievalSignals
-from rag.schema.runtime import AccessPolicy, ProviderAttempt, RuntimeMode
+from rag.schema.runtime import AccessPolicy, RuntimeMode
 from rag.utils.telemetry import TelemetryService
 
 
@@ -362,7 +359,6 @@ class RetrievalService:
             access_policy=access_policy,
             retrieval_signals=RetrievalSignals(),
             decision=RoutingDecision(
-
                 runtime_mode=RuntimeMode.FAST,
                 rerank_required=True,
             ),
@@ -372,6 +368,7 @@ class RetrievalService:
         self.last_payload = payload
         return payload
 
+    # Backward-compatible alias. Prefer retrieve()/aretrieve().
     def run(
         self,
         query: str,
@@ -389,6 +386,7 @@ class RetrievalService:
             )
         )
 
+    # Backward-compatible alias. Prefer retrieve()/aretrieve().
     async def arun(
         self,
         query: str,
