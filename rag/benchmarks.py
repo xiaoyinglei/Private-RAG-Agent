@@ -27,7 +27,6 @@ from rag.retrieval import QueryOptions
 from rag.schema.core import SourceType
 from rag.schema.runtime import (
     AccessPolicy,
-    ExecutionLocationPreference,
     RuntimeMode,
 )
 
@@ -343,7 +342,6 @@ class RetrievalBenchmarkEvaluator:
         retrieval_pool_k: int | None = None,
         rerank_enabled: bool,
         rerank_pool_k: int | None = None,
-        execution_location_preference: ExecutionLocationPreference = ExecutionLocationPreference.LOCAL_ONLY,
         access_policy: AccessPolicy | None = None,
     ) -> None:
         self.runtime = runtime
@@ -355,7 +353,6 @@ class RetrievalBenchmarkEvaluator:
         self.retrieval_pool_k = retrieval_pool_k
         self.rerank_enabled = rerank_enabled
         self.rerank_pool_k = rerank_pool_k
-        self.execution_location_preference = execution_location_preference
         self.access_policy = access_policy or benchmark_access_policy()
 
     def evaluate(
@@ -395,7 +392,6 @@ class RetrievalBenchmarkEvaluator:
                 retrieval_result = self.runtime.retrieval_service.retrieve(
                     query_record.query_text,
                     access_policy=self.access_policy,
-                    execution_location_preference=self.execution_location_preference,
                     query_options=QueryOptions(
                         retrieval_profile=self.retrieval_profile,
                         top_k=self.top_k,

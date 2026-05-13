@@ -167,7 +167,6 @@ class _QueryPipeline:
                 query,
                 access_policy=access_policy,
                 source_scope=source_scope,
-                execution_location_preference=options.execution_location_preference,
                 query_options=options,
             )
         )
@@ -214,7 +213,6 @@ class _QueryPipeline:
                 query=query,
                 prompt=prompt,
                 access_policy=access_policy,
-                execution_location_preference=options.execution_location_preference,
             )
         )
         return _QueryExecutionResult(
@@ -273,7 +271,6 @@ class _QueryPipeline:
                 grounded_candidate=prompt_build.grounded_candidate,
                 runtime_mode=retrieval.decision.runtime_mode,
                 access_policy=access_policy,
-                execution_location_preference=options.execution_location_preference,
             )
         )
         generated, merged_evidence, truncated, prompt_build = self._maybe_execute_compute_loop(
@@ -391,7 +388,6 @@ class _QueryPipeline:
                     getattr(retrieval, "decision", None), "runtime_mode", None
                 ),
                 access_policy=access_policy,
-                execution_location_preference=options.execution_location_preference,
             )
         )
         return regenerated, ev, t, pb
@@ -503,7 +499,6 @@ class _QueryPipeline:
             query,
             access_policy=access_policy,
             source_scope=source_scope,
-            execution_location_preference=options.execution_location_preference,
             query_options=options,
         )
 

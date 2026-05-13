@@ -13,7 +13,6 @@ from rag.schema.core import AssetRecord, Document, SectionRecord, Source
 from rag.schema.query import GroundingTarget, RetrievalSignals
 from rag.schema.runtime import (
     AccessPolicy,
-    ExecutionLocationPreference,
     GraphRepo,
     VectorSearchResult,
 )
@@ -117,9 +116,8 @@ class EmptyGraphRetriever:
         self,
         *,
         access_policy: AccessPolicy,
-        execution_location_preference: ExecutionLocationPreference | None,
     ) -> None:
-        del access_policy, execution_location_preference
+        del access_policy
 
     def __call__(
         self,
@@ -153,7 +151,6 @@ class MultiProviderBackedVectorRetriever:
         self,
         *,
         access_policy: AccessPolicy,
-        execution_location_preference: ExecutionLocationPreference | None,
     ) -> None:
         pass
 
@@ -244,7 +241,6 @@ class MilvusSummaryHybridRetriever:
         self,
         *,
         access_policy: AccessPolicy,
-        execution_location_preference: ExecutionLocationPreference | None,
     ) -> None:
         pass
 

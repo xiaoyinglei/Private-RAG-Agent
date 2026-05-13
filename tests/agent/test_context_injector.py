@@ -9,7 +9,7 @@ from rag.agent.memory.models import ExtractedFact, WorkingSummary
 from rag.agent.state import AgentState
 from rag.agent.tools.spec import ToolError, ToolResult
 from rag.schema.query import AnswerCitation, EvidenceItem
-from rag.schema.runtime import AccessPolicy, ExecutionLocationPreference
+from rag.schema.runtime import AccessPolicy
 
 
 def _definition() -> AgentDefinition:
@@ -58,7 +58,6 @@ def _state() -> AgentState:
             budget_total=1000,
             max_depth=2,
             access_policy=AccessPolicy.default(),
-            execution_location_preference=ExecutionLocationPreference.LOCAL_FIRST,
         ),
         "plan": None,
         "iteration": 0,

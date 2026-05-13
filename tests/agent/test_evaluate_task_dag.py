@@ -7,7 +7,7 @@ from rag.agent.core.definition import AgentDefinition
 from rag.agent.core.task import SubTaskNode, SubTaskStatus, TaskDAG, TaskEdge
 from rag.agent.graphs.nodes.evaluate import evaluate_node, route_after_evaluate
 from rag.agent.state import AgentState
-from rag.schema.runtime import AccessPolicy, ExecutionLocationPreference
+from rag.schema.runtime import AccessPolicy
 
 
 def _definition() -> AgentDefinition:
@@ -44,7 +44,6 @@ def _state(
         budget_total=budget_total,
         max_depth=2,
         access_policy=AccessPolicy.default(),
-        execution_location_preference=ExecutionLocationPreference.LOCAL_FIRST,
     )
     RuntimeRegistry.remove(run_id)
     RuntimeRegistry.get_or_create(config)

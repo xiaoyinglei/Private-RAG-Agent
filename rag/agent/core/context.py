@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from uuid import uuid4
 
 from rag.agent.core.definition import AgentDefinition, ToolPolicy
-from rag.schema.runtime import AccessPolicy, ExecutionLocationPreference
+from rag.schema.runtime import AccessPolicy
 
 
 @dataclass(frozen=True)
@@ -15,7 +15,6 @@ class AgentRunConfig:
     budget_total: int
     max_depth: int
     access_policy: AccessPolicy
-    execution_location_preference: ExecutionLocationPreference
     parent_run_id: str | None = None
     source_scope: tuple[str, ...] = ()
     deadline_iso: str | None = None
@@ -35,7 +34,6 @@ def derive_child_config(parent: AgentRunConfig, child_def: AgentDefinition) -> A
         parent_run_id=parent.run_id,
         access_policy=parent.access_policy,
         source_scope=parent.source_scope,
-        execution_location_preference=parent.execution_location_preference,
         max_depth=parent.max_depth - 1,
         budget_total=child_def.estimated_token_budget,
         tool_policy=child_def.tool_policy,

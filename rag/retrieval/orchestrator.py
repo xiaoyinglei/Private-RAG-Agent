@@ -29,7 +29,7 @@ from rag.retrieval.runtime_coordinator import (
 )
 from rag.schema.model_protocols import Reranker as ModelReranker
 from rag.schema.query import RetrievalSignals
-from rag.schema.runtime import AccessPolicy, ExecutionLocationPreference, ProviderAttempt, RuntimeMode
+from rag.schema.runtime import AccessPolicy, ProviderAttempt, RuntimeMode
 from rag.utils.telemetry import TelemetryService
 
 
@@ -40,7 +40,6 @@ class RetrievalExecutor(Protocol):
         *,
         access_policy: AccessPolicy,
         source_scope: Sequence[str] = (),
-        execution_location_preference: ExecutionLocationPreference | None = None,
         query_options: QueryOptions | None = None,
     ) -> RetrievalResult: ...
 
@@ -357,7 +356,6 @@ class RetrievalService:
         *,
         access_policy: AccessPolicy,
         source_scope: Sequence[str] = (),
-        execution_location_preference: ExecutionLocationPreference | None = None,
         query_options: QueryOptions | None = None,
     ) -> CoreRetrievalPayload:
         payload = self.runtime_coordinator.run_sync(
@@ -370,7 +368,6 @@ class RetrievalService:
                     rerank_required=True,
                 ),
                 source_scope=source_scope,
-                execution_location_preference=execution_location_preference,
                 query_options=query_options,
             )
         )
@@ -383,7 +380,6 @@ class RetrievalService:
         *,
         access_policy: AccessPolicy,
         source_scope: Sequence[str] = (),
-        execution_location_preference: ExecutionLocationPreference | None = None,
         query_options: QueryOptions | None = None,
     ) -> CoreRetrievalPayload:
         payload = await self.l3_l4_engine.arun(
@@ -396,7 +392,6 @@ class RetrievalService:
                 rerank_required=True,
             ),
             source_scope=source_scope,
-            execution_location_preference=execution_location_preference,
             query_options=query_options,
         )
         self.last_payload = payload
@@ -408,7 +403,6 @@ class RetrievalService:
         *,
         access_policy: AccessPolicy,
         source_scope: Sequence[str] = (),
-        execution_location_preference: ExecutionLocationPreference | None = None,
         query_options: QueryOptions | None = None,
     ) -> RetrievalResult:
         return to_retrieval_result(
@@ -416,7 +410,6 @@ class RetrievalService:
                 query,
                 access_policy=access_policy,
                 source_scope=source_scope,
-                execution_location_preference=execution_location_preference,
                 query_options=query_options,
             )
         )
@@ -427,7 +420,6 @@ class RetrievalService:
         *,
         access_policy: AccessPolicy,
         source_scope: Sequence[str] = (),
-        execution_location_preference: ExecutionLocationPreference | None = None,
         query_options: QueryOptions | None = None,
     ) -> RetrievalResult:
         return to_retrieval_result(
@@ -435,7 +427,6 @@ class RetrievalService:
                 query,
                 access_policy=access_policy,
                 source_scope=source_scope,
-                execution_location_preference=execution_location_preference,
                 query_options=query_options,
             )
         )
@@ -479,7 +470,7 @@ class RetrievalService:
         plan: PlanningState,
         source_scope: Sequence[str],
         access_policy: AccessPolicy,
-        runtime_mode: ExecutionLocationPreference | str | object,
+        runtime_mode: RuntimeMode | str | object,
         retrieval_signals: RetrievalSignals,
     ) -> object:
         return self.runtime_coordinator.run_sync(
@@ -577,19 +568,16 @@ class RetrievalService:
         *,
         access_policy: AccessPolicy,
         source_scope: Sequence[str] = (),
-        execution_location_preference: ExecutionLocationPreference | None = None,
         query_options: QueryOptions | None = None,
     ) -> RetrievalResult:
         scope = list(source_scope)
         self._prepare_retriever_policies(
             access_policy=access_policy,
-            execution_location_preference=execution_location_preference,
         )
         result = self.run(
             query,
             access_policy=access_policy,
             source_scope=scope,
-            execution_location_preference=execution_location_preference,
             query_options=query_options,
         )
         self.last_result = result
@@ -601,19 +589,16 @@ class RetrievalService:
         *,
         access_policy: AccessPolicy,
         source_scope: Sequence[str] = (),
-        execution_location_preference: ExecutionLocationPreference | None = None,
         query_options: QueryOptions | None = None,
     ) -> RetrievalResult:
         scope = list(source_scope)
         self._prepare_retriever_policies(
             access_policy=access_policy,
-            execution_location_preference=execution_location_preference,
         )
         result = await self.arun(
             query,
             access_policy=access_policy,
             source_scope=scope,
-            execution_location_preference=execution_location_preference,
             query_options=query_options,
         )
         self.last_result = result
@@ -623,7 +608,6 @@ class RetrievalService:
         self,
         *,
         access_policy: AccessPolicy,
-        execution_location_preference: ExecutionLocationPreference | None,
     ) -> None:
         for retriever in (
             self._vector_retriever,
@@ -635,8 +619,7 @@ class RetrievalService:
             if callable(prepare_for_policy):
                 prepare_for_policy(
                     access_policy=access_policy,
-                    execution_location_preference=execution_location_preference,
-                )
+                    )
 
 
 __all__ = [

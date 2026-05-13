@@ -9,7 +9,7 @@ from rag.agent.state import ToolCallPlan
 from rag.agent.tools.builtin_registry import create_builtin_tool_registry
 from rag.agent.tools.llm_tools import LLMTextOutput
 from rag.schema.query import RetrievalSignals
-from rag.schema.runtime import AccessPolicy, ExecutionLocationPreference
+from rag.schema.runtime import AccessPolicy
 
 
 class _ResearchUnderstandingService:
@@ -18,9 +18,8 @@ class _ResearchUnderstandingService:
         query: str,
         *,
         access_policy: object | None = None,
-        execution_location_preference: object | None = None,
     ) -> RetrievalSignals:
-        del query, access_policy, execution_location_preference
+        del query, access_policy
         return RetrievalSignals()
 
 
@@ -116,7 +115,6 @@ async def test_agent_service_run_with_config_uses_supplied_runtime_contract() ->
         budget_total=5000,
         max_depth=1,
         access_policy=AccessPolicy.default(),
-        execution_location_preference=ExecutionLocationPreference.LOCAL_FIRST,
     )
     service = _service_with_registry(
         runners={

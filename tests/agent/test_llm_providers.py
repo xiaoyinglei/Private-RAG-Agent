@@ -19,7 +19,7 @@ from rag.agent.core.llm_registry import ModelRegistry
 from rag.agent.core.task import TaskDAG
 from rag.agent.memory.models import ContextBudgetSnapshot, ContextSection, InjectedContext
 from rag.agent.state import ThinkOutput
-from rag.schema.runtime import AccessPolicy, ExecutionLocationPreference
+from rag.schema.runtime import AccessPolicy
 
 # ── Stub Generator ──
 
@@ -65,7 +65,6 @@ def _make_config() -> AgentRunConfig:
         budget_total=10000,
         max_depth=2,
         access_policy=AccessPolicy.default(),
-        execution_location_preference=ExecutionLocationPreference.LOCAL_FIRST,
     )
 
 

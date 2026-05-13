@@ -11,7 +11,7 @@ from rag.agent.state import AgentState, ThinkOutput, ToolCallPlan
 from rag.agent.tools.builtin_registry import create_builtin_tool_registry
 from rag.agent.tools.llm_tools import LLMTextOutput
 from rag.schema.query import RetrievalSignals
-from rag.schema.runtime import AccessPolicy, ExecutionLocationPreference
+from rag.schema.runtime import AccessPolicy
 
 
 class _ResearchUnderstandingService:
@@ -20,9 +20,8 @@ class _ResearchUnderstandingService:
         query: str,
         *,
         access_policy: object | None = None,
-        execution_location_preference: object | None = None,
     ) -> RetrievalSignals:
-        del query, access_policy, execution_location_preference
+        del query, access_policy
         return RetrievalSignals()
 
 
@@ -73,7 +72,6 @@ def _parent_state(run_id: str = "parent-run", *, max_depth: int = 2) -> AgentSta
         parent_run_id=None,
         source_scope=("doc-1",),
         access_policy=AccessPolicy.default(),
-        execution_location_preference=ExecutionLocationPreference.LOCAL_FIRST,
     )
     RuntimeRegistry.remove(run_id)
     RuntimeRegistry.get_or_create(config)

@@ -17,7 +17,7 @@ from rag.retrieval.rerank_service import IndustrialRerankService
 from rag.retrieval.retrieval_adapter import RetrievalAdapter
 from rag.retrieval.runtime_coordinator import CoreRetrievalPayload
 
-from rag.schema.runtime import AccessPolicy, ExecutionLocationPreference, ProviderAttempt
+from rag.schema.runtime import AccessPolicy, ProviderAttempt
 from rag.utils.telemetry import TelemetryService
 
 
@@ -55,7 +55,6 @@ class L3L4RetrievalEngine:
         retrieval_signals: RetrievalSignals,
         decision: RoutingDecision,
         source_scope: Sequence[str] = (),
-        execution_location_preference: ExecutionLocationPreference | None = None,
         query_options: QueryOptions | None = None,
     ) -> CoreRetrievalPayload:
         scope = list(source_scope)

@@ -18,7 +18,7 @@ from rag.agent.state import AgentState, ToolCallPlan
 from rag.agent.tools.registry import ToolRegistry
 from rag.agent.tools.spec import ToolResult
 from rag.schema.query import AnswerCitation, EvidenceItem, RetrievalSignals
-from rag.schema.runtime import AccessPolicy, ExecutionLocationPreference
+from rag.schema.runtime import AccessPolicy
 
 
 class AgentRunRequest(BaseModel):
@@ -42,7 +42,6 @@ class AgentRunRequest(BaseModel):
             budget_total=self.budget_total or definition.estimated_token_budget,
             max_depth=definition.max_depth if self.max_depth is None else self.max_depth,
             access_policy=definition.access_policy or AccessPolicy.default(),
-            execution_location_preference=ExecutionLocationPreference.LOCAL_FIRST,
             tool_policy=definition.tool_policy,
         )
 

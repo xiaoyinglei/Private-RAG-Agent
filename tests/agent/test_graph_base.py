@@ -13,7 +13,7 @@ from rag.agent.state import AgentState, ThinkOutput, ToolCallPlan
 from rag.agent.tools.registry import ToolRegistry
 from rag.agent.tools.spec import ToolError, ToolPermissions, ToolSpec
 from rag.schema.query import RetrievalSignals
-from rag.schema.runtime import AccessPolicy, ExecutionLocationPreference
+from rag.schema.runtime import AccessPolicy
 
 
 class EchoInput(BaseModel):
@@ -109,7 +109,6 @@ def _make_config(
         budget_total=budget_total,
         max_depth=2,
         access_policy=AccessPolicy.default(),
-        execution_location_preference=ExecutionLocationPreference.LOCAL_FIRST,
         tool_policy=ToolPolicy(max_parallel_calls=max_parallel_calls),
     )
 

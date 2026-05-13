@@ -9,7 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from rag.retrieval.evidence import CandidateLike
 from rag.schema.query import EvidenceItem, GroundedAnswer, GroundingTarget
-from rag.schema.runtime import AccessPolicy, ExecutionLocationPreference, ProviderAttempt, RetrievalDiagnostics
+from rag.schema.runtime import AccessPolicy, ProviderAttempt, RetrievalDiagnostics
 
 if TYPE_CHECKING:
     from rag.retrieval.evidence import EvidenceBundle, SelfCheckResult
@@ -38,7 +38,6 @@ class QueryOptions:
     user_id: str | None = None
     source_scope: tuple[str, ...] = ()
     access_policy: AccessPolicy = field(default_factory=AccessPolicy.default)
-    execution_location_preference: ExecutionLocationPreference = ExecutionLocationPreference.LOCAL_FIRST
     max_context_tokens: int = 12000
     max_evidence_items: int | None = None
     evidence_top_k: int | None = None

@@ -9,7 +9,7 @@ from rag.agent.graphs.nodes.evaluate import evaluate_node
 from rag.agent.memory.models import InjectedContext, WorkingSummary
 from rag.agent.state import AgentState, ThinkOutput
 from rag.schema.query import AnswerCitation, EvidenceItem
-from rag.schema.runtime import AccessPolicy, ExecutionLocationPreference
+from rag.schema.runtime import AccessPolicy
 
 
 def _definition() -> AgentDefinition:
@@ -29,7 +29,6 @@ def _state(run_id: str) -> AgentState:
         budget_total=1000,
         max_depth=2,
         access_policy=AccessPolicy.default(),
-        execution_location_preference=ExecutionLocationPreference.LOCAL_FIRST,
     )
     RuntimeRegistry.remove(run_id)
     RuntimeRegistry.get_or_create(config)

@@ -28,7 +28,7 @@ class _DummyResult(BaseModel):
 
 def _make_state(**overrides: object) -> dict:
     from rag.agent.core.context import AgentRunConfig
-    from rag.schema.runtime import AccessPolicy, ExecutionLocationPreference
+    from rag.schema.runtime import AccessPolicy
 
     s: dict[str, Any] = {
         "messages": [],
@@ -41,7 +41,6 @@ def _make_state(**overrides: object) -> dict:
         "run_config": AgentRunConfig(
             run_id="sig-test", thread_id="sig-test", budget_total=10000, max_depth=2,
             access_policy=AccessPolicy.default(),
-            execution_location_preference=ExecutionLocationPreference.LOCAL_FIRST,
         ),
         "plan": None, "iteration": 0, "status": "running",
         "route_reason": None, "stop_reason": None, "needs_user_input": None,

@@ -20,7 +20,6 @@ from rag.schema.query import (
 )
 from rag.schema.runtime import (
     AccessPolicy,
-    ExecutionLocationPreference,
     ProviderAttempt,
     RuntimeMode,
 )
@@ -740,7 +739,6 @@ class AnswerGenerator:
         grounded_candidate: str,
         runtime_mode: RuntimeMode,
         access_policy: AccessPolicy,
-        execution_location_preference: ExecutionLocationPreference,
     ) -> AnswerGenerationResult:
         del runtime_mode
         attempts: list[ProviderAttempt] = []
@@ -841,7 +839,6 @@ class AnswerGenerator:
         query: str,
         prompt: str,
         access_policy: AccessPolicy,
-        execution_location_preference: ExecutionLocationPreference,
     ) -> AnswerGenerationResult:
         del query
         attempts: list[ProviderAttempt] = []

@@ -13,7 +13,7 @@ from rag.agent.graphs.nodes.pause import pause_node
 from rag.agent.state import AgentState, ToolCallPlan
 from rag.agent.tools.registry import ToolRegistry
 from rag.agent.tools.spec import ToolError, ToolPermissions, ToolSpec
-from rag.schema.runtime import AccessPolicy, ExecutionLocationPreference
+from rag.schema.runtime import AccessPolicy
 
 
 class _DummyOutput(BaseModel):
@@ -31,7 +31,6 @@ def _make_config(run_id: str = "test") -> AgentRunConfig:
         budget_total=10000,
         max_depth=2,
         access_policy=AccessPolicy.default(),
-        execution_location_preference=ExecutionLocationPreference.LOCAL_FIRST,
     )
 
 

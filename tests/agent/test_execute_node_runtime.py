@@ -10,7 +10,7 @@ from rag.agent.graphs.nodes.execute import execute_node
 from rag.agent.state import AgentState, ToolCallPlan
 from rag.agent.tools.registry import ToolRegistry
 from rag.agent.tools.spec import ToolError, ToolPermissions, ToolSpec
-from rag.schema.runtime import AccessPolicy, ExecutionLocationPreference
+from rag.schema.runtime import AccessPolicy
 
 
 class RuntimeInput(BaseModel):
@@ -41,7 +41,6 @@ def _state(*, call: ToolCallPlan, run_id: str) -> AgentState:
         budget_total=100,
         max_depth=2,
         access_policy=AccessPolicy.default(),
-        execution_location_preference=ExecutionLocationPreference.LOCAL_FIRST,
     )
     RuntimeRegistry.remove(run_id)
     RuntimeRegistry.get_or_create(config)

@@ -393,7 +393,6 @@ def benchmark_evaluate(
         default_benchmark_paths,
         ensure_benchmark_layout,
     )
-    from rag.schema.runtime import ExecutionLocationPreference
 
     if variant not in {"full", "mini"}:
         raise typer.BadParameter("variant must be one of: full, mini")
@@ -430,7 +429,6 @@ def benchmark_evaluate(
             top_k=top_k,
             evidence_top_k=evidence_top_k,
             rerank_enabled=rerank_enabled,
-            execution_location_preference=ExecutionLocationPreference.LOCAL_ONLY,
             access_policy=benchmark_access_policy(),
         ).evaluate(
             queries_path=queries_path or (paths.prepared_variant_dir(variant) / "queries.jsonl"),

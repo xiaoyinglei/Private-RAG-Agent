@@ -29,12 +29,6 @@ class RuntimeMode(StrEnum):
     DEEP = "deep"
 
 
-class ExecutionLocationPreference(StrEnum):
-    CLOUD_FIRST = "cloud_first"
-    LOCAL_FIRST = "local_first"
-    LOCAL_ONLY = "local_only"
-
-
 # TODO(agent): replace with AgentToolPolicy + WebSearchTool.
 # The Agent decides whether to call a tool; AccessPolicy controls tool execution.
 class AccessPolicy(BaseModel):
@@ -533,7 +527,6 @@ __all__ = [
     "DocumentStatusRepo",
     "EvaluationMetricInput",
     "EvaluationMetricSummary",
-    "ExecutionLocationPreference",
     "GraphRepo",
     "GroundingMetadataRepo",
     "HealthReport",

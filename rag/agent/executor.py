@@ -12,7 +12,7 @@ from rag.agent.schema import (
     SubTaskStatus,
 )
 from rag.retrieval.models import RetrievalResult
-from rag.schema.runtime import AccessPolicy, ExecutionLocationPreference
+from rag.schema.runtime import AccessPolicy
 
 
 class AgentExecutor:
@@ -33,7 +33,6 @@ class AgentExecutor:
         request: AgentTaskRequest,
         subtask: SubTask,
         access_policy: AccessPolicy,
-        execution_location_preference: ExecutionLocationPreference = ExecutionLocationPreference.LOCAL_FIRST,
     ) -> SubTaskResult:
         traces: list[ExecutionStepTrace] = []
         last_retrieval: RetrievalResult | None = None
@@ -52,7 +51,6 @@ class AgentExecutor:
                 selected_mode=selected_mode,
                 request=request,
                 access_policy=access_policy,
-                execution_location_preference=execution_location_preference,
             )
             last_retrieval = retrieval
             assessment = self._critic.assess(
@@ -123,14 +121,12 @@ class AgentExecutor:
         selected_mode: str,
         request: AgentTaskRequest,
         access_policy: AccessPolicy,
-        execution_location_preference: ExecutionLocationPreference,
     ) -> RetrievalResult:
         retrieve = self._retrieval_service.retrieve
         return retrieve(
             retrieval_query,
             access_policy=access_policy,
             source_scope=request.source_scope,
-            execution_location_preference=execution_location_preference,
             query_mode=selected_mode,
         )
 
