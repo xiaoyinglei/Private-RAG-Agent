@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 from rag.retrieval.authorization_service import AuthorizationService
 from rag.schema.core import Document, Source, SourceType
-from rag.schema.runtime import AccessPolicy, ExecutionLocation
+from rag.schema.runtime import AccessPolicy
 
 
 @dataclass
@@ -15,9 +15,7 @@ class _Resolver:
     def access_policy_for_user(self, user_id: str):
         if user_id != "alice":
             return None
-        return AccessPolicy(
-            allowed_locations=frozenset({ExecutionLocation.LOCAL}),
-        )
+        return AccessPolicy.default()
 
 
 def test_authorization_service_resolves_user_scoped_doc_ids_and_policy() -> None:
