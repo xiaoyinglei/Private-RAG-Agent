@@ -29,11 +29,6 @@ class RuntimeMode(StrEnum):
     DEEP = "deep"
 
 
-class ExecutionLocation(StrEnum):
-    CLOUD = "cloud"
-    LOCAL = "local"
-
-
 class ExecutionLocationPreference(StrEnum):
     CLOUD_FIRST = "cloud_first"
     LOCAL_FIRST = "local_first"
@@ -538,7 +533,6 @@ __all__ = [
     "DocumentStatusRepo",
     "EvaluationMetricInput",
     "EvaluationMetricSummary",
-    "ExecutionLocation",
     "ExecutionLocationPreference",
     "GraphRepo",
     "GroundingMetadataRepo",
