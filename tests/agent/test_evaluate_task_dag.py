@@ -114,6 +114,21 @@ async def test_evaluate_task_dag_marks_budget_exhausted_subtask_failed() -> None
 
 
 @pytest.mark.anyio
+async def test_evaluate_task_dag_uses_subtask_default_budget_when_estimate_is_missing() -> None:
+    plan = TaskDAG(subtasks=[_subtask("s1", estimated_tokens=None)])
+    result = await evaluate_node(
+        _state(run_id="dag-default-budget", plan=plan, budget_total=20000),
+        definition=_definition(),
+    )
+
+    assert result["status"] == "running"
+    assert [subtask.subtask_id for subtask in result["next_subtasks"]] == ["s1"]
+    remaining = await RuntimeRegistry.get("dag-default-budget").budget_ledger.remaining()
+    assert remaining == 10000
+    RuntimeRegistry.remove("dag-default-budget")
+
+
+@pytest.mark.anyio
 async def test_evaluate_task_dag_fails_when_dependencies_cannot_be_satisfied() -> None:
     plan = TaskDAG(
         subtasks=[_subtask("s1"), _subtask("s2")],

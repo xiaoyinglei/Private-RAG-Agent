@@ -7,6 +7,8 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from rag.schema.query import AnswerCitation, EvidenceItem
 
+DEFAULT_SUBTASK_TOKEN_BUDGET = 10000
+
 
 class SubTaskNode(BaseModel):
     model_config = ConfigDict(frozen=True)
@@ -15,7 +17,7 @@ class SubTaskNode(BaseModel):
     agent_type: str
     prompt: str
     priority: int = Field(ge=0)
-    estimated_tokens: int | None = Field(default=None, gt=0)
+    estimated_tokens: int | None = Field(default=DEFAULT_SUBTASK_TOKEN_BUDGET, gt=0)
 
 
 class TaskEdge(BaseModel):

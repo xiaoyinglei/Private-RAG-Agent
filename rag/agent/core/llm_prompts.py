@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from rag.agent.core.task import DEFAULT_SUBTASK_TOKEN_BUDGET
 from rag.agent.state import AgentState
 
 # ── Router prompt ──
@@ -114,7 +115,7 @@ def build_plan_prompt(
             "agent_type": "research | compare | factcheck",
             "prompt": "该子任务的完整指令",
             "priority": 0~10（数字越大越优先）,
-            "estimated_tokens": 8000
+            "estimated_tokens": {DEFAULT_SUBTASK_TOKEN_BUDGET}
         }}
     ],
     "edges": [

@@ -1,13 +1,41 @@
 from __future__ import annotations
 
+from collections.abc import Awaitable
+from inspect import isawaitable
+from typing import Protocol
+
 from pydantic import BaseModel
 
 from rag.agent.core.task import SubTaskResult, SubTaskStatus
 from rag.agent.state import AgentState
 from rag.agent.tools.spec import ToolResult
+from rag.schema.query import AnswerCitation, EvidenceItem
 
 
-def synthesize_node(state: AgentState) -> dict:
+class SynthesisRunResult(Protocol):
+    status: str
+    final_answer: str | None
+    stop_reason: str | None
+    tool_results: list[ToolResult]
+    evidence: list[EvidenceItem]
+    citations: list[AnswerCitation]
+    groundedness_flag: bool
+    insufficient_evidence_flag: bool
+
+
+class SynthesisRunner(Protocol):
+    def run_synthesis(
+        self,
+        *,
+        parent_state: AgentState,
+    ) -> SynthesisRunResult | Awaitable[SynthesisRunResult]: ...
+
+
+async def synthesize_node(
+    state: AgentState,
+    *,
+    synthesis_runner: SynthesisRunner | None = None,
+) -> dict:
     tool_results = state.get("tool_results", [])
     evidence = state.get("evidence", [])
 
@@ -22,6 +50,24 @@ def synthesize_node(state: AgentState) -> dict:
                 "insufficient_evidence_flag": True,
             }
 
+    if synthesis_runner is not None and _should_delegate_to_synthesis_agent(state):
+        try:
+            raw_result = synthesis_runner.run_synthesis(parent_state=state)
+            result = await raw_result if isawaitable(raw_result) else raw_result
+        except Exception as exc:
+            fallback = _legacy_synthesize_node(state)
+            return {
+                **fallback,
+                "stop_reason": f"synthesis_agent_failed: {exc}",
+                "insufficient_evidence_flag": True,
+            }
+        return _synthesis_agent_update(state, result)
+
+    return _legacy_synthesize_node(state)
+
+
+def _legacy_synthesize_node(state: AgentState) -> dict:
+    tool_results = state.get("tool_results", [])
     ok_results = [result for result in tool_results if result.status == "ok"]
     error_results = [result for result in tool_results if result.status == "error"]
     subtask_results = list(state.get("subtask_results", {}).values())
@@ -42,6 +88,49 @@ def synthesize_node(state: AgentState) -> dict:
             or bool(error_results)
             or _has_failed_subtask(subtask_results)
             or _has_insufficient_output(ok_results)
+        ),
+    }
+
+
+def _should_delegate_to_synthesis_agent(state: AgentState) -> bool:
+    if state.get("status") == "failed":
+        return False
+    tool_results = state.get("tool_results", [])
+    subtask_results = list(state.get("subtask_results", {}).values())
+    return (
+        bool(state.get("evidence"))
+        or any(result.status == "ok" for result in tool_results)
+        or any(
+            result.status is SubTaskStatus.COMPLETED and result.findings
+            for result in subtask_results
+        )
+    )
+
+
+def _synthesis_agent_update(state: AgentState, result: SynthesisRunResult) -> dict:
+    fallback = _legacy_synthesize_node(state)
+    if result.status != "done" or not result.final_answer:
+        return {
+            **fallback,
+            "stop_reason": result.stop_reason or result.status,
+            "insufficient_evidence_flag": True,
+        }
+
+    return {
+        "status": "done",
+        "final_answer": result.final_answer,
+        "tool_results": result.tool_results,
+        "evidence": result.evidence,
+        "citations": result.citations,
+        "groundedness_flag": (
+            fallback["groundedness_flag"]
+            or result.groundedness_flag
+            or bool(result.evidence)
+            or bool(result.citations)
+        ),
+        "insufficient_evidence_flag": (
+            fallback["insufficient_evidence_flag"]
+            or result.insufficient_evidence_flag
         ),
     }
 
