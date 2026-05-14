@@ -21,7 +21,6 @@ from rag.agent.memory.models import InjectedContext
 from rag.agent.state import AgentState, ThinkOutput
 from rag.schema.query import RetrievalSignals
 
-
 _QUOTED_TERM_RE = re.compile(
     r"""["“”]([^"“”]+?)["“”]|"""
     r"""['‘’]([^'‘’]+?)['‘’]""",
@@ -279,6 +278,8 @@ class LLMPlanProvider(PlanProvider):
 def create_default_providers(
     registry: ModelRegistry,
     selection: ModelSelectionPolicy,
+    *,
+    decompose_enabled: bool = False,
 ) -> tuple[LLMRouteProvider, LLMEvaluateDecisionProvider, LLMPlanProvider]:
     """根据 ModelSelectionPolicy + ModelRegistry 创建三个 LLM provider。"""
 
@@ -299,7 +300,11 @@ def create_default_providers(
     )
 
     return (
-        LLMRouteProvider(router_gen, kwargs=router_kwargs),
+        LLMRouteProvider(
+            router_gen,
+            kwargs=router_kwargs,
+            decompose_enabled=decompose_enabled,
+        ),
         LLMEvaluateDecisionProvider(evaluator_gen, kwargs=evaluator_kwargs),
         LLMPlanProvider(planner_gen, kwargs=planner_kwargs),
     )

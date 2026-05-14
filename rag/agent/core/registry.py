@@ -4,18 +4,18 @@ from rag.agent.core.definition import AgentDefinition
 
 
 class AgentRegistry:
-    _agents: dict[str, AgentDefinition] = {}
+    def __init__(self) -> None:
+        self._agents: dict[str, AgentDefinition] = {}
 
-    @classmethod
-    def register(cls, definition: AgentDefinition) -> None:
-        cls._agents[definition.agent_type] = definition
+    def register(self, definition: AgentDefinition, *, replace: bool = False) -> None:
+        if not replace and definition.agent_type in self._agents:
+            raise ValueError(f"Agent type '{definition.agent_type}' already registered")
+        self._agents[definition.agent_type] = definition
 
-    @classmethod
-    def get(cls, agent_type: str) -> AgentDefinition:
-        if agent_type not in cls._agents:
+    def get(self, agent_type: str) -> AgentDefinition:
+        if agent_type not in self._agents:
             raise KeyError(f"Agent type '{agent_type}' not found in registry")
-        return cls._agents[agent_type]
+        return self._agents[agent_type]
 
-    @classmethod
-    def list_all(cls) -> list[AgentDefinition]:
-        return list(cls._agents.values())
+    def list_all(self) -> list[AgentDefinition]:
+        return list(self._agents.values())

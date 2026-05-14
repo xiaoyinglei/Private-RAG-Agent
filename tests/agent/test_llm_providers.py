@@ -15,7 +15,7 @@ from rag.agent.core.llm_providers import (
     _generate_structured,
     create_default_providers,
 )
-from rag.agent.core.llm_registry import ModelRegistry
+from rag.agent.core.llm_registry import ModelRegistry, ResolvedModel
 from rag.agent.core.task import TaskDAG
 from rag.agent.memory.models import ContextBudgetSnapshot, ContextSection, InjectedContext
 from rag.agent.state import ThinkOutput
@@ -56,6 +56,20 @@ class _FailingGenerator:
 
     def generate_text(self, *, prompt: str, **kwargs: Any) -> str:
         return "garbage {{ not json"
+
+
+class _FakeModelRegistry:
+    def __init__(self, generator: object) -> None:
+        self._generator = generator
+
+    def resolve_for_node(
+        self,
+        *,
+        node_model: str | None,
+        node_name: str,
+    ) -> ResolvedModel:
+        del node_model, node_name
+        return ResolvedModel(generator=self._generator, kwargs={})
 
 
 def _make_config() -> AgentRunConfig:
@@ -373,3 +387,18 @@ class TestCreateDefaultProviders:
         assert isinstance(evaluator, LLMEvaluateDecisionProvider)
         assert isinstance(planner, LLMPlanProvider)
         # router uses fast, others use main via default
+
+    def test_decompose_enabled_is_forwarded_to_default_router(self) -> None:
+        gen = _StubGenerator([{"route": "decompose", "reason": "multi-hop"}])
+        reg = _FakeModelRegistry(gen)
+        selection = ModelSelectionPolicy()
+
+        router, _, _ = create_default_providers(
+            reg,  # type: ignore[arg-type]
+            selection,
+            decompose_enabled=True,
+        )
+        result = router.route(_make_state(task="对比 A 和 B"))
+
+        assert result["status"] == "decompose"
+        assert result["execution_mode"] == "decompose"

@@ -6,9 +6,14 @@ from typing import Annotated
 
 import typer
 
-from rag.agent.builtin.research import create_research_agent_service
+from rag.agent.builtin import create_builtin_agent_registry
+from rag.agent.builtin.research import RESEARCH_AGENT
+from rag.agent.core.agent_service_factory import AgentServiceFactory
 from rag.agent.core.human_input import HumanInputResponse
+from rag.agent.core.llm_registry import ModelRegistry
+from rag.agent.core.subagent_runner import BuiltinSubAgentRunner
 from rag.agent.service import AgentRunRequest, AgentRunResult, AgentService
+from rag.agent.tools.builtin_registry import create_builtin_tool_registry
 from rag.agent.tools.llm_tools import (
     LLMCompareInput,
     LLMGenerateInput,
@@ -18,6 +23,40 @@ from rag.agent.tools.llm_tools import (
 from rag.agent.tools.registry import ToolRunner
 
 agent_app = typer.Typer(add_completion=False, no_args_is_help=True)
+
+
+def _build_llm_tool_runners(primary_chat) -> dict[str, ToolRunner]:
+    if primary_chat is None:
+        return {}
+
+    def _llm_generate(payload: LLMGenerateInput) -> LLMTextOutput:
+        text = primary_chat.chat(payload.prompt)
+        return LLMTextOutput(text=text)
+
+    def _llm_summarize(payload: LLMSummarizeInput) -> LLMTextOutput:
+        prompt = payload.task
+        if payload.context_sections:
+            prompt = payload.task + "\n\n" + "\n".join(payload.context_sections)
+        text = primary_chat.chat(prompt)
+        return LLMTextOutput(
+            text=text,
+            evidence_ids=payload.evidence_ids,
+            citation_ids=payload.citation_ids,
+        )
+
+    def _llm_compare(payload: LLMCompareInput) -> LLMTextOutput:
+        prompt = payload.question
+        if payload.left_context_sections or payload.right_context_sections:
+            prompt += "\n\n左:\n" + "\n".join(payload.left_context_sections)
+            prompt += "\n\n右:\n" + "\n".join(payload.right_context_sections)
+        text = primary_chat.chat(prompt)
+        return LLMTextOutput(text=text)
+
+    return {
+        "llm_generate": _llm_generate,
+        "llm_summarize": _llm_summarize,
+        "llm_compare": _llm_compare,
+    }
 
 
 def _build_agent_service(runtime) -> AgentService:
@@ -42,38 +81,25 @@ def _build_agent_service(runtime) -> AgentService:
     for name in ("vector_search", "keyword_search", "grounding", "rerank", "graph_expand"):
         runners[name] = rag_runner.retrieve_evidence
 
-    # LLM tools
-    if primary_chat is not None:
+    runners.update(_build_llm_tool_runners(primary_chat))
 
-        def _llm_generate(payload: LLMGenerateInput) -> LLMTextOutput:
-            text = primary_chat.chat(payload.prompt)
-            return LLMTextOutput(text=text)
+    tool_registry = create_builtin_tool_registry(runners=runners)
+    try:
+        model_registry = ModelRegistry.from_env()
+    except Exception:
+        model_registry = None
 
-        def _llm_summarize(payload: LLMSummarizeInput) -> LLMTextOutput:
-            prompt = payload.task
-            if payload.context_sections:
-                prompt = payload.task + "\n\n" + "\n".join(payload.context_sections)
-            text = primary_chat.chat(prompt)
-            return LLMTextOutput(
-                text=text,
-                evidence_ids=payload.evidence_ids,
-                citation_ids=payload.citation_ids,
-            )
-
-        def _llm_compare(payload: LLMCompareInput) -> LLMTextOutput:
-            prompt = payload.question
-            if payload.left_context_sections or payload.right_context_sections:
-                prompt += "\n\n左:\n" + "\n".join(payload.left_context_sections)
-                prompt += "\n\n右:\n" + "\n".join(payload.right_context_sections)
-            text = primary_chat.chat(prompt)
-            return LLMTextOutput(text=text)
-
-        runners["llm_generate"] = _llm_generate
-        runners["llm_summarize"] = _llm_summarize
-        runners["llm_compare"] = _llm_compare
-
-    # SubAgentRunner 暂缺（TODO: 多 Agent 编排阶段实现）
-    return create_research_agent_service(runners=runners)
+    agent_registry = create_builtin_agent_registry()
+    service_factory = AgentServiceFactory(
+        tool_registry=tool_registry,
+        model_registry=model_registry,
+    )
+    subagent_runner = BuiltinSubAgentRunner(
+        agent_registry=agent_registry,
+        service_factory=service_factory,
+    )
+    service_factory.bind_subagent_runner(subagent_runner)
+    return service_factory.create(RESEARCH_AGENT)
 
 
 def _format_tool_summary(result: AgentRunResult) -> str:
