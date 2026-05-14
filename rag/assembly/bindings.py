@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass, field
+from typing import Any
 
 def _provider_name(provider: object) -> str:
     explicit = getattr(provider, "provider_name", None)
@@ -119,13 +120,13 @@ class ChatCapabilityBinding:
         object.__setattr__(self, "provider_name", _provider_name(self.backend))
         object.__setattr__(self, "model_name", _provider_model(self.backend, "chat"))
 
-    def chat(self, prompt: str) -> str:
+    def chat(self, prompt: str, **kwargs: Any) -> str:
         chat = getattr(self.backend, "chat", None)
         if callable(chat):
-            return str(chat(prompt))
+            return str(chat(prompt, **kwargs))
         generate_text = getattr(self.backend, "generate_text", None)
         if callable(generate_text):
-            return str(generate_text(prompt=prompt))
+            return str(generate_text(prompt=prompt, **kwargs))
         raise RuntimeError("Chat capability is not available")
 
 

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
@@ -39,7 +39,6 @@ from rag.ingest.section_refiner import SectionRefiner
 from rag.ingest.table_executor import TableExecutor
 from rag.providers.generation import AnswerGenerationService, AnswerGenerator, GeneratorBinding
 from rag.query_pipeline import _QueryPipeline
-
 from rag.retrieval.authorization_service import AuthorizationService
 from rag.retrieval.context import (
     ContextPromptBuilder,
@@ -128,11 +127,11 @@ class _ChatGeneratorAdapter:
         value = getattr(self._binding, "model_name", None)
         return value if isinstance(value, str) and value else None
 
-    def generate_text(self, *, prompt: str) -> str:
+    def generate_text(self, *, prompt: str, max_tokens: int = 4096) -> str:
         chat = getattr(self._binding, "chat", None)
         if not callable(chat):
             raise RuntimeError("chat generation capability is not configured")
-        return str(chat(prompt))
+        return str(chat(prompt, max_tokens=max_tokens))
 
     def generate_structured(self, *, prompt: str, schema: type[Any], **kwargs: Any) -> Any:
         backend = getattr(self._binding, "backend", None)
@@ -143,9 +142,7 @@ class _ChatGeneratorAdapter:
 
 
 class _LazySummaryGeneratorAdapter:
-    def __init__(self, *, binding: object) -> None:
-        if binding is None:
-            raise RuntimeError("Summary generator requires a chat binding from the capability bundle")
+    def __init__(self, *, binding: object | None) -> None:
         self._adapter = _ChatGeneratorAdapter(binding)
 
     @property
@@ -156,8 +153,8 @@ class _LazySummaryGeneratorAdapter:
     def model_name(self) -> str | None:
         return self._adapter.model_name
 
-    def generate_text(self, *, prompt: str) -> str:
-        return self._adapter.generate_text(prompt=prompt)
+    def generate_text(self, *, prompt: str, max_tokens: int = 4096) -> str:
+        return self._adapter.generate_text(prompt=prompt, max_tokens=max_tokens)
 
     def generate_structured(self, *, prompt: str, schema: type[Any], **kwargs: Any) -> Any:
         return self._adapter.generate_structured(prompt=prompt, schema=schema, **kwargs)
