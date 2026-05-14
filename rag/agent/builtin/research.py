@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
+from langgraph.checkpoint.base import BaseCheckpointSaver
+
 from rag.agent.core.definition import AgentDefinition, ModelSelectionPolicy, ToolPolicy
 from rag.agent.core.llm_registry import ModelRegistry
 from rag.agent.graphs.nodes.evaluate import EvaluateDecisionProvider
@@ -39,6 +41,7 @@ RESEARCH_AGENT = AgentDefinition(
         "grounding",
         "rerank",
         "llm_summarize",
+        "rag_search_answer",
     ],
     estimated_token_budget=10000,
     model_selection=ModelSelectionPolicy(thinking=True),
@@ -56,6 +59,7 @@ def create_research_agent_service(
     route_provider: RouteProvider | None = None,
     subagent_runner: SubAgentRunner | None = None,
     model_registry: ModelRegistry | None | object = _SENTINEL,
+    checkpointer: BaseCheckpointSaver | None = None,
 ) -> AgentService:
     # 默认自动加载 models.yaml，测试环境可显式传 None 跳过
     registry: ModelRegistry | None
@@ -74,4 +78,5 @@ def create_research_agent_service(
         route_provider=route_provider,
         subagent_runner=subagent_runner,
         model_registry=registry,
+        checkpointer=checkpointer,
     )

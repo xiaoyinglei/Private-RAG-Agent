@@ -9,11 +9,13 @@ import typer
 from rag.agent.builtin import create_builtin_agent_registry
 from rag.agent.builtin.research import RESEARCH_AGENT
 from rag.agent.core.agent_service_factory import AgentServiceFactory
+from rag.agent.core.checkpointing import create_agent_checkpointer
 from rag.agent.core.human_input import HumanInputResponse
 from rag.agent.core.llm_registry import ModelRegistry
 from rag.agent.core.subagent_runner import BuiltinSubAgentRunner, BuiltinSynthesisRunner
 from rag.agent.service import AgentRunRequest, AgentRunResult, AgentService
 from rag.agent.tools.builtin_registry import create_builtin_tool_registry
+from rag.agent.tools.fast_path_tools import RAGSearchAnswerRunner
 from rag.agent.tools.llm_tools import (
     LLMCompareInput,
     LLMGenerateInput,
@@ -59,7 +61,7 @@ def _build_llm_tool_runners(primary_chat) -> dict[str, ToolRunner]:
     }
 
 
-def _build_agent_service(runtime) -> AgentService:
+def _build_agent_service(runtime, *, checkpoint_db: Path | None = None) -> AgentService:
     """从 RAGRuntime 构造 AgentService，注册真实 RAG tool runners。
 
     只在可以构造 RAGRuntime / retrieval_service 时成功。
@@ -80,6 +82,8 @@ def _build_agent_service(runtime) -> AgentService:
     )
     for name in ("vector_search", "keyword_search", "grounding", "rerank", "graph_expand"):
         runners[name] = rag_runner.retrieve_evidence
+    fast_path_runner = RAGSearchAnswerRunner(runtime=runtime)
+    runners["rag_search_answer"] = fast_path_runner.answer
 
     runners.update(_build_llm_tool_runners(primary_chat))
 
@@ -93,6 +97,7 @@ def _build_agent_service(runtime) -> AgentService:
     service_factory = AgentServiceFactory(
         tool_registry=tool_registry,
         model_registry=model_registry,
+        checkpointer=create_agent_checkpointer(checkpoint_db),
     )
     subagent_runner = BuiltinSubAgentRunner(
         agent_registry=agent_registry,
@@ -193,6 +198,19 @@ def _handle_pause(result: AgentRunResult, run_id: str) -> HumanInputResponse | N
         decision=choice,
         approved_tool_call_ids=approved,
         denied_tool_call_ids=denied,
+    )
+
+
+def _build_resume_response(request: object, decision: str) -> HumanInputResponse:
+    tool_call_ids = [
+        tool_call.tool_call_id
+        for tool_call in getattr(request, "tool_calls", [])
+    ]
+    return HumanInputResponse(
+        request_id=request.request_id,
+        decision=decision,  # type: ignore[arg-type]
+        approved_tool_call_ids=tool_call_ids if decision == "allow_once" else [],
+        denied_tool_call_ids=tool_call_ids if decision == "deny" else [],
     )
 
 
@@ -330,8 +348,15 @@ def agent_run(
     verbose: Annotated[
         bool, typer.Option("--verbose", "-v", help="详细输出")
     ] = False,
+    run_id: Annotated[
+        str | None, typer.Option("--run-id", help="指定 run_id，便于后续 resume")
+    ] = None,
+    checkpoint_db: Annotated[
+        Path | None,
+        typer.Option("--checkpoint-db", help="SQLite checkpoint 文件；启用后可跨进程 resume"),
+    ] = None,
 ) -> None:
-    """单次 Agent 运行。不支持跨进程恢复。"""
+    """单次 Agent 运行。传入 --checkpoint-db 后支持跨进程恢复。"""
     from rag import AssemblyRequest, CapabilityRequirements, RAGRuntime, StorageComponentConfig, StorageConfig
     from rag.retrieval import QueryOptions
 
@@ -352,19 +377,31 @@ def agent_run(
         )
 
     with runtime:
-        service = _build_agent_service(runtime)
-        run_id = f"run_{id(service):x}"
+        service = _build_agent_service(runtime, checkpoint_db=checkpoint_db)
+        effective_run_id = run_id or f"run_{id(service):x}"
         result = asyncio.run(
-            service.run(AgentRunRequest(task=task, run_id=run_id, thread_id=run_id))
+            service.run(
+                AgentRunRequest(
+                    task=task,
+                    run_id=effective_run_id,
+                    thread_id=effective_run_id,
+                )
+            )
         )
 
         _display_result(result, verbose=verbose)
 
         if result.status == "paused":
             print()
-            print("⚠  当前命令使用 MemorySaver，进程结束后暂停状态无法恢复。")
-            print("   请使用 `rag agent chat` 重新发起同一任务并在同一会话内完成审批。")
-            print("   如需跨进程恢复，请先启用 SqliteSaver/PostgresSaver。")
+            if checkpoint_db is None:
+                print("⚠  当前命令使用 MemorySaver，进程结束后暂停状态无法恢复。")
+                print("   请使用 --checkpoint-db 启用 SQLite checkpoint 后重试。")
+            else:
+                print("⏸  已保存 checkpoint，可跨进程恢复:")
+                print(
+                    f"   rag agent resume {effective_run_id} "
+                    f"--checkpoint-db {checkpoint_db}"
+                )
 
             if result.needs_user_input:
                 print(f"\n   待处理: {result.needs_user_input}")
@@ -376,9 +413,56 @@ def agent_run(
             raise typer.Exit(code=1)
 
 
-@agent_app.command(name="resume", hidden=True)
-def agent_resume() -> None:
-    """（暂未开放）MemorySaver 不支持跨进程 resume。"""
-    print("错误: MemorySaver 不支持跨进程 resume。")
-    print("请使用 `rag agent chat` 重新发起查询并在同一会话内完成交互。")
-    raise typer.Exit(code=1)
+@agent_app.command(name="resume")
+def agent_resume(
+    run_id: Annotated[str, typer.Argument(help="要恢复的 run_id/thread_id")],
+    storage_root: Annotated[
+        Path, typer.Option("--storage-root", help="RAG 存储根目录")
+    ] = Path(".rag"),
+    profile: Annotated[
+        str | None, typer.Option("--profile", help="Assembly profile")
+    ] = None,
+    checkpoint_db: Annotated[
+        Path,
+        typer.Option("--checkpoint-db", help="SQLite checkpoint 文件"),
+    ] = Path(".rag/agent_checkpoints.sqlite"),
+    decision: Annotated[
+        str,
+        typer.Option("--decision", help="allow_once | deny | continue | abort"),
+    ] = "allow_once",
+    verbose: Annotated[
+        bool, typer.Option("--verbose", "-v", help="详细输出")
+    ] = False,
+) -> None:
+    """从 SQLite checkpoint 恢复暂停的 Agent 运行。"""
+    from rag import AssemblyRequest, CapabilityRequirements, RAGRuntime, StorageComponentConfig, StorageConfig
+    from rag.retrieval import QueryOptions
+
+    storage = StorageConfig(
+        root=storage_root,
+        vectors=StorageComponentConfig(backend="milvus", dsn="http://127.0.0.1:19530"),
+    )
+    requirements = CapabilityRequirements(
+        require_chat=True,
+        default_context_tokens=QueryOptions().max_context_tokens,
+    )
+    if profile:
+        runtime = RAGRuntime.from_profile(
+            storage=storage,
+            profile_id=profile,
+            requirements=requirements,
+        )
+    else:
+        runtime = RAGRuntime.from_request(
+            storage=storage,
+            request=AssemblyRequest(requirements=requirements),
+        )
+
+    with runtime:
+        service = _build_agent_service(runtime, checkpoint_db=checkpoint_db)
+        request = asyncio.run(service.apending_human_input_request(run_id=run_id))
+        response = _build_resume_response(request, decision)
+        result = asyncio.run(service.resume(run_id=run_id, response=response))
+        _display_result(result, verbose=verbose)
+        if result.status == "failed":
+            raise typer.Exit(code=1)

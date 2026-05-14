@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.checkpoint.memory import MemorySaver
 
 from rag.agent.core.definition import AgentDefinition
@@ -27,6 +28,7 @@ class AgentGraphCompiler:
         subagent_runner: SubAgentRunner | None = None,
         synthesis_runner: SynthesisRunner | None = None,
         model_registry: ModelRegistry | None = None,
+        checkpointer: BaseCheckpointSaver | None = None,
     ) -> None:
         self._tool_registry = tool_registry
         self._evaluate_decision_provider = evaluate_decision_provider
@@ -35,7 +37,7 @@ class AgentGraphCompiler:
         self._subagent_runner = subagent_runner
         self._synthesis_runner = synthesis_runner
         self._model_registry = model_registry
-        self._checkpointer = MemorySaver()
+        self._checkpointer = checkpointer or MemorySaver()
 
     def compile(self, definition: AgentDefinition) -> object:
         missing_tools = self._missing_allowed_tools(definition)

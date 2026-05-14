@@ -1,16 +1,13 @@
 from __future__ import annotations
 
-import asyncio
-
 import pytest
 from pydantic import BaseModel
 
-from rag.agent.core.approval_policy import ApprovalAction, ApprovalPolicy
-from rag.agent.core.human_input import HumanInputResponse, ToolCallSummary
 from rag.agent.core.context import AgentRunConfig
+from rag.agent.core.human_input import HumanInputResponse
 from rag.agent.graphs.nodes.execute import execute_node
 from rag.agent.graphs.nodes.pause import pause_node
-from rag.agent.state import AgentState, ToolCallPlan
+from rag.agent.state import ToolCallPlan
 from rag.agent.tools.registry import ToolRegistry
 from rag.agent.tools.spec import ToolError, ToolPermissions, ToolSpec
 from rag.schema.runtime import AccessPolicy
@@ -117,6 +114,7 @@ class TestExecuteNodeWithApproval:
         assert update["status"] == "paused"
         assert update["human_input_request"] is not None
         assert update["human_input_request"].kind == "tool_approval"
+        assert update["human_input_request"].tool_calls[0].tool_call_id == call.tool_call_id
 
     @pytest.mark.anyio
     async def test_previously_approved_tool_executes(self) -> None:

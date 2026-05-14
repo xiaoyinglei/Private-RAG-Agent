@@ -7,7 +7,6 @@ from rag import RAGRuntime, StorageConfig
 from rag.assembly import AssemblyConfig, CapabilityAssemblyService, CapabilityRequirements, ProviderConfig
 from rag.retrieval import QueryOptions
 from rag.retrieval.models import PublicQueryResult, RetrievalResult
-from rag.runtime import _LazySummaryGeneratorAdapter
 from rag.schema.query import EvidenceItem, GroundingTarget
 
 
@@ -71,6 +70,13 @@ def _assembly_service(monkeypatch: pytest.MonkeyPatch) -> CapabilityAssemblyServ
     return service
 
 
+def _empty_assembly_service(monkeypatch: pytest.MonkeyPatch) -> CapabilityAssemblyService:
+    service = CapabilityAssemblyService(env_path=".env.test-unused")
+    monkeypatch.setattr(service, "_load_env", lambda: None)
+    monkeypatch.setattr(service, "_compatibility_config_from_environment", lambda: (AssemblyConfig(), {}))
+    return service
+
+
 def test_runtime_catalog_lists_recommended_profiles(monkeypatch: pytest.MonkeyPatch) -> None:
     service = _assembly_service(monkeypatch)
     runtime = RAGRuntime.from_profile(
@@ -84,6 +90,32 @@ def test_runtime_catalog_lists_recommended_profiles(monkeypatch: pytest.MonkeyPa
         runtime.close()
 
     assert {"local_full", "local_retrieval_cloud_chat", "cloud_full", "test_minimal"} <= profile_ids
+
+
+def test_runtime_without_chat_binding_uses_visible_summary_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = _empty_assembly_service(monkeypatch)
+    runtime = RAGRuntime.from_profile(
+        storage=StorageConfig.in_memory(),
+        profile_id="test_minimal",
+        assembly_service=service,
+    )
+    try:
+        assert runtime.capability_bundle.chat_bindings == ()
+        result = runtime.insert(
+            source_type="plain_text",
+            location="memory://runtime-no-chat",
+            owner="test",
+            content_text="Alpha Engine handles ingestion. Beta Service depends on Alpha Engine.",
+        )
+        entry = runtime.stores.vector_repo.get_entry(str(result.doc_id), item_kind="doc_summary")
+    finally:
+        runtime.close()
+
+    assert entry is not None
+    assert '"method": "fallback"' in entry.metadata["metadata_json"]
+    assert '"fallback_reason": "RuntimeError"' in entry.metadata["metadata_json"]
 
 
 def test_runtime_summary_generator_follows_chat_binding(monkeypatch: pytest.MonkeyPatch) -> None:

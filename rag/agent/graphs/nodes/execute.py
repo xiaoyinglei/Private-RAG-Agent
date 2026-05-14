@@ -108,8 +108,9 @@ async def execute_node(
 
     for call in rest:
         spec = specs_by_name.get(call.tool_name)
+        approval_arguments = {**call.arguments, "tool_call_id": call.tool_call_id}
         decision = approval_policy.decide(
-            tool_name=call.tool_name, arguments=call.arguments, spec=spec,
+            tool_name=call.tool_name, arguments=approval_arguments, spec=spec,
         )
 
         if decision.action == "deny":

@@ -2,13 +2,14 @@ from __future__ import annotations
 
 from uuid import uuid4
 
+from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph.message import BaseMessage
 from pydantic import BaseModel, ConfigDict, Field
 
 from rag.agent.core.compiler import AgentGraphCompiler
 from rag.agent.core.context import AgentRunConfig, RuntimeRegistry
 from rag.agent.core.definition import AgentDefinition
-from rag.agent.core.human_input import HumanInputResponse
+from rag.agent.core.human_input import HumanInputRequest, HumanInputResponse
 from rag.agent.core.llm_registry import ModelRegistry
 from rag.agent.graphs.nodes.evaluate import EvaluateDecisionProvider
 from rag.agent.graphs.nodes.execute_subagent import SubAgentRunner
@@ -103,6 +104,7 @@ class AgentService:
         subagent_runner: SubAgentRunner | None = None,
         synthesis_runner: SynthesisRunner | None = None,
         model_registry: ModelRegistry | None = None,
+        checkpointer: BaseCheckpointSaver | None = None,
     ) -> None:
         self._definition = definition
         self._compiler = AgentGraphCompiler(
@@ -113,6 +115,7 @@ class AgentService:
             subagent_runner=subagent_runner,
             synthesis_runner=synthesis_runner,
             model_registry=model_registry,
+            checkpointer=checkpointer,
         )
 
     def initial_state(self, request: AgentRunRequest) -> AgentState:
@@ -225,13 +228,79 @@ class AgentService:
         from langgraph.types import Command
 
         graph = self._compiler.compile(self._definition)
+        run_config = await self._restore_runtime_handles_from_checkpoint(
+            graph,
+            thread_id=run_id,
+        )
         result_state = await graph.ainvoke(
             Command(resume=response.model_dump(mode="json")),
-            config={"configurable": {"thread_id": run_id}},
+            config={"configurable": {"thread_id": run_config.thread_id}},
         )
         if result_state.get("status") in {"done", "failed"}:
-            RuntimeRegistry.remove(run_id)
+            RuntimeRegistry.remove(run_config.run_id)
         return AgentRunResult.from_state(result_state)
+
+    def pending_human_input_request(self, *, run_id: str) -> HumanInputRequest:
+        graph = self._compiler.compile(self._definition)
+        state = self._checkpoint_state(graph, thread_id=run_id)
+        request = state.get("human_input_request")
+        if request is None:
+            raise KeyError(f"No pending human input request for run_id={run_id}")
+        return request
+
+    async def apending_human_input_request(self, *, run_id: str) -> HumanInputRequest:
+        graph = self._compiler.compile(self._definition)
+        state = await self._acheckpoint_state(graph, thread_id=run_id)
+        request = state.get("human_input_request")
+        if request is None:
+            raise KeyError(f"No pending human input request for run_id={run_id}")
+        return request
+
+    async def _restore_runtime_handles_from_checkpoint(
+        self,
+        graph: object,
+        *,
+        thread_id: str,
+    ) -> AgentRunConfig:
+        state = await self._acheckpoint_state(graph, thread_id=thread_id)
+        run_config = state["run_config"]
+        try:
+            RuntimeRegistry.get(run_config.run_id)
+            return run_config
+        except KeyError:
+            handles = RuntimeRegistry.get_or_create(run_config)
+
+        committed = sum(
+            max(0, getattr(result, "token_used", 0))
+            for result in state.get("tool_results", [])
+        )
+        if committed > 0:
+            lease_id = f"checkpoint_restore:{run_config.run_id}"
+            reserved = await handles.budget_ledger.reserve(
+                lease_id,
+                min(committed, run_config.budget_total),
+            )
+            if reserved:
+                await handles.budget_ledger.commit(lease_id, committed)
+        return run_config
+
+    @staticmethod
+    def _checkpoint_state(graph: object, *, thread_id: str) -> AgentState:
+        snapshot = graph.get_state(  # type: ignore[attr-defined]
+            {"configurable": {"thread_id": thread_id}}
+        )
+        if not snapshot.values:
+            raise KeyError(f"No checkpoint found for run_id={thread_id}")
+        return snapshot.values
+
+    @staticmethod
+    async def _acheckpoint_state(graph: object, *, thread_id: str) -> AgentState:
+        snapshot = await graph.aget_state(  # type: ignore[attr-defined]
+            {"configurable": {"thread_id": thread_id}}
+        )
+        if not snapshot.values:
+            raise KeyError(f"No checkpoint found for run_id={thread_id}")
+        return snapshot.values
 
 
 __all__ = [

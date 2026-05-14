@@ -35,7 +35,9 @@ def route_node(state: AgentState) -> dict:
 
 
 def route_after_route(state: AgentState) -> str:
-    if state.get("status") in {"fast_path", "direct"}:
+    if state.get("status") == "fast_path":
+        return "fast_path"
+    if state.get("status") == "direct":
         return "execute"
     if state.get("status") == "decompose":
         if state.get("decompose_disabled_single_agent_mode"):

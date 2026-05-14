@@ -6,6 +6,7 @@ from rag.agent.builtin.research import RESEARCH_AGENT, create_research_agent_ser
 from rag.agent.core.compiler import AgentGraphCompiler
 from rag.agent.service import AgentRunRequest
 from rag.agent.state import ToolCallPlan
+from rag.agent.tools.fast_path_tools import ALL_FAST_PATH_TOOLS
 from rag.agent.tools.llm_tools import ALL_LLM_TOOLS, LLMTextOutput
 from rag.agent.tools.rag_tools import ALL_RAG_TOOLS
 from rag.agent.tools.registry import ToolRegistry
@@ -13,7 +14,7 @@ from rag.agent.tools.registry import ToolRegistry
 
 def _registry_with_builtin_tools() -> ToolRegistry:
     registry = ToolRegistry()
-    for tool in [*ALL_RAG_TOOLS, *ALL_LLM_TOOLS]:
+    for tool in [*ALL_RAG_TOOLS, *ALL_LLM_TOOLS, *ALL_FAST_PATH_TOOLS]:
         registry.register(tool)
     return registry
 
@@ -26,6 +27,7 @@ def test_research_agent_uses_spec_tool_allowlist() -> None:
         "grounding",
         "rerank",
         "llm_summarize",
+        "rag_search_answer",
     ]
 
 

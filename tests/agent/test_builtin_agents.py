@@ -37,6 +37,10 @@ def test_compare_agent_uses_compare_tool_contract() -> None:
     assert "llm_generate" not in COMPARE_AGENT.allowed_tools
 
 
+def test_research_agent_allows_fast_path_answer_tool() -> None:
+    assert "rag_search_answer" in BUILTIN_AGENT_DEFINITIONS["research"].allowed_tools
+
+
 def test_builtin_agent_budget_defaults_match_orchestration_budget_policy() -> None:
     assert ORCHESTRATOR_AGENT.estimated_token_budget == 20000
     for agent_type in {"research", "compare", "factcheck", "synthesize"}:

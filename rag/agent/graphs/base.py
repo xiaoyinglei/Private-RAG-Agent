@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
 
@@ -16,6 +17,7 @@ from rag.agent.graphs.nodes.execute_subagent import (
     SubAgentRunResult,
     execute_subagent_node,
 )
+from rag.agent.graphs.nodes.fast_path import fast_path_node
 from rag.agent.graphs.nodes.observe import observe_node
 from rag.agent.graphs.nodes.pause import pause_node
 from rag.agent.graphs.nodes.plan import PlanProvider, plan_node, route_after_plan
@@ -45,7 +47,7 @@ def build_agent_graph(
     route_provider: RouteProvider | None = None,
     subagent_runner: SubAgentRunner | None = None,
     synthesis_runner: SynthesisRunner | None = None,
-    checkpointer: MemorySaver | None = None,
+    checkpointer: BaseCheckpointSaver | MemorySaver | None = None,
 ):
     graph = StateGraph(AgentState)
     allowed_tools = frozenset(definition.allowed_tools)
@@ -65,6 +67,13 @@ def build_agent_graph(
 
     async def bound_execute_node(state: AgentState) -> dict:
         return await execute_node(state, tool_registry=tool_registry, allowed_tools=allowed_tools)
+
+    async def bound_fast_path_node(state: AgentState) -> dict:
+        return await fast_path_node(
+            state,
+            tool_registry=tool_registry,
+            allowed_tools=allowed_tools,
+        )
 
     async def bound_execute_subagent_node(state: AgentState) -> dict:
         return await execute_subagent_node(state, subagent_runner=effective_subagent_runner)
@@ -90,6 +99,7 @@ def build_agent_graph(
         )
 
     graph.add_node("route", bound_route_node)
+    graph.add_node("fast_path", bound_fast_path_node)
     graph.add_node("plan", bound_plan_node)
     graph.add_node("execute", bound_execute_node)
     graph.add_node("execute_subagent", bound_execute_subagent_node)
@@ -103,6 +113,7 @@ def build_agent_graph(
         "route",
         route_after_route,
         {
+            "fast_path": "fast_path",
             "execute": "execute",
             "plan": "plan",
             "synthesize": "synthesize",
@@ -125,6 +136,7 @@ def build_agent_graph(
         },
     )
     graph.add_edge("execute_subagent", "evaluate")
+    graph.add_edge("fast_path", END)
     graph.add_edge("observe", "evaluate")
     graph.add_conditional_edges(
         "evaluate",

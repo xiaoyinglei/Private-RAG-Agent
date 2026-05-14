@@ -20,6 +20,7 @@ def test_builtin_tool_registry_contains_rag_and_llm_specs() -> None:
         "llm_generate",
         "llm_summarize",
         "llm_compare",
+        "rag_search_answer",
     }
 
 
