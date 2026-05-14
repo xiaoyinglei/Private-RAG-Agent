@@ -6,7 +6,7 @@ from rag.agent.core.compiler import AgentGraphCompiler
 from rag.agent.core.context import AgentRunConfig, BudgetLedger, RuntimeRegistry, derive_child_config
 from rag.agent.core.definition import AgentDefinition, ModelSelectionPolicy, ToolPolicy
 from rag.agent.core.registry import AgentRegistry
-from rag.agent.core.subagent_runner import BuiltinSubAgentRunner
+from rag.agent.core.subagent_runner import BuiltinSubAgentRunner, BuiltinSynthesisRunner
 from rag.agent.core.task import SubTaskNode, SubTaskResult, SubTaskStatus, TaskDAG, TaskEdge
 from rag.agent.service import AgentRunRequest, AgentRunResult, AgentService
 from rag.agent.state import (
@@ -33,6 +33,7 @@ __all__ = [
     "AgentAsToolRunner",
     "AgentToolSpec",
     "BuiltinSubAgentRunner",
+    "BuiltinSynthesisRunner",
     "BudgetLedger",
     "ContextBudgetSnapshot",
     "ExtractedFact",

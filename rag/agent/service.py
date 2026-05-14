@@ -14,6 +14,7 @@ from rag.agent.graphs.nodes.evaluate import EvaluateDecisionProvider
 from rag.agent.graphs.nodes.execute_subagent import SubAgentRunner
 from rag.agent.graphs.nodes.plan import PlanProvider
 from rag.agent.graphs.nodes.route import RouteProvider
+from rag.agent.graphs.nodes.synthesize import SynthesisRunner
 from rag.agent.state import AgentState, ToolCallPlan
 from rag.agent.tools.registry import ToolRegistry
 from rag.agent.tools.spec import ToolResult
@@ -100,6 +101,7 @@ class AgentService:
         plan_provider: PlanProvider | None = None,
         route_provider: RouteProvider | None = None,
         subagent_runner: SubAgentRunner | None = None,
+        synthesis_runner: SynthesisRunner | None = None,
         model_registry: ModelRegistry | None = None,
     ) -> None:
         self._definition = definition
@@ -109,6 +111,7 @@ class AgentService:
             plan_provider=plan_provider,
             route_provider=route_provider,
             subagent_runner=subagent_runner,
+            synthesis_runner=synthesis_runner,
             model_registry=model_registry,
         )
 

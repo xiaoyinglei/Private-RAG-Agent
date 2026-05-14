@@ -2,7 +2,14 @@ from __future__ import annotations
 
 import pytest
 
-from rag.agent.core.task import SubTaskNode, SubTaskResult, SubTaskStatus, TaskDAG, TaskEdge
+from rag.agent.core.task import (
+    DEFAULT_SUBTASK_TOKEN_BUDGET,
+    SubTaskNode,
+    SubTaskResult,
+    SubTaskStatus,
+    TaskDAG,
+    TaskEdge,
+)
 
 
 def _subtask(subtask_id: str, *, priority: int = 1) -> SubTaskNode:
@@ -65,6 +72,10 @@ def test_ready_subtasks_are_sorted_by_priority_then_id() -> None:
         "high",
         "low",
     ]
+
+
+def test_subtask_default_token_budget_is_10000() -> None:
+    assert _subtask("s1").estimated_tokens == DEFAULT_SUBTASK_TOKEN_BUDGET
 
 
 def test_failed_subtask_result_requires_error_message() -> None:

@@ -40,7 +40,7 @@ RESEARCH_AGENT = AgentDefinition(
         "rerank",
         "llm_summarize",
     ],
-    estimated_token_budget=8000,
+    estimated_token_budget=10000,
     model_selection=ModelSelectionPolicy(thinking=True),
     max_iterations=10,
     max_depth=2,

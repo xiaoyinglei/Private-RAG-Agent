@@ -19,7 +19,7 @@ FACTCHECK_AGENT = AgentDefinition(
         "grounding",
         "llm_generate",
     ],
-    estimated_token_budget=6000,
+    estimated_token_budget=10000,
     model_selection=ModelSelectionPolicy(thinking=True),
     max_iterations=8,
     max_depth=1,

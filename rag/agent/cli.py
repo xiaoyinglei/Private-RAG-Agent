@@ -11,7 +11,7 @@ from rag.agent.builtin.research import RESEARCH_AGENT
 from rag.agent.core.agent_service_factory import AgentServiceFactory
 from rag.agent.core.human_input import HumanInputResponse
 from rag.agent.core.llm_registry import ModelRegistry
-from rag.agent.core.subagent_runner import BuiltinSubAgentRunner
+from rag.agent.core.subagent_runner import BuiltinSubAgentRunner, BuiltinSynthesisRunner
 from rag.agent.service import AgentRunRequest, AgentRunResult, AgentService
 from rag.agent.tools.builtin_registry import create_builtin_tool_registry
 from rag.agent.tools.llm_tools import (
@@ -98,7 +98,12 @@ def _build_agent_service(runtime) -> AgentService:
         agent_registry=agent_registry,
         service_factory=service_factory,
     )
+    synthesis_runner = BuiltinSynthesisRunner(
+        agent_registry=agent_registry,
+        service_factory=service_factory,
+    )
     service_factory.bind_subagent_runner(subagent_runner)
+    service_factory.bind_synthesis_runner(synthesis_runner)
     return service_factory.create(RESEARCH_AGENT)
 
 
@@ -218,11 +223,17 @@ def agent_chat(
     ] = None,
     embedding_model: Annotated[
         str | None,
-        typer.Option("--embedding-model", help="Embedding 模型别名，对应 configs/models.yaml 中 capability=embedding 的条目"),
+        typer.Option(
+            "--embedding-model",
+            help="Embedding 模型别名，对应 configs/models.yaml 中 capability=embedding 的条目",
+        ),
     ] = None,
     reranker_model: Annotated[
         str | None,
-        typer.Option("--reranker-model", help="Reranker 模型别名，对应 configs/models.yaml 中 capability=reranker 的条目"),
+        typer.Option(
+            "--reranker-model",
+            help="Reranker 模型别名，对应 configs/models.yaml 中 capability=reranker 的条目",
+        ),
     ] = None,
 ) -> None:
     """交互式 Agent 对话。暂停时支持工具审批。"""

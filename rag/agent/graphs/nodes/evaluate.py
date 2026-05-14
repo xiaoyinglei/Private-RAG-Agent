@@ -9,7 +9,13 @@ from pydantic import ValidationError
 
 from rag.agent.core.context import AgentRuntimeHandles
 from rag.agent.core.definition import AgentDefinition
-from rag.agent.core.task import SubTaskNode, SubTaskResult, SubTaskStatus, TaskDAG
+from rag.agent.core.task import (
+    DEFAULT_SUBTASK_TOKEN_BUDGET,
+    SubTaskNode,
+    SubTaskResult,
+    SubTaskStatus,
+    TaskDAG,
+)
 from rag.agent.memory.injector import ContextInjector
 from rag.agent.memory.models import InjectedContext
 from rag.agent.state import AgentState, ThinkOutput
@@ -107,7 +113,7 @@ async def _evaluate_task_dag(
     budget_failed: dict[str, SubTaskResult] = {}
     terminal_budget_failed: set[str] = set()
     for subtask in ready:
-        estimated = subtask.estimated_tokens or definition.estimated_token_budget
+        estimated = subtask.estimated_tokens or DEFAULT_SUBTASK_TOKEN_BUDGET
         if await handles.budget_ledger.reserve(subtask.subtask_id, estimated):
             schedulable.append(subtask)
             continue

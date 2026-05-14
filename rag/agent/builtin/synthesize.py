@@ -16,7 +16,7 @@ SYNTHESIZE_AGENT = AgentDefinition(
     allowed_tools=[
         "llm_generate",
     ],
-    estimated_token_budget=5000,
+    estimated_token_budget=10000,
     model_selection=ModelSelectionPolicy(thinking=True),
     max_iterations=4,
     max_depth=0,

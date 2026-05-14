@@ -352,6 +352,36 @@ class TestLLMPlanProvider:
                 ),
             )
 
+    def test_plan_prompt_uses_default_subtask_budget_10000(self) -> None:
+        gen = _StubGenerator([
+            {
+                "subtasks": [
+                    {
+                        "subtask_id": "s1",
+                        "agent_type": "research",
+                        "prompt": "Research",
+                        "priority": 1,
+                        "estimated_tokens": 10000,
+                    }
+                ],
+                "edges": [],
+            }
+        ])
+        provider = LLMPlanProvider(gen)
+
+        provider.create_plan(
+            _make_state(),
+            definition=AgentDefinition(
+                agent_type="orchestrator",
+                description="test",
+                system_prompt="test",
+                allowed_tools=[],
+            ),
+        )
+
+        prompt = gen.calls[0][0]
+        assert '"estimated_tokens": 10000' in prompt
+
 
 # ── create_default_providers ──
 

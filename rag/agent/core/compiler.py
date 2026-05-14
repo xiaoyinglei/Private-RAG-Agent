@@ -10,6 +10,7 @@ from rag.agent.graphs.nodes.evaluate import EvaluateDecisionProvider
 from rag.agent.graphs.nodes.execute_subagent import SubAgentRunner
 from rag.agent.graphs.nodes.plan import PlanProvider
 from rag.agent.graphs.nodes.route import RouteProvider
+from rag.agent.graphs.nodes.synthesize import SynthesisRunner
 from rag.agent.tools.registry import ToolRegistry
 
 
@@ -24,6 +25,7 @@ class AgentGraphCompiler:
         plan_provider: PlanProvider | None = None,
         route_provider: RouteProvider | None = None,
         subagent_runner: SubAgentRunner | None = None,
+        synthesis_runner: SynthesisRunner | None = None,
         model_registry: ModelRegistry | None = None,
     ) -> None:
         self._tool_registry = tool_registry
@@ -31,6 +33,7 @@ class AgentGraphCompiler:
         self._plan_provider = plan_provider
         self._route_provider = route_provider
         self._subagent_runner = subagent_runner
+        self._synthesis_runner = synthesis_runner
         self._model_registry = model_registry
         self._checkpointer = MemorySaver()
 
@@ -69,6 +72,7 @@ class AgentGraphCompiler:
             plan_provider=plan_provider,
             route_provider=route_provider,
             subagent_runner=self._subagent_runner,
+            synthesis_runner=self._synthesis_runner,
             checkpointer=self._checkpointer,
         )
 

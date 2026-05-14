@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from rag.agent.builtin import BUILTIN_AGENT_DEFINITIONS, create_builtin_agent_registry
 from rag.agent.builtin.compare import COMPARE_AGENT
+from rag.agent.builtin.orchestrator import ORCHESTRATOR_AGENT
 from rag.agent.tools.builtin_registry import create_builtin_tool_registry
 
 
@@ -34,3 +35,9 @@ def test_builtin_agent_allowed_tools_exist_in_builtin_tool_registry() -> None:
 def test_compare_agent_uses_compare_tool_contract() -> None:
     assert "llm_compare" in COMPARE_AGENT.allowed_tools
     assert "llm_generate" not in COMPARE_AGENT.allowed_tools
+
+
+def test_builtin_agent_budget_defaults_match_orchestration_budget_policy() -> None:
+    assert ORCHESTRATOR_AGENT.estimated_token_budget == 20000
+    for agent_type in {"research", "compare", "factcheck", "synthesize"}:
+        assert BUILTIN_AGENT_DEFINITIONS[agent_type].estimated_token_budget == 10000
