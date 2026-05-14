@@ -38,7 +38,8 @@ class RetrievalSummaryConfig:
     max_input_tokens: int = 5000
 
     # 摘要最大 token 数，做最后一道截断保护
-    max_output_tokens: int = 800
+    # 预留足够空间：Qwen3 等模型会先输出 reasoning tokens，再输出实际摘要
+    max_output_tokens: int = 4096
 
     # 头中尾截断比例（三区采样，防止中间核心内容丢失）
     head_tokens: int = 1500
@@ -73,6 +74,14 @@ class RetrievalSummarizer:
                 local_files_only=True,
             )
         )
+
+    def _generate_text(self, *, prompt: str) -> str:
+        try:
+            return self._llm.generate_text(
+                prompt=prompt, max_tokens=self._config.max_output_tokens
+            )
+        except TypeError:
+            return self._llm.generate_text(prompt=prompt)
 
     def summarize_section(self, section: ParsedSection, document_title: str) -> str:
         return self.summarize_section_with_metadata(section, document_title).text
@@ -111,7 +120,7 @@ class RetrievalSummarizer:
 
         # 4. 调大模型，但绝不让主链因为摘要失败而崩
         try:
-            generated = self._llm.generate_text(prompt=prompt)
+            generated = self._generate_text(prompt=prompt)
         except Exception as exc:
             return RetrievalSummaryResult(
                 text=self._fallback_summary(raw_text),
@@ -173,7 +182,7 @@ class RetrievalSummarizer:
         )
 
         try:
-            generated = self._llm.generate_text(prompt=prompt)
+            generated = self._generate_text(prompt=prompt)
         except Exception as exc:
             return RetrievalSummaryResult(
                 text=self._fallback_asset_summary(
@@ -231,7 +240,7 @@ class RetrievalSummarizer:
         sampled_text = self._sample_text(child_summary_text)
         prompt = self._build_doc_prompt(document_title=document_title, sampled_text=sampled_text)
         try:
-            generated = self._llm.generate_text(prompt=prompt)
+            generated = self._generate_text(prompt=prompt)
         except Exception as exc:
             return RetrievalSummaryResult(
                 text=self._fallback_summary(child_summary_text),

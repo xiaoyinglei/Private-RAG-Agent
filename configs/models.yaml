@@ -8,6 +8,7 @@ models:
     provider: openai_compatible
     model: mlx-community/Qwen3-14B-4bit
     base_url: http://127.0.0.1:8080/v1
+    summary_max_tokens: 8192
 
   deepseek:
     capability: chat
