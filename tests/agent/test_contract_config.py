@@ -263,27 +263,68 @@ class TestAgentDefinition:
 
 class TestAgentRegistry:
     def test_register_and_get(self) -> None:
+        registry = AgentRegistry()
         ad = AgentDefinition(
             agent_type="test_research",
             description="Test agent",
             system_prompt="You are a test agent.",
             allowed_tools=["search"],
         )
-        AgentRegistry.register(ad)
-        retrieved = AgentRegistry.get("test_research")
+        registry.register(ad)
+        retrieved = registry.get("test_research")
         assert retrieved is ad
 
     def test_get_missing_raises(self) -> None:
+        registry = AgentRegistry()
         with pytest.raises(KeyError, match="not found"):
-            AgentRegistry.get("nonexistent_agent_type")
+            registry.get("nonexistent_agent_type")
 
     def test_list_all(self) -> None:
+        registry = AgentRegistry()
         ad1 = AgentDefinition(
             agent_type="agent_a",
             description="A",
             system_prompt="A",
             allowed_tools=[],
         )
-        AgentRegistry.register(ad1)
-        all_agents = AgentRegistry.list_all()
+        registry.register(ad1)
+        all_agents = registry.list_all()
         assert ad1 in all_agents
+
+    def test_instances_are_isolated(self) -> None:
+        first = AgentRegistry()
+        second = AgentRegistry()
+        ad = AgentDefinition(
+            agent_type="isolated_agent",
+            description="A",
+            system_prompt="A",
+            allowed_tools=[],
+        )
+
+        first.register(ad)
+
+        assert first.get("isolated_agent") is ad
+        with pytest.raises(KeyError, match="not found"):
+            second.get("isolated_agent")
+
+    def test_duplicate_registration_fails_unless_replace_is_explicit(self) -> None:
+        registry = AgentRegistry()
+        first = AgentDefinition(
+            agent_type="dup_agent",
+            description="A",
+            system_prompt="A",
+            allowed_tools=[],
+        )
+        replacement = AgentDefinition(
+            agent_type="dup_agent",
+            description="B",
+            system_prompt="B",
+            allowed_tools=[],
+        )
+
+        registry.register(first)
+        with pytest.raises(ValueError, match="already registered"):
+            registry.register(replacement)
+
+        registry.register(replacement, replace=True)
+        assert registry.get("dup_agent") is replacement

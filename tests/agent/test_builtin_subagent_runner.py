@@ -2,27 +2,18 @@ from __future__ import annotations
 
 import pytest
 
-from rag.agent.core.agent_as_tool import AgentAsToolRunner
+from rag.agent.core.agent_service_factory import AgentServiceFactory
 from rag.agent.core.context import AgentRunConfig, RuntimeRegistry
 from rag.agent.core.definition import AgentDefinition
 from rag.agent.core.registry import AgentRegistry
+from rag.agent.core.subagent_runner import BuiltinSubAgentRunner
 from rag.agent.core.task import SubTaskNode
+from rag.agent.service import AgentRunResult
 from rag.agent.state import AgentState, ThinkOutput, ToolCallPlan
 from rag.agent.tools.builtin_registry import create_builtin_tool_registry
 from rag.agent.tools.llm_tools import LLMTextOutput
 from rag.schema.query import RetrievalSignals
 from rag.schema.runtime import AccessPolicy
-
-
-class _ResearchUnderstandingService:
-    def analyze(
-        self,
-        query: str,
-        *,
-        access_policy: object | None = None,
-    ) -> RetrievalSignals:
-        del query, access_policy
-        return RetrievalSignals()
 
 
 class _ChildDecisionProvider:
@@ -81,6 +72,8 @@ def _parent_state(run_id: str = "parent-run", *, max_depth: int = 2) -> AgentSta
         "citations": [],
         "tool_results": [],
         "task": "Parent task",
+        "retrieval_signals": RetrievalSignals(),
+        "retrieval_signals_debug": None,
         "run_config": config,
         "plan": None,
         "iteration": 0,
@@ -92,6 +85,9 @@ def _parent_state(run_id: str = "parent-run", *, max_depth: int = 2) -> AgentSta
         "approved_tool_call_ids": [],
         "denied_tool_call_ids": [],
         "user_decision": None,
+        "user_message": None,
+        "human_input_request": None,
+        "human_input_response": None,
         "next_subtasks": None,
         "working_summary": None,
         "extracted_facts": [],
@@ -106,7 +102,7 @@ def _parent_state(run_id: str = "parent-run", *, max_depth: int = 2) -> AgentSta
 
 
 @pytest.mark.anyio
-async def test_agent_as_tool_runner_executes_registered_child_with_derived_config() -> None:
+async def test_builtin_subagent_runner_returns_agent_run_result_with_derived_config() -> None:
     child_def = AgentDefinition(
         agent_type="child_research_runner",
         description="Child research",
@@ -117,8 +113,7 @@ async def test_agent_as_tool_runner_executes_registered_child_with_derived_confi
     agent_registry = AgentRegistry()
     agent_registry.register(child_def)
     decision_provider = _ChildDecisionProvider()
-    runner = AgentAsToolRunner(
-        agent_registry=agent_registry,
+    factory = AgentServiceFactory(
         tool_registry=create_builtin_tool_registry(
             runners={
                 "llm_summarize": lambda payload: LLMTextOutput(
@@ -128,9 +123,11 @@ async def test_agent_as_tool_runner_executes_registered_child_with_derived_confi
                 )
             }
         ),
-
+        model_registry=None,
         evaluate_decision_provider=decision_provider,
     )
+    runner = BuiltinSubAgentRunner(agent_registry=agent_registry, service_factory=factory)
+    factory.bind_subagent_runner(runner)
 
     result = await runner.run_subtask(
         subtask=SubTaskNode(
@@ -143,9 +140,9 @@ async def test_agent_as_tool_runner_executes_registered_child_with_derived_confi
         parent_state=_parent_state(),
     )
 
+    assert isinstance(result, AgentRunResult)
     assert result.status == "done"
     assert result.final_answer == "summary:Child task"
-    assert result.tool_results[0].status == "ok"
     first_child_config = decision_provider.seen_configs[0]
     assert first_child_config.parent_run_id == "parent-run"
     assert first_child_config.source_scope == ("doc-1",)
@@ -156,7 +153,7 @@ async def test_agent_as_tool_runner_executes_registered_child_with_derived_confi
 
 
 @pytest.mark.anyio
-async def test_agent_as_tool_runner_rejects_exhausted_parent_depth() -> None:
+async def test_builtin_subagent_runner_rejects_exhausted_parent_depth() -> None:
     child_def = AgentDefinition(
         agent_type="child_depth_runner",
         description="Child depth",
@@ -165,11 +162,12 @@ async def test_agent_as_tool_runner_rejects_exhausted_parent_depth() -> None:
     )
     agent_registry = AgentRegistry()
     agent_registry.register(child_def)
-    runner = AgentAsToolRunner(
-        agent_registry=agent_registry,
+    factory = AgentServiceFactory(
         tool_registry=create_builtin_tool_registry(),
-
+        model_registry=None,
     )
+    runner = BuiltinSubAgentRunner(agent_registry=agent_registry, service_factory=factory)
+    factory.bind_subagent_runner(runner)
 
     with pytest.raises(RuntimeError, match="Agent nesting depth exceeded"):
         await runner.run_subtask(

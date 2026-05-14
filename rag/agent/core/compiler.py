@@ -48,7 +48,9 @@ class AgentGraphCompiler:
         ):
             try:
                 router, evaluator, planner = create_default_providers(
-                    self._model_registry, definition.model_selection
+                    self._model_registry,
+                    definition.model_selection,
+                    decompose_enabled=self._subagent_runner is not None,
                 )
             except Exception:
                 pass

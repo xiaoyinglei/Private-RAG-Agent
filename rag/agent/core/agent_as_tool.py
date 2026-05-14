@@ -9,6 +9,7 @@ from rag.agent.core.registry import AgentRegistry
 from rag.agent.core.task import SubTaskNode
 from rag.agent.graphs.nodes.evaluate import EvaluateDecisionProvider
 from rag.agent.graphs.nodes.plan import PlanProvider
+from rag.agent.graphs.nodes.route import RouteProvider
 from rag.agent.state import AgentState
 from rag.agent.tools.registry import ToolRegistry
 from rag.agent.tools.spec import ToolSpec
@@ -29,14 +30,16 @@ class AgentAsToolRunner:
         self,
         *,
         tool_registry: ToolRegistry,
-        agent_registry: type[AgentRegistry] = AgentRegistry,
+        agent_registry: AgentRegistry,
         evaluate_decision_provider: EvaluateDecisionProvider | None = None,
         plan_provider: PlanProvider | None = None,
+        route_provider: RouteProvider | None = None,
     ) -> None:
         self._tool_registry = tool_registry
         self._agent_registry = agent_registry
         self._evaluate_decision_provider = evaluate_decision_provider
         self._plan_provider = plan_provider
+        self._route_provider = route_provider
 
     async def run_subtask(
         self,
@@ -57,6 +60,7 @@ class AgentAsToolRunner:
             tool_registry=self._tool_registry,
             evaluate_decision_provider=self._evaluate_decision_provider,
             plan_provider=self._plan_provider,
+            route_provider=self._route_provider,
             subagent_runner=self,
         )
         return await service.run_with_config(
