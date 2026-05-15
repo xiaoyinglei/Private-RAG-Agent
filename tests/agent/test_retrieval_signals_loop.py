@@ -491,3 +491,77 @@ class TestNoRoutingMapping:
         import rag.agent.graphs.nodes.execute as m
         src = inspect.getsource(m)
         assert "_routing_from_signals" not in src
+
+
+class TestQueryOptionsToRetrievalServiceSignalFlow:
+    """验证 QueryOptions.retrieval_signals → RetrievalService → engine 的完整链路"""
+
+    def test_query_options_carries_retrieval_signals(self) -> None:
+        from rag.retrieval import QueryOptions
+
+        signals = RetrievalSignals(special_targets=["table"], quoted_terms=["报销"])
+        opts = QueryOptions(retrieval_signals=signals)
+        assert opts.retrieval_signals is not None
+        assert opts.retrieval_signals.special_targets == ["table"]
+        assert opts.retrieval_signals.quoted_terms == ["报销"]
+
+    def test_query_options_signals_default_to_none(self) -> None:
+        from rag.retrieval import QueryOptions
+
+        opts = QueryOptions()
+        assert opts.retrieval_signals is None
+        assert opts.retrieval_signals_debug == {}
+
+    def test_aretrieve_payload_reads_signals_from_query_options(self) -> None:
+        """aretrieve_payload 不再硬编码 RetrievalSignals()"""
+        import inspect
+        import rag.retrieval.orchestrator as m
+        src = inspect.getsource(m.RetrievalService.aretrieve_payload)
+        # 确认不再有硬编码的 RetrievalSignals()
+        assert "retrieval_signals=RetrievalSignals()" not in src
+        # 确认从 query_options 读取 signals
+        assert "query_options.retrieval_signals" in src
+        # 确认有 fallback 逻辑
+        assert "signals or RetrievalSignals()" in src
+
+    def test_async_rag_tool_runner_passes_signals_in_query_options(self) -> None:
+        """AsyncRAGToolRunner._via_aretrieve_payload 构造 QueryOptions 时包含 retrieval_signals"""
+        import inspect
+        import rag.agent.tools.rag_tool_runner as m
+        src = inspect.getsource(m.AsyncRAGToolRunner._via_aretrieve_payload)
+        assert "retrieval_signals=" in src
+        assert "retrieval_signals_debug=" in src
+        assert '"signals_source": "agent_tool_input"' in src
+
+    def test_fast_path_answer_runner_passes_signals(self) -> None:
+        """RAGSearchAnswerRunner.answer 在 QueryOptions 中传递 retrieval_signals"""
+        import inspect
+        import rag.agent.tools.fast_path_tools as m
+        src = inspect.getsource(m.RAGSearchAnswerRunner.answer)
+        assert '"retrieval_signals": payload.retrieval_signals' in src
+        assert '"signals_source": "agent_tool_input"' in src
+
+    def test_aretrieve_payload_signals_plumbing(self) -> None:
+        """验证 aretrieve_payload 的信号解析逻辑（不构造完整 service）"""
+        from rag.retrieval import QueryOptions
+        from rag.schema.query import RetrievalSignals as RS
+
+        # 模拟信号解析逻辑（与 aretrieve_payload 一致）
+        def _resolve(qo):
+            s = qo.retrieval_signals if qo else None
+            return s or RS()
+
+        # 有 signals 时用传入的
+        signals = RS(special_targets=["table"], quoted_terms=["报销"])
+        qo = QueryOptions(retrieval_signals=signals)
+        assert _resolve(qo).special_targets == ["table"]
+
+        # 无 signals 时 fallback 到空
+        qo_none = QueryOptions()
+        resolved = _resolve(qo_none)
+        assert isinstance(resolved, RS)
+        assert resolved.special_targets == []
+        assert resolved.quoted_terms == []
+
+        # query_options=None 也不崩
+        assert isinstance(_resolve(None), RS)

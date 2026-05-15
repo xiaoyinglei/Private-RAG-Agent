@@ -63,9 +63,25 @@ class AsyncRAGToolRunner:
     async def _via_aretrieve_payload(
         self, payload: SearchInput, access_policy: AccessPolicy
     ) -> SearchOutput:
+        from rag.retrieval import QueryOptions
+
+        retrieval_signals = getattr(payload, "retrieval_signals", None)
+        signals_debug: dict[str, object] = {}
+        if retrieval_signals is not None:
+            signals_debug = {
+                "signals_source": "agent_tool_input",
+                "special_targets": list(retrieval_signals.special_targets),
+                "quoted_terms": list(retrieval_signals.quoted_terms),
+            }
+        query_options = QueryOptions(
+            max_context_tokens=self.max_context_tokens,
+            retrieval_signals=retrieval_signals,
+            retrieval_signals_debug=signals_debug,
+        )
         p = await self.retrieval_service.aretrieve_payload(
             payload.query,
             access_policy=access_policy,
+            query_options=query_options,
         )
         # EvidenceBundle 有三个子列表：internal / external / graph
         bundle = p.evidence
@@ -94,10 +110,21 @@ class AsyncRAGToolRunner:
     async def _via_to_thread(self, payload: SearchInput) -> SearchOutput:
         from rag.retrieval import QueryOptions
 
+        retrieval_signals = getattr(payload, "retrieval_signals", None)
+        query_kwargs: dict[str, object] = {
+            "max_context_tokens": self.max_context_tokens,
+            "retrieval_signals": retrieval_signals,
+        }
+        if retrieval_signals is not None:
+            query_kwargs["retrieval_signals_debug"] = {
+                "signals_source": "agent_tool_input",
+                "special_targets": list(retrieval_signals.special_targets),
+                "quoted_terms": list(retrieval_signals.quoted_terms),
+            }
         result = await asyncio.to_thread(
             self.runtime.query,
             payload.query,
-            options=QueryOptions(max_context_tokens=self.max_context_tokens),
+            options=QueryOptions(**query_kwargs),
         )
         items: list[dict[str, object]] = []
         if hasattr(result, "evidence") and result.evidence:

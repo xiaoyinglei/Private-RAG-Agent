@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from rag.retrieval.evidence import CandidateLike
-from rag.schema.query import EvidenceItem, GroundedAnswer, GroundingTarget
+from rag.schema.query import EvidenceItem, GroundedAnswer, GroundingTarget, RetrievalSignals
 from rag.schema.runtime import AccessPolicy, ProviderAttempt, RetrievalDiagnostics
 
 if TYPE_CHECKING:
@@ -49,6 +49,8 @@ class QueryOptions:
     enable_rerank: bool = True
     retrieval_pool_k: int | None = None
     rerank_pool_k: int | None = None
+    retrieval_signals: RetrievalSignals | None = None
+    retrieval_signals_debug: dict[str, object] = field(default_factory=dict)
 
     @property
     def resolved_retrieval_profile(self) -> RetrievalProfile:
