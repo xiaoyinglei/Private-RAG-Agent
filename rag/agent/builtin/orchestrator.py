@@ -14,7 +14,7 @@ ORCHESTRATOR_AGENT = AgentDefinition(
     agent_type="orchestrator",
     description="Plan and coordinate child agents through a TaskDAG.",
     system_prompt=ORCHESTRATOR_AGENT_SYSTEM_PROMPT,
-    allowed_tools=[],
+    allowed_tools=["agent_research", "agent_factcheck"],
     estimated_token_budget=20000,
     model_selection=ModelSelectionPolicy(thinking=True),
     max_iterations=6,

@@ -107,6 +107,14 @@ class AgentService:
         checkpointer: BaseCheckpointSaver | None = None,
     ) -> None:
         self._definition = definition
+        self._base_tool_registry = tool_registry
+        self._evaluate_decision_provider = evaluate_decision_provider
+        self._plan_provider = plan_provider
+        self._route_provider = route_provider
+        self._subagent_runner = subagent_runner
+        self._synthesis_runner = synthesis_runner
+        self._model_registry = model_registry
+        self._checkpointer = checkpointer
         self._compiler = AgentGraphCompiler(
             tool_registry=tool_registry,
             evaluate_decision_provider=evaluate_decision_provider,
@@ -196,7 +204,19 @@ class AgentService:
         denied_tool_call_ids: list[str] | None = None,
         messages: list[BaseMessage] | None = None,
     ) -> AgentRunResult:
-        graph = self._compiler.compile(self._definition)
+        # 构造 request-scoped runtime_tool_registry，注入 AgentAsToolAdapter
+        runtime_registry = self._runtime_tool_registry(run_config)
+        compiler = AgentGraphCompiler(
+            tool_registry=runtime_registry,
+            evaluate_decision_provider=self._evaluate_decision_provider,
+            plan_provider=self._plan_provider,
+            route_provider=self._route_provider,
+            subagent_runner=self._subagent_runner,
+            synthesis_runner=self._synthesis_runner,
+            model_registry=self._model_registry,
+            checkpointer=self._checkpointer,
+        )
+        graph = compiler.compile(self._definition)
         state = self.initial_state_from_config(
             task=task,
             run_config=run_config,
@@ -216,6 +236,36 @@ class AgentService:
         if result_state.get("status") in {"done", "failed"}:
             RuntimeRegistry.remove(run_config.run_id)
         return AgentRunResult.from_state(result_state)
+
+    def _runtime_tool_registry(self, run_config: AgentRunConfig) -> ToolRegistry:
+        """Clone base registry and inject AgentAsToolAdapter runners for this request.
+
+        Agent-as-tool adapters are request-scoped — each run_config gets fresh adapters
+        to prevent concurrent request pollution of depth/budget/access_policy.
+        """
+        runtime = self._base_tool_registry.clone()
+
+        # Only wire if subagent_runner is an AgentAsToolRunner
+        from rag.agent.core.agent_as_tool import AgentAsToolAdapter, AgentAsToolRunner
+
+        if not isinstance(self._subagent_runner, AgentAsToolRunner):
+            return runtime
+
+        runner: AgentAsToolRunner = self._subagent_runner
+
+        # Wire adapters for all agent-tool specs registered in the base registry
+        for spec in self._base_tool_registry.list_all():
+            if not spec.name.startswith("agent_"):
+                continue
+            agent_type = spec.name[len("agent_"):]
+            adapter = AgentAsToolAdapter(
+                runner=runner,
+                agent_type=agent_type,
+                run_config=run_config,
+            )
+            runtime.register_runner(spec.name, adapter)
+
+        return runtime
 
 
     async def resume(
