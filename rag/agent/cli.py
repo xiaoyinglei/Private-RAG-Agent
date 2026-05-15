@@ -7,11 +7,12 @@ from typing import Annotated
 import typer
 
 from rag.agent.builtin import create_builtin_agent_registry
-from rag.agent.builtin.research import RESEARCH_AGENT
 from rag.agent.core.agent_service_factory import AgentServiceFactory
 from rag.agent.core.checkpointing import create_agent_checkpointer
+from rag.agent.core.definition import AgentDefinition
 from rag.agent.core.human_input import HumanInputResponse
 from rag.agent.core.llm_registry import ModelRegistry
+from rag.agent.core.registry import AgentRegistry
 from rag.agent.core.subagent_runner import BuiltinSubAgentRunner, BuiltinSynthesisRunner
 from rag.agent.service import AgentRunRequest, AgentRunResult, AgentService
 from rag.agent.tools.builtin_registry import create_builtin_tool_registry
@@ -25,6 +26,8 @@ from rag.agent.tools.llm_tools import (
 from rag.agent.tools.registry import ToolRunner
 
 agent_app = typer.Typer(add_completion=False, no_args_is_help=True)
+
+CLI_AGENT_CHOICES = ("research", "orchestrator", "compare", "factcheck")
 
 
 def _build_llm_tool_runners(primary_chat) -> dict[str, ToolRunner]:
@@ -61,7 +64,22 @@ def _build_llm_tool_runners(primary_chat) -> dict[str, ToolRunner]:
     }
 
 
-def _build_agent_service(runtime, *, checkpoint_db: Path | None = None) -> AgentService:
+def _resolve_cli_agent_definition(
+    agent_registry: AgentRegistry,
+    agent_type: str,
+) -> AgentDefinition:
+    if agent_type not in CLI_AGENT_CHOICES:
+        allowed = ", ".join(CLI_AGENT_CHOICES)
+        raise ValueError(f"{agent_type!r} is not a supported CLI agent. Allowed: {allowed}")
+    return agent_registry.get(agent_type)
+
+
+def _build_agent_service(
+    runtime,
+    *,
+    checkpoint_db: Path | None = None,
+    agent_type: str = "research",
+) -> AgentService:
     """从 RAGRuntime 构造 AgentService，注册真实 RAG tool runners。
 
     只在可以构造 RAGRuntime / retrieval_service 时成功。
@@ -94,6 +112,7 @@ def _build_agent_service(runtime, *, checkpoint_db: Path | None = None) -> Agent
         model_registry = None
 
     agent_registry = create_builtin_agent_registry()
+    definition = _resolve_cli_agent_definition(agent_registry, agent_type)
     service_factory = AgentServiceFactory(
         tool_registry=tool_registry,
         model_registry=model_registry,
@@ -109,7 +128,7 @@ def _build_agent_service(runtime, *, checkpoint_db: Path | None = None) -> Agent
     )
     service_factory.bind_subagent_runner(subagent_runner)
     service_factory.bind_synthesis_runner(synthesis_runner)
-    return service_factory.create(RESEARCH_AGENT)
+    return service_factory.create(definition)
 
 
 def _format_tool_summary(result: AgentRunResult) -> str:
@@ -214,8 +233,8 @@ def _build_resume_response(request: object, decision: str) -> HumanInputResponse
     )
 
 
-def _print_startup_banner(model_alias: str) -> None:
-    print(f"Agent 就绪 (模型: {model_alias})")
+def _print_startup_banner(model_alias: str, *, agent_type: str) -> None:
+    print(f"Agent 就绪 (agent: {agent_type}, 模型: {model_alias})")
     print("输入查询，或 /exit 退出，/verbose 切换详细输出")
     print()
 
@@ -235,6 +254,13 @@ def agent_chat(
             help="运行行为 / 装配策略（local_full 等），不再控制模型选择。模型由 --model / configs/models.yaml 决定。",
         ),
     ] = None,
+    agent: Annotated[
+        str,
+        typer.Option(
+            "--agent",
+            help="根 Agent：research, orchestrator, compare, factcheck。默认 research，不做自动意图判断。",
+        ),
+    ] = "research",
     model: Annotated[
         str | None,
         typer.Option("--model", help="主生成模型别名，对应 configs/models.yaml 中 capability=chat 的条目"),
@@ -289,11 +315,11 @@ def agent_chat(
     )
 
     with runtime:
-        service = _build_agent_service(runtime)
+        service = _build_agent_service(runtime, agent_type=agent)
         run_id = f"chat_{id(service):x}"
         verbose = False
 
-        _print_startup_banner(runtime_config.primary_model.alias)
+        _print_startup_banner(runtime_config.primary_model.alias, agent_type=agent)
 
         while True:
             try:
@@ -342,6 +368,13 @@ def agent_run(
     profile: Annotated[
         str | None, typer.Option("--profile", help="Assembly profile")
     ] = None,
+    agent: Annotated[
+        str,
+        typer.Option(
+            "--agent",
+            help="根 Agent：research, orchestrator, compare, factcheck。默认 research，不做自动意图判断。",
+        ),
+    ] = "research",
     non_interactive: Annotated[
         bool, typer.Option("--non-interactive", help="非交互模式")
     ] = False,
@@ -377,7 +410,7 @@ def agent_run(
         )
 
     with runtime:
-        service = _build_agent_service(runtime, checkpoint_db=checkpoint_db)
+        service = _build_agent_service(runtime, checkpoint_db=checkpoint_db, agent_type=agent)
         effective_run_id = run_id or f"run_{id(service):x}"
         result = asyncio.run(
             service.run(
@@ -400,6 +433,7 @@ def agent_run(
                 print("⏸  已保存 checkpoint，可跨进程恢复:")
                 print(
                     f"   rag agent resume {effective_run_id} "
+                    f"--agent {agent} "
                     f"--checkpoint-db {checkpoint_db}"
                 )
 
@@ -422,6 +456,13 @@ def agent_resume(
     profile: Annotated[
         str | None, typer.Option("--profile", help="Assembly profile")
     ] = None,
+    agent: Annotated[
+        str,
+        typer.Option(
+            "--agent",
+            help="恢复时使用的根 Agent，必须与原 run 一致：research, orchestrator, compare, factcheck。",
+        ),
+    ] = "research",
     checkpoint_db: Annotated[
         Path,
         typer.Option("--checkpoint-db", help="SQLite checkpoint 文件"),
@@ -459,7 +500,7 @@ def agent_resume(
         )
 
     with runtime:
-        service = _build_agent_service(runtime, checkpoint_db=checkpoint_db)
+        service = _build_agent_service(runtime, checkpoint_db=checkpoint_db, agent_type=agent)
         request = asyncio.run(service.apending_human_input_request(run_id=run_id))
         response = _build_resume_response(request, decision)
         result = asyncio.run(service.resume(run_id=run_id, response=response))

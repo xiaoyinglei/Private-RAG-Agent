@@ -259,6 +259,22 @@ def test_cli_query_help_uses_new_retrieval_profile_option() -> None:
     assert "--mode" not in result.output
 
 
+def test_agent_run_help_exposes_explicit_agent_selector() -> None:
+    result = runner.invoke(app, ["agent", "run", "--help"], env={"COLUMNS": "240"})
+
+    assert result.exit_code == 0
+    assert "--agent" in result.output
+    assert "research" in result.output
+    assert "orchestrator" in result.output
+
+
+def test_agent_resume_help_exposes_agent_selector_for_checkpoint_restore() -> None:
+    result = runner.invoke(app, ["agent", "resume", "--help"], env={"COLUMNS": "240"})
+
+    assert result.exit_code == 0
+    assert "--agent" in result.output
+
+
 def test_cli_benchmark_help_defaults_to_new_milvus_profile() -> None:
     help_env = {"COLUMNS": "240"}
     ingest_help = runner.invoke(app, ["benchmark-ingest", "--help"], env=help_env)
