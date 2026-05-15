@@ -50,14 +50,19 @@ def profile_table_data(
     rows: list[list[str]],
     token_accounting: TokenAccountingClient | None = None,
     full_text: str | None = None,
+    total_row_count: int | None = None,
+    total_column_count: int | None = None,
 ) -> TableAssetProfile:
     data_rows = [[str(cell).strip() for cell in row] for row in rows]
-    column_count = _column_count(columns, data_rows)
-    normalized_columns = _columns(columns, column_count)
-    row_count = len(data_rows)
+    sampled_column_count = _column_count(columns, data_rows)
+    column_count = max(_safe_count(total_column_count), sampled_column_count)
+    normalized_columns = _columns(columns, sampled_column_count)
+    row_count = max(_safe_count(total_row_count), len(data_rows))
     estimated_tokens = _estimated_tokens(
         columns=normalized_columns,
         data_rows=data_rows,
+        row_count=row_count,
+        column_count=column_count,
         full_text=full_text,
         token_accounting=token_accounting,
     )
@@ -100,17 +105,22 @@ def _estimated_tokens(
     *,
     columns: list[str],
     data_rows: list[list[str]],
+    row_count: int,
+    column_count: int,
     full_text: str | None,
     token_accounting: TokenAccountingClient | None,
 ) -> int:
     if full_text is not None:
         return _count_tokens(full_text, token_accounting=token_accounting)
+    column_scale = max(column_count, 1) / max(len(columns), 1)
     if not data_rows:
-        return _count_tokens(" | ".join(columns), token_accounting=token_accounting)
+        header_tokens = max(_count_tokens(" | ".join(columns), token_accounting=token_accounting), 1)
+        return max(int(header_tokens * max(row_count, 1) * column_scale), header_tokens)
     sampled_rows = data_rows[: min(len(data_rows), TYPE_INFERENCE_ROWS)]
     sample_text = "\n".join(_markdown_rows(columns, sampled_rows))
     sample_tokens = max(_count_tokens(sample_text, token_accounting=token_accounting), 1)
-    return max(int(sample_tokens * (len(data_rows) / max(len(sampled_rows), 1))), sample_tokens)
+    row_scale = max(row_count, len(data_rows), 1) / max(len(sampled_rows), 1)
+    return max(int(sample_tokens * row_scale * column_scale), sample_tokens)
 
 
 def _normalize_table_text(text: str) -> str:
@@ -146,6 +156,12 @@ def _column_count(header: list[str], data_rows: list[list[str]]) -> int:
     return max([len(header), *(len(row) for row in data_rows)] or [0])
 
 
+def _safe_count(value: int | None) -> int:
+    if value is None:
+        return 0
+    return max(int(value), 0)
+
+
 def _columns(header: list[str], column_count: int) -> list[str]:
     if not header:
         return [f"column_{index + 1}" for index in range(column_count)]
@@ -174,7 +190,7 @@ def _summary_sample(
     lines = [
         f"Table policy: {table_policy}",
         f"Table shape: rows={row_count}, columns={column_count}, estimated_tokens={estimated_tokens}",
-        f"Table columns: {' | '.join(columns)}",
+        f"Table columns: {_columns_text(columns, column_count)}",
         f"Field types: {field_type_text}",
         "Sample rows:",
     ]
@@ -187,6 +203,15 @@ def _summary_sample(
 
 def _field_types(columns: list[str], rows: list[list[str]]) -> list[str]:
     return [f"{field['name']}={field['type']}" for field in _schema(columns, rows)]
+
+
+def _columns_text(columns: list[str], column_count: int) -> str:
+    if not columns:
+        return ""
+    text = " | ".join(columns)
+    if column_count > len(columns):
+        text = f"{text} | ... ({column_count - len(columns)} more columns)"
+    return text
 
 
 def _schema(columns: list[str], rows: list[list[str]]) -> list[dict[str, str]]:

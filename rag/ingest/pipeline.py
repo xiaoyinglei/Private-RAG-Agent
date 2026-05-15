@@ -19,7 +19,6 @@ from rag.ingest.parsers.web_parser_repo import WebParserRepo
 from rag.ingest.retrievalsummarizer import RetrievalSummarizer, RetrievalSummaryResult
 from rag.ingest.section_refiner import SectionRefiner
 from rag.ingest.table_sampler import TableAssetProfile, profile_markdown_table
-import io
 from rag.schema.core import (
     AssetRecord,
     AssetSummaryRecord,
@@ -1041,7 +1040,10 @@ class IngestPipeline:
         metadata = parsed_element.metadata or {}
         source_type = str(metadata.get("source_type", "") or "").strip()
         if source_type == SourceType.XLSX.value and fallback_storage_key:
-            parquet_bytes = self._excel_source_to_parquet(fallback_storage_key)
+            parquet_bytes = self._excel_source_to_parquet(
+                fallback_storage_key,
+                sheet_name=self._metadata_str(metadata, "sheet_name"),
+            )
             if parquet_bytes is not None and self._object_store is not None:
                 return self._object_store.put_bytes(parquet_bytes, suffix=".parquet")
 
@@ -1050,29 +1052,30 @@ class IngestPipeline:
             return self._object_store.put_bytes(parquet_bytes, suffix=".parquet")
         return fallback_storage_key or ""
 
-    def _excel_source_to_parquet(self, storage_key: str) -> bytes | None:
+    def _excel_source_to_parquet(self, storage_key: str, *, sheet_name: str | None = None) -> bytes | None:
         """用 header=None 重读 Excel 源文件，走 header detector 获取干净列名，存全量 Parquet。"""
         try:
             import pandas as pd
-            from rag.ingest.header_detector import detect_header, HeaderKind
+
+            from rag.ingest.header_detector import HeaderKind, detect_header
 
             local_path = self._resolve_local_path(storage_key)
             if local_path is None:
                 return None
 
-            raw = pd.read_excel(local_path, header=None)
+            sheet_arg: str | int = sheet_name if sheet_name else 0
+            raw = pd.read_excel(local_path, sheet_name=sheet_arg, header=None)
             raw = raw.dropna(how="all").dropna(axis=1, how="all").fillna("")
             result = detect_header(raw)
 
             if result.confidence >= 0.5 and result.header_kind != HeaderKind.NONE:
                 columns = result.normalized_columns
                 data_start = result.data_start_row
-                df = pd.DataFrame(
-                    [[raw.iat[r, c] for c in range(raw.shape[1])] for r in range(data_start, raw.shape[0])],
-                    columns=columns,
-                )
+                df = raw.iloc[data_start:].copy()
+                df.columns = columns
             else:
-                df = pd.read_excel(local_path)
+                df = raw.copy()
+                df.columns = [f"column_{index + 1}" for index in range(raw.shape[1])]
 
             df = df.dropna(how="all").dropna(axis=1, how="all")
             if df.empty:

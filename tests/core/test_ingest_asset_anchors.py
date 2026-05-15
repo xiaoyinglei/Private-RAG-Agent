@@ -5,6 +5,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+import duckdb
+from openpyxl import Workbook
+
 from rag.assembly import TokenAccountingService, TokenizerContract
 from rag.ingest.asset_anchors import asset_anchor
 from rag.ingest.parsers.docling_parser_repo import DoclingParserRepo
@@ -470,6 +473,43 @@ def test_compute_only_excel_asset_uses_raw_workbook_storage_and_top_level_table_
     stored = object_store.read_bytes(saved_asset.storage_key)
     assert len(stored) > 0
     assert stored[:4] == b"PAR1"
+
+
+def test_excel_source_to_parquet_uses_requested_sheet_name(tmp_path: Path) -> None:
+    source_path = tmp_path / "multi-sheet.xlsx"
+    workbook = Workbook()
+    first = workbook.active
+    first.title = "First"
+    first.append(["Name", "Amount"])
+    first.append(["first-sheet", 1])
+    second = workbook.create_sheet("Second")
+    second.append(["Name", "Amount"])
+    second.append(["second-sheet", 2])
+    workbook.save(source_path)
+
+    object_store = FileObjectStore(tmp_path / "objects")
+    storage_key = object_store.put_bytes(source_path.read_bytes(), suffix=".xlsx")
+    pipeline = IngestPipeline(
+        dispatcher=None,  # type: ignore[arg-type]
+        summarizer=None,  # type: ignore[arg-type]
+        embedder=None,  # type: ignore[arg-type]
+        metadata_repo=_MetadataRepo(),  # type: ignore[arg-type]
+        summary_repo=_SummaryRepo(),  # type: ignore[arg-type]
+        object_store=object_store,
+    )
+
+    parquet_bytes = pipeline._excel_source_to_parquet(storage_key, sheet_name="Second")
+    assert parquet_bytes is not None
+
+    parquet_path = tmp_path / "second.parquet"
+    parquet_path.write_bytes(parquet_bytes)
+    con = duckdb.connect(":memory:")
+    try:
+        rows = con.execute("SELECT Name, Amount FROM read_parquet(?)", [str(parquet_path)]).fetchall()
+    finally:
+        con.close()
+
+    assert rows == [("second-sheet", 2)]
 
 
 def test_doc_summary_reduces_generated_section_and_asset_summaries(tmp_path: Path) -> None:

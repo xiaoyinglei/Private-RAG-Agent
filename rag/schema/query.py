@@ -54,18 +54,6 @@ class MetadataFilters(BaseModel):
             )
         )
 
-
-class PolicyHints(BaseModel):
-    model_config = ConfigDict(frozen=True)
-
-    disable_external_retrieval: bool = False
-    local_only: bool = False
-    source_type_scope: list[str] = Field(default_factory=list)
-
-    def has_hints(self) -> bool:
-        return any((self.disable_external_retrieval, self.local_only, bool(self.source_type_scope)))
-
-
 class RetrievalSignals(BaseModel):
     """RAG 检索层消费的结构化信号，由 Agent 或上层调用方产出。"""
     model_config = ConfigDict(frozen=True)
@@ -223,7 +211,6 @@ __all__ = [
     "KnowledgeArtifact",
     "MetadataFilters",
     "PageRangeConstraint",
-    "PolicyHints",
     "RetrievalSignals",
     "StructureConstraints",
 ]

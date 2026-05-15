@@ -4,7 +4,7 @@ from rag.ingest.retrievalsummarizer import (
     RetrievalSummarizer,
     RetrievalSummaryConfig,
 )
-from rag.ingest.table_sampler import TABLE_POLICY_COMPUTE_ONLY, profile_markdown_table
+from rag.ingest.table_sampler import TABLE_POLICY_COMPUTE_ONLY, profile_markdown_table, profile_table_data
 from rag.schema.core import ParsedSection
 
 
@@ -184,3 +184,19 @@ def test_table_sampler_uses_token_accounting_for_policy_decision() -> None:
 
     assert profile.estimated_tokens == 20_000
     assert profile.table_policy == TABLE_POLICY_COMPUTE_ONLY
+
+
+def test_table_sampler_keeps_full_shape_when_only_sample_rows_are_profiled() -> None:
+    profile = profile_table_data(
+        columns=["Name", "Amount"],
+        rows=[["Travel", "500"]],
+        token_accounting=_FixedTokenAccounting(10),  # type: ignore[arg-type]
+        total_row_count=100,
+        total_column_count=4,
+    )
+
+    assert profile.row_count == 100
+    assert profile.column_count == 4
+    assert profile.estimated_tokens > 10
+    assert "Table shape: rows=100, columns=4" in profile.summary_sample
+    assert "2 more columns" in profile.summary_sample

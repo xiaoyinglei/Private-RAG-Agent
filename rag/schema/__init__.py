@@ -3,7 +3,6 @@ from .query import (
     EvidenceItem,
     GroundingTarget,
     MetadataFilters,
-    PolicyHints,
     RetrievalSignals,
     StructureConstraints,
 )
@@ -15,7 +14,6 @@ __all__ = [
     "EvidenceItem",
     "GroundingTarget",
     "MetadataFilters",
-    "PolicyHints",
     "RetrievalSignals",
     "RuntimeMode",
     "Source",
