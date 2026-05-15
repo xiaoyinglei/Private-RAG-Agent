@@ -331,7 +331,8 @@ class ContextInjector:
     def _format_message(message: BaseMessage) -> str:
         message_id = message.id or "<no-id>"
         role = getattr(message, "type", message.__class__.__name__)
-        return f"- message_id={message_id} role={role} content={ContextInjector._one_line(ContextInjector._message_text(message))}"
+        content = ContextInjector._one_line(ContextInjector._message_text(message))
+        return f"- message_id={message_id} role={role} content={content}"
 
     @staticmethod
     def _message_text(message: BaseMessage) -> str:

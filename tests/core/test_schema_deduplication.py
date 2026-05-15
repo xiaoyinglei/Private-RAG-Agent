@@ -1,10 +1,9 @@
 from __future__ import annotations
 
-from rag.agent.report import AgentReportBuilder
-from rag.agent.schema import CriticAction, EvidenceAssessment, ReportCitation, SubTask, SubTaskResult
+from rag.agent.core.task import SubTaskNode, SubTaskResult, SubTaskStatus
 from rag.retrieval.models import ContextEvidence
 from rag.schema.core import PartitionKey, StorageTier
-from rag.schema.query import AnswerCitation, EvidenceItem
+from rag.schema.query import EvidenceItem
 
 
 def test_context_evidence_extends_evidence_item_contract() -> None:
@@ -31,7 +30,7 @@ def test_context_evidence_extends_evidence_item_contract() -> None:
     assert "token_count" not in evidence_item.model_dump()
 
 
-def test_report_citation_reuses_answer_citation_contract() -> None:
+def test_subtask_result_reuses_evidence_item_contract() -> None:
     evidence = EvidenceItem(
         evidence_id="ev-1",
         doc_id=1,
@@ -41,29 +40,21 @@ def test_report_citation_reuses_answer_citation_contract() -> None:
         record_type="section",
         file_name="alpha.md",
     )
-    subtask = SubTask(
+    subtask = SubTaskNode(
         subtask_id="task-1",
-        objective="Find alpha evidence",
-        instruction="Find alpha evidence",
+        agent_type="research",
+        prompt="Find alpha evidence",
+        priority=1,
     )
     result = SubTaskResult(
         subtask=subtask,
+        status=SubTaskStatus.COMPLETED,
         findings=["Alpha evidence"],
         evidence=[evidence],
-        evidence_assessment=EvidenceAssessment(
-            sufficient=True,
-            recommended_action=CriticAction.ACCEPT,
-        ),
     )
 
-    citations = AgentReportBuilder._citations([result])
-
-    assert len(citations) == 1
-    assert isinstance(citations[0], AnswerCitation)
-    assert isinstance(citations[0], ReportCitation)
-    assert citations[0].evidence_id == "ev-1"
-    assert citations[0].chunk_id == "ev-1"
-    assert citations[0].record_type == "section"
+    assert result.evidence == [evidence]
+    assert result.evidence[0].record_type == "section"
 
 
 def test_partition_key_is_independent_index_layer_enum() -> None:

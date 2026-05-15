@@ -78,7 +78,7 @@ class ModelRegistry:
         with open(path, encoding="utf-8") as fh:
             data = yaml.safe_load(fh)
 
-        # Support new configs/models.yaml format: { models: { alias: { capability, provider, ... } }, defaults: { ... } }
+        # Support configs/models.yaml: models keyed by alias plus defaults.
         raw_models = data.get("models", {})
         defaults = data.get("defaults", {})
 

@@ -6,7 +6,7 @@ from uuid import uuid4
 from pydantic import BaseModel
 
 from rag.agent.core.human_input import HumanInputRequest, ToolCallSummary
-from rag.agent.tools.spec import ToolPermissions, ToolSpec
+from rag.agent.tools.spec import ToolSpec
 
 
 class ApprovalAction(StrEnum):
