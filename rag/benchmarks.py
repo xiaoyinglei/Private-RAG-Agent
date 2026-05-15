@@ -21,8 +21,10 @@ from datasets import load_dataset
 from tqdm.auto import tqdm
 
 from rag import CapabilityRequirements, RAGRuntime, StorageComponentConfig, StorageConfig
-from rag.assembly import AssemblyOverrides, CapabilityAssemblyService, ProviderConfig, TokenizerConfig
+from rag.assembly import AssemblyConfig, AssemblyOverrides, CapabilityAssemblyService, ProviderConfig, TokenizerConfig
 from rag.ingest.pipeline import IngestRequest
+from rag.models.assembly_adapter import to_assembly_overrides
+from rag.models.runtime import RuntimeOverrides, resolve_runtime_config
 from rag.retrieval import QueryOptions
 from rag.schema.core import SourceType
 from rag.schema.runtime import (
@@ -1632,6 +1634,11 @@ def build_runtime_for_benchmark(
         if rerank_model is not None or rerank_model_path is not None
         else None
     )
+    model_config_rerank = (
+        to_assembly_overrides(resolve_runtime_config(RuntimeOverrides())).rerank
+        if require_rerank and rerank_override is None
+        else None
+    )
     chat_override = (
         ProviderConfig(
             provider_kind=chat_provider_kind or ("local-hf" if chat_model_path is not None else "ollama"),
@@ -1650,6 +1657,7 @@ def build_runtime_for_benchmark(
             require_chat=require_chat,
             require_rerank=require_rerank,
         ),
+        config=AssemblyConfig(rerank=model_config_rerank) if model_config_rerank is not None else None,
         overrides=(
             AssemblyOverrides(
                 embedding=embedding_override,
