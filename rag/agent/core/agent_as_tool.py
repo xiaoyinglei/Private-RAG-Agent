@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 from uuid import uuid4
@@ -11,12 +12,13 @@ from rag.agent.core.definition import AgentDefinition
 from rag.agent.core.registry import AgentRegistry
 from rag.agent.core.task import DEFAULT_SUBTASK_TOKEN_BUDGET, SubTaskNode
 from rag.agent.graphs.nodes.evaluate import EvaluateDecisionProvider
-from rag.agent.graphs.nodes.execute_subagent import SubAgentRunner
+from rag.agent.graphs.nodes.execute_subagent import SubAgentRunner, SubAgentRunResult
 from rag.agent.graphs.nodes.plan import PlanProvider
 from rag.agent.graphs.nodes.route import RouteProvider
 from rag.agent.state import AgentState
 from rag.agent.tools.registry import ToolRegistry
 from rag.agent.tools.spec import ToolError, ToolPermissions, ToolSpec
+from rag.schema.query import RetrievalSignals
 
 if TYPE_CHECKING:
     from rag.agent.service import AgentRunResult
@@ -71,7 +73,7 @@ class AgentToolOutput(BaseModel):
     agent_name: str = Field(default="", description="执行的 Agent 类型")
 
     @classmethod
-    def from_run_result(cls, result: AgentRunResult, agent_name: str) -> AgentToolOutput:
+    def from_run_result(cls, result: SubAgentRunResult, agent_name: str) -> AgentToolOutput:
         """从 AgentRunResult 提取脱水结果。"""
         return cls(
             conclusion=result.final_answer or "",
@@ -92,7 +94,7 @@ class AgentToolOutput(BaseModel):
         )
 
 
-def _extract_key_facts(result: AgentRunResult) -> list[str]:
+def _extract_key_facts(result: SubAgentRunResult) -> list[str]:
     facts: list[str] = []
     for item in result.evidence:
         text = getattr(item, "text", None)
@@ -101,9 +103,9 @@ def _extract_key_facts(result: AgentRunResult) -> list[str]:
     return facts[:10]
 
 
-def _derive_confidence(result: AgentRunResult) -> float:
+def _derive_confidence(result: SubAgentRunResult) -> float:
     if result.status == "done":
-        return 0.8 if result.groundedness_flag else 0.5
+        return 0.8 if bool(getattr(result, "groundedness_flag", False)) else 0.5
     return 0.1
 
 # ── AgentAsToolAdapter ─────────────────────────────────────────
@@ -125,7 +127,8 @@ class AgentAsToolAdapter:
         self._agent_type = agent_type
         self._run_config = run_config
 
-    async def __call__(self, payload: AgentToolInput) -> AgentToolOutput:
+    async def __call__(self, payload: BaseModel) -> AgentToolOutput:
+        request = AgentToolInput.model_validate(payload)
         # 构造最小父上下文（不是完整 LangGraph state，仅用于 derive_child_config）
         # run_subtask 只访问 parent_state["run_config"]，不读取其他 state 字段
         parent_state: AgentState = {
@@ -134,8 +137,8 @@ class AgentAsToolAdapter:
             "evidence": [],
             "citations": [],
             "tool_results": [],
-            "task": payload.task,
-            "retrieval_signals": None,
+            "task": request.task,
+            "retrieval_signals": RetrievalSignals(),
             "retrieval_signals_debug": None,
             "plan": None,
             "iteration": 0,
@@ -162,7 +165,7 @@ class AgentAsToolAdapter:
             "insufficient_evidence_flag": False,
         }
 
-        prompt = _build_subtask_prompt(payload)
+        prompt = _build_subtask_prompt(request)
         subtask = SubTaskNode(
             subtask_id=f"{self._agent_type}-tool-{uuid4().hex[:8]}",
             agent_type=self._agent_type,
@@ -172,10 +175,11 @@ class AgentAsToolAdapter:
         )
 
         try:
-            result = await self._runner.run_subtask(
+            raw_result = self._runner.run_subtask(
                 subtask=subtask,
                 parent_state=parent_state,
             )
+            result = await raw_result if inspect.isawaitable(raw_result) else raw_result
         except Exception as exc:
             raise AgentAsToolExecutionError(
                 self._agent_type,

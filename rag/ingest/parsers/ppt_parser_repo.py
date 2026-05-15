@@ -25,7 +25,7 @@ class PptxParserRepo:
         title: str | None = None,
         owner: str = "user",
     ) -> ParsedDocument:
-        prs = Presentation(file_path)
+        prs = Presentation(str(file_path))
 
         # 提取原生核心元数据
         core_props = prs.core_properties

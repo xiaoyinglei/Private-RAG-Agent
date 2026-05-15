@@ -290,7 +290,7 @@ class DataContractService:
         limit: int = 10,
         doc_ids: list[str] | None = None,
         expr: str | None = None,
-    ):
+    ) -> list[VectorSearchResult]:
         return self.milvus_repo.search(
             query_vector,
             limit=limit,

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from langgraph.graph.message import BaseMessage
+from langchain_core.messages import BaseMessage
 from pydantic import BaseModel, ConfigDict, Field
 
 ContextSectionName = Literal[

@@ -9,15 +9,28 @@ from dataclasses import dataclass, field
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
 from threading import BoundedSemaphore
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 
 from rag.ingest.asset_anchors import asset_anchor
-
-MAX_COMPUTE_BLOCK_TOKENS = 1_500
-MAX_SCHEMA_COLUMNS = 30
 from rag.schema.core import AssetRecord, LayoutMetaCacheRecord, SectionRecord
 from rag.schema.query import EvidenceItem, GroundingTarget
 from rag.utils.text import DEFAULT_TOKENIZER_FALLBACK_MODEL, keyword_overlap, search_terms
+
+MAX_COMPUTE_BLOCK_TOKENS = 1_500
+MAX_SCHEMA_COLUMNS = 30
+
+
+class _TokenAccounting(Protocol):
+    def count(self, text: str) -> int: ...
+    def clip(self, text: str, token_budget: int, *, add_ellipsis: bool = ...) -> str: ...
+    def chunk_text(self, text: str, *, chunk_token_size: int, chunk_overlap_tokens: int) -> list[str]: ...
+
+
+class _CircuitBreaker(Protocol):
+    def allow(self) -> bool: ...
+    def on_failure(self) -> None: ...
+    def on_success(self) -> None: ...
+
 
 _logger = logging.getLogger("rag.grounding")
 
@@ -37,14 +50,14 @@ def _load_tokenizer_classes() -> tuple[type[Any], type[Any]]:
     return module.TokenAccountingService, module.TokenizerContract
 
 
-def _default_token_accounting() -> object:
+def _default_token_accounting() -> _TokenAccounting:
     token_accounting_cls, tokenizer_contract_cls = _load_tokenizer_classes()
     contract = tokenizer_contract_cls(
         embedding_model_name=DEFAULT_TOKENIZER_FALLBACK_MODEL,
         tokenizer_model_name=DEFAULT_TOKENIZER_FALLBACK_MODEL,
         chunking_tokenizer_model_name=DEFAULT_TOKENIZER_FALLBACK_MODEL,
     )
-    return token_accounting_cls(contract)
+    return cast(_TokenAccounting, token_accounting_cls(contract))
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,10 +118,10 @@ class _GroundingSession:
 class GroundingService:
     metadata_repo: object
     object_store: object
-    token_accounting: object = field(default_factory=_default_token_accounting)
+    token_accounting: _TokenAccounting = field(default_factory=_default_token_accounting)
     budgets: GroundingBudgets = field(default_factory=GroundingBudgets)
     rerank_binding: _RerankBinding | object | None = None
-    s3_circuit_breaker: object | None = None
+    s3_circuit_breaker: _CircuitBreaker | None = None
     _executor: ThreadPoolExecutor | None = field(default=None, init=False, repr=False)
     _semaphore: BoundedSemaphore | None = field(default=None, init=False, repr=False)
 
@@ -547,7 +560,7 @@ class GroundingService:
         assets = self._layout_neighbor_assets(section)
         if assets:
             return assets
-        return list_assets(doc_id=section.doc_id, section_id=section.section_id)
+        return cast(list[AssetRecord], list_assets(doc_id=section.doc_id, section_id=section.section_id))
 
     def _replace_section_asset_anchors(
         self,
@@ -597,9 +610,9 @@ class GroundingService:
         parts.append('or comparing rows — you MUST output a computation request in this')
         parts.append("EXACT format:")
         parts.append("")
-        parts.append(f"<compute_request>")
+        parts.append("<compute_request>")
         parts.append(f'{{"asset_id": {asset.asset_id}, "sql": "SELECT ... FROM sheet WHERE ..."}}')
-        parts.append(f"</compute_request>")
+        parts.append("</compute_request>")
         parts.append("")
         parts.append("SQL rules:")
         parts.append('- Table name is ALWAYS "sheet".')
@@ -731,7 +744,7 @@ class GroundingService:
             else:
                 if breaker is not None:
                     breaker.on_success()
-                return result
+                return cast(bytes, result)
 
     @staticmethod
     def _raw_locator_payload(raw_locator: object) -> dict[str, Any]:
@@ -783,7 +796,7 @@ class GroundingService:
         getter = getattr(self.metadata_repo, "get_section", None)
         if not callable(getter):
             return None
-        return getter(section_id)
+        return cast(SectionRecord | None, getter(section_id))
 
     def _get_asset(self, asset_id: int | None) -> AssetRecord | None:
         if asset_id is None:
@@ -791,13 +804,13 @@ class GroundingService:
         getter = getattr(self.metadata_repo, "get_asset", None)
         if not callable(getter):
             return None
-        return getter(asset_id)
+        return cast(AssetRecord | None, getter(asset_id))
 
     def _get_layout_meta_cache(self, doc_id: int) -> LayoutMetaCacheRecord | None:
         getter = getattr(self.metadata_repo, "get_layout_meta_cache", None)
         if not callable(getter):
             return None
-        return getter(doc_id=doc_id)
+        return cast(LayoutMetaCacheRecord | None, getter(doc_id=doc_id))
 
     def _layout_neighbor_assets(self, section: SectionRecord) -> list[AssetRecord]:
         layout_cache = self._get_layout_meta_cache(section.doc_id)
@@ -1004,15 +1017,12 @@ class GroundingService:
         if not raw_scores_or_ranking:
             return []
         if all(isinstance(value, int) for value in raw_scores_or_ranking):
-            return [
-                int(value)
-                for value in raw_scores_or_ranking
-                if 0 <= int(value) < item_count
-            ]
+            ranking = cast(list[int], raw_scores_or_ranking)
+            return [v for v in ranking if 0 <= v < item_count]
         scored_indices: list[tuple[float, int]] = []
         for index, value in enumerate(raw_scores_or_ranking[:item_count]):
             try:
-                score = float(value)
+                score = float(cast(Any, value))
             except (TypeError, ValueError):
                 continue
             scored_indices.append((score, index))

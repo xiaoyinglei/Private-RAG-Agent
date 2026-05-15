@@ -285,8 +285,8 @@ def guarded(
                 breaker.on_success()
                 return result
 
-        wrapper.__name__ = fn.__name__  # type: ignore[attr-defined]
-        wrapper.__qualname__ = fn.__qualname__  # type: ignore[attr-defined]
+        wrapper.__name__ = fn.__name__
+        wrapper.__qualname__ = fn.__qualname__
         return wrapper
 
     return decorator

@@ -78,7 +78,7 @@ class HuggingFaceEmbedder(Embedder):
                 f"HuggingFace embedding count mismatch: expected {len(texts)}, got {len(vectors)}"
             )
 
-        return vectors
+        return [[float(value) for value in vector] for vector in vectors]
 
     @property
     def model_name_or_path(self) -> str:
@@ -159,7 +159,7 @@ class BgeM3Embedder(Embedder):
             sparse_payload = self._first_non_empty_payload(payload, ("sparse_vecs", "sparse_weights"))
         if sparse_payload is None:
             raise RuntimeError("BGE-M3 embedding backend returned no sparse vectors")
-        return [self._normalize_sparse_payload(item) for item in sparse_payload]
+        return [self._normalize_sparse_payload(item) for item in cast(Sequence[object], sparse_payload)]
 
     def _encode(
         self,
@@ -187,16 +187,16 @@ class BgeM3Embedder(Embedder):
                 if return_dense:
                     dense_payload = self._first_non_empty_payload(payload, ("dense_vecs",))
                     if dense_payload is not None:
-                        dense_payloads.extend(dense_payload)
+                        dense_payloads.extend(cast(Sequence[Any], dense_payload))
                 if return_sparse:
                     sparse_payload = self._first_non_empty_payload(
                         payload,
                         ("lexical_weights", "sparse_vecs", "sparse_weights"),
                     )
                     if sparse_payload is not None:
-                        sparse_payloads.extend(sparse_payload)
+                        sparse_payloads.extend(cast(Sequence[Any], sparse_payload))
             elif return_dense:
-                dense_payloads.extend(payload)
+                dense_payloads.extend(cast(Sequence[Any], payload))
         return {"dense_vecs": dense_payloads, "lexical_weights": sparse_payloads}
 
     def _load_backend(self) -> object:
@@ -251,11 +251,11 @@ class BgeM3Embedder(Embedder):
             if value is None:
                 continue
             try:
-                if len(value) == 0:  # type: ignore[arg-type]
+                if len(value) == 0:
                     continue
             except TypeError:
                 pass
-            return value
+            return cast(object, value)
         return None
 
     @staticmethod

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable
-from typing import Protocol
+from typing import Any, Protocol
 
 from rag.agent.state import AgentState
 
@@ -12,10 +12,10 @@ class RouteProvider(Protocol):
     def route(
         self,
         state: AgentState,
-    ) -> dict | Awaitable[dict]: ...
+    ) -> dict[str, Any] | Awaitable[dict[str, Any]]: ...
 
 
-def route_node(state: AgentState) -> dict:
+def route_node(state: AgentState) -> dict[str, Any]:
     """Agent route 节点。基于 AgentState 中的 task 和 retrieval_signals 做路由。
 
     不调用 RAG Core 的 QueryUnderstandingService。

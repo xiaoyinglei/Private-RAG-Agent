@@ -3,9 +3,9 @@ from __future__ import annotations
 import asyncio
 import inspect
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol, cast
 
 from rag.assembly import EmbeddingCapabilityBinding
 from rag.retrieval.evidence import CandidateLike, EvidenceBundle
@@ -28,6 +28,7 @@ class RetrievedCandidate(CandidateLike):
     citation_anchor: str
     score: float
     rank: int
+    item_id: str = field(default="", init=False)
     source_kind: str = "internal"
     source_id: str | None = None
     benchmark_doc_id: str | None = None
@@ -42,9 +43,8 @@ class RetrievedCandidate(CandidateLike):
     retrieval_channels: list[str] | None = None
     grounding_target: GroundingTarget | None = None
 
-    @property
-    def item_id(self) -> str:
-        return self.evidence_id
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "item_id", self.evidence_id)
 
 
 class VectorSearchRepoProtocol(Protocol):
@@ -326,12 +326,12 @@ class MilvusSummaryHybridRetriever:
                 continue
             sparse_query_vector = self._sparse_query_vector(binding, sparse_query)
             for stage in stage_plan:
-                if stage.trigger != "always" and len(results) >= stage.min_hits:
+                if getattr(stage, "trigger", "always") != "always" and len(results) >= int(getattr(stage, "min_hits", 0) or 0):
                     continue
-                item_kind = stage.collection
+                item_kind = str(getattr(stage, "collection", "") or "")
                 if self._vector_repo.count_vectors(embedding_space=target_space, item_kind=item_kind) <= 0:
                     continue
-                remaining = max(min(stage.limit, branch_limit) - len(results), 1)
+                remaining = max(min(int(getattr(stage, "limit", branch_limit) or branch_limit), branch_limit) - len(results), 1)
                 hits = await self._hybrid_search(
                     query_vector=query_vectors[0],
                     sparse_query=sparse_query,
@@ -458,7 +458,7 @@ class MilvusSummaryHybridRetriever:
     ) -> Sequence[VectorSearchResult]:
         hybrid_search_async = self._vector_repo.hybrid_search_async
         parameters = inspect.signature(hybrid_search_async).parameters
-        kwargs = {
+        kwargs: dict[str, Any] = {
             "query_vector": query_vector,
             "sparse_query": sparse_query,
             "limit": limit,
@@ -663,7 +663,7 @@ class SearchBackedRetrievalFactory:
         if self._supports_hybrid_vector_repo(vector_repo) and bindings:
             return MilvusSummaryHybridRetriever(
                 factory=self,
-                vector_repo=vector_repo,
+                vector_repo=cast(HybridVectorSearchRepoProtocol, vector_repo),
                 bindings=bindings,
                 item_kinds=("section_summary", "doc_summary"),
                 branch_name="vector",
@@ -700,7 +700,7 @@ class SearchBackedRetrievalFactory:
         if self._supports_hybrid_vector_repo(vector_repo) and bindings:
             return MilvusSummaryHybridRetriever(
                 factory=self,
-                vector_repo=vector_repo,
+                vector_repo=cast(HybridVectorSearchRepoProtocol, vector_repo),
                 bindings=bindings,
                 item_kinds=("asset_summary",),
                 branch_name="special",
@@ -976,7 +976,13 @@ class SearchBackedRetrievalFactory:
             return False
         if page_numbers and pages & page_numbers:
             return True
-        return any(any(page_range.start <= page <= page_range.end for page in pages) for page_range in page_ranges)
+        return any(
+            any(
+                getattr(page_range, "start", 0) <= page <= getattr(page_range, "end", 0)
+                for page in pages
+            )
+            for page_range in page_ranges
+        )
 
     def _iter_documents(self, source_scope: list[str]) -> list[Document]:
         documents = self._metadata_repo.list_documents(active_only=True)
@@ -994,7 +1000,7 @@ class SearchBackedRetrievalFactory:
         if not callable(get_document):
             return None
         try:
-            return get_document(int(str(doc_id)))
+            return cast(Document | None, get_document(int(str(doc_id))))
         except (TypeError, ValueError):
             return None
 
@@ -1059,10 +1065,12 @@ class SearchBackedRetrievalFactory:
 
     @staticmethod
     def _rerank_candidates(candidates: list[RetrievedCandidate]) -> list[RetrievedCandidate]:
-        return [
-            candidate.__class__(**{**candidate.__dict__, "rank": index})
-            for index, candidate in enumerate(candidates, start=1)
-        ]
+        result: list[RetrievedCandidate] = []
+        for index, candidate in enumerate(candidates, start=1):
+            kwargs = {k: v for k, v in candidate.__dict__.items() if k != "item_id"}
+            kwargs["rank"] = index
+            result.append(candidate.__class__(**kwargs))
+        return result
 
 
 class GraphExpansionService:
@@ -1088,12 +1096,12 @@ class GraphExpansionService:
         seen = {item.evidence_id for item in evidence.all}
         expanded: list[CandidateLike] = []
         for candidate in graph_candidates:
-            if candidate.evidence_id in seen:
+            if candidate.item_id in seen:
                 continue
             if not self._candidate_allowed(candidate, source_scope):
                 continue
             expanded.append(candidate)
-            seen.add(candidate.evidence_id)
+            seen.add(candidate.item_id)
         return expanded
 
 

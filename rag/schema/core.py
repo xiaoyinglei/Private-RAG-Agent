@@ -122,11 +122,10 @@ class ParsedSection:
     char_range_start: int 
     char_range_end: int
     anchor_hint: str | None = None
-    metadata: dict[str, str] = field(default_factory=dict)
-    
+    metadata: dict[str, Any] = field(default_factory=dict)    
     
     @model_validator(mode="after")
-    def validate_char_range(self):
+    def validate_char_range(self) -> ParsedSection:
         start = self.char_range_start
         end = self.char_range_end
         if start is None and end is None:
@@ -150,8 +149,7 @@ class ParsedElement:
     page_no: int | None = None
     bbox: tuple[float, float, float, float] | None = None
     parent_ref: str | None = None
-    metadata: dict[str, str] = field(default_factory=dict)
-
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 @dataclass(frozen=True)
 class ParsedDocument:
@@ -159,15 +157,14 @@ class ParsedDocument:
     title: str
     source_type: SourceType
     authors: list[str]
-    language: str
     sections: list[ParsedSection]
     visible_text: str
+    language: str | None = None
     visual_semantics: str | None = None
     elements: list[ParsedElement] = field(default_factory=list)
     page_count: int | None = None
     doc_model: Any | None = None
-    metadata: dict[str, str] = field(default_factory=dict)
-
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 @dataclass(frozen=True)
 class OcrRegion:
@@ -341,7 +338,7 @@ class AssetRecord(BaseModel):
     metadata_json: dict[str, Any] = Field(default_factory=dict)
 
     @property
-    def schema(self) -> list[dict[str, Any]]:
+    def schema(self) -> list[dict[str, Any]]:  # type: ignore[override]
         return self.table_schema
 
 

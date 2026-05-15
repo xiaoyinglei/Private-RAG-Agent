@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 from rag.agent.tools.rag_tools import SearchInput, SearchOutput
 from rag.retrieval.models import QueryOptions
@@ -65,7 +65,13 @@ class AsyncRAGToolRunner:
         self, payload: SearchInput, access_policy: AccessPolicy
     ) -> SearchOutput:
         query_options = self._query_options(payload, access_policy=access_policy)
-        p = await self.retrieval_service.aretrieve_payload(
+        retrieval_service = self.retrieval_service
+        if retrieval_service is None:
+            raise RAGToolRunnerNotConfiguredError("retrieval_service is not configured")
+        aretrieve_payload = getattr(retrieval_service, "aretrieve_payload", None)
+        if not callable(aretrieve_payload):
+            raise RAGToolRunnerNotConfiguredError("retrieval_service does not implement aretrieve_payload")
+        p = await aretrieve_payload(
             payload.query,
             access_policy=access_policy,
             query_options=query_options,
@@ -81,7 +87,13 @@ class AsyncRAGToolRunner:
 
     async def _via_aquery(self, payload: SearchInput, access_policy: AccessPolicy) -> SearchOutput:
         query_options = self._query_options(payload, access_policy=access_policy)
-        result = await self.runtime.aquery(
+        runtime = self.runtime
+        if runtime is None:
+            raise RAGToolRunnerNotConfiguredError("runtime is not configured")
+        aquery = getattr(runtime, "aquery", None)
+        if not callable(aquery):
+            raise RAGToolRunnerNotConfiguredError("runtime does not implement aquery")
+        result = await aquery(
             payload.query,
             options=query_options,
         )
@@ -97,8 +109,14 @@ class AsyncRAGToolRunner:
 
     async def _via_to_thread(self, payload: SearchInput) -> SearchOutput:
         query_options = self._query_options(payload, access_policy=self._resolve_access_policy(payload))
+        runtime = self.runtime
+        if runtime is None:
+            raise RAGToolRunnerNotConfiguredError("runtime is not configured")
+        query = getattr(runtime, "query", None)
+        if not callable(query):
+            raise RAGToolRunnerNotConfiguredError("runtime does not implement query")
         result = await asyncio.to_thread(
-            self.runtime.query,
+            query,
             payload.query,
             options=query_options,
         )
@@ -113,12 +131,13 @@ class AsyncRAGToolRunner:
         return SearchOutput(items=items)
 
     def _resolve_access_policy(self, payload: SearchInput) -> AccessPolicy:
-        if getattr(payload, "access_policy", None) is not None:
+        if payload.access_policy is not None:
             return payload.access_policy
         if self.access_policy is not None:
             return self.access_policy
-        if self.runtime is not None and getattr(self.runtime, "access_policy", None) is not None:
-            return self.runtime.access_policy
+        runtime_policy = getattr(self.runtime, "access_policy", None) if self.runtime is not None else None
+        if runtime_policy is not None:
+            return cast(AccessPolicy, runtime_policy)
         return AccessPolicy.default()
 
     def _query_options(self, payload: SearchInput, *, access_policy: AccessPolicy) -> QueryOptions:

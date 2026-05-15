@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 from langgraph.types import interrupt
 from pydantic import ValidationError
 
@@ -11,7 +13,7 @@ class HumanInputRequestIdMismatchError(RuntimeError):
     """恢复时的 request_id 与当前 human_input_request.request_id 不匹配。"""
 
 
-def pause_node(state: AgentState) -> dict:
+def pause_node(state: AgentState) -> dict[str, Any]:
     """暂停执行，等待用户输入。
 
     只做三件事：

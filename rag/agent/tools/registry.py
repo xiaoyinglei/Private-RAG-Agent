@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from inspect import isawaitable
+from typing import cast
 
 from pydantic import BaseModel, ValidationError
 
@@ -22,7 +23,7 @@ class ToolInputValidationError(ValueError):
         self.validation_error = validation_error
 
     def errors(self) -> list[dict[str, object]]:
-        return self.validation_error.errors()
+        return [cast(dict[str, object], dict(error)) for error in self.validation_error.errors()]
 
 
 class ToolOutputValidationError(ValueError):
@@ -32,7 +33,7 @@ class ToolOutputValidationError(ValueError):
         self.validation_error = validation_error
 
     def errors(self) -> list[dict[str, object]]:
-        return self.validation_error.errors()
+        return [cast(dict[str, object], dict(error)) for error in self.validation_error.errors()]
 
 
 class ToolRegistry:

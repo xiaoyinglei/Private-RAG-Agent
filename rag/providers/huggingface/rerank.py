@@ -114,11 +114,11 @@ class FlagEmbeddingReranker(Reranker):
             kwargs["devices"] = self._devices
         if callable(from_finetuned):
             return self._call_factory(from_finetuned, model_ref, kwargs)
-        return self._call_factory(backend_cls, model_ref, kwargs)  # type: ignore[arg-type]
+        return self._call_factory(backend_cls, model_ref, kwargs)
 
     @staticmethod
     def _call_factory(factory: object, model_ref: str, kwargs: dict[str, Any]) -> object:
-        call = factory  # type: ignore[assignment]
+        call = factory
         unsupported_order = (
             "local_files_only",
             "normalize",
@@ -131,7 +131,7 @@ class FlagEmbeddingReranker(Reranker):
         current = dict(kwargs)
         while True:
             try:
-                return call(model_ref, **current)  # type: ignore[misc]
+                return call(model_ref, **current)  # type: ignore[operator]
             except TypeError:
                 removed = False
                 for key in unsupported_order:

@@ -105,7 +105,7 @@ class ApprovalPolicy:
             for key, value in list(arguments.items())[:5]
         )
         summary = ToolCallSummary(
-            tool_call_id=arguments.get("tool_call_id", "?"),
+            tool_call_id=str(arguments.get("tool_call_id", "?")),
             tool_name=tool_name,
             args_preview=args_preview or "(无参数)",
             risk_level=risk_level,

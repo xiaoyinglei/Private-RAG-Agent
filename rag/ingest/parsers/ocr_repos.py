@@ -3,23 +3,26 @@ from __future__ import annotations
 import sys
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 from PIL import Image
 
-from rag.schema.model_protocols import OcrVisionRepo
-from rag.schema.core import OcrRegion, OcrResult
 from rag.ingest.parsers.util import normalize_whitespace
+from rag.schema.core import OcrRegion, OcrResult
+from rag.schema.model_protocols import OcrVisionRepo
 
 try:
     from ocrmac import ocrmac as ocrmac_module
 except Exception:  # pragma: no cover - optional dependency
     ocrmac_module = None
 
+
 class DeterministicOcrVisionRepo(OcrVisionRepo):
     def __init__(self, mapping: dict[str, OcrResult] | None = None) -> None:
         self._mapping = mapping or {}
 
-    def extract(self, image_path: Path) -> OcrResult:
+    def extract(self, image_path: Path, **kwargs: Any) -> OcrResult:
+        del kwargs
         if image_path.as_posix() in self._mapping:
             return self._mapping[image_path.as_posix()]
 
@@ -39,7 +42,8 @@ class OCRMacVisionRepo(OcrVisionRepo):
         self._min_confidence = min_confidence
         self._fallback_repo = fallback_repo or DeterministicOcrVisionRepo()
 
-    def extract(self, image_path: Path) -> OcrResult:
+    def extract(self, image_path: Path, **kwargs: Any) -> OcrResult:
+        del kwargs
         with Image.open(image_path) as image:
             width = image.width
             height = image.height
@@ -115,7 +119,8 @@ class CallableOcrVisionRepo(OcrVisionRepo):
     def __init__(self, extract_fn: Callable[[Path], OcrResult]) -> None:
         self._extract_fn = extract_fn
 
-    def extract(self, image_path: Path) -> OcrResult:
+    def extract(self, image_path: Path, **kwargs: Any) -> OcrResult:
+        del kwargs
         return self._extract_fn(image_path)
 
 

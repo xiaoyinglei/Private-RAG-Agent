@@ -28,7 +28,7 @@ class AgentGraphCompiler:
         subagent_runner: SubAgentRunner | None = None,
         synthesis_runner: SynthesisRunner | None = None,
         model_registry: ModelRegistry | None = None,
-        checkpointer: BaseCheckpointSaver | None = None,
+        checkpointer: BaseCheckpointSaver[str] | None = None,
     ) -> None:
         self._tool_registry = tool_registry
         self._evaluate_decision_provider = evaluate_decision_provider

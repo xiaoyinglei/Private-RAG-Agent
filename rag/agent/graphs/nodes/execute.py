@@ -25,7 +25,7 @@ async def execute_node(
     *,
     tool_registry: ToolRegistry,
     allowed_tools: frozenset[str],
-) -> dict:
+) -> dict[str, Any]:
     pending = state.get("pending_tool_calls", [])
 
     # fast_path 无 pending tool calls 时自动补一个轻量 RAG 检索
@@ -186,7 +186,7 @@ async def execute_node(
         return_exceptions=True,
     )
     for index, result_or_exc in enumerate(gathered):
-        if isinstance(result_or_exc, Exception):
+        if isinstance(result_or_exc, BaseException):
             results.append(
                 ToolResult(
                     tool_call_id=batch[index].tool_call_id,

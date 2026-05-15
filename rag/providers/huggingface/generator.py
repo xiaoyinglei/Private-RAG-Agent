@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import json
-from typing import Any, TypeVar
 import re
+from typing import Any, TypeVar, cast
+
 import torch
 from pydantic import BaseModel
 from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -44,14 +45,14 @@ class HuggingFaceGenerator(Generator):
         if torch_dtype is not None:
             model_kwargs["torch_dtype"] = self._resolve_torch_dtype(torch_dtype)
 
-        self._tokenizer = AutoTokenizer.from_pretrained(
+        self._tokenizer = cast(Any, AutoTokenizer.from_pretrained(
             model_name_or_path,
             **tokenizer_kwargs,
-        )
-        self._model = AutoModelForCausalLM.from_pretrained(
+        ))
+        self._model = cast(Any, AutoModelForCausalLM.from_pretrained(
             model_name_or_path,
             **model_kwargs,
-        )
+        ))
 
         self._device = self._resolve_device(device)
         self._model.to(self._device)
@@ -95,7 +96,7 @@ class HuggingFaceGenerator(Generator):
 
         input_length = inputs["input_ids"].shape[1]
         generated_ids = outputs[0][input_length:]
-        raw_text = self._tokenizer.decode(generated_ids, skip_special_tokens=True)
+        raw_text = cast(str, self._tokenizer.decode(generated_ids, skip_special_tokens=True))
 
         # 🚨 2. 在返回之前，剥离思考过程！
         return self._normalize_chat_text(raw_text)

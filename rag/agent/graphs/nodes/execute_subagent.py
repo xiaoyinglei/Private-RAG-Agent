@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable
 from inspect import isawaitable
-from typing import Protocol
+from typing import Any, Protocol
 
 from rag.agent.core.context import RuntimeRegistry
 from rag.agent.core.task import SubTaskNode, SubTaskResult, SubTaskStatus
@@ -33,7 +33,7 @@ async def execute_subagent_node(
     state: AgentState,
     *,
     subagent_runner: SubAgentRunner,
-) -> dict:
+) -> dict[str, Any]:
     subtask = state.get("subtask")
     if not isinstance(subtask, SubTaskNode):
         return {

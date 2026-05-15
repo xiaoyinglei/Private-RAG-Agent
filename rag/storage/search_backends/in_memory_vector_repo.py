@@ -7,6 +7,15 @@ from math import sqrt
 from rag.schema.runtime import StoredVectorEntry, VectorSearchResult
 
 
+def _to_int(value: object, default: int = 0) -> int:
+    """Safely coerce a metadata value to int (handles str from JSON round-tripping)."""
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.isdigit():
+        return int(value)
+    return default
+
+
 @dataclass(frozen=True)
 class _VectorRecord:
     item_id: str
@@ -70,8 +79,8 @@ class InMemoryVectorRepo:
                         item_id=record.item_id,
                         score=self._cosine_similarity(query_vector, record_vector),
                         item_kind=record.item_kind,
-                        doc_id=record.metadata.get("doc_id", ""),
-                        source_id=record.metadata.get("source_id", ""),
+                        doc_id=_to_int(record.metadata.get("doc_id", 0)),
+                        source_id=_to_int(record.metadata.get("source_id", 0)),
                         text=record.text,
                         metadata=dict(record.metadata),
                     )
@@ -92,8 +101,8 @@ class InMemoryVectorRepo:
                     item_id=record.item_id,
                     score=self._cosine_similarity(query_vector, record.vector),
                     item_kind=record.item_kind,
-                    doc_id=record.metadata.get("doc_id", ""),
-                    source_id=record.metadata.get("source_id", ""),
+                    doc_id=_to_int(record.metadata.get("doc_id", 0)),
+                    source_id=_to_int(record.metadata.get("source_id", 0)),
                     text=record.text,
                     metadata=dict(record.metadata),
                 )
@@ -116,7 +125,7 @@ class InMemoryVectorRepo:
             item_id=record.item_id,
             item_kind=record.item_kind,
             embedding_space=record.embedding_space,
-            doc_id=metadata.get("doc_id", ""),
+            doc_id=_to_int(metadata.get("doc_id", 0)),
             text=record.text,
             metadata=metadata,
             vector=list(record.vector),

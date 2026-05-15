@@ -425,6 +425,7 @@ class DataContractMetadataRepo(MetadataRepo, GroundingMetadataRepo, ProcessingSt
         *,
         is_indexed: bool | None = None,
         index_ready: bool | None = None,
+        embedding_model_id: str | None = None,
         indexed_at: datetime | None = None,
         last_index_error: str | None = None,
     ) -> Document: ...

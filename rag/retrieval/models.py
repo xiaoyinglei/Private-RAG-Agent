@@ -91,10 +91,10 @@ class FusedCandidateView(CandidateLike):
     rrf_score: float | None = None
     unified_rank: int | None = None
     grounding_target: GroundingTarget | None = None
+    item_id: str = field(init=False)
 
-    @property
-    def item_id(self) -> str:
-        return self.evidence_id
+    def __post_init__(self) -> None:
+        self.item_id = self.evidence_id
 
 
 @dataclass(frozen=True, slots=True)

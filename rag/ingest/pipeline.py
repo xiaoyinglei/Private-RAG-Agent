@@ -3,12 +3,12 @@ from __future__ import annotations
 import os as _os_module
 import tempfile
 from collections.abc import Sequence
-from contextlib import nullcontext
+from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from hashlib import sha256
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 
 import duckdb as _duckdb
 
@@ -433,10 +433,10 @@ class IngestPipeline:
                     self._mark_l2_failed(prepared, error_message=str(exc))
             raise
 
-    def _metadata_transaction(self):
+    def _metadata_transaction(self) -> AbstractContextManager[Any]:
         transaction = getattr(self._metadata_repo, "transaction", None)
         if callable(transaction):
-            return transaction()
+            return cast("AbstractContextManager[Any]", transaction())
         return nullcontext()
 
     def _mark_l2_ready(self, prepared: _PreparedIngestItem, *, indexed_at: datetime) -> None:
@@ -717,11 +717,11 @@ class IngestPipeline:
         ]
         has_table = any(kind == "table" for kind in anchor_kinds)
         has_figure = any(kind in {"figure", "image_summary"} for kind in anchor_kinds)
-        metadata_json = dict(parsed_section.metadata)
-        metadata_json.setdefault("document_title", document.title)
+        metadata_json: dict[str, Any] = dict(parsed_section.metadata)
+        metadata_json.setdefault("document_title", document.title or "")
         metadata_json.setdefault(
             "section_title",
-            parsed_section.toc_path[-1] if parsed_section.toc_path else document.title,
+            parsed_section.toc_path[-1] if parsed_section.toc_path else document.title or "",
         )
         refined_window_index = self._metadata_int(metadata_json, "refined_window_index")
         refined_window_count = self._metadata_int(metadata_json, "refined_window_count")
@@ -885,7 +885,7 @@ class IngestPipeline:
             fallback_storage_key=content_storage_key,
         )
 
-        metadata_json = dict(parsed_element.metadata)
+        metadata_json: dict[str, Any] = dict(parsed_element.metadata)
         if parsed_element.element_id:
             metadata_json["asset_anchor_ref"] = parsed_element.element_id
             metadata_json["asset_anchor"] = asset_anchor(parsed_element.element_id)
@@ -930,7 +930,7 @@ class IngestPipeline:
             row_count=self._metadata_int(metadata_json, "row_count"),
             column_count=self._metadata_int(metadata_json, "column_count"),
             sample_rows=self._metadata_dict_list(metadata_json, "sample_rows"),
-            schema=self._metadata_dict_list(metadata_json, "schema"),
+            table_schema=self._metadata_dict_list(metadata_json, "schema"),
             content_hash=content_hash,
             storage_key=storage_key,
             metadata_json=metadata_json,

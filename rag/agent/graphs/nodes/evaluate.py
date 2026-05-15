@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable
 from inspect import isawaitable
-from typing import Protocol
+from typing import Any, Protocol
 
 from langgraph.types import Send
 from pydantic import ValidationError
@@ -37,7 +37,7 @@ async def evaluate_node(
     *,
     definition: AgentDefinition,
     decision_provider: EvaluateDecisionProvider | None = None,
-) -> dict:
+) -> dict[str, Any]:
     iteration = state.get("iteration", 0)
 
     from rag.agent.core.context import RuntimeRegistry
@@ -99,7 +99,7 @@ async def _evaluate_task_dag(
     plan: TaskDAG,
     definition: AgentDefinition,
     handles: AgentRuntimeHandles,
-) -> dict:
+) -> dict[str, Any]:
     terminal = state.get("terminal_subtasks", set())
     successful = state.get("successful_subtasks", set())
     if all(subtask.subtask_id in terminal for subtask in plan.subtasks):
@@ -161,7 +161,7 @@ async def _call_decision_provider(
         )
 
 
-def _apply_decision(decision: ThinkOutput, *, next_iteration: int) -> dict:
+def _apply_decision(decision: ThinkOutput, *, next_iteration: int) -> dict[str, Any]:
     if decision.action == "execute":
         if not decision.tool_calls:
             return {

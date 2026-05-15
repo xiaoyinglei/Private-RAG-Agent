@@ -52,7 +52,7 @@ def test_milvus_vector_repo_queries_numeric_section_entries(monkeypatch: pytest.
     try:
         entry = repo.get_entry("7", item_kind="section_summary")
         assert entry is not None
-        assert entry.doc_id == "42"
+        assert entry.doc_id == 42
         assert entry.metadata["section_id"] == "7"
         assert entry.text == "Alpha section"
         assert entry.metadata["source_id"] == "9"

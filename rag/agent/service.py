@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+from typing import Any, cast
 from uuid import uuid4
 
+from langchain_core.messages import BaseMessage
 from langgraph.checkpoint.base import BaseCheckpointSaver
-from langgraph.graph.message import BaseMessage
 from pydantic import BaseModel, ConfigDict, Field
 
 from rag.agent.core.compiler import AgentGraphCompiler
@@ -104,7 +105,7 @@ class AgentService:
         subagent_runner: SubAgentRunner | None = None,
         synthesis_runner: SynthesisRunner | None = None,
         model_registry: ModelRegistry | None = None,
-        checkpointer: BaseCheckpointSaver | None = None,
+        checkpointer: BaseCheckpointSaver[str] | None = None,
     ) -> None:
         self._definition = definition
         self._base_tool_registry = tool_registry
@@ -216,7 +217,7 @@ class AgentService:
             model_registry=self._model_registry,
             checkpointer=self._checkpointer,
         )
-        graph = compiler.compile(self._definition)
+        graph = cast(Any, compiler.compile(self._definition))
         state = self.initial_state_from_config(
             task=task,
             run_config=run_config,
@@ -276,7 +277,7 @@ class AgentService:
         """从中断点恢复。response 对应 HumanInputRequest 的用户响应。"""
         from langgraph.types import Command
 
-        graph = self._compiler.compile(self._definition)
+        graph = cast(Any, self._compiler.compile(self._definition))
         run_config = await self._restore_runtime_handles_from_checkpoint(
             graph,
             thread_id=run_id,
@@ -340,7 +341,7 @@ class AgentService:
         )
         if not snapshot.values:
             raise KeyError(f"No checkpoint found for run_id={thread_id}")
-        return snapshot.values
+        return cast(AgentState, snapshot.values)
 
     @staticmethod
     async def _acheckpoint_state(graph: object, *, thread_id: str) -> AgentState:
@@ -349,7 +350,7 @@ class AgentService:
         )
         if not snapshot.values:
             raise KeyError(f"No checkpoint found for run_id={thread_id}")
-        return snapshot.values
+        return cast(AgentState, snapshot.values)
 
 
 __all__ = [

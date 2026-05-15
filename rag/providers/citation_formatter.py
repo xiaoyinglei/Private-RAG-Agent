@@ -8,7 +8,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-from rag.schema.query import AnswerCitation, EvidenceItem, GroundedAnswer
+from rag.schema.query import AnswerCitation, GroundedAnswer
 
 _DOC_ALIAS_RE = re.compile(r"\[(Doc-\d+)\]")
 _SUPERSCRIPT_TABLE = str.maketrans("0123456789", "⁰¹²³⁴⁵⁶⁷⁸⁹")
@@ -74,7 +74,7 @@ class CitationFormatter:
             doc_order = [f"Doc-{i+1}" for i in range(len(ordered))]
             reindex = {f"Doc-{i+1}": (i + 1, ordered[i]) for i in range(len(ordered))}
         else:
-            reindex: dict[str, tuple[int, str]] = {}
+            reindex = {}
             evidence_ids_seen: set[str] = set()
             next_num = 1
             for doc_marker in doc_order:
@@ -189,11 +189,11 @@ class CitationFormatter:
     ) -> str:
         entries: list[tuple[int, AnswerCitation]] = []
         seen_nums: set[int] = set()
-        for doc_marker, (num, ev_id) in sorted(reindex.items(), key=lambda x: x[1][0]):
+        for _doc_marker, (num, ev_id) in sorted(reindex.items(), key=lambda x: x[1][0]):
             if num in seen_nums:
                 continue
             seen_nums.add(num)
-            for cid, cit in citation_by_id.items():
+            for _cid, cit in citation_by_id.items():
                 if cit.evidence_id == ev_id:
                     entries.append((num, cit))
                     break

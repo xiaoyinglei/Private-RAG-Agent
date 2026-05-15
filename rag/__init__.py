@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from importlib import import_module
+from typing import TYPE_CHECKING
 
 __all__ = [
     "AgentDefinition",
@@ -22,6 +23,12 @@ __all__ = [
     "StorageComponentConfig",
     "StorageConfig",
 ]
+
+if TYPE_CHECKING:
+    from rag.agent import AgentDefinition, AgentRunConfig, AgentRunRequest, AgentService, AgentState, ToolRegistry, ToolSpec  # noqa: F401
+    from rag.assembly import AssemblyConfig, AssemblyDiagnostics, AssemblyOverrides, AssemblyRequest, CapabilityAssemblyService, CapabilityRequirements  # noqa: F401, E501
+    from rag.runtime import RAGRuntime  # noqa: F401
+    from rag.storage import StorageComponentConfig, StorageConfig  # noqa: F401
 
 _EXPORTS = {
     "AgentDefinition": ("rag.agent", "AgentDefinition"),

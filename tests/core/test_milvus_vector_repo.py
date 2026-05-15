@@ -107,9 +107,49 @@ def test_milvus_vector_repo_upserts_v1_section_summary_with_partition(monkeypatc
         assert rows[0]["toc_path_text"] == "A / B"
         assert rows[0]["embedding_model_id"] == "bge-m3"
         assert rows[0]["index_ready"] is True
+        assert rows[0]["external_sparse_embedding"] == {}
         assert fake_collection.flush_count == 1
     finally:
         repo.close()
+
+
+def test_milvus_vector_repo_sparse_schema_uses_non_nullable_external_field(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(MilvusVectorRepo, "_connect", lambda self: setattr(self, "_connected", True))
+
+    class _Connections:
+        def disconnect(self, alias: str) -> None:
+            return None
+
+    class _DataType:
+        INT64 = "INT64"
+        INT32 = "INT32"
+        VARCHAR = "VARCHAR"
+        BOOL = "BOOL"
+        FLOAT_VECTOR = "FLOAT_VECTOR"
+        SPARSE_FLOAT_VECTOR = "SPARSE_FLOAT_VECTOR"
+
+    class _FieldSchema:
+        def __init__(self, **kwargs) -> None:
+            self.kwargs = kwargs
+
+    monkeypatch.setitem(sys.modules, "pymilvus", types.SimpleNamespace(connections=_Connections()))
+
+    repo = MilvusVectorRepo("http://127.0.0.1:19530")
+    try:
+        fields = repo._collection_fields(
+            item_kind="section_summary",
+            dimension=2,
+            data_type=_DataType,
+            field_schema=_FieldSchema,
+        )
+    finally:
+        repo.close()
+
+    external_sparse = next(field for field in fields if field.kwargs["name"] == "external_sparse_embedding")
+    assert external_sparse.kwargs["dtype"] == _DataType.SPARSE_FLOAT_VECTOR
+    assert "nullable" not in external_sparse.kwargs
 
 
 def test_milvus_vector_repo_deduplicates_primary_keys_within_one_flush(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -193,7 +233,10 @@ def test_milvus_vector_repo_search_injects_system_guardrail(monkeypatch: pytest.
         name = "summary_index__section_summary__default"
 
         def search(self, **kwargs):
-            assert kwargs["expr"] == "(is_active == true and index_ready == true) and (doc_id in [42]) and (tenant_id == \"tenant-a\")"
+            assert (
+                kwargs["expr"]
+                == '(is_active == true and index_ready == true) and (doc_id in [42]) and (tenant_id == "tenant-a")'
+            )
             return [[]]
 
         def release(self) -> None:
@@ -312,7 +355,7 @@ def test_milvus_vector_repo_does_not_reuse_async_client_across_event_loops(
     class _RRFRanker:
         pass
 
-    clients: list["_FakeAsyncClient"] = []
+    clients: list[_FakeAsyncClient] = []
 
     class _FakeAsyncClient:
         def __init__(self, **kwargs) -> None:

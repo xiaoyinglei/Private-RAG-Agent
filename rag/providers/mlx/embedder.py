@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from rag.schema.model_protocols import Embedder
 
@@ -51,21 +51,27 @@ class MLXEmbedder(Embedder):
             ) from exc
 
         try:
-            self._model, self._tokenizer = load(
+            loaded = cast(
+                Any,
+                load(
                 model_name_or_path,
                 tokenizer_config=tokenizer_config or {},
+                ),
             )
+            self._model = loaded[0]
+            self._tokenizer = loaded[1]
         except Exception as exc:
             raise RuntimeError(
                 f"Failed to load MLX embedding model '{model_name_or_path}': {exc}"
             ) from exc
 
-        self._transformer = getattr(self._model, "model", None)
-        if self._transformer is None:
+        transformer = getattr(self._model, "model", None)
+        if transformer is None:
             raise MLXEmbeddingModelError(
                 "This MLX model does not expose hidden states required for embedding. "
                 "The model must have a .model attribute (transformer trunk)."
             )
+        self._transformer = cast(Any, transformer)
 
     # ── Public API ──
 
@@ -144,14 +150,16 @@ class MLXEmbedder(Embedder):
     def _encode(self, texts: list[str]) -> Any:
         """编码文本。优先 call tokenizer，不支持时 fallback 到内部 _tokenizer。"""
         try:
-            return self._tokenizer(
+            tokenizer = cast(Any, self._tokenizer)
+            return tokenizer(
                 texts, padding=True, truncation=True, return_tensors="np",
             )
         except TypeError:
             inner = getattr(self._tokenizer, "_tokenizer", None)
             if inner is None:
                 raise
-            return inner(texts, padding=True, truncation=True, return_tensors="np")
+            inner_tokenizer = cast(Any, inner)
+            return inner_tokenizer(texts, padding=True, truncation=True, return_tensors="np")
 
     def _extract_hidden_states(self, input_ids: Any, attention_mask: Any) -> Any:
         """提取 hidden states。优先传 attention_mask，不支持时 fallback。"""

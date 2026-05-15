@@ -221,8 +221,8 @@ class PlanningGraph:
             fusion_alpha=float(state["fusion_alpha"]),
         )
 
-    def _build_graph(self):
-        graph = StateGraph(_PlannerState)
+    def _build_graph(self) -> Any:
+        graph: Any = StateGraph(_PlannerState)
         graph.add_node("complexity_gate", self._node_complexity_gate)
         graph.add_node("query_decompose", self._node_query_decompose)
         graph.add_node("query_variants", self._node_query_variants)

@@ -3,7 +3,7 @@ from __future__ import annotations
 import inspect
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Any, Protocol, cast
 
 from rag.retrieval.evidence import CandidateLike, EvidenceService
 from rag.retrieval.planning_graph import FallbackStep, PlanningState, QueryVariant, RetrievalPath
@@ -316,12 +316,12 @@ class RetrievalAdapter:
         supports_plan = callable(retrieve_with_plan)
         effective_scope = self._effective_scope(source_scope, plan=plan, supports_plan=supports_plan)
         if supports_plan:
-            return retrieve_with_plan(
+            return cast(Sequence[CandidateLike], cast(Any, retrieve_with_plan)(
                 query=query,
                 source_scope=effective_scope,
                 retrieval_signals=retrieval_signals,
                 plan=plan,
-            )
+            ))
         return retriever(query, effective_scope, retrieval_signals)
 
     async def _acall_branch(
@@ -338,25 +338,28 @@ class RetrievalAdapter:
         supports_plan = callable(aretrieve_with_plan) or callable(retrieve_with_plan)
         effective_scope = self._effective_scope(source_scope, plan=plan, supports_plan=supports_plan)
         if callable(aretrieve_with_plan):
-            return await aretrieve_with_plan(
+            raw_result = cast(Any, aretrieve_with_plan)(
                 query=query,
                 source_scope=effective_scope,
                 retrieval_signals=retrieval_signals,
                 plan=plan,
             )
+            if inspect.isawaitable(raw_result):
+                return cast(Sequence[CandidateLike], await raw_result)
+            return cast(Sequence[CandidateLike], raw_result)
         if callable(retrieve_with_plan):
-            result = retrieve_with_plan(
+            result = cast(Any, retrieve_with_plan)(
                 query=query,
                 source_scope=effective_scope,
                 retrieval_signals=retrieval_signals,
                 plan=plan,
             )
             if inspect.isawaitable(result):
-                return await result
-            return result
+                return cast(Sequence[CandidateLike], await result)
+            return cast(Sequence[CandidateLike], result)
         result = retriever(query, effective_scope, retrieval_signals)
         if inspect.isawaitable(result):
-            return await result
+            return cast(Sequence[CandidateLike], await result)
         return result
 
     def _skipped_branches(self, plan: PlanningState) -> set[str]:

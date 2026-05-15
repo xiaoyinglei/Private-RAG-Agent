@@ -873,7 +873,7 @@ def _candidate_kind(
         "grounded_section",
         "grounded_asset",
     }:
-        return explicit  # type: ignore[return-value]
+        return explicit  # type: ignore[no-any-return]
     if grounding_target is not None:
         if grounding_target.kind == "asset" or grounding_target.asset_id is not None:
             return "asset_summary"
@@ -926,7 +926,7 @@ def _source_family(
 ) -> SourceFamily:
     explicit = getattr(candidate, "source_family", None) or metadata.get("source_family")
     if explicit in {"dense", "sparse", "hybrid", "asset", "lexical", "fallback", "grounding", "unknown"}:
-        return explicit  # type: ignore[return-value]
+        return explicit  # type: ignore[no-any-return]
     channels = {channel for channel in retrieval_channels if channel}
     if candidate_kind == "asset_summary" or channels & {"asset", "special"}:
         return "asset"

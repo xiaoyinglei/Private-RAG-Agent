@@ -68,5 +68,18 @@ strict = true
 warn_unused_configs = true
 packages = ["rag"]
 
+[[tool.mypy.overrides]]
+module = [
+  "boto3",
+  "datasets",
+  "ocrmac",
+  "pandas",
+  "pymilvus",
+  "tqdm",
+  "tqdm.*",
+  "yaml",
+]
+ignore_missing_imports = true
+
 [tool.uv]
 default-groups = ["dev"]

@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable
+from collections.abc import Awaitable, Coroutine
 from dataclasses import dataclass, field
-from typing import TypeVar
+from typing import Any, TypeVar, cast
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -116,7 +116,7 @@ class RuntimeCoordinator:
         try:
             asyncio.get_running_loop()
         except RuntimeError:
-            return asyncio.run(awaitable)
+            return asyncio.run(cast(Coroutine[Any, Any, T], awaitable))
         raise RuntimeError("synchronous runtime bridge cannot run inside an active event loop; call the async path")
 
 

@@ -8,7 +8,7 @@ from langgraph.checkpoint.memory import MemorySaver
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
 
-def create_agent_checkpointer(checkpoint_db: Path | str | None) -> BaseCheckpointSaver:
+def create_agent_checkpointer(checkpoint_db: Path | str | None) -> BaseCheckpointSaver[str]:
     if checkpoint_db is None:
         return MemorySaver()
 
@@ -17,7 +17,7 @@ def create_agent_checkpointer(checkpoint_db: Path | str | None) -> BaseCheckpoin
     return AsyncSqliteSaver(aiosqlite.connect(str(path)))
 
 
-async def aclose_agent_checkpointer(checkpointer: BaseCheckpointSaver) -> None:
+async def aclose_agent_checkpointer(checkpointer: BaseCheckpointSaver[str]) -> None:
     connection = getattr(checkpointer, "conn", None)
     if connection is not None and hasattr(connection, "close"):
         await connection.close()

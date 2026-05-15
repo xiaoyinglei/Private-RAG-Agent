@@ -5,11 +5,11 @@ import logging
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
-from typing import Any
+from typing import Any, Literal, cast
 
 from rag.ingest.table_executor import ComputeResult, TableExecutor
 from rag.providers.citation_formatter import CitationFormatter
-from rag.providers.generation import AnswerGenerator
+from rag.providers.generation import AnswerGenerationResult, AnswerGenerator
 from rag.retrieval.authorization_service import AuthorizationService
 from rag.retrieval.context import (
     ContextPromptBuilder,
@@ -29,13 +29,14 @@ from rag.retrieval.models import (
 )
 from rag.retrieval.orchestrator import RetrievalService
 from rag.retrieval.runtime_coordinator import (
+    CoreRetrievalPayload,
     RuntimeCoordinator,
     build_retrieval_diagnostics,
     to_retrieval_result,
 )
 from rag.retrieval.synthesis_service import SynthesisService
 from rag.schema.query import EvidenceItem
-from rag.schema.runtime import AccessPolicy
+from rag.schema.runtime import AccessPolicy, RuntimeMode
 from rag.utils.guard import RateLimitExceeded
 
 
@@ -55,9 +56,9 @@ class _LLMFallbackResult:
 
 @dataclass(slots=True, frozen=True)
 class _QueryExecutionResult:
-    retrieval_payload: object | None
+    retrieval_payload: CoreRetrievalPayload | None
     retrieval: RetrievalResult
-    generated: object
+    generated: AnswerGenerationResult
     context: BuiltContext
 
 
@@ -82,7 +83,7 @@ class _QueryPipeline:
     def _run_async(awaitable: Any) -> Any:
         return RuntimeCoordinator().run_sync(awaitable)
 
-    def _render_answer(self, generated: object) -> object:
+    def _render_answer(self, generated: AnswerGenerationResult) -> AnswerGenerationResult:
         answer = getattr(generated, "answer", None)
         if answer is None:
             return generated
@@ -92,7 +93,7 @@ class _QueryPipeline:
 
     def _generate_with_breaker(self, awaitable: Any) -> Any:
         breaker = self.llm_circuit_breaker
-        if breaker is not None and not breaker.allow():
+        if breaker is not None and not cast(Any, breaker).allow():
             _logger = logging.getLogger("rag.runtime")
             _logger.warning("LLM circuit breaker open, returning fallback")
             return _LLMFallbackResult()
@@ -100,11 +101,11 @@ class _QueryPipeline:
             result = self._run_async(awaitable)
         except Exception:
             if breaker is not None:
-                breaker.on_failure()
+                cast(Any, breaker).on_failure()
             raise
         else:
             if breaker is not None:
-                breaker.on_success()
+                cast(Any, breaker).on_success()
             return result
 
     def run(
@@ -190,7 +191,7 @@ class _QueryPipeline:
         if self.rate_limiter is None:
             return
         user_id = options.user_id or "anonymous"
-        if not self.rate_limiter.allow(user_id=user_id):
+        if not cast(Any, self.rate_limiter).allow(user_id=user_id):
             raise RateLimitExceeded(f"rate limit exceeded for user '{user_id}'")
 
     def _execute_direct_query(
@@ -199,7 +200,7 @@ class _QueryPipeline:
         query: str,
         options: QueryOptions,
         access_policy: AccessPolicy,
-        retrieval_payload: object | None,
+        retrieval_payload: CoreRetrievalPayload | None,
         retrieval: RetrievalResult,
     ) -> _QueryExecutionResult:
         prompt = self.prompt_builder.answer_generation_service.build_direct_prompt(
@@ -235,7 +236,7 @@ class _QueryPipeline:
         query: str,
         options: QueryOptions,
         access_policy: AccessPolicy,
-        retrieval_payload: object | None,
+        retrieval_payload: CoreRetrievalPayload | None,
         retrieval: RetrievalResult,
     ) -> _QueryExecutionResult:
         merged_evidence = self.context_merger.merge(retrieval_payload or retrieval)
@@ -283,6 +284,7 @@ class _QueryPipeline:
             evidence_budget=evidence_budget,
             access_policy=access_policy,
         )
+        generated = cast(AnswerGenerationResult, generated)
         return _QueryExecutionResult(
             retrieval_payload=retrieval_payload,
             retrieval=retrieval,
@@ -320,10 +322,10 @@ class _QueryPipeline:
         merged_evidence: list[EvidenceItem],
         query: str,
         options: QueryOptions,
-        retrieval: object,
+        retrieval: RetrievalResult,
         total_budget: int,
         evidence_budget: int,
-        access_policy: object,
+        access_policy: AccessPolicy,
     ) -> tuple[object, list[EvidenceItem], ContextTruncationResult, ContextPromptBuildResult]:
         def _recontext(
             ev: list[EvidenceItem],
@@ -384,9 +386,7 @@ class _QueryPipeline:
                 prompt=pb.prompt,
                 evidence_pack=context_evidence_items,
                 grounded_candidate=pb.grounded_candidate,
-                runtime_mode=getattr(retrieval, "decision", None) and getattr(
-                    getattr(retrieval, "decision", None), "runtime_mode", None
-                ),
+                runtime_mode=retrieval.decision.runtime_mode,
                 access_policy=access_policy,
             )
         )
@@ -491,23 +491,23 @@ class _QueryPipeline:
         access_policy: AccessPolicy,
         source_scope: tuple[str, ...],
         options: QueryOptions,
-    ) -> object | None:
+    ) -> CoreRetrievalPayload | None:
         retrieve_payload = getattr(self.retrieval, "retrieve_payload", None)
         if not callable(retrieve_payload):
             return None
-        return retrieve_payload(
+        return cast(CoreRetrievalPayload, retrieve_payload(
             query,
             access_policy=access_policy,
             source_scope=source_scope,
             query_options=options,
-        )
+        ))
 
     def _build_bounded_context(
         self,
         *,
         query: str,
         options: QueryOptions,
-        retrieval: object,
+        retrieval: RetrievalResult,
         merged_evidence: list[EvidenceItem],
         total_budget: int,
         evidence_budget: int,
@@ -547,12 +547,12 @@ class _QueryPipeline:
         *,
         query: str,
         options: QueryOptions,
-        retrieval: object,
+        retrieval: RetrievalResult,
         merged_evidence: list[EvidenceItem],
         total_budget: int,
         current_budget: int,
         truncated: ContextTruncationResult,
-        prompt_variants: Sequence[tuple[str, str | None, Sequence[tuple[str, str]]]],
+        prompt_variants: Sequence[tuple[Literal["full", "compact", "minimal"], str | None, Sequence[tuple[str, str]]]],
     ) -> tuple[ContextTruncationResult, ContextPromptBuildResult, int]:
         prompt_build = self._build_prompt_variants(
             query=query,
@@ -603,9 +603,9 @@ class _QueryPipeline:
         *,
         query: str,
         options: QueryOptions,
-        retrieval: object,
+        retrieval: RetrievalResult,
         truncated: ContextTruncationResult,
-        prompt_variants: Sequence[tuple[str, str | None, Sequence[tuple[str, str]]]],
+        prompt_variants: Sequence[tuple[Literal["full", "compact", "minimal"], str | None, Sequence[tuple[str, str]]]],
     ) -> ContextPromptBuildResult:
         last_prompt: ContextPromptBuildResult | None = None
         for prompt_style, user_prompt, conversation_history in prompt_variants:
@@ -636,9 +636,9 @@ class _QueryPipeline:
         *,
         query: str,
         options: QueryOptions,
-        retrieval: object,
+        retrieval: RetrievalResult,
         truncated: ContextTruncationResult,
-        prompt_style: str,
+        prompt_style: Literal["full", "compact", "minimal"],
         user_prompt: str | None,
         conversation_history: Sequence[tuple[str, str]],
     ) -> ContextPromptBuildResult:

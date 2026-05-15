@@ -1,11 +1,11 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Callable
+from typing import cast
 
 from rag.schema.core import ProcessingStateRecord
-
 
 _PRIORITY_ORDER = {"high": 0, "normal": 1, "low": 2}
 
@@ -61,13 +61,13 @@ class IndexSyncService:
             error_message=error_message,
             metadata_json=merged_metadata,
         )
-        return save_processing_state(state)
+        return cast(ProcessingStateRecord, save_processing_state(state))
 
     def get(self, doc_id: int) -> ProcessingStateRecord | None:
         getter = getattr(self.metadata_repo, "get_processing_state", None)
         if not callable(getter):
             return None
-        return getter(doc_id)
+        return cast(ProcessingStateRecord | None, getter(doc_id))
 
     def claim_next(
         self,
@@ -109,7 +109,7 @@ class IndexSyncService:
                 "updated_at": current_time,
             }
         )
-        return save_processing_state(claimed)
+        return cast(ProcessingStateRecord, save_processing_state(claimed))
 
     def mark_completed(self, doc_id: int, *, now: datetime | None = None) -> ProcessingStateRecord | None:
         save_processing_state = getattr(self.metadata_repo, "save_processing_state", None)
@@ -127,7 +127,7 @@ class IndexSyncService:
                 "updated_at": now or datetime.now(UTC),
             }
         )
-        return save_processing_state(completed)
+        return cast(ProcessingStateRecord, save_processing_state(completed))
 
     def mark_failed(
         self,
@@ -152,13 +152,13 @@ class IndexSyncService:
                 "updated_at": now or datetime.now(UTC),
             }
         )
-        return save_processing_state(failed)
+        return cast(ProcessingStateRecord, save_processing_state(failed))
 
     def process_next(
         self,
         *,
         worker_id: str,
-        sync_handler: Callable[[ProcessingStateRecord], None],
+        sync_handler: Callable[[ProcessingStateRecord], object],
         lease_seconds: int = 60,
         now: datetime | None = None,
     ) -> ProcessingStateRecord | None:

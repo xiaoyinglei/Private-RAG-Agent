@@ -87,14 +87,14 @@ class ReciprocalRankFusion:
         final_score = item.fused_score
         return FusedCandidateView(
             evidence_id=item.candidate.item_id,
-            doc_id=item.candidate.doc_id,
+            doc_id=str(item.candidate.doc_id),
             benchmark_doc_id=getattr(item.candidate, "benchmark_doc_id", None),
             text=item.candidate.text,
             citation_anchor=item.candidate.citation_anchor,
             score=final_score,
             rank=item.rank,
             source_kind=item.candidate.source_kind,
-            source_id=item.candidate.source_id,
+            source_id=None if item.candidate.source_id is None else str(item.candidate.source_id),
             section_path=tuple(item.candidate.section_path),
             effective_access_policy=getattr(item.candidate, "effective_access_policy", None),
             metadata=getattr(item.candidate, "metadata", None),

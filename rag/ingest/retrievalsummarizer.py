@@ -11,7 +11,7 @@ from rag.utils.text import text_unit_count
 
 
 class TextGenerationClient(Protocol):
-    def generate_text(self, *, prompt: str) -> str: ...
+    def generate_text(self, *, prompt: str, **kwargs: Any) -> str: ...
 
 
 class TokenAccountingClient(Protocol):

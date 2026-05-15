@@ -1226,8 +1226,8 @@ class PostgresMetadataRepo:
             return []
         if isinstance(value, str):
             loaded = json.loads(value)
-            return cast(list[Any], loaded if isinstance(loaded, list) else [])
-        return cast(list[Any], value if isinstance(value, list) else [])
+            return loaded if isinstance(loaded, list) else []
+        return value if isinstance(value, list) else []
 
     def _connect(self) -> Any:
         import psycopg

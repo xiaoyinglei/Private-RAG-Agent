@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from rag.assembly import (
     AssemblyDiagnostics,
@@ -32,10 +32,12 @@ from rag.ingest.pipeline import (
     IngestPipeline,
     IngestPipelineResult,
     IngestRequest,
+    MetadataWriterRepo,
+    SummaryIndexRepo as PipelineSummaryIndexRepo,
 )
 from rag.ingest.retrievalsummarizer import RetrievalSummarizer, RetrievalSummaryConfig
 from rag.ingest.section_refiner import SectionRefiner
-from rag.ingest.table_executor import TableExecutor
+from rag.ingest.table_executor import TableExecutor, _AssetMetadataRepo, _RangeReadableObjectStore
 from rag.providers.generation import AnswerGenerationService, AnswerGenerator, GeneratorBinding
 from rag.query_pipeline import _QueryPipeline
 from rag.retrieval.authorization_service import AuthorizationService
@@ -44,22 +46,22 @@ from rag.retrieval.context import (
     EvidenceTruncator,
 )
 from rag.retrieval.evidence import ContextEvidenceMerger, EvidenceService
-from rag.retrieval.graph import GraphExpansionService, SearchBackedRetrievalFactory
+from rag.retrieval.graph import GraphExpansionService, RetrievalMetadataRepoProtocol, SearchBackedRetrievalFactory, VectorSearchRepoProtocol
 from rag.retrieval.grounding_service import GroundingService
 from rag.retrieval.models import (
     PublicQueryResult,
     QueryOptions,
     RAGQueryResult,
 )
-from rag.retrieval.orchestrator import RetrievalService, RetrievalServiceConfig
+from rag.retrieval.orchestrator import RetrievalService, RetrievalServiceConfig, RetrieverFn
 from rag.retrieval.planning_graph import PlanningGraph
 from rag.retrieval.rerank_service import ModelBackedRerankService
 from rag.retrieval.synthesis_service import SynthesisService
 from rag.schema.core import Document, ProcessingStateRecord, Source, SourceType, StorageTier
 from rag.schema.graph import GraphEdge, GraphNode
-from rag.schema.runtime import CacheEntry, ProviderAttempt, VisualDescriptionRepo
+from rag.schema.runtime import CacheEntry, DataContractMetadataRepo, ProviderAttempt, VisualDescriptionRepo
 from rag.storage import StorageBundle, StorageConfig
-from rag.storage.data_contract_service import DataContractService
+from rag.storage.data_contract_service import DataContractService, SummaryIndexRepo as DataContractSummaryIndexRepo
 from rag.storage.index_sync_worker import IndexSyncWorker
 from rag.storage.storage_lifecycle_service import StorageLifecycleService
 from rag.storage.storage_lifecycle_worker import StorageLifecycleWorker
@@ -467,7 +469,7 @@ class RAGRuntime:
                 status="deleting",
             )
             data_contract_service.deactivate_document(document.doc_id)
-            self.stores.metadata_repo.set_document_storage_tier(document.doc_id, storage_tier=StorageTier.COLD)
+            cast(DataContractMetadataRepo, self.stores.metadata_repo).set_document_storage_tier(document.doc_id, storage_tier=StorageTier.COLD)
             self._save_runtime_processing_state(
                 doc_id=document.doc_id,
                 source_id=document.source_id,
@@ -511,7 +513,7 @@ class RAGRuntime:
                 request = self._rebuild_request_from_source(source=source, document=document)
             except Exception as exc:
                 message = f"No rebuildable source payload available for doc_id={document.doc_id}: {exc}"
-                self.stores.metadata_repo.set_document_index_state(
+                cast(DataContractMetadataRepo, self.stores.metadata_repo).set_document_index_state(
                     document.doc_id,
                     is_indexed=False,
                     index_ready=False,
@@ -633,8 +635,8 @@ class RAGRuntime:
                 config=summarizer_config,
             ),
             embedder=embedding_binding,
-            metadata_repo=self.stores.metadata_repo,
-            summary_repo=self.stores.vector_repo,
+            metadata_repo=cast(MetadataWriterRepo, self.stores.metadata_repo),
+            summary_repo=cast(PipelineSummaryIndexRepo, self.stores.vector_repo),
             object_store=self.stores.object_store,
             embedding_model_id=embedding_binding.model_name or embedding_binding.provider_name,
             section_refiner=SectionRefiner(token_accounting=self.token_accounting),
@@ -670,8 +672,8 @@ class RAGRuntime:
             ),
             authorization_service=AuthorizationService(resolver=self.stores.metadata_repo),
             table_executor=TableExecutor(
-                object_store=self.stores.object_store,
-                metadata_repo=self.stores.metadata_repo,
+                object_store=cast(_RangeReadableObjectStore, self.stores.object_store),
+                metadata_repo=cast(_AssetMetadataRepo, self.stores.metadata_repo),
             ),
             rate_limiter=query_rate_limiter,
             llm_circuit_breaker=llm_breaker,
@@ -684,8 +686,8 @@ class RAGRuntime:
             return None
         embedder = self.capability_bundle.embedding_bindings[0] if self.capability_bundle.embedding_bindings else None
         return DataContractService(
-            metadata_repo=self.stores.metadata_repo,
-            milvus_repo=self.stores.vector_repo,
+            metadata_repo=cast(DataContractMetadataRepo, self.stores.metadata_repo),
+            milvus_repo=cast(DataContractSummaryIndexRepo, self.stores.vector_repo),
             embedder=embedder,
         )
 
@@ -716,7 +718,7 @@ class RAGRuntime:
     def _build_retrieval_service(self) -> RetrievalService:
         bundle = self.capability_bundle
         retrieval_factory = SearchBackedRetrievalFactory(
-            metadata_repo=self.stores.metadata_repo,
+            metadata_repo=cast(RetrievalMetadataRepoProtocol, self.stores.metadata_repo),
             graph_repo=self.stores.graph_repo,
         )
         planning_graph = PlanningGraph(
@@ -731,19 +733,20 @@ class RAGRuntime:
             else None
         )
         instrumented_reranker = None if reranker_service is None else _InstrumentedReranker(reranker_service)
+        vec_repo: VectorSearchRepoProtocol = cast(VectorSearchRepoProtocol, self.stores.vector_repo)
         return RetrievalService(
             RetrievalServiceConfig(
-                vector_retriever=retrieval_factory.vector_retriever_from_repo(
-                    self.stores.vector_repo,
+                vector_retriever=cast(RetrieverFn, retrieval_factory.vector_retriever_from_repo(
+                    vec_repo,
                     bundle.embedding_bindings,
-                ),
+                )),
                 local_retriever=(lambda _query, _scope, _understanding: []),
                 global_retriever=(lambda _query, _scope, _understanding: []),
                 section_retriever=(lambda _query, _scope, _understanding: []),
-                special_retriever=retrieval_factory.special_retriever_from_repo(
-                    self.stores.vector_repo,
+                special_retriever=cast(RetrieverFn, retrieval_factory.special_retriever_from_repo(
+                    vec_repo,
                     bundle.embedding_bindings,
-                ),
+                )),
                 metadata_retriever=(lambda _query, _scope, _understanding: []),
                 graph_expander=retrieval_factory.graph_expander,
                 web_retriever=retrieval_factory.web_retriever,
@@ -850,10 +853,10 @@ class RAGRuntime:
         count = 0
         if self.stores.vector_repo.get_entry(str(document.doc_id), item_kind="doc_summary") is not None:
             count += 1
-        for section in self.stores.metadata_repo.list_sections(doc_id=document.doc_id):
+        for section in cast(DataContractMetadataRepo, self.stores.metadata_repo).list_sections(doc_id=document.doc_id):
             if self.stores.vector_repo.get_entry(str(section.section_id), item_kind="section_summary") is not None:
                 count += 1
-        for asset in self.stores.metadata_repo.list_assets(doc_id=document.doc_id):
+        for asset in cast(DataContractMetadataRepo, self.stores.metadata_repo).list_assets(doc_id=document.doc_id):
             if self.stores.vector_repo.get_entry(str(asset.asset_id), item_kind="asset_summary") is not None:
                 count += 1
         return count
@@ -867,7 +870,7 @@ class RAGRuntime:
         raw_bytes = self.stores.object_store.read_bytes(object_key)
         metadata = {str(key): str(value) for key, value in document.metadata_json.items()}
         source_type = SourceType(source.source_type)
-        kwargs: dict[str, object] = {
+        kwargs: dict[str, Any] = {
             "location": source.location,
             "source_type": source_type,
             "owner": source.owner_id or "user",
@@ -894,7 +897,7 @@ class RAGRuntime:
         status: str,
         error_message: str | None = None,
     ) -> None:
-        self.stores.metadata_repo.save_processing_state(
+        cast(DataContractMetadataRepo, self.stores.metadata_repo).save_processing_state(
             ProcessingStateRecord(
                 doc_id=doc_id,
                 source_id=source_id,

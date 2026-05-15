@@ -59,7 +59,7 @@ def create_research_agent_service(
     route_provider: RouteProvider | None = None,
     subagent_runner: SubAgentRunner | None = None,
     model_registry: ModelRegistry | None | object = _SENTINEL,
-    checkpointer: BaseCheckpointSaver | None = None,
+    checkpointer: BaseCheckpointSaver[str] | None = None,
 ) -> AgentService:
     # 默认自动加载 models.yaml，测试环境可显式传 None 跳过
     registry: ModelRegistry | None

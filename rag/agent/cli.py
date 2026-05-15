@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any, Literal, cast
 
 import typer
 
@@ -10,7 +10,7 @@ from rag.agent.builtin import create_builtin_agent_registry
 from rag.agent.core.agent_service_factory import AgentServiceFactory
 from rag.agent.core.checkpointing import create_agent_checkpointer
 from rag.agent.core.definition import AgentDefinition
-from rag.agent.core.human_input import HumanInputResponse
+from rag.agent.core.human_input import HumanInputRequest, HumanInputResponse
 from rag.agent.core.llm_registry import ModelRegistry
 from rag.agent.core.registry import AgentRegistry
 from rag.agent.core.subagent_runner import BuiltinSubAgentRunner, BuiltinSynthesisRunner
@@ -30,7 +30,7 @@ agent_app = typer.Typer(add_completion=False, no_args_is_help=True)
 CLI_AGENT_CHOICES = ("research", "orchestrator", "compare", "factcheck")
 
 
-def _build_llm_tool_runners(primary_chat) -> dict[str, ToolRunner]:
+def _build_llm_tool_runners(primary_chat: Any) -> dict[str, ToolRunner]:
     if primary_chat is None:
         return {}
 
@@ -58,9 +58,9 @@ def _build_llm_tool_runners(primary_chat) -> dict[str, ToolRunner]:
         return LLMTextOutput(text=text)
 
     return {
-        "llm_generate": _llm_generate,
-        "llm_summarize": _llm_summarize,
-        "llm_compare": _llm_compare,
+        "llm_generate": cast(ToolRunner, _llm_generate),
+        "llm_summarize": cast(ToolRunner, _llm_summarize),
+        "llm_compare": cast(ToolRunner, _llm_compare),
     }
 
 
@@ -75,7 +75,7 @@ def _resolve_cli_agent_definition(
 
 
 def _build_agent_service(
-    runtime,
+    runtime: Any,
     *,
     checkpoint_db: Path | None = None,
     agent_type: str = "research",
@@ -99,9 +99,9 @@ def _build_agent_service(
         max_context_tokens=4096,
     )
     for name in ("vector_search", "keyword_search", "grounding", "rerank", "graph_expand"):
-        runners[name] = rag_runner.retrieve_evidence
+        runners[name] = cast(ToolRunner, rag_runner.retrieve_evidence)
     fast_path_runner = RAGSearchAnswerRunner(runtime=runtime)
-    runners["rag_search_answer"] = fast_path_runner.answer
+    runners["rag_search_answer"] = cast(ToolRunner, fast_path_runner.answer)
 
     runners.update(_build_llm_tool_runners(primary_chat))
 
@@ -173,6 +173,7 @@ def _handle_pause(result: AgentRunResult, run_id: str) -> HumanInputResponse | N
     req = result.human_input_request
     if req is None:
         return None
+    req = cast(HumanInputRequest, req)
 
     print(f"\n⏸  需要确认: {result.needs_user_input or req.question}")
 
@@ -214,20 +215,21 @@ def _handle_pause(result: AgentRunResult, run_id: str) -> HumanInputResponse | N
 
     return HumanInputResponse(
         request_id=req.request_id,
-        decision=choice,
+        decision=cast(Literal["allow_once", "deny", "continue", "abort"], choice),
         approved_tool_call_ids=approved,
         denied_tool_call_ids=denied,
     )
 
 
 def _build_resume_response(request: object, decision: str) -> HumanInputResponse:
+    r = cast(HumanInputRequest, request)
     tool_call_ids = [
         tool_call.tool_call_id
-        for tool_call in getattr(request, "tool_calls", [])
+        for tool_call in r.tool_calls
     ]
     return HumanInputResponse(
-        request_id=request.request_id,
-        decision=decision,  # type: ignore[arg-type]
+        request_id=r.request_id,
+        decision=cast(Literal["allow_once", "deny", "continue", "abort"], decision),
         approved_tool_call_ids=tool_call_ids if decision == "allow_once" else [],
         denied_tool_call_ids=tool_call_ids if decision == "deny" else [],
     )

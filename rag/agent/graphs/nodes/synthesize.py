@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable
 from inspect import isawaitable
-from typing import Protocol
+from typing import Any, Protocol
 
 from pydantic import BaseModel
 
@@ -35,7 +35,7 @@ async def synthesize_node(
     state: AgentState,
     *,
     synthesis_runner: SynthesisRunner | None = None,
-) -> dict:
+) -> dict[str, Any]:
     tool_results = state.get("tool_results", [])
     evidence = state.get("evidence", [])
 
@@ -66,7 +66,7 @@ async def synthesize_node(
     return _legacy_synthesize_node(state)
 
 
-def _legacy_synthesize_node(state: AgentState) -> dict:
+def _legacy_synthesize_node(state: AgentState) -> dict[str, Any]:
     tool_results = state.get("tool_results", [])
     ok_results = [result for result in tool_results if result.status == "ok"]
     error_results = [result for result in tool_results if result.status == "error"]
@@ -107,7 +107,7 @@ def _should_delegate_to_synthesis_agent(state: AgentState) -> bool:
     )
 
 
-def _synthesis_agent_update(state: AgentState, result: SynthesisRunResult) -> dict:
+def _synthesis_agent_update(state: AgentState, result: SynthesisRunResult) -> dict[str, Any]:
     fallback = _legacy_synthesize_node(state)
     if result.status != "done" or not result.final_answer:
         return {

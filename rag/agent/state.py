@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
+from langchain_core.messages import BaseMessage
 from langgraph.graph import add_messages
-from langgraph.graph.message import BaseMessage
 from pydantic import BaseModel, Field
 from typing_extensions import TypedDict
 
@@ -41,9 +41,9 @@ class ThinkOutput(BaseModel):
 
 class AgentState(TypedDict):
     messages: Annotated[list[BaseMessage], add_messages]
-    evidence: Annotated[list, _merge_evidence]
-    citations: Annotated[list, _merge_citations]
-    tool_results: Annotated[list, _merge_tool_results]
+    evidence: Annotated[list[Any], _merge_evidence]
+    citations: Annotated[list[Any], _merge_citations]
+    tool_results: Annotated[list[Any], _merge_tool_results]
     task: str
     retrieval_signals: RetrievalSignals
     retrieval_signals_debug: dict[str, object] | None
@@ -73,7 +73,7 @@ class AgentState(TypedDict):
     insufficient_evidence_flag: bool
 
 
-def _merge_evidence(left: list, right: list) -> list:
+def _merge_evidence(left: list[Any], right: list[Any]) -> list[Any]:
     from rag.schema.query import EvidenceItem
 
     merged: dict[str, EvidenceItem] = {}
@@ -106,19 +106,19 @@ def _texts_contradict(a: str, b: str) -> bool:
     return a_negated != b_negated
 
 
-def _merge_citations(left: list, right: list) -> list:
+def _merge_citations(left: list[Any], right: list[Any]) -> list[Any]:
     return list({citation.citation_id: citation for citation in left + right}.values())
 
 
-def _merge_tool_results(left: list, right: list) -> list:
+def _merge_tool_results(left: list[Any], right: list[Any]) -> list[Any]:
     return list({result.tool_call_id: result for result in left + right}.values())
 
 
-def _merge_subtask_results(left: dict, right: dict) -> dict:
+def _merge_subtask_results(left: dict[str, SubTaskResult], right: dict[str, SubTaskResult]) -> dict[str, SubTaskResult]:
     return {**left, **right}
 
 
-def _merge_sets(left: set, right: set) -> set:
+def _merge_sets(left: set[str], right: set[str]) -> set[str]:
     return left | right
 
 

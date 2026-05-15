@@ -29,8 +29,22 @@ from rag.retrieval import QueryOptions
 from rag.schema.core import SourceType
 from rag.schema.runtime import (
     AccessPolicy,
+    DataContractMetadataRepo,
     RuntimeMode,
 )
+from typing import TYPE_CHECKING, cast
+
+if TYPE_CHECKING:
+    from typing import Literal
+
+    class _EmbeddingBackend:
+        def set_embedding_batch_size(self, batch_size: int) -> None: ...
+        def set_device_preference(self, device: str) -> None: ...
+        def set_embedding_call_logging(self, enabled: bool) -> None: ...
+        def set_backend_progress_enabled(self, enabled: bool) -> None: ...
+        def reset_embedding_stats(self) -> None: ...
+        def embedding_runtime_info(self) -> dict[str, object]: ...
+        def embedding_stats(self) -> dict[str, object]: ...
 
 FIQA_DATASET = "fiqa"
 MEDICAL_RETRIEVAL_DATASET = "medical_retrieval"
@@ -393,7 +407,7 @@ class RetrievalBenchmarkEvaluator:
                     query_record.query_text,
                     access_policy=self.access_policy,
                     query_options=QueryOptions(
-                        retrieval_profile=self.retrieval_profile,
+                        retrieval_profile=cast("Literal['bypass', 'fast', 'auto', 'deep', 'asset']", self.retrieval_profile),
                         top_k=self.top_k,
                         evidence_top_k=self.evidence_top_k,
                         retrieval_pool_k=self.retrieval_pool_k,
@@ -417,7 +431,7 @@ class RetrievalBenchmarkEvaluator:
                     query_text=query_record.query_text,
                     predicted_doc_ids=predicted_doc_ids,
                     gold_doc_ids=sorted(gold),
-                    hit_at_10=metrics["hit_at_10"],
+                    hit_at_10=cast(int, metrics["hit_at_10"]),
                     recall_at_10=metrics["recall_at_10"],
                     reciprocal_rank=metrics["mrr_at_10"],
                     ndcg=metrics["ndcg_at_10"],
@@ -453,14 +467,15 @@ class RetrievalBenchmarkEvaluator:
         return summary
 
     def _validate_retrieval_index(self) -> None:
-        documents = self.runtime.stores.metadata_repo.list_documents()
+        metadata = cast(DataContractMetadataRepo, self.runtime.stores.metadata_repo)
+        documents = metadata.list_documents()
         document_count = len(documents)
         section_count = sum(
-            len(self.runtime.stores.metadata_repo.list_sections(doc_id=document.doc_id))
+            len(metadata.list_sections(doc_id=document.doc_id))
             for document in documents
         )
         asset_count = sum(
-            len(self.runtime.stores.metadata_repo.list_assets(doc_id=document.doc_id))
+            len(metadata.list_assets(doc_id=document.doc_id))
             for document in documents
         )
         vector_count = sum(
@@ -891,12 +906,12 @@ def build_prepared_mini_subset(
             handle.write(json.dumps(record, ensure_ascii=False) + "\n")
 
     with queries_out.open("w", encoding="utf-8") as handle:
-        for record in selected_queries:
+        for query_record in selected_queries:
             handle.write(
                 json.dumps(
                     {
-                        "query_id": record.query_id,
-                        "query_text": record.query_text,
+                        "query_id": query_record.query_id,
+                        "query_text": query_record.query_text,
                         "metadata": {
                             "dataset": dataset,
                             "subset": "mini",
@@ -980,12 +995,12 @@ def build_prepared_query_slice_subset(
 
     split = benchmark_dataset_spec(dataset).default_split
     with queries_out.open("w", encoding="utf-8") as handle:
-        for record in selected_queries:
+        for query_record in selected_queries:
             handle.write(
                 json.dumps(
                     {
-                        "query_id": record.query_id,
-                        "query_text": record.query_text,
+                        "query_id": query_record.query_id,
+                        "query_text": query_record.query_text,
                         "metadata": {
                             "dataset": dataset,
                             "subset": "query_slice",
@@ -1064,28 +1079,26 @@ def ingest_prepared_documents(
 ) -> BenchmarkIngestResult:
     if streaming:
         total_requests = _count_lines(documents_path)
-        requests = iter_prepared_benchmark_requests(
-            documents_path=documents_path,
-            dataset=dataset,
-            show_progress=False,
-        )
         return ingest_prepared_request_stream(
             runtime,
             dataset=dataset,
-            requests=requests,
+            requests=iter_prepared_benchmark_requests(
+                documents_path=documents_path,
+                dataset=dataset,
+                show_progress=False,
+            ),
             total_requests=total_requests,
             batch_size=batch_size,
             continue_on_error=continue_on_error,
         )
-    requests = load_prepared_benchmark_requests(
-        documents_path=documents_path,
-        dataset=dataset,
-        show_progress=False,
-    )
     return ingest_prepared_requests(
         runtime,
         dataset=dataset,
-        requests=requests,
+        requests=load_prepared_benchmark_requests(
+            documents_path=documents_path,
+            dataset=dataset,
+            show_progress=False,
+        ),
         batch_size=batch_size,
         continue_on_error=continue_on_error,
     )
@@ -1154,7 +1167,7 @@ def ingest_prepared_requests(
         for batch_index, start in enumerate(range(0, total_requests, batch_size), start=1):
             batch = requests[start : start + batch_size]
             with _suppress_process_output():
-                result = runtime.insert_many(batch, continue_on_error=continue_on_error)
+                result = runtime.insert_many(list(batch), continue_on_error=continue_on_error)
             success_count += result.success_count
             failure_count += result.failure_count
             indexed_object_count += result.indexed_object_count
@@ -1316,7 +1329,7 @@ def load_qrels(path: Path) -> list[BenchmarkQrel]:
         BenchmarkQrel(
             query_id=_coerce_required_str(record.get("query_id"), field_name="query_id"),
             doc_id=_coerce_required_str(record.get("doc_id"), field_name="doc_id"),
-            relevance=int(record.get("relevance", 0)),
+            relevance=int(cast("int | str", record.get("relevance", 0))),
         )
         for record in iter_jsonl(path)
     ]
@@ -1327,7 +1340,7 @@ def load_qrels_jsonl(path: Path) -> list[BenchmarkQrel]:
         BenchmarkQrel(
             query_id=_coerce_required_str(record.get("qid") or record.get("query_id"), field_name="query_id"),
             doc_id=_coerce_required_str(record.get("pid") or record.get("doc_id"), field_name="doc_id"),
-            relevance=int(record.get("score") or record.get("relevance") or 0),
+            relevance=int(cast("int | str", record.get("score") or record.get("relevance") or 0)),
         )
         for record in iter_jsonl(path)
     ]
@@ -1478,17 +1491,27 @@ def write_dataset_baseline_summary(
             return float(raw)
         if isinstance(raw, str) and raw.strip():
             return float(raw)
-        avg_latency_ms = float(record.get("avg_latency_ms", 0.0))
+        avg_latency_ms = float(cast("int | float | str", record.get("avg_latency_ms", 0.0)))
         if avg_latency_ms <= 0:
             return 0.0
         return 1000.0 / avg_latency_ms
 
+    def _to_float(value: object, default: float = 0.0) -> float:
+        if isinstance(value, (int, float)):
+            return float(value)
+        if isinstance(value, str):
+            try:
+                return float(value)
+            except ValueError:
+                return default
+        return default
+
     ordered = sorted(
         (dict(record) for record in baselines),
         key=lambda item: (
-            float(item.get("Recall@10", 0.0)),
-            float(item.get("MRR@10", 0.0)),
-            -float(item.get("avg_latency_ms", 0.0)),
+            _to_float(item.get("Recall@10", 0.0)),
+            _to_float(item.get("MRR@10", 0.0)),
+            -_to_float(item.get("avg_latency_ms", 0.0)),
         ),
         reverse=True,
     )
@@ -1505,16 +1528,16 @@ def write_dataset_baseline_summary(
             "from_run_id": reference_run_id,
             "to_run_id": target_run_id,
             "Recall@10_delta": round(
-                float(target.get("Recall@10", 0.0)) - float(reference.get("Recall@10", 0.0)), 6
+                _to_float(target.get("Recall@10", 0.0)) - _to_float(reference.get("Recall@10", 0.0)), 6
             ),
             "MRR@10_delta": round(
-                float(target.get("MRR@10", 0.0)) - float(reference.get("MRR@10", 0.0)), 6
+                _to_float(target.get("MRR@10", 0.0)) - _to_float(reference.get("MRR@10", 0.0)), 6
             ),
             "NDCG@10_delta": round(
-                float(target.get("NDCG@10", 0.0)) - float(reference.get("NDCG@10", 0.0)), 6
+                _to_float(target.get("NDCG@10", 0.0)) - _to_float(reference.get("NDCG@10", 0.0)), 6
             ),
             "avg_latency_ms_delta": round(
-                float(target.get("avg_latency_ms", 0.0)) - float(reference.get("avg_latency_ms", 0.0)), 3
+                _to_float(target.get("avg_latency_ms", 0.0)) - _to_float(reference.get("avg_latency_ms", 0.0)), 3
             ),
             "queries_per_second_delta": round(
                 _queries_per_second(target) - _queries_per_second(reference),
@@ -1555,7 +1578,7 @@ def write_json(path: Path, payload: Mapping[str, object]) -> None:
 
 def iter_jsonl(path: Path) -> Iterator[dict[str, object]]:
     opener = gzip.open if path.suffix == ".gz" else open
-    with opener(path, "rt", encoding="utf-8") as handle:  # type: ignore[arg-type]
+    with opener(path, "rt", encoding="utf-8") as handle:
         for line in handle:
             line = line.strip()
             if not line:
@@ -1688,8 +1711,8 @@ def build_runtime_for_benchmark(
             backend=summary_backend,
         )
     if skip_graph_extraction:
-        runtime.ingest_pipeline.extractor = None
-        runtime.ingest_pipeline.merger = None
+        runtime.ingest_pipeline.extractor = None  # type: ignore[attr-defined]
+        runtime.ingest_pipeline.merger = None  # type: ignore[attr-defined]
     configure_runtime_embedding(
         runtime,
         encode_batch_size=embedding_batch_size,
@@ -1747,7 +1770,7 @@ def configure_runtime_embedding(
         provider=str(info["provider"]),
         model_name=_coerce_str(info.get("model_name")),
         device=str(info["device"]),
-        encode_batch_size=int(info["encode_batch_size"]),
+        encode_batch_size=int(cast("int | str", info["encode_batch_size"])),
     )
 
 
@@ -1816,31 +1839,29 @@ def profile_benchmark_ingest(
             )
         )
         if ingest_strategy == "preload":
-            requests = load_prepared_benchmark_requests(
-                documents_path=documents_path,
-                dataset=dataset,
-                limit=doc_limit,
-                show_progress=False,
-            )
             result = ingest_prepared_requests(
                 runtime,
                 dataset=dataset,
-                requests=requests,
+                requests=load_prepared_benchmark_requests(
+                    documents_path=documents_path,
+                    dataset=dataset,
+                    limit=doc_limit,
+                    show_progress=False,
+                ),
                 batch_size=ingest_batch_size,
                 continue_on_error=False,
             )
         else:
             total_requests = min(_count_lines(documents_path), doc_limit)
-            requests = iter_prepared_benchmark_requests(
-                documents_path=documents_path,
-                dataset=dataset,
-                limit=doc_limit,
-                show_progress=False,
-            )
             result = ingest_prepared_request_stream(
                 runtime,
                 dataset=dataset,
-                requests=requests,
+                requests=iter_prepared_benchmark_requests(
+                    documents_path=documents_path,
+                    dataset=dataset,
+                    limit=doc_limit,
+                    show_progress=False,
+                ),
                 total_requests=total_requests,
                 batch_size=ingest_batch_size,
                 continue_on_error=False,
@@ -1990,10 +2011,10 @@ def _embedding_model_name(runtime: RAGRuntime) -> str | None:
     bindings = runtime.capability_bundle.embedding_bindings
     if not bindings:
         return None
-    return bindings[0].model_name or bindings[0].provider_name
+    return cast("str | None", bindings[0].model_name or bindings[0].provider_name)
 
 
-def _benchmark_embedding_provider(runtime: RAGRuntime) -> object | None:
+def _benchmark_embedding_provider(runtime: RAGRuntime) -> _EmbeddingBackend | None:
     bindings = runtime.capability_bundle.embedding_bindings
     if not bindings:
         return None
@@ -2010,7 +2031,7 @@ def _benchmark_embedding_provider(runtime: RAGRuntime) -> object | None:
     )
     if not all(hasattr(backend, attr) for attr in required):
         return None
-    return backend
+    return cast(_EmbeddingBackend, backend)
 
 
 
@@ -2062,7 +2083,7 @@ def _coerce_content_length(value: str | None) -> int | None:
 
 def _count_lines(path: Path) -> int:
     opener = gzip.open if path.suffix == ".gz" else open
-    with opener(path, "rt", encoding="utf-8") as handle:  # type: ignore[arg-type]
+    with opener(path, "rt", encoding="utf-8") as handle:
         return sum(1 for _ in handle)
 
 
@@ -2081,7 +2102,7 @@ def _progress[T](
     desc: str,
     unit: str,
 ) -> Iterable[T]:
-    return tqdm(iterable, total=total, desc=desc, unit=unit)
+    return cast(Iterable[T], tqdm(iterable, total=total, desc=desc, unit=unit))
 
 
 __all__ = [

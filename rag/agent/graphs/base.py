@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
@@ -47,8 +49,8 @@ def build_agent_graph(
     route_provider: RouteProvider | None = None,
     subagent_runner: SubAgentRunner | None = None,
     synthesis_runner: SynthesisRunner | None = None,
-    checkpointer: BaseCheckpointSaver | MemorySaver | None = None,
-):
+    checkpointer: BaseCheckpointSaver[str] | MemorySaver | None = None,
+) -> Any:
     graph = StateGraph(AgentState)
     allowed_tools = frozenset(definition.allowed_tools)
     effective_subagent_runner = subagent_runner or _MissingSubAgentRunner()
@@ -57,7 +59,7 @@ def build_agent_graph(
     )
     effective_route_provider = route_provider
 
-    async def bound_route_node(state: AgentState) -> dict:
+    async def bound_route_node(state: AgentState) -> dict[str, Any]:
         if effective_route_provider is not None:
             result = effective_route_provider.route(state)
             if hasattr(result, "__await__"):
@@ -65,34 +67,34 @@ def build_agent_graph(
             return result
         return route_node(state)
 
-    async def bound_execute_node(state: AgentState) -> dict:
+    async def bound_execute_node(state: AgentState) -> dict[str, Any]:
         return await execute_node(state, tool_registry=tool_registry, allowed_tools=allowed_tools)
 
-    async def bound_fast_path_node(state: AgentState) -> dict:
+    async def bound_fast_path_node(state: AgentState) -> dict[str, Any]:
         return await fast_path_node(
             state,
             tool_registry=tool_registry,
             allowed_tools=allowed_tools,
         )
 
-    async def bound_execute_subagent_node(state: AgentState) -> dict:
+    async def bound_execute_subagent_node(state: AgentState) -> dict[str, Any]:
         return await execute_subagent_node(state, subagent_runner=effective_subagent_runner)
 
-    async def bound_evaluate_node(state: AgentState) -> dict:
+    async def bound_evaluate_node(state: AgentState) -> dict[str, Any]:
         return await evaluate_node(
             state,
             definition=definition,
             decision_provider=evaluate_decision_provider,
         )
 
-    async def bound_plan_node(state: AgentState) -> dict:
+    async def bound_plan_node(state: AgentState) -> dict[str, Any]:
         return await plan_node(
             state,
             definition=definition,
             plan_provider=plan_provider,
         )
 
-    async def bound_synthesize_node(state: AgentState) -> dict:
+    async def bound_synthesize_node(state: AgentState) -> dict[str, Any]:
         return await synthesize_node(
             state,
             synthesis_runner=effective_synthesis_runner,

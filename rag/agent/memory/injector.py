@@ -15,7 +15,7 @@ from rag.agent.memory.models import (
 from rag.utils.text import text_unit_count
 
 if TYPE_CHECKING:
-    from langgraph.graph.message import BaseMessage
+    from langchain_core.messages import BaseMessage
 
     from rag.agent.state import AgentState, ToolCallPlan
     from rag.agent.tools.spec import ToolResult

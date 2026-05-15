@@ -3,13 +3,13 @@ from __future__ import annotations
 import importlib
 import logging
 from collections.abc import MutableMapping, Sequence
-
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 _FAST_TOKENIZER_PADDING_WARNING = "Asking-to-pad-a-fast-tokenizer"
 _LOGGER = logging.getLogger(__name__)
 _DECODER_ONLY_RERANKER_MARKERS = ("qwen", "gemma", "minicpm", "llm-reranker")
+
 
 def suppress_backend_fast_tokenizer_padding_warning(backend: object) -> object:
     tokenizer = getattr(backend, "tokenizer", None)
@@ -198,7 +198,7 @@ def _patch_transformers_tokenizer_prepare_for_model() -> None:
         pair_ids: Sequence[int] | None = None,
         **kwargs: object,
     ) -> dict[str, list[int]]:
-        return _prepare_for_model_fallback(self, ids, pair_ids, **kwargs)
+        return _prepare_for_model_fallback(self, ids, pair_ids, **cast(dict[str, Any], kwargs))
 
     TokenizersBackend.prepare_for_model = prepare_for_model  # type: ignore[attr-defined]
 

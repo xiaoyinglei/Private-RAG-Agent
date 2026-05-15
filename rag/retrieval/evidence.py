@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections import Counter
 from collections.abc import Sequence
-from typing import Protocol
+from typing import Protocol, cast
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -303,9 +303,13 @@ class EvidenceService:
         return Counter(item.evidence_kind for item in bundle.all)
 
 
+class _RetrievalWithEvidence(Protocol):
+    evidence: EvidenceBundle
+
+
 class ContextEvidenceMerger:
     def merge(self, retrieval: object) -> list[EvidenceItem]:
-        evidence = retrieval.evidence
+        evidence = cast(_RetrievalWithEvidence, retrieval).evidence
         reranked_evidence_ids = list(getattr(retrieval, "reranked_evidence_ids", []) or [])
         if not reranked_evidence_ids:
             reranked_evidence_ids = [

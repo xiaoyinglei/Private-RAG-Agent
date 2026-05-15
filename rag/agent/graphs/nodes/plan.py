@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable
 from inspect import isawaitable
-from typing import Protocol
+from typing import Any, Protocol
 
 from pydantic import ValidationError
 
@@ -25,7 +25,7 @@ async def plan_node(
     *,
     definition: AgentDefinition,
     plan_provider: PlanProvider | None = None,
-) -> dict:
+) -> dict[str, Any]:
     if plan_provider is None:
         return {"status": "failed", "stop_reason": "plan_provider_missing"}
 

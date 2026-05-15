@@ -11,8 +11,16 @@ from typing import Any, cast
 from rag.schema.core import AssetSummaryRecord, DocSummaryRecord, SectionSummaryRecord
 from rag.schema.runtime import StoredVectorEntry, VectorSearchResult
 
-
 SummaryRecord = DocSummaryRecord | SectionSummaryRecord | AssetSummaryRecord
+
+
+def _to_int(value: object, default: int = 0) -> int:
+    """Safely coerce a metadata value to int (handles str from JSON round-tripping)."""
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.isdigit():
+        return int(value)
+    return default
 
 
 class MilvusVectorRepo:
@@ -77,7 +85,7 @@ class MilvusVectorRepo:
         embedding_space: str = "default",
     ) -> None:
         item_kind = self._item_kind_for_record(record)
-        metadata = cast(dict[str, Any], record.model_dump(mode="python"))
+        metadata: dict[str, Any] = record.model_dump(mode="python")
         item_id = str(self._record_item_id(record))
         self.upsert(item_id, vector, metadata=metadata, embedding_space=embedding_space, item_kind=item_kind)
 
@@ -161,7 +169,7 @@ class MilvusVectorRepo:
             item_id=str(row["item_id"]),
             item_kind=item_kind,
             embedding_space=embedding_space,
-            doc_id=str(row["doc_id"]),
+            doc_id=_to_int(row["doc_id"]),
             text=self._entry_text(row, item_kind=item_kind),
             metadata=metadata,
             vector=[float(value) for value in cast(list[float], row.get("embedding", []))],
@@ -223,7 +231,7 @@ class MilvusVectorRepo:
     def close(self) -> None:
         if not self._connected:
             return
-        from pymilvus import connections  # type: ignore[import-untyped]
+        from pymilvus import connections
 
         self._flush_dirty_collections()
         self._close_async_client()
@@ -281,10 +289,10 @@ class MilvusVectorRepo:
                 fields=self._collection_fields(
                     item_kind=item_kind,
                     dimension=dimension,
-                    DataType=DataType,
-                    FieldSchema=FieldSchema,
+                    data_type=DataType,
+                    field_schema=FieldSchema,
                 ),
-                functions=self._collection_functions(Function=Function, FunctionType=FunctionType),
+                functions=self._collection_functions(function=Function, function_type=FunctionType),
                 description=f"Summary index for {item_kind}",
                 enable_dynamic_field=False,
             )
@@ -298,60 +306,66 @@ class MilvusVectorRepo:
         self._collections[name] = collection
         return collection
 
-    def _collection_fields(self, *, item_kind: str, dimension: int, DataType: Any, FieldSchema: Any) -> list[Any]:
+    def _collection_fields(self, *, item_kind: str, dimension: int, data_type: Any, field_schema: Any) -> list[Any]:
         common = [
-            FieldSchema(name="item_id", dtype=DataType.INT64, is_primary=True),
-            FieldSchema(name="doc_id", dtype=DataType.INT64),
-            FieldSchema(name="source_id", dtype=DataType.INT64),
-            FieldSchema(name="version_group_id", dtype=DataType.INT64),
-            FieldSchema(name="version_no", dtype=DataType.INT32),
-            FieldSchema(name="doc_status", dtype=DataType.VARCHAR, max_length=32),
-            FieldSchema(name="effective_date", dtype=DataType.INT64),
-            FieldSchema(name="updated_at", dtype=DataType.INT64),
-            FieldSchema(name="is_active", dtype=DataType.BOOL),
-            FieldSchema(name="index_ready", dtype=DataType.BOOL),
-            FieldSchema(name="tenant_id", dtype=DataType.VARCHAR, max_length=64),
-            FieldSchema(name="department_id", dtype=DataType.VARCHAR, max_length=64),
-            FieldSchema(name="auth_tag", dtype=DataType.VARCHAR, max_length=128),
-            FieldSchema(name="embedding_model_id", dtype=DataType.VARCHAR, max_length=64),
-            FieldSchema(name="partition_key", dtype=DataType.VARCHAR, max_length=16),
-            FieldSchema(name="bm25_text", dtype=DataType.VARCHAR, max_length=65535, enable_match=True, enable_analyzer=True),
-            FieldSchema(name="metadata_json", dtype=DataType.VARCHAR, max_length=65535),
-            FieldSchema(name="embedding", dtype=DataType.FLOAT_VECTOR, dim=dimension),
-            FieldSchema(name="bm25_sparse_embedding", dtype=DataType.SPARSE_FLOAT_VECTOR),
-            FieldSchema(name="external_sparse_embedding", dtype=DataType.SPARSE_FLOAT_VECTOR, nullable=True),
+            field_schema(name="item_id", dtype=data_type.INT64, is_primary=True),
+            field_schema(name="doc_id", dtype=data_type.INT64),
+            field_schema(name="source_id", dtype=data_type.INT64),
+            field_schema(name="version_group_id", dtype=data_type.INT64),
+            field_schema(name="version_no", dtype=data_type.INT32),
+            field_schema(name="doc_status", dtype=data_type.VARCHAR, max_length=32),
+            field_schema(name="effective_date", dtype=data_type.INT64),
+            field_schema(name="updated_at", dtype=data_type.INT64),
+            field_schema(name="is_active", dtype=data_type.BOOL),
+            field_schema(name="index_ready", dtype=data_type.BOOL),
+            field_schema(name="tenant_id", dtype=data_type.VARCHAR, max_length=64),
+            field_schema(name="department_id", dtype=data_type.VARCHAR, max_length=64),
+            field_schema(name="auth_tag", dtype=data_type.VARCHAR, max_length=128),
+            field_schema(name="embedding_model_id", dtype=data_type.VARCHAR, max_length=64),
+            field_schema(name="partition_key", dtype=data_type.VARCHAR, max_length=16),
+            field_schema(
+                name="bm25_text",
+                dtype=data_type.VARCHAR,
+                max_length=65535,
+                enable_match=True,
+                enable_analyzer=True,
+            ),
+            field_schema(name="metadata_json", dtype=data_type.VARCHAR, max_length=65535),
+            field_schema(name="embedding", dtype=data_type.FLOAT_VECTOR, dim=dimension),
+            field_schema(name="bm25_sparse_embedding", dtype=data_type.SPARSE_FLOAT_VECTOR),
+            field_schema(name="external_sparse_embedding", dtype=data_type.SPARSE_FLOAT_VECTOR),
         ]
         if item_kind == "doc_summary":
             return common + [
-                FieldSchema(name="title", dtype=DataType.VARCHAR, max_length=4096),
-                FieldSchema(name="source_type", dtype=DataType.VARCHAR, max_length=32),
-                FieldSchema(name="summary_text", dtype=DataType.VARCHAR, max_length=65535),
+                field_schema(name="title", dtype=data_type.VARCHAR, max_length=4096),
+                field_schema(name="source_type", dtype=data_type.VARCHAR, max_length=32),
+                field_schema(name="summary_text", dtype=data_type.VARCHAR, max_length=65535),
             ]
         if item_kind == "section_summary":
             return common + [
-                FieldSchema(name="section_id", dtype=DataType.INT64),
-                FieldSchema(name="page_start", dtype=DataType.INT32),
-                FieldSchema(name="page_end", dtype=DataType.INT32),
-                FieldSchema(name="section_kind", dtype=DataType.VARCHAR, max_length=64),
-                FieldSchema(name="toc_path_text", dtype=DataType.VARCHAR, max_length=4096),
-                FieldSchema(name="source_type", dtype=DataType.VARCHAR, max_length=32),
-                FieldSchema(name="summary_text", dtype=DataType.VARCHAR, max_length=65535),
+                field_schema(name="section_id", dtype=data_type.INT64),
+                field_schema(name="page_start", dtype=data_type.INT32),
+                field_schema(name="page_end", dtype=data_type.INT32),
+                field_schema(name="section_kind", dtype=data_type.VARCHAR, max_length=64),
+                field_schema(name="toc_path_text", dtype=data_type.VARCHAR, max_length=4096),
+                field_schema(name="source_type", dtype=data_type.VARCHAR, max_length=32),
+                field_schema(name="summary_text", dtype=data_type.VARCHAR, max_length=65535),
             ]
         return common + [
-            FieldSchema(name="asset_id", dtype=DataType.INT64),
-            FieldSchema(name="section_id", dtype=DataType.INT64),
-            FieldSchema(name="asset_type", dtype=DataType.VARCHAR, max_length=64),
-            FieldSchema(name="page_no", dtype=DataType.INT32),
-            FieldSchema(name="caption", dtype=DataType.VARCHAR, max_length=65535),
-            FieldSchema(name="summary_text", dtype=DataType.VARCHAR, max_length=65535),
+            field_schema(name="asset_id", dtype=data_type.INT64),
+            field_schema(name="section_id", dtype=data_type.INT64),
+            field_schema(name="asset_type", dtype=data_type.VARCHAR, max_length=64),
+            field_schema(name="page_no", dtype=data_type.INT32),
+            field_schema(name="caption", dtype=data_type.VARCHAR, max_length=65535),
+            field_schema(name="summary_text", dtype=data_type.VARCHAR, max_length=65535),
         ]
 
     @staticmethod
-    def _collection_functions(*, Function: Any, FunctionType: Any) -> list[Any]:
+    def _collection_functions(*, function: Any, function_type: Any) -> list[Any]:
         return [
-            Function(
+            function(
                 name="bm25_summary_text",
-                function_type=FunctionType.BM25,
+                function_type=function_type.BM25,
                 input_field_names=["bm25_text"],
                 output_field_names=["bm25_sparse_embedding"],
             )
@@ -401,7 +415,12 @@ class MilvusVectorRepo:
         self._validate_item_kind(item_kind)
         from pymilvus import utility
 
-        return bool(utility.has_collection(self._collection_name(item_kind=item_kind, embedding_space=embedding_space), using=self._alias))
+        return bool(
+            utility.has_collection(
+                self._collection_name(item_kind=item_kind, embedding_space=embedding_space),
+                using=self._alias,
+            )
+        )
 
     def _flush_dirty_collections(self) -> None:
         for name in list(self._pending_upserts):
@@ -499,6 +518,7 @@ class MilvusVectorRepo:
             "bm25_text": self._text(self._bm25_text(record, item_kind=item_kind), limit=65535),
             "metadata_json": json.dumps(self._serialize_metadata(record), ensure_ascii=True, sort_keys=True),
             "embedding": [float(value) for value in vector],
+            "external_sparse_embedding": {},
         }
         if item_kind == "doc_summary":
             row.update(
@@ -682,8 +702,8 @@ class MilvusVectorRepo:
             item_id=str(entity.get("item_id", "")),
             score=float(getattr(hit, "score", 0.0) or 0.0),
             item_kind=item_kind,
-            doc_id=str(entity.get("doc_id", "")),
-            source_id=str(entity.get("source_id", metadata.get("source_id", ""))),
+            doc_id=_to_int(entity.get("doc_id", 0)),
+            source_id=_to_int(entity.get("source_id", metadata.get("source_id", 0))),
             text=cls._entry_text(entity, item_kind=item_kind),
             metadata=metadata,
         )
@@ -757,7 +777,7 @@ class MilvusVectorRepo:
         ranker = self._hybrid_ranker(
             fusion_strategy=fusion_strategy,
             alpha=alpha,
-            RRFRanker=RRFRanker,
+            rrf_ranker=RRFRanker,
         )
         try:
             hits = await async_client.hybrid_search(
@@ -796,19 +816,19 @@ class MilvusVectorRepo:
         *,
         fusion_strategy: str,
         alpha: float | None,
-        RRFRanker: Any,
+        rrf_ranker: Any,
     ) -> object:
         normalized_alpha = 0.5 if alpha is None else max(0.0, min(float(alpha), 1.0))
         if fusion_strategy == "weighted_rrf":
             try:
-                from pymilvus import WeightedRanker  # type: ignore[import-untyped]
+                from pymilvus import WeightedRanker
 
                 dense_weight = round(normalized_alpha, 6)
                 sparse_weight = round(1.0 - normalized_alpha, 6)
                 return WeightedRanker(dense_weight, sparse_weight)
             except Exception:
-                return RRFRanker()
-        return RRFRanker()
+                return rrf_ranker()
+        return rrf_ranker()
 
     @staticmethod
     def _bm25_search_params() -> dict[str, Any]:
@@ -895,8 +915,8 @@ class MilvusVectorRepo:
             item_id=str(item_id),
             score=float(score or 0.0),
             item_kind=item_kind,
-            doc_id=str(entity.get("doc_id", "")),
-            source_id=str(entity.get("source_id", metadata.get("source_id", ""))),
+            doc_id=_to_int(entity.get("doc_id", 0)),
+            source_id=_to_int(entity.get("source_id", metadata.get("source_id", 0))),
             text=cls._entry_text(entity, item_kind=item_kind),
             metadata=metadata,
         )
@@ -942,7 +962,7 @@ class MilvusVectorRepo:
             if isinstance(value, datetime):
                 serialized[key] = value.isoformat()
             elif hasattr(value, "value"):
-                serialized[key] = getattr(value, "value")
+                serialized[key] = value.value
             elif isinstance(value, tuple):
                 serialized[key] = list(value)
             else:

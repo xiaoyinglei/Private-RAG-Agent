@@ -353,7 +353,7 @@ def _try_build_tokenizer(*, model_name: str, backend: str, local_files_only: boo
                 local_files_only=local_files_only,
                 use_fast=True,
                 trust_remote_code=True,
-            )  # type: ignore[no-untyped-call]
+            )
         except Exception:
             return None
     return None

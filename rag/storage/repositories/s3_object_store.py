@@ -76,7 +76,7 @@ class S3ObjectStore:
 
     def _client_instance(self) -> Any:
         if self._client is None:
-            import boto3  # type: ignore[import-untyped]
+            import boto3
 
             self._client = boto3.client(
                 "s3",

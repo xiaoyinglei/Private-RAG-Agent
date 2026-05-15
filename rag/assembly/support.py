@@ -78,7 +78,7 @@ class _CompositeProvider:
         generate_structured = getattr(backend, "generate_structured", None)
         if not callable(generate_structured):
             raise RuntimeError(f"{self.provider_name} does not implement structured generation")
-        return generate_structured(prompt=prompt, schema=schema, **kwargs)
+        return generate_structured(prompt=prompt, schema=schema, **kwargs)  # type: ignore[no-any-return]
 
     def embed(self, texts: Sequence[str], **kwargs: Any) -> list[list[float]]:
         backend = self._require(self.embedder, capability="embedding")
@@ -131,7 +131,7 @@ class _OpenAICompatibleChatGenerator:
         if system_prompt:
             messages.append({"role": "system", "content": system_prompt})
         messages.append({"role": "user", "content": prompt})
-        response = self._client.chat.completions.create(
+        response = self._client.chat.completions.create(  # type: ignore[call-overload]
             model=self.chat_model_name,
             messages=messages,
             **kwargs,
@@ -517,6 +517,7 @@ def build_provider(provider_config: ProviderConfig) -> object:
                 reason="openai-compatible provider requires base_url",
                 chat_model_name=chat_model,
             )
+        generator: object | None
         generator = _OpenAICompatibleChatGenerator(
             model=chat_model,
             base_url=base_url,
@@ -535,6 +536,7 @@ def build_provider(provider_config: ProviderConfig) -> object:
             if provider_config.chat_model
             else None
         )
+        embedder: object | None
         embedder = (
             OllamaEmbedder(
                 base_url=provider_config.base_url or "http://localhost:11434",
@@ -659,6 +661,7 @@ def first_bool(*values: bool | None) -> bool:
 
 
 __all__ = [
+    "FallbackEmbeddingRepo",
     "build_provider",
     "compatibility_config_from_environment",
     "env_bool",

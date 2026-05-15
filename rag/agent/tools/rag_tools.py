@@ -4,6 +4,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from rag.agent.tools.spec import ToolError, ToolPermissions, ToolSpec
 from rag.schema.query import RetrievalSignals
+from rag.schema.runtime import AccessPolicy
 
 
 class SearchInput(BaseModel):
@@ -12,6 +13,7 @@ class SearchInput(BaseModel):
     query: str
     top_k: int = 8
     retrieval_signals: RetrievalSignals | None = Field(default=None)
+    access_policy: AccessPolicy | None = Field(default=None)
 
 
 RAG_SIGNAL_AWARE_TOOLS = frozenset({

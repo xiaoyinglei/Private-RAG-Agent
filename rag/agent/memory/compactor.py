@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 from hashlib import sha256
 from typing import Any
 
-from langgraph.graph.message import BaseMessage
+from langchain_core.messages import BaseMessage
 
 from rag.agent.memory.models import (
     ContextBudgetSnapshot,

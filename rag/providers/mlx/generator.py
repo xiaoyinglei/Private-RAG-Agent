@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any, TypeVar
+from typing import Any, TypeVar, cast
 
 from pydantic import BaseModel
 
@@ -33,10 +33,15 @@ class MLXGenerator(Generator):
             ) from exc
 
         try:
-            self._model, self._tokenizer = load(
+            loaded = cast(
+                Any,
+                load(
                 model_name_or_path,
                 tokenizer_config=self._tokenizer_config,
+                ),
             )
+            self._model = loaded[0]
+            self._tokenizer = loaded[1]
         except Exception as exc:
             raise RuntimeError(
                 f"Failed to load MLX model '{model_name_or_path}': {exc}"

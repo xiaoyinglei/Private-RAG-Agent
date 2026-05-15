@@ -47,7 +47,7 @@ def profile_markdown_table(
 def profile_table_data(
     *,
     columns: list[str],
-    rows: list[list[object]],
+    rows: list[list[str]],
     token_accounting: TokenAccountingClient | None = None,
     full_text: str | None = None,
 ) -> TableAssetProfile:

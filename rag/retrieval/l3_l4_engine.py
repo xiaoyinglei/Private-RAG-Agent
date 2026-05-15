@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from typing import Protocol
 
 from rag.retrieval.evidence import (
     CandidateLike,
@@ -12,8 +13,9 @@ from rag.retrieval.graph import GraphExpansionService
 from rag.retrieval.models import FusedCandidateView, QueryOptions, RankPipelineResult, RetrievalProfile
 from rag.retrieval.planning_graph import PlanningGraph, PlanningState
 from rag.retrieval.rerank_service import IndustrialRerankService
-from rag.retrieval.retrieval_adapter import RetrievalAdapter
+from rag.retrieval.retrieval_adapter import BranchCollectionResult, RetrievalAdapter
 from rag.retrieval.runtime_coordinator import CoreRetrievalPayload, RoutingDecision
+from rag.schema.model_protocols import Reranker
 from rag.schema.query import RetrievalSignals
 from rag.schema.runtime import AccessPolicy, ProviderAttempt
 from rag.utils.telemetry import TelemetryService
@@ -23,6 +25,33 @@ def _retrieval_signals_debug(query_options: QueryOptions | None) -> dict[str, ob
     if query_options is None:
         return {}
     return dict(query_options.retrieval_signals_debug or {})
+
+
+class FusionLike(Protocol):
+    def fuse(
+        self,
+        *,
+        query: str,
+        retrieval_profile: object,
+        branches: Sequence[tuple[str, Sequence[CandidateLike]]],
+        alpha: float | None = None,
+    ) -> list[CandidateLike]: ...
+
+
+class UnifiedRerankerLike(Reranker, Protocol):
+    reranker: Reranker | None
+
+    @property
+    def enabled(self) -> bool: ...
+
+
+class GraphExpanderLike(Protocol):
+    def __call__(
+        self,
+        query: str,
+        source_scope: list[str],
+        evidence: list[CandidateLike],
+    ) -> Sequence[CandidateLike]: ...
 
 
 class L3L4RetrievalEngine:
@@ -36,9 +65,9 @@ class L3L4RetrievalEngine:
         planning_graph: PlanningGraph,
         retrieval_adapter: RetrievalAdapter,
         rerank_service: IndustrialRerankService,
-        fusion: object,
-        reranker: object,
-        graph_expander: object,
+        fusion: FusionLike,
+        reranker: UnifiedRerankerLike,
+        graph_expander: GraphExpanderLike,
     ) -> None:
         self.branch_registry = branch_registry
         self.evidence_service = evidence_service
@@ -266,17 +295,17 @@ class L3L4RetrievalEngine:
 
     @staticmethod
     def _merge_branch_collection(
-        current: object,
-        supplemental: object,
-    ) -> object:
-        current_branches = list(getattr(current, "branches", []) or [])
-        current_hits = dict(getattr(current, "branch_hits", {}) or {})
-        current_limits = dict(getattr(current, "branch_limits", {}) or {})
-        for branch_name, items in getattr(supplemental, "branches", []) or []:
+        current: BranchCollectionResult,
+        supplemental: BranchCollectionResult,
+    ) -> BranchCollectionResult:
+        current_branches = list(current.branches)
+        current_hits = dict(current.branch_hits)
+        current_limits = dict(current.branch_limits)
+        for branch_name, items in supplemental.branches:
             current_branches.append((branch_name, list(items)))
-        current_hits.update(dict(getattr(supplemental, "branch_hits", {}) or {}))
-        current_limits.update(dict(getattr(supplemental, "branch_limits", {}) or {}))
-        return type(current)(
+        current_hits.update(supplemental.branch_hits)
+        current_limits.update(supplemental.branch_limits)
+        return BranchCollectionResult(
             branches=current_branches,
             branch_hits=current_hits,
             branch_limits=current_limits,
@@ -286,7 +315,7 @@ class L3L4RetrievalEngine:
     def _supplemental_branches(
         *,
         plan: PlanningState,
-        collection: object,
+        collection: BranchCollectionResult,
         rank_result: RankPipelineResult,
     ) -> tuple[str, ...]:
         available = {

@@ -4,7 +4,6 @@ from collections.abc import Sequence
 from dataclasses import dataclass, fields, replace
 from typing import Any, Protocol
 
-from rag.retrieval.runtime_coordinator import RoutingDecision
 from rag.retrieval.evidence import (
     CandidateLike,
     EvidenceService,
@@ -22,6 +21,7 @@ from rag.retrieval.rerank_service import IndustrialRerankService
 from rag.retrieval.retrieval_adapter import RetrievalAdapter
 from rag.retrieval.runtime_coordinator import (
     CoreRetrievalPayload,
+    RoutingDecision,
     RuntimeCoordinator,
     to_retrieval_result,
 )
@@ -98,7 +98,7 @@ class UnifiedReranker:
         if callable(rerank):
             return [float(score) for score in rerank(query, documents, **kwargs)]
         if callable(self.reranker):
-            return [float(score) for score in self.reranker(query, documents, **kwargs)]  # type: ignore[misc]
+            return [float(score) for score in self.reranker(query, documents, **kwargs)]
         raise RuntimeError("Reranker does not implement rerank(query, documents)")
 
 
@@ -200,7 +200,7 @@ class RetrievalService:
         self.graph_expansion_service = self._graph_expansion_service
         self.fusion = self._fusion
         self.reranker = self._unified_reranker
-        self.graph_expander = self._graph_expander
+        self.graph_expander: GraphExpander = self._graph_expander
         self.telemetry_service = self._telemetry_service
         self.planning_graph = self._planning_graph
         self.retrieval_adapter = self._retrieval_adapter

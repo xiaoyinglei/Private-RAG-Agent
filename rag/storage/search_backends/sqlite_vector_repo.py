@@ -13,6 +13,15 @@ from rag.schema.runtime import StoredVectorEntry, VectorSearchResult
 SummaryRecord = DocSummaryRecord | SectionSummaryRecord | AssetSummaryRecord
 
 
+def _to_int(value: object, default: int = 0) -> int:
+    """Safely coerce a metadata value to int (handles str from JSON round-tripping)."""
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.isdigit():
+        return int(value)
+    return default
+
+
 class SQLiteVectorRepo:
     _SUPPORTED_KINDS = {"doc_summary", "section_summary", "asset_summary"}
 
@@ -230,8 +239,8 @@ class SQLiteVectorRepo:
                     item_id=row["item_id"],
                     score=self._cosine_similarity(query_vector, query_norm, vector, vector_norm),
                     item_kind=str(item_kind),
-                    doc_id=str(row["doc_id"]),
-                    source_id=str(metadata.get("source_id", "")),
+                    doc_id=_to_int(row["doc_id"]),
+                    source_id=_to_int(metadata.get("source_id", 0)),
                     text=str(row["text"]),
                     metadata=metadata
                     | {
@@ -266,7 +275,7 @@ class SQLiteVectorRepo:
             item_id=str(row["item_id"]),
             item_kind=str(row["item_kind"]),
             embedding_space=str(row["embedding_space"]),
-            doc_id=str(row["doc_id"]),
+            doc_id=_to_int(row["doc_id"]),
             text=str(row["text"]),
             metadata=json.loads(row["metadata_json"]) | {"source_id": str(row["source_id"])},
             vector=[float(value) for value in json.loads(row["vector_json"])],

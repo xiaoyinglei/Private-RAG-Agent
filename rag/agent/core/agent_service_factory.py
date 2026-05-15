@@ -22,7 +22,7 @@ class AgentServiceFactory:
         route_provider: RouteProvider | None = None,
         evaluate_decision_provider: EvaluateDecisionProvider | None = None,
         plan_provider: PlanProvider | None = None,
-        checkpointer: BaseCheckpointSaver | None = None,
+        checkpointer: BaseCheckpointSaver[str] | None = None,
     ) -> None:
         self._tool_registry = tool_registry
         self._model_registry = model_registry

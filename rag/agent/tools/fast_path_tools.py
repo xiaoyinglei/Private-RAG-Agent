@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -67,7 +67,7 @@ class RAGSearchAnswerRunner:
         result = await asyncio.to_thread(
             self.runtime.query_public,
             payload.query,
-            options=QueryOptions(**options_kwargs),
+            options=QueryOptions(**cast(Any, options_kwargs)),
         )
         answer = result.answer
         context = getattr(result, "context", None)

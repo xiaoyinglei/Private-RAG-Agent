@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 from rag.agent.graphs.nodes.execute import execute_node
 from rag.agent.state import AgentState, ToolCallPlan
 from rag.agent.tools.fast_path_tools import RAGSearchAnswerOutput
@@ -12,7 +14,7 @@ async def fast_path_node(
     *,
     tool_registry: ToolRegistry,
     allowed_tools: frozenset[str],
-) -> dict:
+) -> dict[str, Any]:
     signals = state.get("retrieval_signals")
     call = ToolCallPlan.create(
         "rag_search_answer",
@@ -67,7 +69,7 @@ async def fast_path_node(
     }
 
 
-def _failed_fast_path_update(result: ToolResult) -> dict:
+def _failed_fast_path_update(result: ToolResult) -> dict[str, Any]:
     error_code = result.error.code if result.error is not None else "unknown"
     return {
         "status": "failed",
