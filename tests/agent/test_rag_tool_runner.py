@@ -10,9 +10,9 @@ from rag.agent.tools.rag_tool_runner import (
     RAGToolRunnerNotConfiguredError,
     _evidence_to_output,
 )
-from rag.agent.tools.rag_tools import SearchInput, SearchOutput
+from rag.agent.tools.rag_tools import SearchInput
+from rag.schema.query import RetrievalSignals
 from rag.schema.runtime import AccessPolicy
-
 
 # ── Fake evidence ──
 
@@ -52,8 +52,16 @@ def _make_evidence(n: int = 1) -> list[_FakeEvidenceItem]:
 class _FakeRetrievalService:
     evidence: Any = field(default_factory=list)
     fail_next: bool = False
+    calls: list[dict[str, Any]] = field(default_factory=list)
 
-    async def aretrieve_payload(self, query: str, *, access_policy: Any) -> Any:
+    async def aretrieve_payload(self, query: str, *, access_policy: Any, query_options: Any = None) -> Any:
+        self.calls.append(
+            {
+                "query": query,
+                "access_policy": access_policy,
+                "query_options": query_options,
+            }
+        )
         if self.fail_next:
             raise RuntimeError("simulated retrieval failure")
         return _FakePayload(self.evidence)
@@ -112,6 +120,7 @@ class TestAsyncRAGToolRunner:
         assert len(output.items) == 2
         assert output.items[0]["text"] == "text 1"
         assert output.items[1]["doc_id"] == 20
+        assert svc.calls[0]["query_options"] is not None
 
     @pytest.mark.anyio
     async def test_aretrieve_payload_fail_does_not_fallback(self) -> None:
@@ -145,6 +154,34 @@ class TestAsyncRAGToolRunner:
         assert len(output.items) == 1
 
     @pytest.mark.anyio
+    async def test_aquery_fallback_preserves_retrieval_signals(self) -> None:
+        """aquery fallback 不能静默丢弃 Agent 产出的 retrieval_signals。"""
+        captured: dict[str, Any] = {}
+        signals = RetrievalSignals(special_targets=["table"], quoted_terms=["报销"])
+
+        class _FakeRuntime:
+            async def aquery(self, query: str, *, options: Any) -> Any:
+                captured["query"] = query
+                captured["options"] = options
+                return _FakeQueryResult(evidence=_make_evidence(1))
+
+        @dataclass
+        class _FakeQueryResult:
+            evidence: list[Any]
+
+        runner = AsyncRAGToolRunner(runtime=_FakeRuntime())
+        output = await runner.retrieve_evidence(
+            SearchInput(query="test", retrieval_signals=signals)
+        )
+
+        assert len(output.items) == 1
+        assert captured["query"] == "test"
+        options = captured["options"]
+        assert options.retrieval_signals is signals
+        assert options.retrieval_signals_debug["signals_source"] == "agent_tool_input"
+        assert options.retrieval_signals_debug["special_targets"] == ["table"]
+
+    @pytest.mark.anyio
     async def test_fail_closed_when_nothing_configured(self) -> None:
         """无 runtime、无 retrieval_service → fail closed。"""
         runner = AsyncRAGToolRunner()
@@ -162,7 +199,6 @@ class TestAsyncRAGToolRunner:
         """access_policy 来源优先级验证。"""
         payload_ap = AccessPolicy(local_only=True)
         runner_ap = AccessPolicy(local_only=False)
-        runtime_ap = AccessPolicy(allow_remote=True)
 
         # 无 runtime 时用 runner policy
         runner = AsyncRAGToolRunner(access_policy=runner_ap)

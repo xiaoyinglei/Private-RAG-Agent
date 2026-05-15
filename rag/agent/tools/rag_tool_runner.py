@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from rag.agent.tools.rag_tools import SearchInput, SearchOutput
+from rag.retrieval.models import QueryOptions
 from rag.schema.runtime import AccessPolicy
 
 
@@ -63,21 +64,7 @@ class AsyncRAGToolRunner:
     async def _via_aretrieve_payload(
         self, payload: SearchInput, access_policy: AccessPolicy
     ) -> SearchOutput:
-        from rag.retrieval import QueryOptions
-
-        retrieval_signals = getattr(payload, "retrieval_signals", None)
-        signals_debug: dict[str, object] = {}
-        if retrieval_signals is not None:
-            signals_debug = {
-                "signals_source": "agent_tool_input",
-                "special_targets": list(retrieval_signals.special_targets),
-                "quoted_terms": list(retrieval_signals.quoted_terms),
-            }
-        query_options = QueryOptions(
-            max_context_tokens=self.max_context_tokens,
-            retrieval_signals=retrieval_signals,
-            retrieval_signals_debug=signals_debug,
-        )
+        query_options = self._query_options(payload, access_policy=access_policy)
         p = await self.retrieval_service.aretrieve_payload(
             payload.query,
             access_policy=access_policy,
@@ -93,9 +80,10 @@ class AsyncRAGToolRunner:
         return _evidence_to_output(all_items)
 
     async def _via_aquery(self, payload: SearchInput, access_policy: AccessPolicy) -> SearchOutput:
+        query_options = self._query_options(payload, access_policy=access_policy)
         result = await self.runtime.aquery(
             payload.query,
-            access_policy=access_policy,
+            options=query_options,
         )
         if hasattr(result, "evidence"):
             return _evidence_to_output(result.evidence)
@@ -108,23 +96,11 @@ class AsyncRAGToolRunner:
         return SearchOutput(items=[])
 
     async def _via_to_thread(self, payload: SearchInput) -> SearchOutput:
-        from rag.retrieval import QueryOptions
-
-        retrieval_signals = getattr(payload, "retrieval_signals", None)
-        query_kwargs: dict[str, object] = {
-            "max_context_tokens": self.max_context_tokens,
-            "retrieval_signals": retrieval_signals,
-        }
-        if retrieval_signals is not None:
-            query_kwargs["retrieval_signals_debug"] = {
-                "signals_source": "agent_tool_input",
-                "special_targets": list(retrieval_signals.special_targets),
-                "quoted_terms": list(retrieval_signals.quoted_terms),
-            }
+        query_options = self._query_options(payload, access_policy=self._resolve_access_policy(payload))
         result = await asyncio.to_thread(
             self.runtime.query,
             payload.query,
-            options=QueryOptions(**query_kwargs),
+            options=query_options,
         )
         items: list[dict[str, object]] = []
         if hasattr(result, "evidence") and result.evidence:
@@ -144,6 +120,22 @@ class AsyncRAGToolRunner:
         if self.runtime is not None and getattr(self.runtime, "access_policy", None) is not None:
             return self.runtime.access_policy
         return AccessPolicy.default()
+
+    def _query_options(self, payload: SearchInput, *, access_policy: AccessPolicy) -> QueryOptions:
+        retrieval_signals = getattr(payload, "retrieval_signals", None)
+        signals_debug: dict[str, object] = {}
+        if retrieval_signals is not None:
+            signals_debug = {
+                "signals_source": "agent_tool_input",
+                "special_targets": list(retrieval_signals.special_targets),
+                "quoted_terms": list(retrieval_signals.quoted_terms),
+            }
+        return QueryOptions(
+            access_policy=access_policy,
+            max_context_tokens=self.max_context_tokens,
+            retrieval_signals=retrieval_signals,
+            retrieval_signals_debug=signals_debug,
+        )
 
 
 def _evidence_to_output(evidence: Any) -> SearchOutput:

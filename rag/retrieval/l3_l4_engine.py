@@ -2,8 +2,6 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from rag.retrieval.runtime_coordinator import RoutingDecision
-from rag.schema.query import RetrievalSignals
 from rag.retrieval.evidence import (
     CandidateLike,
     EvidenceBundle,
@@ -15,10 +13,16 @@ from rag.retrieval.models import FusedCandidateView, QueryOptions, RankPipelineR
 from rag.retrieval.planning_graph import PlanningGraph, PlanningState
 from rag.retrieval.rerank_service import IndustrialRerankService
 from rag.retrieval.retrieval_adapter import RetrievalAdapter
-from rag.retrieval.runtime_coordinator import CoreRetrievalPayload
-
+from rag.retrieval.runtime_coordinator import CoreRetrievalPayload, RoutingDecision
+from rag.schema.query import RetrievalSignals
 from rag.schema.runtime import AccessPolicy, ProviderAttempt
 from rag.utils.telemetry import TelemetryService
+
+
+def _retrieval_signals_debug(query_options: QueryOptions | None) -> dict[str, object]:
+    if query_options is None:
+        return {}
+    return dict(query_options.retrieval_signals_debug or {})
 
 
 class L3L4RetrievalEngine:
@@ -68,6 +72,7 @@ class L3L4RetrievalEngine:
                 query=query,
                 decision=decision,
                 retrieval_signals=retrieval_signals,
+                retrieval_signals_debug=_retrieval_signals_debug(query_options),
             )
         plan = await self.planning_graph.aplan(
             query,
@@ -85,6 +90,7 @@ class L3L4RetrievalEngine:
             retrieval_signals=retrieval_signals,
             query_options=query_options,
             plan=plan,
+            retrieval_signals_debug=_retrieval_signals_debug(query_options),
         )
 
     async def _execute_mode_async(
@@ -97,6 +103,7 @@ class L3L4RetrievalEngine:
         retrieval_signals: RetrievalSignals,
         query_options: QueryOptions | None,
         plan: PlanningState,
+        retrieval_signals_debug: dict[str, object],
     ) -> CoreRetrievalPayload:
         collection = await self.retrieval_adapter.acollect_internal(
             plan=plan,
@@ -248,7 +255,7 @@ class L3L4RetrievalEngine:
             fusion_input_count=rank_result.candidate_count + len(web_candidates),
             fused_count=len(reranked_candidates),
             retrieval_signals=retrieval_signals,
-            retrieval_signals_debug={},
+            retrieval_signals_debug=dict(retrieval_signals_debug),
             pre_rerank_count=rank_result.pre_rerank_count,
             post_cleanup_count=rank_result.post_cleanup_count,
             top1_confidence=rank_result.top1_confidence,
@@ -305,6 +312,7 @@ class L3L4RetrievalEngine:
         query: str,
         decision: RoutingDecision,
         retrieval_signals: RetrievalSignals,
+        retrieval_signals_debug: dict[str, object],
     ) -> CoreRetrievalPayload:
         del query
         return CoreRetrievalPayload(
@@ -330,7 +338,7 @@ class L3L4RetrievalEngine:
             fusion_input_count=0,
             fused_count=0,
             retrieval_signals=retrieval_signals,
-            retrieval_signals_debug={},
+            retrieval_signals_debug=dict(retrieval_signals_debug),
             collapsed_candidate_count=0,
         )
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
+from pydantic import BaseModel
 
 from rag.agent.core.llm_providers import (
     LLMRouteProvider,
@@ -16,8 +17,6 @@ from rag.agent.tools.rag_tools import RAG_SIGNAL_AWARE_TOOLS, SearchInput, Searc
 from rag.agent.tools.registry import ToolRegistry
 from rag.agent.tools.spec import ToolError, ToolPermissions, ToolSpec
 from rag.schema.query import RetrievalSignals
-from pydantic import BaseModel
-
 
 # ── Helpers ──
 
@@ -351,7 +350,7 @@ class TestExecuteNodeSignalInjection:
         from rag.agent.state import ToolCallPlan
         call = ToolCallPlan.create("llm_summarize", {"text": "hello"})
 
-        update = await execute_node(
+        await execute_node(
             _make_state(
                 retrieval_signals=RetrievalSignals(quoted_terms=["test"]),
                 pending_tool_calls=[call],
@@ -486,8 +485,8 @@ class TestNoRoutingMapping:
         assert "runtime_mode" not in text.lower()
 
     def test_execute_node_has_no_routing_from_signals(self) -> None:
-        import ast
         import inspect
+
         import rag.agent.graphs.nodes.execute as m
         src = inspect.getsource(m)
         assert "_routing_from_signals" not in src
@@ -515,6 +514,7 @@ class TestQueryOptionsToRetrievalServiceSignalFlow:
     def test_aretrieve_payload_reads_signals_from_query_options(self) -> None:
         """aretrieve_payload 不再硬编码 RetrievalSignals()"""
         import inspect
+
         import rag.retrieval.orchestrator as m
         src = inspect.getsource(m.RetrievalService.aretrieve_payload)
         # 确认不再有硬编码的 RetrievalSignals()
@@ -527,8 +527,9 @@ class TestQueryOptionsToRetrievalServiceSignalFlow:
     def test_async_rag_tool_runner_passes_signals_in_query_options(self) -> None:
         """AsyncRAGToolRunner._via_aretrieve_payload 构造 QueryOptions 时包含 retrieval_signals"""
         import inspect
+
         import rag.agent.tools.rag_tool_runner as m
-        src = inspect.getsource(m.AsyncRAGToolRunner._via_aretrieve_payload)
+        src = inspect.getsource(m.AsyncRAGToolRunner._query_options)
         assert "retrieval_signals=" in src
         assert "retrieval_signals_debug=" in src
         assert '"signals_source": "agent_tool_input"' in src
@@ -536,6 +537,7 @@ class TestQueryOptionsToRetrievalServiceSignalFlow:
     def test_fast_path_answer_runner_passes_signals(self) -> None:
         """RAGSearchAnswerRunner.answer 在 QueryOptions 中传递 retrieval_signals"""
         import inspect
+
         import rag.agent.tools.fast_path_tools as m
         src = inspect.getsource(m.RAGSearchAnswerRunner.answer)
         assert '"retrieval_signals": payload.retrieval_signals' in src
@@ -544,24 +546,52 @@ class TestQueryOptionsToRetrievalServiceSignalFlow:
     def test_aretrieve_payload_signals_plumbing(self) -> None:
         """验证 aretrieve_payload 的信号解析逻辑（不构造完整 service）"""
         from rag.retrieval import QueryOptions
-        from rag.schema.query import RetrievalSignals as RS
 
         # 模拟信号解析逻辑（与 aretrieve_payload 一致）
         def _resolve(qo):
             s = qo.retrieval_signals if qo else None
-            return s or RS()
+            return s or RetrievalSignals()
 
         # 有 signals 时用传入的
-        signals = RS(special_targets=["table"], quoted_terms=["报销"])
+        signals = RetrievalSignals(special_targets=["table"], quoted_terms=["报销"])
         qo = QueryOptions(retrieval_signals=signals)
         assert _resolve(qo).special_targets == ["table"]
 
         # 无 signals 时 fallback 到空
         qo_none = QueryOptions()
         resolved = _resolve(qo_none)
-        assert isinstance(resolved, RS)
+        assert isinstance(resolved, RetrievalSignals)
         assert resolved.special_targets == []
         assert resolved.quoted_terms == []
 
         # query_options=None 也不崩
-        assert isinstance(_resolve(None), RS)
+        assert isinstance(_resolve(None), RetrievalSignals)
+
+    @pytest.mark.anyio
+    async def test_l3_l4_bypass_payload_preserves_signals_debug(self) -> None:
+        """L3/L4 payload diagnostics 要保留 QueryOptions 中的 retrieval_signals_debug。"""
+        from rag.retrieval import QueryOptions
+        from rag.retrieval.l3_l4_engine import L3L4RetrievalEngine
+        from rag.retrieval.runtime_coordinator import RoutingDecision
+        from rag.schema.runtime import AccessPolicy, RuntimeMode
+
+        signals = RetrievalSignals(special_targets=["table"], quoted_terms=["报销"])
+        debug = {
+            "signals_source": "agent_tool_input",
+            "special_targets": ["table"],
+            "quoted_terms": ["报销"],
+        }
+        payload = await object.__new__(L3L4RetrievalEngine).arun(
+            "test",
+            access_policy=AccessPolicy.default(),
+            retrieval_signals=signals,
+            decision=RoutingDecision(runtime_mode=RuntimeMode.FAST),
+            query_options=QueryOptions(
+                retrieval_profile="bypass",
+                retrieval_signals=signals,
+                retrieval_signals_debug=debug,
+            ),
+        )
+
+        assert payload.retrieval_signals is signals
+        assert payload.retrieval_signals_debug == debug
