@@ -44,6 +44,7 @@ def resolve_runtime_config(
         primary_model=primary_model,
         embedding_model=embedding_model,
         reranker_model=reranker_model,
+        generation=catalog.generation,
     )
 
 

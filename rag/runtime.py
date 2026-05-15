@@ -34,7 +34,7 @@ from rag.ingest.pipeline import (
     IngestPipelineResult,
     IngestRequest,
 )
-from rag.ingest.retrievalsummarizer import RetrievalSummarizer
+from rag.ingest.retrievalsummarizer import RetrievalSummarizer, RetrievalSummaryConfig
 from rag.ingest.section_refiner import SectionRefiner
 from rag.ingest.table_executor import TableExecutor
 from rag.providers.generation import AnswerGenerationService, AnswerGenerator, GeneratorBinding
@@ -127,11 +127,15 @@ class _ChatGeneratorAdapter:
         value = getattr(self._binding, "model_name", None)
         return value if isinstance(value, str) and value else None
 
-    def generate_text(self, *, prompt: str, max_tokens: int = 4096) -> str:
+    def generate_text(self, *, prompt: str, max_tokens: int | None = None, **kwargs: Any) -> str:
         chat = getattr(self._binding, "chat", None)
         if not callable(chat):
             raise RuntimeError("chat generation capability is not configured")
-        return str(chat(prompt, max_tokens=max_tokens))
+        call_kwargs: dict[str, Any] = {}
+        if max_tokens is not None:
+            call_kwargs["max_tokens"] = max_tokens
+        call_kwargs.update(kwargs)
+        return str(chat(prompt, **call_kwargs))
 
     def generate_structured(self, *, prompt: str, schema: type[Any], **kwargs: Any) -> Any:
         backend = getattr(self._binding, "backend", None)
@@ -153,8 +157,8 @@ class _LazySummaryGeneratorAdapter:
     def model_name(self) -> str | None:
         return self._adapter.model_name
 
-    def generate_text(self, *, prompt: str, max_tokens: int = 4096) -> str:
-        return self._adapter.generate_text(prompt=prompt, max_tokens=max_tokens)
+    def generate_text(self, *, prompt: str, max_tokens: int | None = None, **kwargs: Any) -> str:
+        return self._adapter.generate_text(prompt=prompt, max_tokens=max_tokens, **kwargs)
 
     def generate_structured(self, *, prompt: str, schema: type[Any], **kwargs: Any) -> Any:
         return self._adapter.generate_structured(prompt=prompt, schema=schema, **kwargs)
@@ -233,6 +237,7 @@ class RAGRuntime:
     assembly_service: CapabilityAssemblyService = field(default_factory=CapabilityAssemblyService, repr=False)
     telemetry_service: TelemetryService | None = None
     vlm_repo: VisualDescriptionRepo | None = None
+    generation_config: object | None = None  # GenerationConfig from rag.models.config
     capability_bundle: CapabilityBundle = field(init=False, repr=False)
     token_contract: TokenizerContract = field(init=False, repr=False)
     token_accounting: TokenAccountingService = field(init=False, repr=False)
@@ -637,11 +642,22 @@ class RAGRuntime:
             image_parser=ImageParserRepo(ocr_repo),
         )
         chat_binding = self.capability_bundle.chat_bindings[0] if self.capability_bundle.chat_bindings else None
+
+        # Build summarizer config from generation.summary if available, otherwise use defaults
+        summarizer_config = RetrievalSummaryConfig()
+        if self.generation_config is not None:
+            gen_summary = getattr(self.generation_config, "summary", None)
+            if gen_summary is not None:
+                max_tokens = getattr(gen_summary, "max_tokens", None)
+                if max_tokens is not None:
+                    summarizer_config = RetrievalSummaryConfig(max_output_tokens=max_tokens)
+
         self.ingest_pipeline = IngestPipeline(
             dispatcher=dispatcher,
             summarizer=RetrievalSummarizer(
                 llm_client=_LazySummaryGeneratorAdapter(binding=chat_binding),
                 token_accounting=self.token_accounting,
+                config=summarizer_config,
             ),
             embedder=embedding_binding,
             metadata_repo=self.stores.metadata_repo,

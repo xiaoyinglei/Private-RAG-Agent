@@ -1,6 +1,11 @@
 # Model catalog: single source of truth for all model configuration.
 # Business code MUST NOT reference model names, providers, base_url, or api_key directly.
 # Always resolve models via rag.models.runtime.resolve_runtime_config().
+#
+# Layers:
+#   models     — what a model IS (identity, no task params)
+#   defaults   — which model for each capability
+#   generation — how to USE models (per-task model selection + params)
 
 models:
   qwen_local:
@@ -8,7 +13,18 @@ models:
     provider: openai_compatible
     model: mlx-community/Qwen3-14B-4bit
     base_url: http://127.0.0.1:8080/v1
-    summary_max_tokens: 8192
+
+  qwen_local_small:
+    capability: chat
+    provider: openai_compatible
+    model: mlx-community/Qwen3-0.6B-4bit
+    base_url: http://127.0.0.1:8080/v1
+
+  qwen_8b:
+    capability: chat
+    provider: openai_compatible
+    model: Qwen/Qwen3-8B-MLX-4bit
+    base_url: http://127.0.0.1:8080/v1
 
   deepseek:
     capability: chat
@@ -39,3 +55,29 @@ defaults:
   primary_model: qwen_local
   embedding_model: qwen_embedding_mlx
   reranker_model: qwen3_reranker
+
+generation:
+  summary:
+    model: qwen_local
+    max_tokens: 8192
+    temperature: 0.3
+
+  answer:
+    model: qwen_local
+    max_tokens: 4096
+    temperature: 0.7
+
+  planner:
+    model: qwen_local
+    max_tokens: 4096
+    temperature: 0.3
+
+  synthesize:
+    model: qwen_local
+    max_tokens: 8192
+    temperature: 0.5
+
+  factcheck:
+    model: qwen_local
+    max_tokens: 2048
+    temperature: 0.1

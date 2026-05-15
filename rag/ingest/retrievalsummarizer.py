@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Any, Protocol
 
 from rag.assembly import TokenAccountingService, TokenizerContract
 from rag.ingest.parsers.util import normalize_whitespace
@@ -46,6 +46,9 @@ class RetrievalSummaryConfig:
     middle_tokens: int = 1500
     tail_tokens: int = 1500
 
+    # 生成温度，None 表示不透传（使用 LLM 默认值）
+    temperature: float | None = None
+
 
 class RetrievalSummarizer:
     """
@@ -76,12 +79,17 @@ class RetrievalSummarizer:
         )
 
     def _generate_text(self, *, prompt: str) -> str:
+        kwargs: dict[str, Any] = {}
+        if self._config.temperature is not None:
+            kwargs["temperature"] = self._config.temperature
         try:
             return self._llm.generate_text(
-                prompt=prompt, max_tokens=self._config.max_output_tokens
+                prompt=prompt, max_tokens=self._config.max_output_tokens, **kwargs
             )
-        except TypeError:
-            return self._llm.generate_text(prompt=prompt)
+        except TypeError as exc:
+            if "unexpected keyword argument" in str(exc):
+                return self._llm.generate_text(prompt=prompt)
+            raise
 
     def summarize_section(self, section: ParsedSection, document_title: str) -> str:
         return self.summarize_section_with_metadata(section, document_title).text
