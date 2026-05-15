@@ -79,5 +79,16 @@ class ToolRegistry:
         except ValidationError as exc:
             raise ToolOutputValidationError(tool_name, exc) from exc
 
+    def clone(self) -> ToolRegistry:
+        """创建浅拷贝，用于 request-scoped runner 注入。
+
+        返回的新 registry 共享 ToolSpec，但有独立的 runners dict，
+        因此注入 AgentAsToolAdapter 不会污染原始 registry。
+        """
+        cloned = ToolRegistry()
+        cloned._tools = dict(self._tools)
+        cloned._runners = dict(self._runners)
+        return cloned
+
     def list_all(self) -> list[ToolSpec]:
         return list(self._tools.values())

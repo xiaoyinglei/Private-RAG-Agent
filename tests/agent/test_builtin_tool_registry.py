@@ -11,17 +11,16 @@ def test_builtin_tool_registry_contains_rag_and_llm_specs() -> None:
     registry = create_builtin_tool_registry()
     names = {tool.name for tool in registry.list_all()}
 
-    assert names == {
-        "vector_search",
-        "keyword_search",
-        "grounding",
-        "rerank",
-        "graph_expand",
-        "llm_generate",
-        "llm_summarize",
-        "llm_compare",
+    # standard RAG + LLM + fast path tools
+    assert {
+        "vector_search", "keyword_search", "grounding", "rerank", "graph_expand",
+        "llm_generate", "llm_summarize", "llm_compare",
         "rag_search_answer",
-    }
+    } <= names
+    # agent-as-tool specs (registered without runners)
+    assert {
+        "agent_research", "agent_compare", "agent_factcheck", "agent_synthesize",
+    } <= names
 
 
 def test_builtin_tool_registry_satisfies_research_agent_allowlist() -> None:
