@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from rag import CapabilityRequirements, RAGRuntime, StorageConfig
+from rag import AssemblyRequest, CapabilityRequirements, RAGRuntime, StorageConfig
 from rag.assembly import AssemblyConfig, CapabilityAssemblyService, CapabilityBundle
 from rag.retrieval.models import QueryOptions
 from rag.schema.runtime import OcrVisionRepo, VisualDescriptionRepo, WebFetchRepo
@@ -21,8 +21,7 @@ def make_capability_bundle(
     assembly_service: CapabilityAssemblyService | None = None,
 ) -> CapabilityBundle:
     service = assembly_service or _isolated_assembly_service()
-    request = service.request_for_profile(
-        "test_minimal",
+    request = AssemblyRequest(
         requirements=CapabilityRequirements(
             require_chat=require_chat,
             allow_degraded=True,
@@ -39,8 +38,7 @@ def make_runtime(
     assembly_service: CapabilityAssemblyService | None = None,
 ) -> RAGRuntime:
     service = assembly_service or _isolated_assembly_service()
-    request = service.request_for_profile(
-        "test_minimal",
+    request = AssemblyRequest(
         requirements=CapabilityRequirements(
             require_chat=require_chat,
             allow_degraded=True,

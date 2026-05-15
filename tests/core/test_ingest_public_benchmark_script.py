@@ -22,8 +22,6 @@ class _FakePaths:
 
 
 class _FakeRuntime:
-    selected_profile_id = "local_full"
-
     def close(self) -> None:
         return None
 
@@ -79,8 +77,6 @@ def test_ingest_script_requires_chat_when_graph_extraction_enabled(
             "medical_retrieval",
             "--variant",
             "mini",
-            "--profile",
-            "local_full",
         ]
     )
 
@@ -127,8 +123,6 @@ def test_ingest_script_passes_chat_model_override_for_graph_extraction(
             "medical_retrieval",
             "--variant",
             "mini",
-            "--profile",
-            "local_full",
             "--chat-provider",
             "local-hf",
             "--chat-model",

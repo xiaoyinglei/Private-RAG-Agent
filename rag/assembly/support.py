@@ -2,14 +2,12 @@ from __future__ import annotations
 
 import os
 from collections.abc import Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import Any, TypeVar
 
 from rag.assembly.models import (
     AssemblyConfig,
     AssemblyOverrides,
-    AssemblyProfileSpec,
-    CapabilityRequirements,
     ProviderConfig,
     TokenizerConfig,
 )
@@ -392,103 +390,6 @@ def compatibility_config_from_environment() -> tuple[AssemblyConfig, dict[str, s
     return AssemblyConfig(profiles=tuple(profiles), tokenizer=tokenizer_config), compatibility_inputs
 
 
-def assembly_profiles(
-    *,
-    config: AssemblyConfig | None,
-    compatibility_config: AssemblyConfig,
-) -> tuple[AssemblyProfileSpec, ...]:
-    del config
-    compat = {profile.profile_id: profile for profile in compatibility_config.profiles}
-    compat_openai = compat.get("openai-compatible")
-    compat_ollama = compat.get("ollama")
-    compat_local_bge = compat.get("local-bge")
-    compat_local_hf = compat.get("local-hf-chat")
-    return (
-        AssemblyProfileSpec(
-            profile_id="local_full",
-            label="Local Full",
-            description=(
-                "Prefer local retrieval and local chat. Uses local retrieval with either a configured local HF chat "
-                "provider or Ollama for generation."
-            ),
-            location="local",
-            overrides=AssemblyOverrides(
-                embedding=local_retrieval_provider(compat_local_bge, compat_ollama),
-                rerank=rerank_provider(compat_local_bge),
-                chat=_provider_or_default(
-                    compat_local_hf or compat_ollama,
-                    fallback_kind="local-hf" if compat_local_hf is not None else "ollama",
-                    fallback_location="local",
-                    fallback_base_url=None if compat_local_hf is not None else "http://localhost:11434",
-                ),
-            ),
-        ),
-        AssemblyProfileSpec(
-            profile_id="local_retrieval_cloud_chat",
-            label="Local Retrieval + Cloud Chat",
-            description=(
-                "Prefer local retrieval with a cloud chat model. Uses local BGE for retrieval and "
-                "OpenAI-compatible chat for generation."
-            ),
-            location="hybrid",
-            overrides=AssemblyOverrides(
-                embedding=local_retrieval_provider(compat_local_bge, compat_ollama),
-                rerank=rerank_provider(compat_local_bge),
-                chat=_provider_or_default(
-                    compat_openai,
-                    fallback_kind="openai-compatible",
-                    fallback_location="cloud",
-                    fallback_base_url="https://api.openai.com/v1",
-                ),
-            ),
-        ),
-        AssemblyProfileSpec(
-            profile_id="cloud_full",
-            label="Cloud Full",
-            description="Prefer a cloud chat + embedding stack, with optional local rerank when available.",
-            location="cloud",
-            overrides=AssemblyOverrides(
-                embedding=_provider_or_default(
-                    compat_openai,
-                    fallback_kind="openai-compatible",
-                    fallback_location="cloud",
-                    fallback_base_url="https://api.openai.com/v1",
-                ),
-                chat=_provider_or_default(
-                    compat_openai,
-                    fallback_kind="openai-compatible",
-                    fallback_location="cloud",
-                    fallback_base_url="https://api.openai.com/v1",
-                ),
-                rerank=rerank_provider(compat_local_bge),
-            ),
-        ),
-        AssemblyProfileSpec(
-            profile_id="test_minimal",
-            label="Test Minimal",
-            description="Minimal test profile. Allows degraded assembly and uses fallback embedding when needed.",
-            location="test",
-            recommended_requirements=CapabilityRequirements(
-                require_embedding=True,
-                require_chat=False,
-                require_rerank=False,
-                allow_degraded=True,
-            ),
-            overrides=AssemblyOverrides(),
-        ),
-    )
-
-
-def assembly_profile_by_id(
-    profiles: Sequence[AssemblyProfileSpec],
-    profile_id: str | None,
-) -> AssemblyProfileSpec | None:
-    if profile_id is None:
-        return None
-    for profile in profiles:
-        if profile.profile_id == profile_id:
-            return profile
-    return None
 def merge_provider_config(
     high: ProviderConfig | None,
     low: ProviderConfig | None,
@@ -578,7 +479,6 @@ def merge_assembly_config(
     if low is None:
         return high
     return AssemblyConfig(
-        default_profile_id=first_non_blank(high.default_profile_id, low.default_profile_id),
         profiles=tuple([*high.profiles, *low.profiles]),
         chat=merge_provider_config(high.chat, low.chat),
         embedding=merge_provider_config(high.embedding, low.embedding),
@@ -601,55 +501,6 @@ def merge_assembly_overrides(
         rerank=merge_provider_config(high.rerank, low.rerank),
         tokenizer=merge_tokenizer_config(high.tokenizer, low.tokenizer),
     )
-
-
-def local_retrieval_provider(
-    local_bge: ProviderConfig | None,
-    ollama: ProviderConfig | None,
-) -> ProviderConfig:
-    # MLX embedding 优先（如果通过 env 启用）
-    mlx_enabled = (
-        env_bool("PKP_MLX_EMBEDDING__ENABLED", "RAG_MLX_EMBEDDING_ENABLED") is True
-    )
-    if mlx_enabled:
-        mlx_model = first_env("PKP_MLX_EMBEDDING__MODEL", "RAG_MLX_EMBEDDING_MODEL")
-        if mlx_model:
-            return ProviderConfig(
-                provider_kind="mlx-embedding",
-                location="local",
-                embedding_model=mlx_model,
-            )
-    if local_bge is not None:
-        return _strip_profile(local_bge)
-    if ollama is not None and ollama.base_url and ollama.embedding_model:
-        return _strip_profile(ollama)
-    return ProviderConfig(provider_kind="local-bge", location="local")
-
-
-def rerank_provider(local_bge: ProviderConfig | None) -> ProviderConfig | None:
-    return _strip_profile(local_bge) if local_bge is not None else None
-
-
-def _strip_profile(provider: ProviderConfig) -> ProviderConfig:
-    return replace(provider, profile_id=None, label=None)
-
-
-def _provider_or_default(
-    provider: ProviderConfig | None,
-    *,
-    fallback_kind: str,
-    fallback_location: str,
-    fallback_base_url: str | None = None,
-) -> ProviderConfig:
-    if provider is not None:
-        return _strip_profile(provider)
-    return ProviderConfig(
-        provider_kind=fallback_kind,
-        location=fallback_location,
-        base_url=fallback_base_url,
-    )
-
-
 def build_provider(provider_config: ProviderConfig) -> object:
     kind = provider_config.provider_kind
     if kind == "openai-compatible":
@@ -808,8 +659,6 @@ def first_bool(*values: bool | None) -> bool:
 
 
 __all__ = [
-    "assembly_profile_by_id",
-    "assembly_profiles",
     "build_provider",
     "compatibility_config_from_environment",
     "env_bool",
@@ -819,9 +668,7 @@ __all__ = [
     "first_non_blank",
     "first_non_negative_int",
     "first_positive_int",
-    "local_retrieval_provider",
     "merge_assembly_config",
     "merge_assembly_overrides",
     "normalize_gemini_base_url",
-    "rerank_provider",
 ]

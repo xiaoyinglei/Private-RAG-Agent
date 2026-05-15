@@ -31,7 +31,6 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--input", required=True, help="File or directory containing private documents.")
     parser.add_argument("--storage-root", default="data/private_index_milvus")
-    parser.add_argument("--profile", default="local_full")
     parser.add_argument("--owner", default="private")
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--recursive", action=argparse.BooleanOptionalAction, default=True)
@@ -117,7 +116,6 @@ def main(argv: list[str] | None = None) -> int:
 
     runtime = build_runtime_for_benchmark(
         storage_root=Path(args.storage_root),
-        profile_id=args.profile,
         require_chat=False,
         require_rerank=False,
         skip_graph_extraction=True,
@@ -170,7 +168,6 @@ def main(argv: list[str] | None = None) -> int:
         payload = {
             "input": str(input_path),
             "storage_root": str(Path(args.storage_root)),
-            "profile": args.profile,
             "vector_backend": args.vector_backend,
             "vector_namespace": args.vector_namespace,
             "vector_collection_prefix": args.vector_collection_prefix,

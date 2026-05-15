@@ -28,9 +28,8 @@ from rag.benchmarks import (
     write_dataset_baseline_summary,
 )
 from rag.retrieval.evidence import EvidenceBundle, SelfCheckResult
-from rag.retrieval.runtime_coordinator import RoutingDecision
 from rag.retrieval.models import RetrievalResult
-
+from rag.retrieval.runtime_coordinator import RoutingDecision
 from rag.schema.runtime import RuntimeMode
 from tests.support import make_runtime
 
@@ -192,7 +191,6 @@ def test_benchmark_run_summary_reports_query_throughput() -> None:
         embedding_model="BAAI/bge-m3",
         retrieval_profile="fast",
         rerank_enabled=True,
-        profile_id="local_full",
         recall_at_10=0.7,
         mrr_at_10=0.6,
         ndcg_at_10=0.65,
@@ -226,7 +224,6 @@ def test_append_baseline_row_upgrades_existing_csv_header(tmp_path: Path) -> Non
             embedding_model="BAAI/bge-m3",
             retrieval_profile="fast",
             rerank_enabled=True,
-            profile_id="local_full",
             recall_at_10=0.71,
             mrr_at_10=0.61,
             ndcg_at_10=0.66,
@@ -372,7 +369,6 @@ def test_build_runtime_for_benchmark_creates_storage_root(tmp_path) -> None:
 
     runtime = build_runtime_for_benchmark(
         storage_root=storage_root,
-        profile_id="test_minimal",
         require_chat=False,
         require_rerank=False,
         vector_backend="sqlite",
@@ -412,7 +408,6 @@ def test_build_runtime_for_benchmark_passes_milvus_vector_config(tmp_path, monke
 
     runtime = build_runtime_for_benchmark(
         storage_root=tmp_path / "benchmarks" / "medical_retrieval" / "index",
-        profile_id="test_minimal",
         require_chat=False,
         require_rerank=False,
         vector_backend="milvus",
@@ -435,7 +430,6 @@ def test_build_runtime_for_benchmark_passes_milvus_vector_config(tmp_path, monke
 def test_build_runtime_for_benchmark_accepts_ollama_embedding_override(tmp_path) -> None:
     runtime = build_runtime_for_benchmark(
         storage_root=tmp_path / "benchmarks" / "medical_retrieval" / "index",
-        profile_id="local_full",
         require_chat=False,
         require_rerank=True,
         embedding_provider_kind="ollama",
@@ -474,7 +468,6 @@ def test_build_runtime_for_benchmark_accepts_chat_and_rerank_overrides(
 
     runtime = build_runtime_for_benchmark(
         storage_root=tmp_path / "benchmarks" / "medical_retrieval" / "index",
-        profile_id="local_full",
         require_chat=True,
         require_rerank=True,
         embedding_provider_kind="ollama",
@@ -522,7 +515,6 @@ def test_build_runtime_for_benchmark_accepts_local_hf_chat_overrides(
 
     runtime = build_runtime_for_benchmark(
         storage_root=tmp_path / "benchmarks" / "medical_retrieval" / "index",
-        profile_id="local_full",
         require_chat=True,
         require_rerank=False,
         chat_provider_kind="local-hf",
@@ -567,7 +559,6 @@ def test_build_runtime_for_benchmark_configures_summary_model_without_requiring_
 
     runtime = build_runtime_for_benchmark(
         storage_root=tmp_path / "benchmarks" / "medical_retrieval" / "index",
-        profile_id="local_full",
         require_chat=False,
         require_rerank=False,
         summary_provider_kind="local-hf",
@@ -596,7 +587,6 @@ def test_build_runtime_for_benchmark_rerank_override_clears_stale_rerank_path(
 
     runtime = build_runtime_for_benchmark(
         storage_root=tmp_path / "benchmarks" / "medical_retrieval" / "index",
-        profile_id="local_full",
         require_chat=False,
         require_rerank=True,
         rerank_model="Qwen/Qwen3-Reranker-4B",

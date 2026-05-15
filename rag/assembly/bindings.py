@@ -4,6 +4,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
+
 def _provider_name(provider: object) -> str:
     explicit = getattr(provider, "provider_name", None)
     if isinstance(explicit, str) and explicit:

@@ -38,7 +38,6 @@ def main() -> int:
     parser.add_argument("--dataset", default=FIQA_DATASET, choices=[FIQA_DATASET, MEDICAL_RETRIEVAL_DATASET])
     parser.add_argument("--variant", default="full", choices=["full", "mini"])
     parser.add_argument("--documents-path", default=None)
-    parser.add_argument("--profile", required=True)
     parser.add_argument("--doc-counts", type=_parse_int_list, default=[100], help="comma-separated, e.g. 100,500,1000")
     parser.add_argument(
         "--ingest-batch-sizes",
@@ -130,7 +129,6 @@ def main() -> int:
                                     shutil.rmtree(run_root)
                                 result = profile_benchmark_ingest(
                                     dataset=args.dataset,
-                                    profile_id=args.profile,
                                     documents_path=documents_path,
                                     storage_root=run_root,
                                     doc_limit=doc_count,

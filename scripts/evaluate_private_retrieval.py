@@ -15,7 +15,6 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Evaluate private section-level retrieval gold set.")
     parser.add_argument("--golden-path", default="data/eval_private/golden_eval_dataset.jsonl")
     parser.add_argument("--storage-root", default="data/company_policy_index_recut")
-    parser.add_argument("--profile", default="local_full")
     parser.add_argument("--retrieval-profile", default="auto", choices=["fast", "auto", "deep", "asset"])
     parser.add_argument("--top-k", type=int, default=10)
     parser.add_argument("--retrieval-pool-k", type=int, default=20)
@@ -300,7 +299,6 @@ def main(argv: list[str] | None = None) -> int:
 
     runtime = build_runtime_for_benchmark(
         storage_root=Path(args.storage_root),
-        profile_id=args.profile,
         require_chat=False,
         require_rerank=bool(args.rerank),
         skip_graph_extraction=True,

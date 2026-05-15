@@ -247,13 +247,6 @@ def agent_chat(
     storage_root: Annotated[
         Path, typer.Option("--storage-root", help="RAG 存储根目录")
     ] = Path(".rag"),
-    profile: Annotated[
-        str | None,
-        typer.Option(
-            "--profile",
-            help="运行行为 / 装配策略（local_full 等），不再控制模型选择。模型由 --model / configs/models.yaml 决定。",
-        ),
-    ] = None,
     agent: Annotated[
         str,
         typer.Option(
@@ -303,13 +296,10 @@ def agent_chat(
         require_chat=True,
         default_context_tokens=QueryOptions().max_context_tokens,
     )
-    # profile 先加载（提供 base strategy），overrides 后覆盖（--model 永远覆盖 profile 中的旧模型配置）。
-    # 合并顺序由 CapabilityAssemblyService._capability_candidates 保证：explicit > profile > config > compat_env。
     runtime = RAGRuntime.from_request(
         storage=storage,
         request=AssemblyRequest(
             requirements=requirements,
-            profile_id=profile,
             overrides=assembly_overrides,
         ),
     )
@@ -365,9 +355,6 @@ def agent_run(
     storage_root: Annotated[
         Path, typer.Option("--storage-root", help="RAG 存储根目录")
     ] = Path(".rag"),
-    profile: Annotated[
-        str | None, typer.Option("--profile", help="Assembly profile")
-    ] = None,
     agent: Annotated[
         str,
         typer.Option(
@@ -388,10 +375,39 @@ def agent_run(
         Path | None,
         typer.Option("--checkpoint-db", help="SQLite checkpoint 文件；启用后可跨进程 resume"),
     ] = None,
+    model: Annotated[
+        str | None,
+        typer.Option("--model", help="主生成模型别名，对应 configs/models.yaml 中 capability=chat 的条目"),
+    ] = None,
+    embedding_model: Annotated[
+        str | None,
+        typer.Option(
+            "--embedding-model",
+            help="Embedding 模型别名，对应 configs/models.yaml 中 capability=embedding 的条目",
+        ),
+    ] = None,
+    reranker_model: Annotated[
+        str | None,
+        typer.Option(
+            "--reranker-model",
+            help="Reranker 模型别名，对应 configs/models.yaml 中 capability=reranker 的条目",
+        ),
+    ] = None,
 ) -> None:
     """单次 Agent 运行。传入 --checkpoint-db 后支持跨进程恢复。"""
     from rag import AssemblyRequest, CapabilityRequirements, RAGRuntime, StorageComponentConfig, StorageConfig
+    from rag.models.assembly_adapter import to_assembly_overrides
+    from rag.models.runtime import RuntimeOverrides, resolve_runtime_config
     from rag.retrieval import QueryOptions
+
+    runtime_config = resolve_runtime_config(
+        RuntimeOverrides(
+            model_alias=model,
+            embedding_model_alias=embedding_model,
+            reranker_model_alias=reranker_model,
+        )
+    )
+    assembly_overrides = to_assembly_overrides(runtime_config)
 
     storage = StorageConfig(
         root=storage_root,
@@ -401,13 +417,10 @@ def agent_run(
         require_chat=True,
         default_context_tokens=QueryOptions().max_context_tokens,
     )
-    if profile:
-        runtime = RAGRuntime.from_profile(storage=storage, profile_id=profile, requirements=requirements)
-    else:
-        runtime = RAGRuntime.from_request(
-            storage=storage,
-            request=AssemblyRequest(requirements=requirements),
-        )
+    runtime = RAGRuntime.from_request(
+        storage=storage,
+        request=AssemblyRequest(requirements=requirements, overrides=assembly_overrides),
+    )
 
     with runtime:
         service = _build_agent_service(runtime, checkpoint_db=checkpoint_db, agent_type=agent)
@@ -453,9 +466,6 @@ def agent_resume(
     storage_root: Annotated[
         Path, typer.Option("--storage-root", help="RAG 存储根目录")
     ] = Path(".rag"),
-    profile: Annotated[
-        str | None, typer.Option("--profile", help="Assembly profile")
-    ] = None,
     agent: Annotated[
         str,
         typer.Option(
@@ -474,10 +484,39 @@ def agent_resume(
     verbose: Annotated[
         bool, typer.Option("--verbose", "-v", help="详细输出")
     ] = False,
+    model: Annotated[
+        str | None,
+        typer.Option("--model", help="主生成模型别名，对应 configs/models.yaml 中 capability=chat 的条目"),
+    ] = None,
+    embedding_model: Annotated[
+        str | None,
+        typer.Option(
+            "--embedding-model",
+            help="Embedding 模型别名，对应 configs/models.yaml 中 capability=embedding 的条目",
+        ),
+    ] = None,
+    reranker_model: Annotated[
+        str | None,
+        typer.Option(
+            "--reranker-model",
+            help="Reranker 模型别名，对应 configs/models.yaml 中 capability=reranker 的条目",
+        ),
+    ] = None,
 ) -> None:
     """从 SQLite checkpoint 恢复暂停的 Agent 运行。"""
     from rag import AssemblyRequest, CapabilityRequirements, RAGRuntime, StorageComponentConfig, StorageConfig
+    from rag.models.assembly_adapter import to_assembly_overrides
+    from rag.models.runtime import RuntimeOverrides, resolve_runtime_config
     from rag.retrieval import QueryOptions
+
+    runtime_config = resolve_runtime_config(
+        RuntimeOverrides(
+            model_alias=model,
+            embedding_model_alias=embedding_model,
+            reranker_model_alias=reranker_model,
+        )
+    )
+    assembly_overrides = to_assembly_overrides(runtime_config)
 
     storage = StorageConfig(
         root=storage_root,
@@ -487,17 +526,10 @@ def agent_resume(
         require_chat=True,
         default_context_tokens=QueryOptions().max_context_tokens,
     )
-    if profile:
-        runtime = RAGRuntime.from_profile(
-            storage=storage,
-            profile_id=profile,
-            requirements=requirements,
-        )
-    else:
-        runtime = RAGRuntime.from_request(
-            storage=storage,
-            request=AssemblyRequest(requirements=requirements),
-        )
+    runtime = RAGRuntime.from_request(
+        storage=storage,
+        request=AssemblyRequest(requirements=requirements, overrides=assembly_overrides),
+    )
 
     with runtime:
         service = _build_agent_service(runtime, checkpoint_db=checkpoint_db, agent_type=agent)

@@ -25,7 +25,6 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--variant", default="full", choices=["full", "mini"])
     parser.add_argument("--documents-path", default=None)
     parser.add_argument("--storage-root", default=None)
-    parser.add_argument("--profile", required=True)
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--preload", action="store_true", help="Load all prepared requests before ingesting.")
     parser.add_argument("--embedding-batch-size", type=int, default=None)
@@ -72,7 +71,6 @@ def main(argv: list[str] | None = None) -> int:
 
     runtime = build_runtime_for_benchmark(
         storage_root=storage_root,
-        profile_id=args.profile,
         require_chat=not args.skip_graph_extraction,
         require_rerank=False,
         skip_graph_extraction=args.skip_graph_extraction,
@@ -149,7 +147,6 @@ def main(argv: list[str] | None = None) -> int:
             {
                 "variant": args.variant,
                 "storage_root": str(storage_root),
-                "selected_profile_id": runtime.selected_profile_id,
                 "skip_graph_extraction": args.skip_graph_extraction,
                 "ingest_batch_size": max(args.batch_size, 1),
                 "ingest_strategy": "preload" if args.preload else "stream",

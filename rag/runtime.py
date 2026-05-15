@@ -11,7 +11,6 @@ from rag.assembly import (
     CapabilityAssemblyService,
     CapabilityBundle,
     CapabilityCatalog,
-    CapabilityRequirements,
     ChatCapabilityBinding,
     ProviderConfig,
     TokenAccountingService,
@@ -275,27 +274,6 @@ class RAGRuntime:
             vlm_repo=vlm_repo,
         )
 
-    @classmethod
-    def from_profile(
-        cls,
-        *,
-        storage: StorageConfig,
-        profile_id: str,
-        requirements: CapabilityRequirements | None = None,
-        assembly_service: CapabilityAssemblyService | None = None,
-        telemetry_service: TelemetryService | None = None,
-        vlm_repo: VisualDescriptionRepo | None = None,
-    ) -> RAGRuntime:
-        service = assembly_service or CapabilityAssemblyService()
-        request = service.request_for_profile(profile_id, requirements=requirements)
-        return cls.from_request(
-            storage=storage,
-            request=request,
-            assembly_service=service,
-            telemetry_service=telemetry_service,
-            vlm_repo=vlm_repo,
-        )
-
     @property
     def diagnostics(self) -> AssemblyDiagnostics:
         return self.capability_bundle.diagnostics
@@ -332,14 +310,9 @@ class RAGRuntime:
             )
         )
 
-    @property
-    def selected_profile_id(self) -> str | None:
-        return self.capability_bundle.selected_profile_id
-
     def diagnostics_payload(self) -> dict[str, object]:
         return {
             "status": self.diagnostics.status,
-            "selected_profile_id": self.selected_profile_id,
             "issues": [
                 {
                     "severity": issue.severity,

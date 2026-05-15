@@ -87,7 +87,7 @@ def test_capability_assembly_assembles_capabilities_from_structured_request(
     assert bundle.token_contract.max_context_tokens == 1536
 
 
-def test_assembly_prefers_explicit_over_profile_config_and_compat_env(
+def test_assembly_prefers_explicit_over_config_and_compat_env(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     compatibility = AssemblyConfig(
@@ -106,22 +106,14 @@ def test_assembly_prefers_explicit_over_profile_config_and_compat_env(
 
     bundle = service.assemble_request(
         AssemblyRequest(
-            profile_id="profile-selected",
             config=AssemblyConfig(
-                default_profile_id="config-default",
-                profiles=(
-                    ProviderConfig(
-                        profile_id="profile-selected",
-                        provider_kind="profile-provider",
-                        embedding_model="profile-embed",
-                        chat_model="profile-chat",
-                    ),
-                    ProviderConfig(
-                        profile_id="config-default",
-                        provider_kind="config-provider",
-                        embedding_model="config-embed",
-                        chat_model="config-chat",
-                    ),
+                embedding=ProviderConfig(
+                    provider_kind="config-provider",
+                    embedding_model="config-embed",
+                ),
+                chat=ProviderConfig(
+                    provider_kind="config-provider",
+                    chat_model="config-chat",
                 ),
             ),
             overrides=AssemblyOverrides(
@@ -159,7 +151,7 @@ def test_assembly_prefers_explicit_over_profile_config_and_compat_env(
     assert bundle.token_contract.embedding_model_name == "explicit-embed"
 
 
-def test_assembly_prefers_profile_over_config_and_compat_env(
+def test_assembly_does_not_select_provider_profiles_from_request_config(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     compatibility = AssemblyConfig(
@@ -178,9 +170,7 @@ def test_assembly_prefers_profile_over_config_and_compat_env(
 
     bundle = service.assemble_request(
         AssemblyRequest(
-            profile_id="profile-selected",
             config=AssemblyConfig(
-                default_profile_id="config-default",
                 profiles=(
                     ProviderConfig(
                         profile_id="profile-selected",
@@ -200,17 +190,16 @@ def test_assembly_prefers_profile_over_config_and_compat_env(
     )
 
     assert bundle.status == "valid"
-    assert bundle.embedding_bindings[0].provider_name == "profile-provider"
-    assert bundle.embedding_bindings[0].model_name == "profile-embed"
-    assert bundle.chat_bindings[0].provider_name == "profile-provider"
-    assert bundle.chat_bindings[0].model_name == "profile-chat"
-    assert bundle.selected_profile_id == "profile-selected"
+    assert bundle.embedding_bindings[0].provider_name == "openai-compatible"
+    assert bundle.embedding_bindings[0].model_name == "compat-embed"
+    assert bundle.chat_bindings[0].provider_name == "openai-compatible"
+    assert bundle.chat_bindings[0].model_name == "compat-chat"
     embedding_decision = next(
         decision
         for decision in bundle.diagnostics.decisions
         if decision.capability == "embedding" and decision.selected
     )
-    assert embedding_decision.source == "profile"
+    assert embedding_decision.source == "compat_env"
 
 
 def test_assembly_prefers_structured_config_over_compat_env(
@@ -412,7 +401,6 @@ def test_capability_assembly_uses_legacy_env_profile_for_openai_compatible_provi
     catalog = service.catalog_from_environment()
     bundle = service.assemble_request(
         AssemblyRequest(
-            profile_id="openai-compatible",
             requirements=CapabilityRequirements(),
         )
     )

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from rag import CapabilityRequirements, RAGRuntime, StorageConfig
+from rag import AssemblyRequest, CapabilityRequirements, RAGRuntime, StorageConfig
 from rag.assembly import AssemblyConfig, CapabilityAssemblyService
 from rag.benchmarks import RetrievalBenchmarkEvaluator, prepared_document_to_ingest_request
 from rag.retrieval.models import QueryOptions
@@ -20,8 +20,7 @@ def _make_runtime() -> RAGRuntime:
     service = CapabilityAssemblyService(env_path=".env.test-unused")
     service._load_env = lambda: None  # type: ignore[method-assign]
     service._compatibility_config_from_environment = lambda: (AssemblyConfig(), {})  # type: ignore[method-assign]
-    request = service.request_for_profile(
-        "test_minimal",
+    request = AssemblyRequest(
         requirements=CapabilityRequirements(
             require_chat=False,
             allow_degraded=True,

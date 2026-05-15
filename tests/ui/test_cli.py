@@ -16,8 +16,15 @@ runner = CliRunner()
 
 
 def _use_isolated_cli_runtime(monkeypatch: MonkeyPatch) -> None:
-    def _runtime(storage_root: Path, *, profile_id: str | None = None, require_chat: bool = False):
-        del profile_id
+    def _runtime(
+        storage_root: Path,
+        *,
+        require_chat: bool = False,
+        model: str | None = None,
+        embedding_model: str | None = None,
+        reranker_model: str | None = None,
+    ):
+        del model, embedding_model, reranker_model
         return make_runtime(storage=StorageConfig(root=storage_root), require_chat=require_chat)
 
     monkeypatch.setattr(cli, "_runtime", _runtime)
@@ -33,8 +40,6 @@ def test_cli_ingest_query_round_trip(tmp_path: Path, monkeypatch: MonkeyPatch) -
             "ingest",
             "--storage-root",
             str(storage_root),
-            "--profile",
-            "test_minimal",
             "--source-type",
             "plain_text",
             "--location",
@@ -50,8 +55,6 @@ def test_cli_ingest_query_round_trip(tmp_path: Path, monkeypatch: MonkeyPatch) -
             "query",
             "--storage-root",
             str(storage_root),
-            "--profile",
-            "test_minimal",
             "--query",
             "What does Alpha Engine handle?",
             "--json",
@@ -75,8 +78,6 @@ def test_cli_delete_and_rebuild_use_new_runtime_contract(tmp_path: Path, monkeyp
             "ingest",
             "--storage-root",
             str(storage_root),
-            "--profile",
-            "test_minimal",
             "--source-type",
             "plain_text",
             "--location",
@@ -91,8 +92,6 @@ def test_cli_delete_and_rebuild_use_new_runtime_contract(tmp_path: Path, monkeyp
             "delete",
             "--storage-root",
             str(storage_root),
-            "--profile",
-            "test_minimal",
             "--location",
             "memory://note-1",
         ],
@@ -103,8 +102,6 @@ def test_cli_delete_and_rebuild_use_new_runtime_contract(tmp_path: Path, monkeyp
             "rebuild",
             "--storage-root",
             str(storage_root),
-            "--profile",
-            "test_minimal",
             "--location",
             "memory://note-1",
         ],
@@ -156,19 +153,27 @@ def test_cli_main_delegates_to_typer_app(monkeypatch: MonkeyPatch) -> None:
     assert calls == ["called"]
 
 
-def test_cli_profiles_lists_recommended_runtime_profiles() -> None:
-    result = runner.invoke(
-        app,
-        [
-            "profiles",
-            "--json",
-        ],
-    )
+def test_assembly_profile_cli_surface_is_removed() -> None:
+    help_env = {"COLUMNS": "240"}
+    root_help = runner.invoke(app, ["--help"], env=help_env)
+    query_help = runner.invoke(app, ["query", "--help"], env=help_env)
+    agent_run_help = runner.invoke(app, ["agent", "run", "--help"], env=help_env)
+    agent_resume_help = runner.invoke(app, ["agent", "resume", "--help"], env=help_env)
 
-    assert result.exit_code == 0
-    payload = json.loads(result.stdout)
-    profile_ids = {item["profile_id"] for item in payload}
-    assert {"local_full", "local_retrieval_cloud_chat", "cloud_full", "test_minimal"} <= profile_ids
+    assert root_help.exit_code == 0
+    assert query_help.exit_code == 0
+    assert agent_run_help.exit_code == 0
+    assert agent_resume_help.exit_code == 0
+
+    assert "profiles" not in root_help.output
+    assert "--profile" not in query_help.output
+    assert "--profile" not in agent_run_help.output
+    assert "--profile" not in agent_resume_help.output
+
+    for output in (agent_run_help.output, agent_resume_help.output):
+        assert "--model" in output
+        assert "--embedding-model" in output
+        assert "--reranker-model" in output
 
 
 def test_cli_analyze_task_is_disabled_on_new_runtime(tmp_path: Path) -> None:
@@ -180,8 +185,6 @@ def test_cli_analyze_task_is_disabled_on_new_runtime(tmp_path: Path) -> None:
             "analyze-task",
             "--storage-root",
             str(storage_root),
-            "--profile",
-            "test_minimal",
             "--query",
             "Summarize Alpha Engine responsibilities.",
             "--json",
@@ -234,8 +237,6 @@ def test_cli_query_uses_public_query_contract(monkeypatch: MonkeyPatch) -> None:
             "query",
             "--storage-root",
             ".rag",
-            "--profile",
-            "test_minimal",
             "--query",
             "What does Alpha Engine do?",
             "--retrieval-profile",
@@ -256,7 +257,7 @@ def test_cli_query_help_uses_new_retrieval_profile_option() -> None:
 
     assert result.exit_code == 0
     assert "--retrieval-profile" in result.output
-    assert "--mode" not in result.output
+    assert "--model" in result.output
 
 
 def test_agent_run_help_exposes_explicit_agent_selector() -> None:
@@ -275,7 +276,7 @@ def test_agent_resume_help_exposes_agent_selector_for_checkpoint_restore() -> No
     assert "--agent" in result.output
 
 
-def test_cli_benchmark_help_defaults_to_new_milvus_profile() -> None:
+def test_cli_benchmark_help_defaults_to_new_milvus_backend() -> None:
     help_env = {"COLUMNS": "240"}
     ingest_help = runner.invoke(app, ["benchmark-ingest", "--help"], env=help_env)
     evaluate_help = runner.invoke(app, ["benchmark-evaluate", "--help"], env=help_env)

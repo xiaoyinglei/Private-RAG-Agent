@@ -1,20 +1,17 @@
 from __future__ import annotations
 
-import os
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
-import yaml
 
 from rag.assembly.models import ProviderConfig
 from rag.assembly.support import _OpenAICompatibleChatGenerator, build_provider
 from rag.models.assembly_adapter import resolve_task_model, to_assembly_overrides
 from rag.models.catalog import ModelCatalog
-from rag.models.config import GenerationConfig, GenerationTaskConfig, ModelCapability, ModelRuntimeConfig, ModelSpec
+from rag.models.config import GenerationTaskConfig, ModelCapability, ModelRuntimeConfig
 from rag.models.guard import EmbeddingSpaceMismatchError, assert_embedding_space_compatible
 from rag.models.runtime import RuntimeOverrides, resolve_runtime_config
-
 
 CATALOG_YAML = """
 models:
@@ -332,10 +329,7 @@ def test_e2e_model_runtime_driven_ingest_and_query(
         RAGRuntime,
         StorageConfig,
     )
-    from rag.assembly import AssemblyOverrides
-    from rag.assembly.models import ProviderConfig
     from rag.assembly.support import _CompositeProvider
-    from rag.ingest.pipeline import IngestRequest
     from rag.models.assembly_adapter import to_assembly_overrides
     from rag.models.runtime import RuntimeOverrides, resolve_runtime_config
 
@@ -402,11 +396,23 @@ def test_e2e_model_runtime_driven_ingest_and_query(
 
         # ── 5. Ingest 测试文档 ──
         documents = [
-            {"title": "请假制度 V3", "content": "正式员工每年享有年假 10 天。病假需出具医院证明。事假每年累计不超过 15 天。"},
-            {"title": "报销流程 2024", "content": "差旅报销需在返回后 7 个工作日内提交。住宿标准一线城市不超过 500 元/晚。"},
+            {
+                "title": "请假制度 V3",
+                "content": "正式员工每年享有年假 10 天。病假需出具医院证明。事假每年累计不超过 15 天。",
+            },
+            {
+                "title": "报销流程 2024",
+                "content": "差旅报销需在返回后 7 个工作日内提交。住宿标准一线城市不超过 500 元/晚。",
+            },
             {"title": "绩效考核办法", "content": "考核周期为季度考核。考核结果分 ABCD 四档。连续两次 D 档启动 PIP。"},
-            {"title": "数据安全管理条例", "content": "敏感数据必须加密存储。数据导出需主管审批。违规操作记入安全审计日志。"},
-            {"title": "远程办公指南", "content": "每周可申请远程办公 2 天。远程办公期间需保持 IM 在线。核心会议要求线下参加。"},
+            {
+                "title": "数据安全管理条例",
+                "content": "敏感数据必须加密存储。数据导出需主管审批。违规操作记入安全审计日志。",
+            },
+            {
+                "title": "远程办公指南",
+                "content": "每周可申请远程办公 2 天。远程办公期间需保持 IM 在线。核心会议要求线下参加。",
+            },
         ]
 
         for doc_meta in documents:
@@ -432,7 +438,7 @@ def test_e2e_model_runtime_driven_ingest_and_query(
         r3 = runtime.query_public("绩效考核怎么评")
         assert any(
             "考核" in e.text for e in r3.context.evidence if e.text
-        ), f"Expected '考核' in evidence"
+        ), "Expected '考核' in evidence"
 
         # 验证 generation provider 来自我们的模型
         assert r1.generation_model is not None
@@ -477,36 +483,28 @@ class _FakeEmbedder:
         return result
 
 
-# ── override priority: --model > profile ──
+# ── override priority: --model > compatibility env ──
 
 
-def test_override_priority_model_beats_profile(monkeypatch: pytest.MonkeyPatch) -> None:
-    """--model deepseek must override any chat config inside the assembly profile."""
+def test_override_priority_model_beats_compat_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """--model deepseek must override compatible environment chat config."""
     from rag.assembly import (
         AssemblyConfig,
         AssemblyOverrides,
         AssemblyRequest,
-        CapabilityAssemblyService,
         CapabilityRequirements,
         ProviderConfig,
     )
+    from tests.core.test_capability_assembly import _isolated_service
 
-    from tests.core.test_capability_assembly import _FakeProvider, _isolated_service
-
-    # 构造一个 profile，内含默认 chat provider（模拟旧配置）
-    profile_chat_config = ProviderConfig(
-        provider_kind="openai-compatible",
-        chat_model="profile-default-model",
-        base_url="http://profile-url/v1",
-    )
     compatibility_config = AssemblyConfig(
         profiles=(
             ProviderConfig(
-                profile_id="test_profile",
+                profile_id="compat-default",
                 provider_kind="openai-compatible",
                 location="local",
-                chat_model="profile-default-model",
-                base_url="http://profile-url/v1",
+                chat_model="compat-default-model",
+                base_url="http://compat-url/v1",
             ),
         ),
     )
@@ -523,7 +521,6 @@ def test_override_priority_model_beats_profile(monkeypatch: pytest.MonkeyPatch) 
 
     bundle = service.assemble_request(
         AssemblyRequest(
-            profile_id="test_profile",
             requirements=CapabilityRequirements(require_chat=True),
             overrides=AssemblyOverrides(chat=override_chat),
         )

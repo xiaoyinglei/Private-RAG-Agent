@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 import rag.schema.query as query_schema
-from rag import RAGRuntime, StorageConfig
+from rag import AssemblyRequest, RAGRuntime, StorageConfig
 from rag.assembly import AssemblyConfig, CapabilityAssemblyService, CapabilityRequirements, ProviderConfig
 from rag.retrieval import QueryOptions
 from rag.retrieval.models import PublicQueryResult, RetrievalResult
@@ -77,28 +77,28 @@ def _empty_assembly_service(monkeypatch: pytest.MonkeyPatch) -> CapabilityAssemb
     return service
 
 
-def test_runtime_catalog_lists_recommended_profiles(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_runtime_catalog_lists_compatibility_provider_profiles(monkeypatch: pytest.MonkeyPatch) -> None:
     service = _assembly_service(monkeypatch)
-    runtime = RAGRuntime.from_profile(
+    runtime = RAGRuntime.from_request(
         storage=StorageConfig.in_memory(),
-        profile_id="test_minimal",
+        request=AssemblyRequest(),
         assembly_service=service,
     )
     try:
-        profile_ids = {profile.profile_id for profile in runtime.catalog.assembly_profiles}
+        profile_ids = {profile.profile_id for profile in runtime.catalog.profiles}
     finally:
         runtime.close()
 
-    assert {"local_full", "local_retrieval_cloud_chat", "cloud_full", "test_minimal"} <= profile_ids
+    assert {"openai-compatible", "ollama", "local-bge"} <= profile_ids
 
 
 def test_runtime_without_chat_binding_uses_visible_summary_fallback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     service = _empty_assembly_service(monkeypatch)
-    runtime = RAGRuntime.from_profile(
+    runtime = RAGRuntime.from_request(
         storage=StorageConfig.in_memory(),
-        profile_id="test_minimal",
+        request=AssemblyRequest(),
         assembly_service=service,
     )
     try:
@@ -121,9 +121,9 @@ def test_runtime_without_chat_binding_uses_visible_summary_fallback(
 def test_runtime_summary_generator_follows_chat_binding(monkeypatch: pytest.MonkeyPatch) -> None:
     """Summary generator 的模型来自 capability bundle 的 chat binding，不再独立配置。"""
     service = _assembly_service(monkeypatch)
-    runtime = RAGRuntime.from_profile(
+    runtime = RAGRuntime.from_request(
         storage=StorageConfig.in_memory(),
-        profile_id="test_minimal",
+        request=AssemblyRequest(requirements=CapabilityRequirements(require_chat=True)),
         assembly_service=service,
     )
     try:
@@ -141,14 +141,15 @@ def test_public_retrieval_result_excludes_old_preservation_contract() -> None:
     assert not hasattr(query_schema, "PreservationSuggestion")
 
 
-def test_runtime_from_profile_round_trips_and_exposes_diagnostics(
+def test_runtime_from_request_round_trips_and_exposes_diagnostics(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     service = _assembly_service(monkeypatch)
-    runtime = RAGRuntime.from_profile(
+    runtime = RAGRuntime.from_request(
         storage=StorageConfig.in_memory(),
-        profile_id="local_retrieval_cloud_chat",
-        requirements=CapabilityRequirements(require_chat=True, default_context_tokens=1024),
+        request=AssemblyRequest(
+            requirements=CapabilityRequirements(require_chat=True, default_context_tokens=1024),
+        ),
         assembly_service=service,
     )
     retrieval_payload = None
@@ -167,15 +168,10 @@ def test_runtime_from_profile_round_trips_and_exposes_diagnostics(
     finally:
         runtime.close()
 
-    assert runtime.selected_profile_id == "local_retrieval_cloud_chat"
     assert runtime.diagnostics.status == "valid"
     diagnostics_payload = runtime.diagnostics_payload()
-    assert diagnostics_payload["selected_profile_id"] == "local_retrieval_cloud_chat"
-    assert any(
-        decision.capability == "assembly_profile"
-        and decision.provider_name == "local_retrieval_cloud_chat"
-        for decision in runtime.diagnostics.decisions
-    )
+    assert "selected_profile_id" not in diagnostics_payload
+    assert all(decision.capability != "assembly_profile" for decision in runtime.diagnostics.decisions)
     assert result.answer.answer_text
     assert result.context.evidence
     assert retrieval_payload is not None
@@ -194,11 +190,11 @@ def test_runtime_from_profile_round_trips_and_exposes_diagnostics(
     )
 
 
-def test_runtime_from_request_with_test_minimal_uses_new_entrypoint(
+def test_runtime_from_request_uses_new_entrypoint(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     service = _assembly_service(monkeypatch)
-    request = service.request_for_profile("test_minimal")
+    request = AssemblyRequest()
     runtime = RAGRuntime.from_request(
         storage=StorageConfig.in_memory(),
         request=request,
@@ -218,7 +214,6 @@ def test_runtime_from_request_with_test_minimal_uses_new_entrypoint(
     finally:
         runtime.close()
 
-    assert runtime.selected_profile_id == "test_minimal"
     assert runtime.diagnostics.status == "valid"
     assert runtime.runtime_contract_payload["embedding_model_name"] == "cloud-embed"
     assert result.answer.answer_text

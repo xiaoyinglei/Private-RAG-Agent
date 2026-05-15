@@ -20,7 +20,7 @@ import httpx
 from datasets import load_dataset
 from tqdm.auto import tqdm
 
-from rag import CapabilityRequirements, RAGRuntime, StorageComponentConfig, StorageConfig
+from rag import AssemblyRequest, CapabilityRequirements, RAGRuntime, StorageComponentConfig, StorageConfig
 from rag.assembly import AssemblyConfig, AssemblyOverrides, CapabilityAssemblyService, ProviderConfig, TokenizerConfig
 from rag.ingest.pipeline import IngestRequest
 from rag.models.assembly_adapter import to_assembly_overrides
@@ -290,7 +290,6 @@ class BenchmarkRunSummary:
     embedding_model: str | None
     retrieval_profile: str
     rerank_enabled: bool
-    profile_id: str | None
     recall_at_10: float
     mrr_at_10: float
     ndcg_at_10: float
@@ -325,7 +324,6 @@ class BenchmarkRunSummary:
             {
                 "split": self.split,
                 "evidence_top_k": self.evidence_top_k,
-                "profile_id": self.profile_id,
             }
         )
         return payload
@@ -439,7 +437,6 @@ class RetrievalBenchmarkEvaluator:
             embedding_model=_embedding_model_name(self.runtime),
             retrieval_profile=self.retrieval_profile,
             rerank_enabled=self.rerank_enabled,
-            profile_id=self.runtime.selected_profile_id,
             recall_at_10=_mean(result.recall_at_10 for result in per_query_results),
             mrr_at_10=_mean(result.reciprocal_rank for result in per_query_results),
             ndcg_at_10=_mean(result.ndcg for result in per_query_results),
@@ -1573,7 +1570,6 @@ def iter_jsonl(path: Path) -> Iterator[dict[str, object]]:
 def build_runtime_for_benchmark(
     *,
     storage_root: Path,
-    profile_id: str,
     require_chat: bool,
     require_rerank: bool,
     skip_graph_extraction: bool = False,
@@ -1634,11 +1630,7 @@ def build_runtime_for_benchmark(
         if rerank_model is not None or rerank_model_path is not None
         else None
     )
-    model_config_rerank = (
-        to_assembly_overrides(resolve_runtime_config(RuntimeOverrides())).rerank
-        if require_rerank and rerank_override is None
-        else None
-    )
+    model_config = to_assembly_overrides(resolve_runtime_config(RuntimeOverrides()))
     chat_override = (
         ProviderConfig(
             provider_kind=chat_provider_kind or ("local-hf" if chat_model_path is not None else "ollama"),
@@ -1650,14 +1642,18 @@ def build_runtime_for_benchmark(
         if chat_model is not None or chat_model_path is not None or chat_provider_kind is not None
         else None
     )
-    request = assembly_service.request_for_profile(
-        profile_id,
+    config = AssemblyConfig(
+        embedding=model_config.embedding if embedding_override is None else None,
+        chat=model_config.chat if require_chat and chat_override is None else None,
+        rerank=model_config.rerank if require_rerank and rerank_override is None else None,
+    )
+    request = AssemblyRequest(
         requirements=CapabilityRequirements(
             require_embedding=True,
             require_chat=require_chat,
             require_rerank=require_rerank,
         ),
-        config=AssemblyConfig(rerank=model_config_rerank) if model_config_rerank is not None else None,
+        config=config,
         overrides=(
             AssemblyOverrides(
                 embedding=embedding_override,
@@ -1765,7 +1761,6 @@ def runtime_embedding_stats(runtime: RAGRuntime) -> dict[str, object] | None:
 def profile_benchmark_ingest(
     *,
     dataset: str,
-    profile_id: str,
     documents_path: Path,
     storage_root: Path,
     doc_limit: int,
@@ -1784,7 +1779,6 @@ def profile_benchmark_ingest(
 ) -> BenchmarkIngestProfileResult:
     runtime = build_runtime_for_benchmark(
         storage_root=storage_root,
-        profile_id=profile_id,
         require_chat=False,
         require_rerank=False,
         skip_graph_extraction=skip_graph_extraction,

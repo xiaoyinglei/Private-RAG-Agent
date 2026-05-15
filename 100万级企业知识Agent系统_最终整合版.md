@@ -1374,7 +1374,6 @@ export CHUNK_OVERLAP_TOKENS=120
 uv run python scripts/ingest_private_documents.py \
   --input "$INPUT_DIR" \
   --storage-root "$STORAGE_ROOT" \
-  --profile local_full \
   --owner private \
   --batch-size 8 \
   --continue-on-error \
@@ -1467,7 +1466,6 @@ uv run python generate_eval_dataset.py \
 uv run python scripts/evaluate_private_retrieval.py \
   --golden-path data/eval_private/golden_eval_dataset_v4.jsonl \
   --storage-root "$STORAGE_ROOT" \
-  --profile local_full \
   --retrieval-profile auto \
   --top-k 20 \
   --retrieval-pool-k 20 \
@@ -1490,7 +1488,6 @@ uv run python scripts/evaluate_private_retrieval.py \
 uv run python scripts/evaluate_private_retrieval.py \
   --golden-path data/eval_private/golden_eval_dataset_v4.jsonl \
   --storage-root "$STORAGE_ROOT" \
-  --profile local_full \
   --retrieval-profile auto \
   --top-k 20 \
   --retrieval-pool-k 20 \
@@ -1524,7 +1521,6 @@ uv run python scripts/prepare_public_benchmark.py --dataset medical_retrieval
 uv run python scripts/ingest_public_benchmark.py \
   --dataset medical_retrieval \
   --variant mini \
-  --profile local_full \
   --storage-root data/benchmarks/medical_retrieval/index/mini-milvus-qwen8b-v1 \
   --vector-backend milvus \
   --vector-dsn "$MILVUS_URI" \
@@ -1547,7 +1543,6 @@ uv run python scripts/ingest_public_benchmark.py \
 uv run rag benchmark-evaluate \
   --dataset medical_retrieval \
   --variant mini \
-  --profile local_full \
   --storage-root data/benchmarks/medical_retrieval/index/mini-milvus-qwen8b-v1 \
   --vector-backend milvus \
   --vector-dsn "$MILVUS_URI" \
@@ -1566,7 +1561,6 @@ uv run rag benchmark-evaluate \
 uv run rag benchmark-evaluate \
   --dataset medical_retrieval \
   --variant mini \
-  --profile local_full \
   --storage-root data/benchmarks/medical_retrieval/index/mini-milvus-qwen8b-v1 \
   --vector-backend milvus \
   --vector-dsn "$MILVUS_URI" \

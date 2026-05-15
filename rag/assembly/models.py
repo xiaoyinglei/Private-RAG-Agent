@@ -8,7 +8,7 @@ from rag.assembly.tokenizer import TokenAccountingService, TokenizerContract
 
 AssemblyStatus = Literal["valid", "degraded", "invalid"]
 IssueSeverity = Literal["info", "warning", "error"]
-DecisionSource = Literal["explicit", "profile", "config", "compat_env", "default"]
+DecisionSource = Literal["explicit", "config", "compat_env", "default"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,7 +47,6 @@ class TokenizerConfig:
 
 @dataclass(frozen=True, slots=True)
 class AssemblyConfig:
-    default_profile_id: str | None = None
     profiles: tuple[ProviderConfig, ...] = ()
     chat: ProviderConfig | None = None
     embedding: ProviderConfig | None = None
@@ -78,7 +77,6 @@ class CapabilityRequirements:
 @dataclass(frozen=True, slots=True)
 class AssemblyRequest:
     requirements: CapabilityRequirements = field(default_factory=CapabilityRequirements)
-    profile_id: str | None = None
     config: AssemblyConfig | None = None
     overrides: AssemblyOverrides | None = None
 
@@ -122,20 +120,8 @@ class CapabilityProfile:
 
 
 @dataclass(frozen=True, slots=True)
-class AssemblyProfileSpec:
-    profile_id: str
-    label: str
-    description: str
-    location: str
-    config: AssemblyConfig | None = None
-    overrides: AssemblyOverrides | None = None
-    recommended_requirements: CapabilityRequirements = field(default_factory=CapabilityRequirements)
-
-
-@dataclass(frozen=True, slots=True)
 class CapabilityCatalog:
     profiles: tuple[CapabilityProfile, ...] = ()
-    assembly_profiles: tuple[AssemblyProfileSpec, ...] = ()
     diagnostics: tuple[AssemblyIssue, ...] = ()
     compatibility_inputs: dict[str, str | int | bool | None] = field(default_factory=dict)
 
@@ -195,7 +181,6 @@ class CapabilityBundle:
     embedding_bindings: tuple[Any, ...]
     chat_bindings: tuple[Any, ...]
     rerank_bindings: tuple[Any, ...]
-    selected_profile_id: str | None = None
     profiles: tuple[CapabilityProfile, ...] = ()
 
     @property
@@ -222,7 +207,6 @@ __all__ = [
     "AssemblyDiagnostics",
     "AssemblyIssue",
     "AssemblyOverrides",
-    "AssemblyProfileSpec",
     "AssemblyRequest",
     "AssemblyStatus",
     "CapabilityBundle",

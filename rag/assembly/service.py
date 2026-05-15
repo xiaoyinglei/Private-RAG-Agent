@@ -20,29 +20,23 @@ from rag.assembly.models import (
     AssemblyDiagnostics,
     AssemblyIssue,
     AssemblyOverrides,
-    AssemblyProfileSpec,
     AssemblyRequest,
     AssemblyStatus,
     CapabilityBundle,
     CapabilityCatalog,
     CapabilityProfile,
-    CapabilityRequirements,
     DecisionSource,
     ProviderConfig,
     RuntimeContractGovernance,
 )
 from rag.assembly.support import (
     FallbackEmbeddingRepo,
-    assembly_profile_by_id,
-    assembly_profiles,
     build_provider,
     compatibility_config_from_environment,
     first_bool,
     first_non_blank,
     first_non_negative_int,
     first_positive_int,
-    merge_assembly_config,
-    merge_assembly_overrides,
 )
 from rag.assembly.tokenizer import DEFAULT_TOKENIZER_FALLBACK_MODEL, TokenAccountingService, TokenizerContract
 from rag.utils.text import load_env_file
@@ -63,106 +57,31 @@ class CapabilityAssemblyService:
     def catalog_from_environment(self, *, config: AssemblyConfig | None = None) -> CapabilityCatalog:
         self._load_env()
         compatibility_config, compatibility_inputs = self._compatibility_config_from_environment()
-        resolved_profiles = assembly_profiles(config=config, compatibility_config=compatibility_config)
         profiles = self._catalog_profiles(config=config, compatibility_config=compatibility_config)
         return CapabilityCatalog(
             profiles=profiles,
-            assembly_profiles=resolved_profiles,
             diagnostics=(),
             compatibility_inputs=compatibility_inputs,
-        )
-
-    def request_for_profile(
-        self,
-        profile_id: str,
-        *,
-        requirements: CapabilityRequirements | None = None,
-        config: AssemblyConfig | None = None,
-        overrides: AssemblyOverrides | None = None,
-    ) -> AssemblyRequest:
-        self._load_env()
-        compatibility_config, _compatibility_inputs = self._compatibility_config_from_environment()
-        profile = assembly_profile_by_id(
-            assembly_profiles(config=config, compatibility_config=compatibility_config),
-            profile_id,
-        )
-        if profile is None:
-            raise RuntimeError(f"Unknown assembly profile: {profile_id!r}")
-        return AssemblyRequest(
-            requirements=requirements or profile.recommended_requirements,
-            profile_id=profile.profile_id,
-            config=config,
-            overrides=overrides,
         )
 
     def evaluate_request(self, request: AssemblyRequest) -> CapabilityBundle:
         self._load_env()
         compatibility_config, compatibility_inputs = self._compatibility_config_from_environment()
-        effective_request, assembly_profile = self._effective_request(
-            request=request,
-            compatibility_config=compatibility_config,
-        )
+        effective_request = request
         profiles = self._catalog_profiles(config=effective_request.config, compatibility_config=compatibility_config)
         provider_cache: dict[str, object] = {}
         issues: list[AssemblyIssue] = []
         decisions: list[AssemblyDecision] = []
-        selected_profile_id: str | None = None
 
         embedding_bindings: list[EmbeddingCapabilityBinding] = []
         chat_bindings: list[ChatCapabilityBinding] = []
         rerank_bindings: list[RerankCapabilityBinding] = []
-
-        if assembly_profile is not None:
-            selected_profile_id = assembly_profile.profile_id
-            decisions.append(
-                AssemblyDecision(
-                    capability="assembly_profile",
-                    source="profile",
-                    provider_kind="assembly-profile",
-                    provider_name=assembly_profile.profile_id,
-                    model_name=None,
-                    location=assembly_profile.location,
-                    reason=assembly_profile.description,
-                )
-            )
-
-        explicit_profile = self._profile_by_id(profiles, effective_request.profile_id)
-        if effective_request.profile_id and explicit_profile is None:
-            issues.append(
-                AssemblyIssue(
-                    severity="warning" if effective_request.requirements.allow_degraded else "error",
-                    code="requested_profile_missing",
-                    message=f"Requested profile {effective_request.profile_id!r} is not available.",
-                )
-            )
-        if explicit_profile is not None and selected_profile_id is None:
-            selected_profile_id = explicit_profile.profile_id
-
-        config_profile: CapabilityProfile | None = None
-        if effective_request.config is not None and effective_request.config.default_profile_id:
-            config_profile = self._profile_by_id(profiles, effective_request.config.default_profile_id)
-            if config_profile is None:
-                issues.append(
-                    AssemblyIssue(
-                        severity="warning" if effective_request.requirements.allow_degraded else "error",
-                        code="config_default_profile_missing",
-                        message=(
-                            "Configured default profile "
-                            f"{effective_request.config.default_profile_id!r} is not available."
-                        ),
-                    )
-                )
-            elif selected_profile_id is None:
-                selected_profile_id = config_profile.profile_id
 
         embedding_binding = cast(
             EmbeddingCapabilityBinding | None,
             self._resolve_binding(
                 capability="embedding",
                 request=effective_request,
-                profiles=profiles,
-                explicit_profile=explicit_profile,
-                config_profile=config_profile,
                 compatibility_config=compatibility_config,
                 compatibility_inputs=compatibility_inputs,
                 provider_cache=provider_cache,
@@ -179,9 +98,6 @@ class CapabilityAssemblyService:
             self._resolve_binding(
                 capability="chat",
                 request=effective_request,
-                profiles=profiles,
-                explicit_profile=explicit_profile,
-                config_profile=config_profile,
                 compatibility_config=compatibility_config,
                 provider_cache=provider_cache,
                 issues=issues,
@@ -196,9 +112,6 @@ class CapabilityAssemblyService:
             self._resolve_binding(
                 capability="rerank",
                 request=effective_request,
-                profiles=profiles,
-                explicit_profile=explicit_profile,
-                config_profile=config_profile,
                 compatibility_config=compatibility_config,
                 provider_cache=provider_cache,
                 issues=issues,
@@ -259,7 +172,6 @@ class CapabilityAssemblyService:
             embedding_bindings=tuple(embedding_bindings),
             chat_bindings=tuple(chat_bindings),
             rerank_bindings=tuple(rerank_bindings),
-            selected_profile_id=selected_profile_id,
             profiles=profiles,
         )
 
@@ -267,28 +179,6 @@ class CapabilityAssemblyService:
         bundle = self.evaluate_request(request)
         bundle.diagnostics.raise_for_invalid()
         return bundle
-
-    def _effective_request(
-        self,
-        *,
-        request: AssemblyRequest,
-        compatibility_config: AssemblyConfig,
-    ) -> tuple[AssemblyRequest, AssemblyProfileSpec | None]:
-        profile = assembly_profile_by_id(
-            assembly_profiles(config=request.config, compatibility_config=compatibility_config),
-            request.profile_id,
-        )
-        if profile is None:
-            return request, None
-        return (
-            AssemblyRequest(
-                requirements=request.requirements,
-                profile_id=None,
-                config=merge_assembly_config(request.config, profile.config),
-                overrides=merge_assembly_overrides(request.overrides, profile.overrides),
-            ),
-            profile,
-        )
 
     def govern_runtime_contract(
         self,
@@ -351,20 +241,11 @@ class CapabilityAssemblyService:
             profiles.append(self._profile_from_provider_config(provider_config))
         return tuple(profiles)
 
-    @staticmethod
-    def _profile_by_id(profiles: Sequence[CapabilityProfile], profile_id: str | None) -> CapabilityProfile | None:
-        if profile_id is None:
-            return None
-        return next((profile for profile in profiles if profile.profile_id == profile_id), None)
-
     def _resolve_binding(
         self,
         *,
         capability: str,
         request: AssemblyRequest,
-        profiles: Sequence[CapabilityProfile],
-        explicit_profile: CapabilityProfile | None,
-        config_profile: CapabilityProfile | None,
         compatibility_config: AssemblyConfig,
         compatibility_inputs: dict[str, str | int | bool | None] | None = None,
         provider_cache: dict[str, object],
@@ -375,9 +256,6 @@ class CapabilityAssemblyService:
         candidates = self._capability_candidates(
             capability=capability,
             request=request,
-            profiles=profiles,
-            explicit_profile=explicit_profile,
-            config_profile=config_profile,
             compatibility_config=compatibility_config,
         )
         return self._choose_capability_binding(
@@ -397,9 +275,6 @@ class CapabilityAssemblyService:
         *,
         capability: str,
         request: AssemblyRequest,
-        profiles: Sequence[CapabilityProfile],
-        explicit_profile: CapabilityProfile | None,
-        config_profile: CapabilityProfile | None,
         compatibility_config: AssemblyConfig,
     ) -> list[_CandidateSource]:
         candidates: list[_CandidateSource] = []
@@ -417,16 +292,6 @@ class CapabilityAssemblyService:
                 )
             )
 
-        if explicit_profile is not None and self._profile_supports(explicit_profile, capability):
-            candidates.append(
-                _CandidateSource(
-                    source="profile",
-                    provider_config=explicit_profile.provider_config,
-                    cache_key=f"profile:{explicit_profile.profile_id}",
-                    reason=f"Using requested profile {explicit_profile.profile_id!r} for {capability}.",
-                )
-            )
-
         config_spec = getattr(config, capability)
         if config_spec is not None and config_spec.enabled:
             candidates.append(
@@ -435,16 +300,6 @@ class CapabilityAssemblyService:
                     provider_config=config_spec,
                     cache_key=f"config:{capability}",
                     reason=f"Using structured config for {capability}.",
-                )
-            )
-
-        if config_profile is not None and self._profile_supports(config_profile, capability):
-            candidates.append(
-                _CandidateSource(
-                    source="config",
-                    provider_config=config_profile.provider_config,
-                    cache_key=f"profile-config:{config_profile.profile_id}",
-                    reason=f"Using config default profile {config_profile.profile_id!r} for {capability}.",
                 )
             )
 
@@ -697,14 +552,6 @@ class CapabilityAssemblyService:
         if any(issue.severity == "warning" for issue in issues):
             return "degraded"
         return "valid"
-
-    @staticmethod
-    def _profile_supports(profile: CapabilityProfile, capability: str) -> bool:
-        return {
-            "chat": profile.supports_chat,
-            "embedding": profile.supports_embedding,
-            "rerank": profile.supports_rerank,
-        }[capability]
 
     def _profile_from_provider_config(self, provider_config: ProviderConfig) -> CapabilityProfile:
         profile_id = provider_config.profile_id or provider_config.provider_kind
