@@ -235,10 +235,12 @@ class RetrievalService:
         source_scope: Sequence[str] = (),
         query_options: QueryOptions | None = None,
     ) -> CoreRetrievalPayload:
+        signals = query_options.retrieval_signals if query_options else None
+        retrieval_signals = signals or RetrievalSignals()
         payload = await self.l3_l4_engine.arun(
             query,
             access_policy=access_policy,
-            retrieval_signals=RetrievalSignals(),
+            retrieval_signals=retrieval_signals,
             decision=RoutingDecision(
                 runtime_mode=RuntimeMode.FAST,
                 rerank_required=True,

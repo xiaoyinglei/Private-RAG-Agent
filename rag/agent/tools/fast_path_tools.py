@@ -54,7 +54,14 @@ class RAGSearchAnswerRunner:
             "retrieval_profile": "fast",
             "top_k": payload.top_k,
             "max_context_tokens": self.max_context_tokens,
+            "retrieval_signals": payload.retrieval_signals,
         }
+        if payload.retrieval_signals is not None:
+            options_kwargs["retrieval_signals_debug"] = {
+                "signals_source": "agent_tool_input",
+                "special_targets": list(payload.retrieval_signals.special_targets),
+                "quoted_terms": list(payload.retrieval_signals.quoted_terms),
+            }
         if access_policy := getattr(self.runtime, "access_policy", None):
             options_kwargs["access_policy"] = access_policy
         result = await asyncio.to_thread(
