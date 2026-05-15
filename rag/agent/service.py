@@ -245,13 +245,12 @@ class AgentService:
         """
         runtime = self._base_tool_registry.clone()
 
-        # Only wire if subagent_runner is an AgentAsToolRunner
-        from rag.agent.core.agent_as_tool import AgentAsToolAdapter, AgentAsToolRunner
+        from rag.agent.core.agent_as_tool import AgentAsToolAdapter
 
-        if not isinstance(self._subagent_runner, AgentAsToolRunner):
+        if self._subagent_runner is None:
             return runtime
 
-        runner: AgentAsToolRunner = self._subagent_runner
+        runner = self._subagent_runner
 
         # Wire adapters for all agent-tool specs registered in the base registry
         for spec in self._base_tool_registry.list_all():

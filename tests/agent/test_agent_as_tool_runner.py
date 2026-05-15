@@ -1,12 +1,29 @@
 from __future__ import annotations
 
 import pytest
+from pydantic import ValidationError
 
-from rag.agent.core.agent_as_tool import AgentAsToolRunner
+from rag.agent.builtin.compare import COMPARE_AGENT
+from rag.agent.builtin.factcheck import FACTCHECK_AGENT
+from rag.agent.builtin.orchestrator import ORCHESTRATOR_AGENT
+from rag.agent.builtin.research import RESEARCH_AGENT
+from rag.agent.builtin.synthesize import SYNTHESIZE_AGENT
+from rag.agent.core.agent_as_tool import (
+    AgentAsToolAdapter,
+    AgentAsToolExecutionError,
+    AgentAsToolRunner,
+    AgentToolInput,
+    AgentToolOutput,
+    build_agent_tool_spec,
+)
+from rag.agent.core.agent_service_factory import AgentServiceFactory
 from rag.agent.core.context import AgentRunConfig, RuntimeRegistry
 from rag.agent.core.definition import AgentDefinition
 from rag.agent.core.registry import AgentRegistry
+from rag.agent.core.subagent_runner import BuiltinSubAgentRunner
 from rag.agent.core.task import SubTaskNode
+from rag.agent.graphs.nodes.execute import execute_node
+from rag.agent.service import AgentRunRequest, AgentRunResult
 from rag.agent.state import AgentState, ThinkOutput, ToolCallPlan
 from rag.agent.tools.builtin_registry import create_builtin_tool_registry
 from rag.agent.tools.llm_tools import LLMTextOutput
@@ -183,23 +200,6 @@ async def test_agent_as_tool_runner_rejects_exhausted_parent_depth() -> None:
         )
 
 
-# ── AgentAsTool wiring tests ────────────────────────────────────
-
-from rag.agent.builtin.compare import COMPARE_AGENT
-from rag.agent.builtin.factcheck import FACTCHECK_AGENT
-from rag.agent.builtin.orchestrator import ORCHESTRATOR_AGENT
-from rag.agent.builtin.research import RESEARCH_AGENT
-from rag.agent.core.agent_as_tool import (
-    AgentAsToolAdapter,
-    AgentToolInput,
-    AgentToolOutput,
-    build_agent_tool_spec,
-)
-from rag.agent.core.task import DEFAULT_SUBTASK_TOKEN_BUDGET
-from rag.agent.tools.builtin_registry import create_builtin_tool_registry
-from rag.agent.tools.registry import ToolRegistry
-
-
 class TestBuildAgentToolSpec:
     def test_research_agent_generates_tool_spec(self) -> None:
         spec = build_agent_tool_spec(RESEARCH_AGENT)
@@ -214,7 +214,7 @@ class TestBuildAgentToolSpec:
             build_agent_tool_spec(ORCHESTRATOR_AGENT)
 
     def test_all_four_agents_generate_valid_specs(self) -> None:
-        for agent_def in [RESEARCH_AGENT, COMPARE_AGENT, FACTCHECK_AGENT, RESEARCH_AGENT]:
+        for agent_def in [RESEARCH_AGENT, COMPARE_AGENT, FACTCHECK_AGENT, SYNTHESIZE_AGENT]:
             spec = build_agent_tool_spec(agent_def)
             assert spec.tool_spec.name.startswith("agent_")
             assert spec.tool_spec.timeout_seconds == 120.0
@@ -277,7 +277,7 @@ class TestAgentToolInput:
         assert len(inp.constraints) == 2
 
     def test_empty_task_raises_validation_error(self) -> None:
-        with pytest.raises(Exception):
+        with pytest.raises(ValidationError):
             AgentToolInput(task="")
 
 
@@ -343,8 +343,8 @@ class TestAgentAsToolAdapter:
         return AgentAsToolAdapter(runner=runner, agent_type=agent_type, run_config=rc)
 
     @pytest.mark.anyio
-    async def test_adapter_returns_error_on_unregistered_agent_type(self) -> None:
-        """adapter 在 agent_type 未注册时返回结构化错误，不崩溃"""
+    async def test_adapter_raises_on_unregistered_agent_type(self) -> None:
+        """adapter 失败时抛错，由 execute_node 转成 ToolResult(error)。"""
         from rag.agent.core.agent_as_tool import AgentAsToolRunner
 
         runner = AgentAsToolRunner(
@@ -360,10 +360,8 @@ class TestAgentAsToolAdapter:
         )
         adapter = AgentAsToolAdapter(runner=runner, agent_type="research", run_config=rc)
         inp = AgentToolInput(task="Test task")
-        result = await adapter(inp)
-        assert isinstance(result, AgentToolOutput)
-        assert result.status == "failed"
-        assert "subagent execution failed" in result.conclusion
+        with pytest.raises(AgentAsToolExecutionError, match="subagent execution failed"):
+            await adapter(inp)
 
     @pytest.mark.anyio
     async def test_adapter_is_callable_compatible_with_tool_runner(self) -> None:
@@ -373,6 +371,49 @@ class TestAgentAsToolAdapter:
         result = await adapter(inp)
         assert isinstance(result, AgentToolOutput)
         assert result.agent_name == "research"
+
+    @pytest.mark.anyio
+    async def test_adapter_failure_becomes_tool_error(self) -> None:
+        class _FailingSubAgentRunner:
+            async def run_subtask(self, *, subtask: SubTaskNode, parent_state: AgentState) -> AgentRunResult:
+                del subtask, parent_state
+                raise RuntimeError("child failed")
+
+        run_config = AgentRunConfig(
+            run_id="agent-tool-failure",
+            thread_id="agent-tool-failure",
+            budget_total=20000,
+            max_depth=2,
+            access_policy=AccessPolicy.default(),
+        )
+        RuntimeRegistry.remove(run_config.run_id)
+        RuntimeRegistry.get_or_create(run_config)
+        registry = create_builtin_tool_registry()
+        registry.register_runner(
+            "agent_research",
+            AgentAsToolAdapter(
+                runner=_FailingSubAgentRunner(),
+                agent_type="research",
+                run_config=run_config,
+            ),
+        )
+        call = ToolCallPlan.create("agent_research", {"task": "delegate research"})
+
+        update = await execute_node(
+            {
+                **_parent_state("agent-tool-failure", max_depth=2),
+                "run_config": run_config,
+                "pending_tool_calls": [call],
+            },
+            tool_registry=registry,
+            allowed_tools=frozenset({"agent_research"}),
+        )
+
+        result = update["tool_results"][0]
+        assert result.status == "error"
+        assert result.error is not None
+        assert result.error.code == "subagent_failed"
+        RuntimeRegistry.remove(run_config.run_id)
 
     def test_depth_exhaust_returns_error_not_exception(self) -> None:
         """depth=0 时不抛异常，返回结构化错误结果（通过 run_config 的 depth 控制）"""
@@ -476,3 +517,56 @@ class TestRegistryCloneAndIsolation:
         assert a2._run_config.max_depth == 1
         assert a1._run_config.run_id == "run-1"
         assert a2._run_config.run_id == "run-2"
+
+
+@pytest.mark.anyio
+async def test_builtin_subagent_runner_is_injected_for_agent_tool_calls() -> None:
+    child_def = AgentDefinition(
+        agent_type="research",
+        description="Research child",
+        system_prompt="Research child task",
+        allowed_tools=["llm_summarize"],
+        estimated_token_budget=2500,
+        max_depth=1,
+    )
+    agent_registry = AgentRegistry()
+    agent_registry.register(child_def)
+    decision_provider = _ChildDecisionProvider()
+    factory = AgentServiceFactory(
+        tool_registry=create_builtin_tool_registry(
+            runners={
+                "llm_summarize": lambda payload: LLMTextOutput(
+                    text=f"summary:{payload.task}",
+                    evidence_ids=payload.evidence_ids,
+                    citation_ids=payload.citation_ids,
+                )
+            }
+        ),
+        model_registry=None,
+        evaluate_decision_provider=decision_provider,
+    )
+    runner = BuiltinSubAgentRunner(agent_registry=agent_registry, service_factory=factory)
+    factory.bind_subagent_runner(runner)
+    service = factory.create(ORCHESTRATOR_AGENT)
+    call = ToolCallPlan.create(
+        "agent_research",
+        {
+            "task": "Find the reimbursement policy",
+            "goal": "Return a grounded summary",
+        },
+    )
+
+    result = await service.run(
+        AgentRunRequest(
+            task="Use a child research agent",
+            run_id="agent-tool-builtin-runner",
+            thread_id="agent-tool-builtin-runner",
+            pending_tool_calls=[call],
+        )
+    )
+
+    assert result.tool_results[0].status == "ok"
+    output = AgentToolOutput.model_validate(result.tool_results[0].output)
+    assert output.status == "done"
+    assert output.agent_name == "research"
+    assert "summary:## Task" in output.conclusion

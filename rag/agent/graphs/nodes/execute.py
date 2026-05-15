@@ -6,6 +6,7 @@ from typing import Any
 
 from pydantic import ValidationError
 
+from rag.agent.core.agent_as_tool import AgentAsToolExecutionError
 from rag.agent.core.approval_policy import ApprovalDecision, ApprovalPolicy, merge_approval_requests
 from rag.agent.core.context import AgentRunConfig, RuntimeRegistry
 from rag.agent.state import AgentState, ToolCallPlan
@@ -326,6 +327,26 @@ async def _execute_one_tool(
                 message=f"{call.tool_name} timed out after {spec.timeout_seconds}s",
                 retryable=True,
                 started_at=started_at,
+                token_used=budget_cost,
+                retry_count=attempt,
+            )
+        except AgentAsToolExecutionError as exc:
+            if reserved_budget:
+                await RuntimeRegistry.get(run_config.run_id).budget_ledger.commit(
+                    call.tool_call_id,
+                    budget_cost,
+                )
+            return _error_result(
+                call,
+                code="subagent_failed",
+                message=str(exc),
+                retryable=False,
+                started_at=started_at,
+                detail={
+                    "agent_name": exc.agent_name,
+                    "status": exc.status,
+                    "stop_reason": exc.stop_reason or "",
+                },
                 token_used=budget_cost,
                 retry_count=attempt,
             )
