@@ -39,8 +39,18 @@ def test_legacy_agent_service_module_no_longer_exports_old_service() -> None:
     assert not hasattr(service, "AnalysisAgentService")
 
 
-def test_legacy_synthesizer_module_no_longer_depends_on_old_run_state() -> None:
-    import importlib
+def test_legacy_agent_modules_are_removed() -> None:
+    import importlib.util
 
-    synthesizer = importlib.import_module("rag.agent.synthesizer")
-    assert not hasattr(synthesizer, "AgentRunState")
+    legacy_modules = (
+        "rag.agent.planner",
+        "rag.agent.executor",
+        "rag.agent.critic",
+        "rag.agent.synthesizer",
+        "rag.agent.understanding",
+        "rag.agent.report",
+        "rag.agent.schema",
+    )
+
+    for module_name in legacy_modules:
+        assert importlib.util.find_spec(module_name) is None

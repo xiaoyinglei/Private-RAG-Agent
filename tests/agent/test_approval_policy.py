@@ -1,13 +1,13 @@
 from __future__ import annotations
 
+from pydantic import BaseModel
+
 from rag.agent.core.approval_policy import (
     ApprovalAction,
-    ApprovalDecision,
     ApprovalPolicy,
     merge_approval_requests,
 )
 from rag.agent.tools.spec import ToolError, ToolPermissions, ToolSpec
-from pydantic import BaseModel
 
 
 class _DummyInput(BaseModel):
