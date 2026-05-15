@@ -5,7 +5,7 @@ from typing import Any
 
 import yaml
 
-from rag.models.config import ModelCapability, ModelSpec
+from rag.models.config import GenerationConfig, GenerationTaskConfig, ModelCapability, ModelSpec
 
 _DEFAULT_CATALOG_PATH = "configs/models.yaml"
 
@@ -18,9 +18,15 @@ class ModelCatalog:
     use resolve_runtime_config() from rag.models.runtime instead.
     """
 
-    def __init__(self, models: dict[str, ModelSpec], defaults: dict[str, str]) -> None:
+    def __init__(
+        self,
+        models: dict[str, ModelSpec],
+        defaults: dict[str, str],
+        generation: GenerationConfig,
+    ) -> None:
         self._models = models
         self._defaults = defaults
+        self._generation = generation
 
     @classmethod
     def from_yaml(cls, path: str = _DEFAULT_CATALOG_PATH) -> ModelCatalog:
@@ -61,7 +67,36 @@ class ModelCatalog:
             "embedding_model": raw_defaults.get("embedding_model", ""),
             "reranker_model": raw_defaults.get("reranker_model", ""),
         }
-        return cls(models=models, defaults=defaults)
+
+        generation = cls._parse_generation(data.get("generation"), defaults)
+        return cls(models=models, defaults=defaults, generation=generation)
+
+    @staticmethod
+    def _parse_generation(raw: object, defaults: dict[str, str]) -> GenerationConfig:
+        if not isinstance(raw, dict):
+            return GenerationConfig()
+
+        def _parse_task(name: str) -> GenerationTaskConfig:
+            entry = raw.get(name)
+            if not isinstance(entry, dict):
+                return GenerationTaskConfig()
+            return GenerationTaskConfig(
+                model=entry.get("model"),
+                max_tokens=int(entry["max_tokens"]) if "max_tokens" in entry else None,
+                temperature=float(entry["temperature"]) if "temperature" in entry else None,
+            )
+
+        return GenerationConfig(
+            summary=_parse_task("summary"),
+            answer=_parse_task("answer"),
+            planner=_parse_task("planner"),
+            synthesize=_parse_task("synthesize"),
+            factcheck=_parse_task("factcheck"),
+        )
+
+    @property
+    def generation(self) -> GenerationConfig:
+        return self._generation
 
     def get_model(self, alias: str) -> ModelSpec:
         spec = self._models.get(alias)

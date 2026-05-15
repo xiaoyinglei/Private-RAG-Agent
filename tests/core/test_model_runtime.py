@@ -9,9 +9,9 @@ import yaml
 
 from rag.assembly.models import ProviderConfig
 from rag.assembly.support import _OpenAICompatibleChatGenerator, build_provider
-from rag.models.assembly_adapter import to_assembly_overrides
+from rag.models.assembly_adapter import resolve_task_model, to_assembly_overrides
 from rag.models.catalog import ModelCatalog
-from rag.models.config import ModelCapability, ModelRuntimeConfig, ModelSpec
+from rag.models.config import GenerationConfig, GenerationTaskConfig, ModelCapability, ModelRuntimeConfig, ModelSpec
 from rag.models.guard import EmbeddingSpaceMismatchError, assert_embedding_space_compatible
 from rag.models.runtime import RuntimeOverrides, resolve_runtime_config
 
@@ -531,3 +531,125 @@ def test_override_priority_model_beats_profile(monkeypatch: pytest.MonkeyPatch) 
 
     assert bundle.chat_bindings
     assert bundle.chat_bindings[0].model_name == "deepseek-chat"
+
+
+# ── generation config ──────────────────────────────────────────
+
+_GENERATION_CATALOG_YAML = CATALOG_YAML + """
+generation:
+  summary:
+    model: qwen_local
+    max_tokens: 8192
+    temperature: 0.3
+
+  answer:
+    model: deepseek
+    max_tokens: 4096
+
+  planner:
+    model: qwen_local
+    max_tokens: 4096
+    temperature: 0.3
+
+  synthesize:
+    model: qwen_local
+    max_tokens: 8192
+
+  factcheck:
+    model: qwen_local
+    max_tokens: 2048
+    temperature: 0.1
+"""
+
+
+@pytest.fixture
+def gen_catalog_path(tmp_path: Path) -> Path:
+    path = tmp_path / "models_gen.yaml"
+    path.write_text(_GENERATION_CATALOG_YAML, encoding="utf-8")
+    return path
+
+
+@pytest.fixture
+def gen_catalog(gen_catalog_path: Path) -> ModelCatalog:
+    return ModelCatalog.from_yaml(str(gen_catalog_path))
+
+
+def test_generation_config_parsing(gen_catalog: ModelCatalog) -> None:
+    """models.yaml 中 generation.summary 能正确解析"""
+    gen = gen_catalog.generation
+
+    assert gen.summary.model == "qwen_local"
+    assert gen.summary.max_tokens == 8192
+    assert gen.summary.temperature == 0.3
+
+    assert gen.answer.model == "deepseek"
+    assert gen.answer.max_tokens == 4096
+    assert gen.answer.temperature is None  # YAML 未配置 temperature
+
+    assert gen.planner.temperature == 0.3
+    assert gen.synthesize.max_tokens == 8192
+    assert gen.factcheck.max_tokens == 2048
+    assert gen.factcheck.temperature == 0.1
+
+
+def test_generation_config_defaults_when_missing(catalog: ModelCatalog) -> None:
+    """无 generation section 时全部字段为 None"""
+    gen = catalog.generation
+    assert gen.summary.model is None
+    assert gen.summary.max_tokens is None
+    assert gen.summary.temperature is None
+    assert gen.answer.model is None
+
+
+def test_resolve_runtime_config_includes_generation(gen_catalog: ModelCatalog) -> None:
+    """resolve_runtime_config 返回的 ModelRuntimeConfig 包含 generation"""
+    config = resolve_runtime_config(catalog=gen_catalog)
+    assert config.generation.summary.model == "qwen_local"
+    assert config.generation.summary.max_tokens == 8192
+
+
+def test_resolve_task_model_uses_explicit_model(gen_catalog: ModelCatalog) -> None:
+    """task_config.model 有值时直接使用"""
+    spec = resolve_task_model(gen_catalog.generation.answer, gen_catalog)
+    assert spec.alias == "deepseek"
+    assert spec.model == "deepseek-chat"
+
+
+def test_resolve_task_model_falls_back_to_default(gen_catalog: ModelCatalog) -> None:
+    """task_config.model 为 None 时 fallback 到 defaults.primary_model"""
+    task = GenerationTaskConfig(max_tokens=4096)  # model=None
+    spec = resolve_task_model(task, gen_catalog)
+    assert spec.alias == "qwen_local"
+
+
+def test_summarizer_receives_max_tokens(gen_catalog: ModelCatalog) -> None:
+    """验证 summarizer 构造时 max_tokens 来自 generation.summary"""
+    from rag.ingest.retrievalsummarizer import RetrievalSummaryConfig
+
+    gen_summary = gen_catalog.generation.summary
+    max_tokens = gen_summary.max_tokens or 4096
+
+    config = RetrievalSummaryConfig(
+        max_output_tokens=max_tokens,
+        temperature=gen_summary.temperature,
+    )
+    assert config.max_output_tokens == 8192
+    assert config.temperature == 0.3
+
+
+def test_switch_summary_model(gen_catalog: ModelCatalog) -> None:
+    """只改 generation.summary.model，不改业务代码即可切换到其他模型"""
+    # 用 qwen_local（默认）
+    spec1 = resolve_task_model(gen_catalog.generation.summary, gen_catalog)
+    assert spec1.alias == "qwen_local"
+
+    # 构造一个新的 task config，切换到 deepseek（模型池中存在）
+    switched = GenerationTaskConfig(
+        model="deepseek",
+        max_tokens=gen_catalog.generation.summary.max_tokens,
+    )
+    spec2 = resolve_task_model(switched, gen_catalog)
+    assert spec2.alias == "deepseek"
+    assert spec2.model == "deepseek-chat"
+    assert spec2.base_url == "https://api.deepseek.com/v1"
+    # 业务逻辑不变：只需 resolve_task_model(task_config, catalog)

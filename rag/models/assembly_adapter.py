@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import os
+from typing import TYPE_CHECKING
 
 from rag.assembly.models import AssemblyOverrides, ProviderConfig
-from rag.models.config import ModelRuntimeConfig, ModelSpec
+from rag.models.config import GenerationTaskConfig, ModelRuntimeConfig, ModelSpec
+
+if TYPE_CHECKING:
+    from rag.models.catalog import ModelCatalog
 
 
 _PROVIDER_KIND_MAP: dict[str, str] = {
@@ -12,6 +16,18 @@ _PROVIDER_KIND_MAP: dict[str, str] = {
     "sentence_transformers": "local-bge",
     "mlx_embedding": "mlx-embedding",
 }
+
+
+def resolve_task_model(task_config: GenerationTaskConfig, catalog: ModelCatalog) -> ModelSpec:
+    """Resolve a generation task's model alias to a ModelSpec.
+
+    If task_config.model is set, uses it directly.
+    Otherwise falls back to catalog's defaults.primary_model.
+    """
+    alias = task_config.model
+    if alias:
+        return catalog.get_model(alias)
+    return catalog.get_default_primary()
 
 
 def to_assembly_overrides(config: ModelRuntimeConfig) -> AssemblyOverrides:
