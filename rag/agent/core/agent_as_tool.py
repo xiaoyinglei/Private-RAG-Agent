@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, Any
+from dataclasses import dataclass, replace
+from typing import TYPE_CHECKING
 from uuid import uuid4
 
 from pydantic import BaseModel, Field
@@ -11,6 +11,7 @@ from rag.agent.core.definition import AgentDefinition
 from rag.agent.core.registry import AgentRegistry
 from rag.agent.core.task import DEFAULT_SUBTASK_TOKEN_BUDGET, SubTaskNode
 from rag.agent.graphs.nodes.evaluate import EvaluateDecisionProvider
+from rag.agent.graphs.nodes.execute_subagent import SubAgentRunner
 from rag.agent.graphs.nodes.plan import PlanProvider
 from rag.agent.graphs.nodes.route import RouteProvider
 from rag.agent.state import AgentState
@@ -28,6 +29,22 @@ class AgentToolSpec:
     agent_definition: AgentDefinition
     inherits_context: bool = True
 
+
+class AgentAsToolExecutionError(RuntimeError):
+    def __init__(
+        self,
+        agent_name: str,
+        message: str,
+        *,
+        status: str = "failed",
+        stop_reason: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.agent_name = agent_name
+        self.status = status
+        self.stop_reason = stop_reason
+
+
 # ── Tool I/O schemas ───────────────────────────────────────────
 
 class AgentToolInput(BaseModel):
@@ -36,7 +53,10 @@ class AgentToolInput(BaseModel):
     task: str = Field(min_length=1, description="子任务描述")
     goal: str | None = Field(default=None, description="期望产出")
     context_summary: str | None = Field(default=None, description="父 Agent 传递的上下文摘要")
-    required_outputs: list[str] = Field(default_factory=list, description="需要的产出类型，如 ['evidence', 'conclusion']")
+    required_outputs: list[str] = Field(
+        default_factory=list,
+        description="需要的产出类型，如 ['evidence', 'conclusion']",
+    )
     constraints: list[str] = Field(default_factory=list, description="约束条件，如 'prefer_table', 'max_3_items'")
 
 
@@ -97,7 +117,7 @@ class AgentAsToolAdapter:
 
     def __init__(
         self,
-        runner: AgentAsToolRunner,
+        runner: SubAgentRunner,
         agent_type: str,
         run_config: AgentRunConfig,
     ) -> None:
@@ -152,12 +172,25 @@ class AgentAsToolAdapter:
         )
 
         try:
-            result = await self._runner.run_subtask(subtask=subtask, parent_state=parent_state)
+            result = await self._runner.run_subtask(
+                subtask=subtask,
+                parent_state=parent_state,
+            )
         except Exception as exc:
-            return AgentToolOutput.error_result(
+            raise AgentAsToolExecutionError(
                 self._agent_type,
-                f"subagent execution failed: {exc.__class__.__name__}",
+                f"subagent execution failed: {exc}",
                 status="failed",
+                stop_reason=exc.__class__.__name__,
+            ) from exc
+
+        if result.status != "done":
+            reason = result.stop_reason or result.status
+            raise AgentAsToolExecutionError(
+                self._agent_type,
+                f"subagent returned {result.status}: {reason}",
+                status=result.status,
+                stop_reason=result.stop_reason,
             )
 
         return AgentToolOutput.from_run_result(result, self._agent_type)
@@ -172,7 +205,7 @@ def _build_subtask_prompt(payload: AgentToolInput) -> str:
     if payload.required_outputs:
         parts.append(f"## Required Outputs\n{', '.join(payload.required_outputs)}")
     if payload.constraints:
-        parts.append(f"## Constraints\n" + "\n".join(f"- {c}" for c in payload.constraints))
+        parts.append("## Constraints\n" + "\n".join(f"- {c}" for c in payload.constraints))
     return "\n\n".join(parts)
 
 # ── build_agent_tool_spec ──────────────────────────────────────
