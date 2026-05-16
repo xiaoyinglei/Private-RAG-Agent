@@ -8,76 +8,97 @@
 #   generation — how to USE models (per-task model selection + params)
 
 models:
-  qwen_local:
+  qwen3_14b_4bit:
     capability: chat
-    provider: openai_compatible
+    provider: qwen
+    protocol: openai_compatible
     model: mlx-community/Qwen3-14B-4bit
     base_url: http://127.0.0.1:8080/v1
 
-  qwen_local_small:
+  qwen3_0_6b_4bit:
     capability: chat
-    provider: openai_compatible
+    provider: qwen
+    protocol: openai_compatible
     model: mlx-community/Qwen3-0.6B-4bit
     base_url: http://127.0.0.1:8080/v1
 
-  qwen_8b:
+  qwen3_8b_mlx_4bit:
     capability: chat
-    provider: openai_compatible
+    provider: qwen
+    protocol: openai_compatible
     model: Qwen/Qwen3-8B-MLX-4bit
     base_url: http://127.0.0.1:8080/v1
 
-  deepseek:
+  deepseek_chat:
     capability: chat
-    provider: openai_compatible
+    provider: deepseek
+    protocol: openai_compatible
     model: deepseek-chat
     base_url: https://api.deepseek.com/v1
     api_key_env: DEEPSEEK_API_KEY
 
   deepseek_reasoner:
     capability: chat
-    provider: openai_compatible
+    provider: deepseek
+    protocol: openai_compatible
     model: deepseek-reasoner
     base_url: https://api.deepseek.com/v1
     api_key_env: DEEPSEEK_API_KEY
 
-  qwen_embedding_mlx:
+  deepseek_v4_flash:
+    capability: chat
+    provider: deepseek
+    protocol: openai_compatible
+    model: deepseek-v4-flash
+    base_url: https://api.deepseek.com/v1
+    api_key_env: DEEPSEEK_API_KEY
+
+  qwen3_embedding_8b_4bit_dwq:
     capability: embedding
-    provider: mlx_embedding
+    provider: qwen
+    protocol: mlx_embedding
     model: mlx-community/Qwen3-Embedding-8B-4bit-DWQ
     embedding_space: mlx/Qwen3-Embedding-8B-4bit-DWQ
 
-  qwen3_reranker:
+  bge_reranker_v2_m3:
     capability: reranker
-    provider: sentence_transformers
+    provider: bge
+    protocol: sentence_transformers
+    model: BAAI/bge-reranker-v2-m3
+
+  qwen3_reranker_4b:
+    capability: reranker
+    provider: qwen
+    protocol: sentence_transformers
     model: Qwen/Qwen3-Reranker-4B
 
 defaults:
-  primary_model: qwen_local
-  embedding_model: qwen_embedding_mlx
-  reranker_model: qwen3_reranker
+  primary_model: deepseek_v4_flash
+  embedding_model: qwen3_embedding_8b_4bit_dwq
+  reranker_model: bge_reranker_v2_m3
 
 generation:
   summary:
-    model: qwen_local
+    model: deepseek_v4_flash
     max_tokens: 8192
     temperature: 0.3
 
   answer:
-    model: qwen_local
+    model: deepseek_v4_flash
     max_tokens: 4096
     temperature: 0.7
 
   planner:
-    model: qwen_local
+    model: deepseek_v4_flash
     max_tokens: 4096
     temperature: 0.3
 
   synthesize:
-    model: qwen_local
+    model: deepseek_v4_flash
     max_tokens: 8192
     temperature: 0.5
 
   factcheck:
-    model: qwen_local
+    model: deepseek_v4_flash
     max_tokens: 2048
     temperature: 0.1

@@ -39,12 +39,15 @@ class ComputeResult:
     raw_row_count: int
     elapsed_ms: float
     truncated: bool
+    sql: str | None = None
 
     @property
     def markdown(self) -> str:
         parts: list[str] = []
         parts.append(f"[TABLE_COMPUTE_RESULT:asset_id={self.asset_id}]")
         parts.append(f"Computation executed in {self.elapsed_ms:.0f}ms. Returned {self.raw_row_count} rows.")
+        if self.sql:
+            parts.append(f"Executed SQL: {self.sql}")
         if self.truncated:
             parts.append(f"(Showing first {len(self.rows)} rows of {self.raw_row_count} total)")
         parts.append("")
@@ -168,6 +171,7 @@ class TableExecutor:
                 raw_row_count=raw_row_count,
                 elapsed_ms=elapsed,
                 truncated=truncated,
+                sql=sql.strip(),
             )
         finally:
             con.close()

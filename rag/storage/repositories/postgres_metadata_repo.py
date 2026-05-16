@@ -221,7 +221,7 @@ class PostgresMetadataRepo:
             )
             VALUES (
                 %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
             )
             ON CONFLICT (source_id, file_hash, version_no) DO UPDATE SET
                 title = EXCLUDED.title,

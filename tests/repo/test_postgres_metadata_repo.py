@@ -29,6 +29,8 @@ class _Connection:
         self.commit_count = 0
 
     def execute(self, sql: str, params: tuple[object, ...] = ()) -> _Cursor:
+        placeholder_count = sql.count("%s")
+        assert placeholder_count == len(params)
         self.calls.append((sql, params))
         return self._handler(sql, params)
 

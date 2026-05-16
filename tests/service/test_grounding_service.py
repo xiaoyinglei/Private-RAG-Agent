@@ -368,6 +368,77 @@ def test_grounding_service_replaces_compute_only_table_with_descriptive_block() 
     assert "row999" not in section_texts[0]
 
 
+def test_grounding_service_direct_table_asset_uses_compute_block() -> None:
+    metadata_repo = _MetadataRepo(
+        assets={
+            11: AssetRecord(
+                asset_id=11,
+                doc_id=42,
+                source_id=9,
+                section_id=7,
+                asset_type="table",
+                element_ref="table-1",
+                page_no=1,
+                content_hash="asset-hash",
+                storage_key="asset-11.parquet",
+                sheet_name="开票明细",
+                row_count=8,
+                column_count=3,
+                sample_rows=[
+                    {"区域": "华南", "季度": "Q1", "开票量": "999"},
+                    {"区域": "华东", "季度": "Q2", "开票量": "777"},
+                ],
+                schema=[
+                    {"name": "区域", "type": "enum(华南, 华东)"},
+                    {"name": "季度", "type": "enum(Q1, Q2)"},
+                    {"name": "开票量", "type": "number(min=1, max=999)"},
+                ],
+                metadata_json={
+                    "asset_text_preview": "Sample row 华南 Q1 999",
+                    "table_policy": "compute_only",
+                    "estimated_tokens": 130,
+                },
+            )
+        },
+    )
+    service = GroundingService(
+        metadata_repo=metadata_repo,
+        object_store=_ObjectStore(payloads={}),
+        token_accounting=_PassthroughTokenAccounting(),
+        budgets=GroundingBudgets(max_neighbor_assets=0),
+    )
+
+    grounded = service.ground(
+        query="请计算华东区域 Q1 的开票量合计是多少？",
+        evidence=[
+            _evidence_item(
+                evidence_id="summary:asset_summary:11",
+                doc_id=42,
+                source_id=9,
+                citation_anchor="table@p1",
+                text="table summary sample",
+                score=0.91,
+                record_type="asset_summary",
+                grounding_target=GroundingTarget(
+                    kind="asset",
+                    doc_id=42,
+                    source_id=9,
+                    section_id=7,
+                    asset_id=11,
+                    page_start=1,
+                    page_end=1,
+                ),
+            )
+        ],
+    )
+
+    assert len(grounded) == 1
+    assert grounded[0].record_type == "asset"
+    assert "[TABLE_COMPUTE_ONLY:asset_id=11]" in grounded[0].text
+    assert "<compute_request>" in grounded[0].text
+    assert "Sample row 华南 Q1 999" not in grounded[0].text
+
+
 def test_grounding_service_uses_layout_meta_cache_for_geometric_neighbor_assets() -> None:
     metadata_repo = _MetadataRepo(
         sections={

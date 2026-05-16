@@ -329,7 +329,11 @@ class GroundingService:
         asset = self._get_asset(self._safe_int(target.asset_id))
         if asset is None:
             return [item]
-        text = self._asset_text(asset, session=session).strip()
+        text = (
+            self._compute_only_table_block(asset)
+            if asset.asset_type == "table"
+            else self._asset_text(asset, session=session).strip()
+        )
         if not text:
             return [item]
         grounded = item.model_copy(

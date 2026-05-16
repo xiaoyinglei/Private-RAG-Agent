@@ -36,7 +36,7 @@ from rag.retrieval.runtime_coordinator import (
 )
 from rag.retrieval.synthesis_service import SynthesisService
 from rag.schema.query import EvidenceItem
-from rag.schema.runtime import AccessPolicy, RuntimeMode
+from rag.schema.runtime import AccessPolicy
 from rag.utils.guard import RateLimitExceeded
 
 
@@ -412,6 +412,7 @@ class _QueryPipeline:
         for item in evidence:
             if not replaced and anchor_pattern.search(item.text):
                 new_text = anchor_pattern.sub(result.markdown, item.text, count=1)
+                new_text = _QueryPipeline._strip_compute_only_sample_rows(new_text)
                 updated.append(
                     item.model_copy(
                         update={
@@ -445,6 +446,30 @@ class _QueryPipeline:
                 )
             updated.append(result_item)
         return updated
+
+    @staticmethod
+    def _strip_compute_only_sample_rows(text: str) -> str:
+        lines = text.splitlines()
+        cleaned: list[str] = []
+        index = 0
+        while index < len(lines):
+            line = lines[index]
+            if not line.startswith("Sample rows ("):
+                cleaned.append(line)
+                index += 1
+                continue
+
+            index += 1
+            while index < len(lines):
+                current = lines[index]
+                if not current.strip():
+                    index += 1
+                    break
+                if current.startswith("|") or current.startswith("(table has "):
+                    index += 1
+                    continue
+                break
+        return "\n".join(cleaned)
 
     @staticmethod
     def _section_diversity_filter(evidence: list[EvidenceItem], *, max_per_section: int = 2) -> list[EvidenceItem]:

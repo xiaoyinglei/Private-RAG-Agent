@@ -167,11 +167,17 @@ class AnswerGenerationService:
         del runtime_mode
 
         doc_aliases = self._doc_aliases(evidence_pack)
+        has_compute_only_table = self._has_compute_only_table(evidence_pack)
 
         if prompt_style == "minimal":
             lines = [
                 f"Q:{query}",
-                "返回一个 JSON 对象，字段必须是：answer_text, answer_sections, insufficient_evidence_flag。",
+                (
+                    "除非表格计算例外要求输出 <compute_request>，否则返回一个 JSON 对象，"
+                    "字段必须是：answer_text, answer_sections, insufficient_evidence_flag。"
+                    if has_compute_only_table
+                    else "返回一个 JSON 对象，字段必须是：answer_text, answer_sections, insufficient_evidence_flag。"
+                ),
                 "answer_sections[].evidence_ids 只能使用给定的 E 编号；"
                 "answer_text 与 section text 句尾必须带 [Doc-n] 引用。",
             ]
@@ -216,13 +222,31 @@ class AnswerGenerationService:
                 if normalized:
                     lines.append(f"{role_name}: {normalized}")
 
+        if has_compute_only_table:
+            lines.extend(
+                [
+                    "表格计算例外：",
+                    "- 如果问题要求读取表格真实数据、筛选、求和、计数、排序、排名、对比或聚合，"
+                    "不要输出 JSON。",
+                    "- 必须只输出证据中指定格式的 <compute_request>...</compute_request>，"
+                    "并填入可执行的 SELECT SQL。",
+                    "- 不要基于 Sample rows 估算答案，也不要因为 Sample rows 没有目标行就回答证据不足。",
+                    "- 后端会执行 SQL，并带着 TABLE_COMPUTE_RESULT 再次调用你生成最终 JSON 回答。",
+                ]
+            )
+
         if prompt_style == "minimal":
             lines.append("Evidence:")
         elif prompt_style == "compact":
             lines.extend(
                 [
                     "输出要求：",
-                    "返回一个 JSON 对象，包含 answer_text、answer_sections、insufficient_evidence_flag。",
+                    (
+                        "没有触发表格计算例外时，返回一个 JSON 对象，"
+                        "包含 answer_text、answer_sections、insufficient_evidence_flag。"
+                        if has_compute_only_table
+                        else "返回一个 JSON 对象，包含 answer_text、answer_sections、insufficient_evidence_flag。"
+                    ),
                     "answer_sections[].evidence_ids 必须引用下面的 E 编号。",
                     "answer_text 和每个 answer_sections[].text 的句尾必须使用给定的 [Doc-n] 标签。",
                     "不得编造新的引用标签。",
@@ -233,7 +257,11 @@ class AnswerGenerationService:
             lines.extend(
                 [
                     "输出要求：",
-                    "- 只输出一个 JSON 对象。",
+                    (
+                        "- 没有触发表格计算例外时，只输出一个 JSON 对象。"
+                        if has_compute_only_table
+                        else "- 只输出一个 JSON 对象。"
+                    ),
                     '- 顶层字段必须包含 "answer_text"、"answer_sections"、"insufficient_evidence_flag"。',
                     '- answer_sections 是数组，每个元素包含 "title"、"text"、"evidence_ids"。',
                     "- evidence_ids 必须引用下面证据编号，例如 E1、E2。",
@@ -275,6 +303,10 @@ class AnswerGenerationService:
                 lines.append(item.text)
 
         return "\n".join(lines)
+
+    @staticmethod
+    def _has_compute_only_table(evidence_pack: Sequence[EvidenceItem]) -> bool:
+        return any("[TABLE_COMPUTE_ONLY:" in item.text for item in evidence_pack)
 
     # ------------------------------------------------------------
     # public APIs
