@@ -60,6 +60,10 @@ class AssemblyOverrides:
     embedding: ProviderConfig | None = None
     rerank: ProviderConfig | None = None
     tokenizer: TokenizerConfig | None = None
+    # Pre-built runtime providers (checked before static ProviderConfig resolution).
+    # Set by _runtime() when RAG_EMBEDDING_SERVICE_URL / RAG_RERANK_SERVICE_URL is present.
+    embedding_provider: object | None = None
+    rerank_provider: object | None = None
 
 
 @dataclass(frozen=True, slots=True)

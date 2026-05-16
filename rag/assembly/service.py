@@ -253,6 +253,35 @@ class CapabilityAssemblyService:
         decisions: list[AssemblyDecision],
         default_space: str = "default",
     ) -> CapabilityBinding | None:
+        # ── pre-built runtime provider (highest priority; used by HTTP service env) ──
+        overrides = request.overrides or AssemblyOverrides()
+        attr_name = f"{capability}_provider"
+        runtime_provider = getattr(overrides, attr_name, None)
+        if runtime_provider is not None and capability in ("embedding", "rerank"):
+            if capability == "embedding":
+                binding: CapabilityBinding = EmbeddingCapabilityBinding(
+                    backend=runtime_provider,
+                    space=default_space,
+                    location="runtime",
+                )
+            else:
+                binding = RerankCapabilityBinding(
+                    backend=runtime_provider,
+                    location="runtime",
+                )
+            decisions.append(
+                AssemblyDecision(
+                    capability=capability,
+                    source="explicit",
+                    provider_kind="runtime-http",
+                    provider_name=getattr(binding, "provider_name", None),
+                    model_name=getattr(binding, "model_name", None),
+                    location="runtime",
+                    reason=f"Using pre-built runtime {capability} provider via service URL env.",
+                )
+            )
+            return binding
+
         candidates = self._capability_candidates(
             capability=capability,
             request=request,

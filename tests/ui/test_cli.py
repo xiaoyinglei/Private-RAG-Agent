@@ -20,11 +20,12 @@ def _use_isolated_cli_runtime(monkeypatch: MonkeyPatch) -> None:
         storage_root: Path,
         *,
         require_chat: bool = False,
+        require_rerank: bool = False,
         model: str | None = None,
         embedding_model: str | None = None,
         reranker_model: str | None = None,
     ):
-        del model, embedding_model, reranker_model
+        del model, embedding_model, reranker_model, require_rerank
         return make_runtime(storage=StorageConfig(root=storage_root), require_chat=require_chat)
 
     monkeypatch.setattr(cli, "_runtime", _runtime)

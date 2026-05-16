@@ -500,6 +500,12 @@ def merge_assembly_overrides(
         embedding=merge_provider_config(high.embedding, low.embedding),
         rerank=merge_provider_config(high.rerank, low.rerank),
         tokenizer=merge_tokenizer_config(high.tokenizer, low.tokenizer),
+        embedding_provider=(
+            high.embedding_provider if high.embedding_provider is not None else low.embedding_provider
+        ),
+        rerank_provider=(
+            high.rerank_provider if high.rerank_provider is not None else low.rerank_provider
+        ),
     )
 def build_provider(provider_config: ProviderConfig) -> object:
     kind = provider_config.provider_kind

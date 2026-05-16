@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import json
-from dataclasses import fields, is_dataclass
+import os
+from dataclasses import fields, is_dataclass, replace
 from enum import Enum
 from pathlib import Path
 from typing import Annotated
@@ -48,10 +49,28 @@ def _runtime(
     storage_root: Path,
     *,
     require_chat: bool = False,
+    require_rerank: bool = False,
     model: str | None = None,
     embedding_model: str | None = None,
     reranker_model: str | None = None,
 ) -> RAGRuntime:
+    # ── service URL env vars (higher priority than YAML) ──
+    embedding_service_url = os.environ.get("RAG_EMBEDDING_SERVICE_URL", "").strip()
+    rerank_service_url = os.environ.get("RAG_RERANK_SERVICE_URL", "").strip()
+
+    # ── conflict detection: env + CLI explicit → error ──
+    if embedding_service_url and embedding_model is not None:
+        raise typer.BadParameter(
+            "RAG_EMBEDDING_SERVICE_URL is set but --embedding-model was also specified. "
+            "Unset RAG_EMBEDDING_SERVICE_URL or remove --embedding-model."
+        )
+    if rerank_service_url and reranker_model is not None:
+        raise typer.BadParameter(
+            "RAG_RERANK_SERVICE_URL is set but --reranker-model was also specified. "
+            "Unset RAG_RERANK_SERVICE_URL or remove --reranker-model."
+        )
+
+    # ── resolve YAML config (CLI override > YAML default) ──
     runtime_config = resolve_runtime_config(
         RuntimeOverrides(
             model_alias=model,
@@ -59,15 +78,49 @@ def _runtime(
             reranker_model_alias=reranker_model,
         )
     )
+    overrides = to_assembly_overrides(runtime_config)
+
+    # ── service URL env → pre-built HTTP providers (env > YAML) ──
+    if embedding_service_url or rerank_service_url:
+        from rag.assembly.support import _CompositeProvider  # noqa: F811
+
+    if embedding_service_url:
+        from rag.providers.embedding_http import EmbeddingHttpClient
+
+        http_client = EmbeddingHttpClient(base_url=embedding_service_url)
+        overrides = replace(
+            overrides,
+            embedding_provider=_CompositeProvider(
+                provider_name="embedding-http",
+                embedder=http_client,
+            ),
+        )
+    if rerank_service_url:
+        from rag.providers.rerank_http import RerankHttpClient
+
+        http_client = RerankHttpClient(base_url=rerank_service_url)
+        overrides = replace(
+            overrides,
+            rerank_provider=_CompositeProvider(
+                provider_name="rerank-http",
+                reranker=http_client,
+            ),
+        )
+
+    # ── strip reranker when not required (prevents loading during ingest) ──
+    if not require_rerank:
+        overrides = replace(overrides, rerank=None, rerank_provider=None)
+
     request = CapabilityRequirements(
         require_chat=require_chat,
+        require_rerank=require_rerank,
         default_context_tokens=QueryOptions().max_context_tokens,
     )
     return RAGRuntime.from_request(
         storage=_default_storage_config(storage_root),
         request=AssemblyRequest(
             requirements=request,
-            overrides=to_assembly_overrides(runtime_config),
+            overrides=overrides,
         ),
     )
 
@@ -129,6 +182,7 @@ def ingest(
     with _runtime(
         storage_root,
         require_chat=False,
+        require_rerank=False,
         model=model,
         embedding_model=embedding_model,
         reranker_model=reranker_model,
@@ -158,6 +212,7 @@ def query(
     with _runtime(
         storage_root,
         require_chat=False,
+        require_rerank=True,
         model=model,
         embedding_model=embedding_model,
         reranker_model=reranker_model,
@@ -166,6 +221,7 @@ def query(
     if json_output:
         _echo_json(result)
         return
+    typer.echo(result.answer.answer_text)
     typer.echo(result.answer.answer_text)
 
 
@@ -208,6 +264,7 @@ def delete(
     with _runtime(
         storage_root,
         require_chat=False,
+        require_rerank=False,
         model=model,
         embedding_model=embedding_model,
         reranker_model=reranker_model,
@@ -232,6 +289,7 @@ def rebuild(
         with _runtime(
             storage_root,
             require_chat=False,
+            require_rerank=False,
             model=model,
             embedding_model=embedding_model,
             reranker_model=reranker_model,
@@ -439,6 +497,45 @@ def benchmark_evaluate(
         _echo_json(payload)
     finally:
         runtime.close()
+
+
+@app.command("embedding-service")
+def embedding_service(
+    model: Annotated[str, typer.Option("--model", help="MLX embedding model name or path")] = "mlx-community/Qwen3-Embedding-8B-4bit-DWQ",
+    port: Annotated[int, typer.Option("--port", help="HTTP port")] = 9090,
+    batch_size: Annotated[int, typer.Option("--batch-size", help="Embedding batch size")] = 8,
+    host: Annotated[str, typer.Option("--host", help="Bind address")] = "127.0.0.1",
+) -> None:
+    """Start a long-lived embedding HTTP service with MLX embedder."""
+    import uvicorn
+
+    from rag.embedding_service import create_app
+
+    app_instance = create_app(model_name_or_path=model, batch_size=batch_size)
+    typer.echo(f"Embedding service starting on http://{host}:{port} (model={model})")
+    uvicorn.run(app_instance, host=host, port=port, log_level="info")
+
+
+@app.command("rerank-service")
+def rerank_service(
+    model: Annotated[str, typer.Option("--model", help="Reranker model name or path")] = "Qwen/Qwen3-Reranker-4B",
+    port: Annotated[int, typer.Option("--port", help="HTTP port")] = 9091,
+    batch_size: Annotated[int, typer.Option("--batch-size", help="Rerank batch size")] = 8,
+    max_length: Annotated[int, typer.Option("--max-length", help="Max token length per document")] = 1024,
+    host: Annotated[str, typer.Option("--host", help="Bind address")] = "127.0.0.1",
+) -> None:
+    """Start a long-lived rerank HTTP service with FlagEmbedding reranker."""
+    import uvicorn
+
+    from rag.rerank_service import create_app
+
+    app_instance = create_app(
+        model_name_or_path=model,
+        batch_size=batch_size,
+        max_length=max_length,
+    )
+    typer.echo(f"Rerank service starting on http://{host}:{port} (model={model})")
+    uvicorn.run(app_instance, host=host, port=port, log_level="info")
 
 
 __all__ = ["app", "main"]

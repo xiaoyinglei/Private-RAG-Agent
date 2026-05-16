@@ -55,7 +55,7 @@ class ModelCatalog:
             models[alias] = ModelSpec(
                 alias=alias,
                 capability=ModelCapability(entry["capability"]),
-                provider=entry["provider"],
+                provider=entry.get("protocol") or entry["provider"],
                 model=entry["model"],
                 base_url=entry.get("base_url"),
                 api_key_env=entry.get("api_key_env"),
