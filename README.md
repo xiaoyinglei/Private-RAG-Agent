@@ -1,36 +1,81 @@
+<div align="center">
+
 # 企业知识 RAG 与 Agent 编排系统
 
-这是一个面向企业私有知识库的 RAG 与 Agent 编排项目。系统覆盖文档解析、结构化入库、摘要索引、混合检索、原文精读、表格计算、引用回答、离线评测，以及基于 LangGraph 的多 Agent 任务编排。
+面向企业私有知识库的 evidence-first RAG 与 LangGraph Agent 编排项目。
 
-项目目标是让企业内部制度、流程、销售资料、Word/PDF/Excel/PPT/图片等异构资料进入同一套可检索、可引用、可评测的知识系统，并为复杂问题提供可拆解、可追踪、可失败显式化的 Agent 执行框架。
+<p>
+  <img src="https://img.shields.io/badge/Python-3.12-3776AB?style=for-the-badge&logo=python&logoColor=white" alt="Python 3.12">
+  <img src="https://img.shields.io/badge/Package-uv-2b3137?style=for-the-badge" alt="uv">
+  <img src="https://img.shields.io/badge/Agent-LangGraph-1f6feb?style=for-the-badge" alt="LangGraph">
+  <img src="https://img.shields.io/badge/Vector-Milvus-00a1ea?style=for-the-badge" alt="Milvus">
+  <img src="https://img.shields.io/badge/Metadata-PostgreSQL-336791?style=for-the-badge&logo=postgresql&logoColor=white" alt="PostgreSQL">
+</p>
+
+<p>
+  <img src="https://img.shields.io/badge/Chat-deepseek--v4--flash-111827?style=for-the-badge" alt="deepseek-v4-flash">
+  <img src="https://img.shields.io/badge/Embedding-Qwen3--8B--4bit-10b981?style=for-the-badge" alt="Qwen3 Embedding">
+  <img src="https://img.shields.io/badge/Rerank-bge--reranker--v2--m3-f97316?style=for-the-badge" alt="bge reranker">
+</p>
+
+<p>
+  <a href="#快速开始">快速开始</a> ·
+  <a href="#当前默认运行配置">默认配置</a> ·
+  <a href="#已验证端到端结果">端到端结果</a> ·
+  <a href="#agent-编排层">Agent 设计</a> ·
+  <a href="#历史基线结果与实验配置">历史基线</a> ·
+  <a href="#目录地图">目录地图</a>
+</p>
+
+</div>
+
+这个项目覆盖文档解析、结构化入库、摘要索引、混合检索、原文精读、表格计算、引用回答、离线评测，以及基于 LangGraph 的多 Agent 任务编排。目标是让企业内部制度、流程、销售资料、Word/PDF/Excel/PPT/图片等异构资料进入同一套可检索、可引用、可评测的知识系统，并为复杂问题提供可拆解、可追踪、失败显式化的 Agent 执行框架。
+
+## News
+
+- 2026-05-16：默认模型切到 `deepseek-v4-flash`、`mlx-community/Qwen3-Embedding-8B-4bit-DWQ`、`BAAI/bge-reranker-v2-m3`。
+- 2026-05-16：完成真实 `PostgreSQL + parquet object store + Milvus + Redis` 端到端验证，表格问题通过 DuckDB 返回 `375`。
+- 2026-05-16：README 恢复历史 baseline，并补齐 Agent 设计说明、文件级目录和当前运行命令。
+
+## 能力一览
+
+| 能力 | 当前状态 | 关键实现 |
+| --- | --- | --- |
+| 多格式入库 | 已支持 PDF、Word、Markdown、Excel、PPT、图片、纯文本 | `rag/ingest/pipeline.py`、`rag/ingest/parsers/*` |
+| 多粒度索引 | doc / section / asset 三类 summary index | Milvus collections + summary records |
+| 混合检索 | 支持 `fast / auto / deep / asset` profile | L3 planning + L4 retrieval + rerank |
+| Grounding | 原文回读、anchor replacement、neighbor expansion | `rag/retrieval/grounding_service.py` |
+| 表格计算 | Excel asset 转 parquet，DuckDB 受限 `SELECT` | `table_sampler.py`、`table_executor.py` |
+| Agent 编排 | Tool-Centric + LangGraph + TaskDAG + approval pause | `rag/agent/*` |
+| 评测 | 公开 MedicalRetrieval mini + 私有 329 条 golden queries | `scripts/evaluate_private_retrieval.py` |
 
 ## 系统流程
 
-```text
-原始文件
-  -> Parser
-  -> Document / SectionRecord / AssetRecord
-  -> SectionRefiner token 窗口
-  -> Doc / Section / Asset 三类摘要
-  -> Embedding
-  -> Milvus summary indexes
-  -> Planning
-  -> Retrieval / Rerank
-  -> Grounding / Asset resolution / Table SQL
-  -> EvidenceItem
-  -> Synthesis with citations
+```mermaid
+flowchart LR
+    A["原始文件"] --> B["Parser"]
+    B --> C["Document / SectionRecord / AssetRecord"]
+    C --> D["SectionRefiner token 窗口"]
+    D --> E["Doc / Section / Asset summaries"]
+    E --> F["Embedding"]
+    F --> G["Milvus summary indexes"]
+    G --> H["Planning"]
+    H --> I["Retrieval / Rerank"]
+    I --> J["Grounding / Asset resolution / Table SQL"]
+    J --> K["EvidenceItem"]
+    K --> L["Synthesis with citations"]
 ```
 
 Agent 编排层运行在 RAG 能力之上：
 
-```text
-AgentDefinition
-  -> ToolSpec / ToolRegistry
-  -> AgentRunConfig / BudgetLedger
-  -> AgentState reducers
-  -> LangGraph route / plan / execute / evaluate / synthesize
-  -> TaskDAG + Send() 子任务并行
-  -> AgentRunResult
+```mermaid
+flowchart LR
+    A["AgentDefinition"] --> B["ToolSpec / ToolRegistry"]
+    B --> C["AgentRunConfig / BudgetLedger"]
+    C --> D["AgentState reducers"]
+    D --> E["LangGraph route / plan / execute / evaluate / synthesize"]
+    E --> F["TaskDAG + Send() 子任务并行"]
+    F --> G["AgentRunResult"]
 ```
 
 ## 架构总览
@@ -405,6 +450,282 @@ TABLE_COMPUTE_RESULT
 sum("开票量") = 375
 ```
 
+## 安装
+
+安装依赖：
+
+```bash
+uv sync
+```
+
+准备 `.env`：
+
+```bash
+cat > .env <<'EOF'
+DEEPSEEK_API_KEY=your_deepseek_key
+EOF
+```
+
+确认基础设施：
+
+```bash
+lsof -nP -iTCP:19530 -sTCP:LISTEN
+lsof -nP -iTCP:5432 -sTCP:LISTEN
+lsof -nP -iTCP:6379 -sTCP:LISTEN
+```
+
+默认本地端口：
+
+| 服务 | 端口 | 说明 |
+| --- | ---: | --- |
+| Milvus | `19530` | 向量索引 |
+| Milvus Web/metrics | `9091` | 已被 Milvus docker 占用，不要给 rerank 用 |
+| Postgres | `5432` | metadata |
+| Redis | `6379` | cache |
+| Embedding service | `9090` | `mlx-community/Qwen3-Embedding-8B-4bit-DWQ` |
+| Rerank service | `9092` | `BAAI/bge-reranker-v2-m3` |
+
+## 模型服务管理
+
+先检查是否已经有同模型服务，避免重复常驻占内存：
+
+```bash
+ps aux | rg -i 'embedding-service|rerank-service|Qwen3-Embedding|bge-reranker|mlx_lm|vllm|ollama|uvicorn' \
+  | rg -v 'rg -i|exec_command'
+
+lsof -nP -iTCP -sTCP:LISTEN \
+  | rg ':(8080|8081|8000|8001|9090|9091|9092|11434|19530|5432|6379)\b' || true
+```
+
+如果发现重复的 embedding/rerank 服务，先杀旧进程。不要杀 Milvus、Postgres、Redis：
+
+```bash
+kill <old_embedding_pid> <old_rerank_pid>
+```
+
+启动唯一一份 embedding 服务：
+
+```bash
+screen -S rag_embedding_9090 -X quit >/dev/null 2>&1 || true
+screen -dmS rag_embedding_9090 zsh -lc '
+cd /Users/leixiaoying/LLM/RAG学习 &&
+uv run rag embedding-service \
+  --model mlx-community/Qwen3-Embedding-8B-4bit-DWQ \
+  --port 9090
+'
+```
+
+启动唯一一份 rerank 服务：
+
+```bash
+screen -S rag_rerank_9092 -X quit >/dev/null 2>&1 || true
+screen -dmS rag_rerank_9092 zsh -lc '
+cd /Users/leixiaoying/LLM/RAG学习 &&
+uv run rag rerank-service \
+  --model BAAI/bge-reranker-v2-m3 \
+  --port 9092
+'
+```
+
+健康检查：
+
+```bash
+curl -sS http://127.0.0.1:9090/health
+curl -sS http://127.0.0.1:9092/health
+screen -ls
+```
+
+预期返回：
+
+```json
+{"model":"mlx-community/Qwen3-Embedding-8B-4bit-DWQ","embedding_space":"default","dimension":4096}
+{"model":"BAAI/bge-reranker-v2-m3"}
+```
+
+## 快速开始
+
+CLI 会读取 `configs/models.yaml` 的默认模型。若已经启动 `9090/9092` 服务，可以通过 HTTP provider 复用常驻模型，避免 CLI 每次重新加载：
+
+```bash
+export RAG_EMBEDDING_SERVICE_URL=http://127.0.0.1:9090
+export RAG_RERANK_SERVICE_URL=http://127.0.0.1:9092
+```
+
+文本入库：
+
+```bash
+uv run rag ingest \
+  --storage-root data/smoke_milvus \
+  --source-type plain_text \
+  --location memory://smoke/travel-policy \
+  --title "差旅制度 Smoke" \
+  --owner smoke \
+  --content "单笔国内差旅报销金额超过 12000 元时，必须由业务线 VP 审批。"
+```
+
+Excel 入库：
+
+```bash
+uv run rag ingest \
+  --storage-root data/smoke_milvus \
+  --source-type xlsx \
+  --location /absolute/path/to/开票量明细.xlsx \
+  --title "开票量明细" \
+  --owner smoke
+```
+
+查询：
+
+```bash
+uv run rag query \
+  --storage-root data/smoke_milvus \
+  --retrieval-profile auto \
+  --query "单笔国内差旅报销金额超过 12000 元需要谁审批？"
+
+uv run rag query \
+  --storage-root data/smoke_milvus \
+  --retrieval-profile asset \
+  --query "请计算华东区域 Q1 的开票量合计是多少？"
+```
+
+说明：当前 CLI 的 metadata 默认仍是本地 metadata repo，适合快速验证。正式端到端使用下面的 `Postgres + parquet object + Milvus` runtime 配置。
+
+## 真实 Postgres + Milvus 端到端
+
+用正式链路时，显式构造 `StorageConfig`：
+
+```python
+from pathlib import Path
+
+from rag import AssemblyRequest, CapabilityRequirements, RAGRuntime, StorageComponentConfig, StorageConfig
+from rag.ingest.pipeline import IngestRequest
+from rag.models.assembly_adapter import to_assembly_overrides
+from rag.models.runtime import resolve_runtime_config
+from rag.retrieval.models import QueryOptions
+from rag.schema.core import SourceType
+from rag.utils.text import load_env_file
+
+load_env_file(".env")
+
+run_id = "manual_run_v1"
+root = Path("data/manual_pq_milvus") / run_id
+schema = f"rag_{run_id}"
+collection_prefix = f"rag_{run_id}"
+
+cfg = resolve_runtime_config()
+storage = StorageConfig(
+    backend="postgres",
+    root=root,
+    metadata=StorageComponentConfig(
+        backend="postgres",
+        dsn="postgresql://leixiaoying:@127.0.0.1:5432/postgres",
+        namespace=schema,
+    ),
+    vectors=StorageComponentConfig(
+        backend="milvus",
+        dsn="http://127.0.0.1:19530",
+        collection=collection_prefix,
+    ),
+    cache=StorageComponentConfig(
+        backend="redis",
+        dsn="redis://127.0.0.1:6379/0",
+        namespace=collection_prefix,
+    ),
+    object_store=StorageComponentConfig(backend="local"),
+)
+
+request = AssemblyRequest(
+    requirements=CapabilityRequirements(
+        require_chat=True,
+        require_rerank=True,
+        allow_degraded=False,
+    ),
+    overrides=to_assembly_overrides(cfg),
+)
+
+with RAGRuntime.from_request(storage=storage, request=request) as runtime:
+    runtime.insert(
+        IngestRequest(
+            location="memory://manual/travel-policy",
+            source_type=SourceType.PLAIN_TEXT,
+            owner="manual",
+            title="差旅制度",
+            content_text="单笔国内差旅报销金额超过 12000 元时，必须由业务线 VP 审批。",
+        )
+    )
+
+    runtime.insert(
+        IngestRequest(
+            location="/absolute/path/to/开票量明细.xlsx",
+            source_type=SourceType.XLSX,
+            owner="manual",
+            title="开票量明细",
+            file_path=Path("/absolute/path/to/开票量明细.xlsx"),
+        )
+    )
+
+    result = runtime.query_public(
+        "请计算华东区域 Q1 的开票量合计是多少？",
+        options=QueryOptions(retrieval_profile="asset", top_k=6, retrieval_pool_k=12),
+    )
+    print(result.answer.answer_text)
+```
+
+检查真实后端：
+
+```bash
+uv run python - <<'PY'
+from pymilvus import connections, utility
+
+prefix = "rag_manual_run_v1"
+connections.connect(alias="check", uri="http://127.0.0.1:19530")
+try:
+    print([name for name in utility.list_collections(using="check") if name.startswith(prefix)])
+finally:
+    connections.disconnect("check")
+PY
+```
+
+## 测试命令
+
+完整测试：
+
+```bash
+uv run pytest -q
+```
+
+模型配置、CLI、registry：
+
+```bash
+uv run pytest \
+  tests/core/test_cli_runtime_model_loading.py \
+  tests/ui/test_cli.py \
+  tests/agent/test_llm_registry.py
+```
+
+表格计算、grounding、Postgres metadata：
+
+```bash
+uv run pytest \
+  tests/core/test_table_compute_integration.py \
+  tests/service/test_grounding_service.py \
+  tests/repo/test_postgres_metadata_repo.py
+```
+
+复杂 RAG / Agent 回归：
+
+```bash
+uv run pytest \
+  tests/agent/test_complex_agent_rag_loop.py \
+  tests/service/test_complex_rag_retrieval.py
+```
+
+最近一次完整结果：
+
+```text
+565 passed, 1 skipped, 2 warnings in 11.51s
+```
+
 ## 目录地图
 
 下面按文件解释主要代码。这里列的是源码里应该维护的文件，不包含 `__pycache__`、本地 `data/` 产物和一次性诊断输出。
@@ -709,282 +1030,6 @@ tests/
 │   └── test_telemetry_service.py      # telemetry service
 └── ui/
     └── test_cli.py                    # 主 CLI 测试
-```
-
-## 环境准备
-
-安装依赖：
-
-```bash
-uv sync
-```
-
-准备 `.env`：
-
-```bash
-cat > .env <<'EOF'
-DEEPSEEK_API_KEY=your_deepseek_key
-EOF
-```
-
-确认基础设施：
-
-```bash
-lsof -nP -iTCP:19530 -sTCP:LISTEN
-lsof -nP -iTCP:5432 -sTCP:LISTEN
-lsof -nP -iTCP:6379 -sTCP:LISTEN
-```
-
-默认本地端口：
-
-| 服务 | 端口 | 说明 |
-| --- | ---: | --- |
-| Milvus | `19530` | 向量索引 |
-| Milvus Web/metrics | `9091` | 已被 Milvus docker 占用，不要给 rerank 用 |
-| Postgres | `5432` | metadata |
-| Redis | `6379` | cache |
-| Embedding service | `9090` | `mlx-community/Qwen3-Embedding-8B-4bit-DWQ` |
-| Rerank service | `9092` | `BAAI/bge-reranker-v2-m3` |
-
-## 模型服务管理
-
-先检查是否已经有同模型服务，避免重复常驻占内存：
-
-```bash
-ps aux | rg -i 'embedding-service|rerank-service|Qwen3-Embedding|bge-reranker|mlx_lm|vllm|ollama|uvicorn' \
-  | rg -v 'rg -i|exec_command'
-
-lsof -nP -iTCP -sTCP:LISTEN \
-  | rg ':(8080|8081|8000|8001|9090|9091|9092|11434|19530|5432|6379)\b' || true
-```
-
-如果发现重复的 embedding/rerank 服务，先杀旧进程。不要杀 Milvus、Postgres、Redis：
-
-```bash
-kill <old_embedding_pid> <old_rerank_pid>
-```
-
-启动唯一一份 embedding 服务：
-
-```bash
-screen -S rag_embedding_9090 -X quit >/dev/null 2>&1 || true
-screen -dmS rag_embedding_9090 zsh -lc '
-cd /Users/leixiaoying/LLM/RAG学习 &&
-uv run rag embedding-service \
-  --model mlx-community/Qwen3-Embedding-8B-4bit-DWQ \
-  --port 9090
-'
-```
-
-启动唯一一份 rerank 服务：
-
-```bash
-screen -S rag_rerank_9092 -X quit >/dev/null 2>&1 || true
-screen -dmS rag_rerank_9092 zsh -lc '
-cd /Users/leixiaoying/LLM/RAG学习 &&
-uv run rag rerank-service \
-  --model BAAI/bge-reranker-v2-m3 \
-  --port 9092
-'
-```
-
-健康检查：
-
-```bash
-curl -sS http://127.0.0.1:9090/health
-curl -sS http://127.0.0.1:9092/health
-screen -ls
-```
-
-预期返回：
-
-```json
-{"model":"mlx-community/Qwen3-Embedding-8B-4bit-DWQ","embedding_space":"default","dimension":4096}
-{"model":"BAAI/bge-reranker-v2-m3"}
-```
-
-## CLI 快速验证
-
-CLI 会读取 `configs/models.yaml` 的默认模型。若已经启动 `9090/9092` 服务，可以通过 HTTP provider 复用常驻模型，避免 CLI 每次重新加载：
-
-```bash
-export RAG_EMBEDDING_SERVICE_URL=http://127.0.0.1:9090
-export RAG_RERANK_SERVICE_URL=http://127.0.0.1:9092
-```
-
-文本入库：
-
-```bash
-uv run rag ingest \
-  --storage-root data/smoke_milvus \
-  --source-type plain_text \
-  --location memory://smoke/travel-policy \
-  --title "差旅制度 Smoke" \
-  --owner smoke \
-  --content "单笔国内差旅报销金额超过 12000 元时，必须由业务线 VP 审批。"
-```
-
-Excel 入库：
-
-```bash
-uv run rag ingest \
-  --storage-root data/smoke_milvus \
-  --source-type xlsx \
-  --location /absolute/path/to/开票量明细.xlsx \
-  --title "开票量明细" \
-  --owner smoke
-```
-
-查询：
-
-```bash
-uv run rag query \
-  --storage-root data/smoke_milvus \
-  --retrieval-profile auto \
-  --query "单笔国内差旅报销金额超过 12000 元需要谁审批？"
-
-uv run rag query \
-  --storage-root data/smoke_milvus \
-  --retrieval-profile asset \
-  --query "请计算华东区域 Q1 的开票量合计是多少？"
-```
-
-说明：当前 CLI 的 metadata 默认仍是本地 metadata repo，适合快速验证。正式端到端使用下面的 `Postgres + parquet object + Milvus` runtime 配置。
-
-## 真实 Postgres + Milvus 端到端
-
-用正式链路时，显式构造 `StorageConfig`：
-
-```python
-from pathlib import Path
-
-from rag import AssemblyRequest, CapabilityRequirements, RAGRuntime, StorageComponentConfig, StorageConfig
-from rag.ingest.pipeline import IngestRequest
-from rag.models.assembly_adapter import to_assembly_overrides
-from rag.models.runtime import resolve_runtime_config
-from rag.retrieval.models import QueryOptions
-from rag.schema.core import SourceType
-from rag.utils.text import load_env_file
-
-load_env_file(".env")
-
-run_id = "manual_run_v1"
-root = Path("data/manual_pq_milvus") / run_id
-schema = f"rag_{run_id}"
-collection_prefix = f"rag_{run_id}"
-
-cfg = resolve_runtime_config()
-storage = StorageConfig(
-    backend="postgres",
-    root=root,
-    metadata=StorageComponentConfig(
-        backend="postgres",
-        dsn="postgresql://leixiaoying:@127.0.0.1:5432/postgres",
-        namespace=schema,
-    ),
-    vectors=StorageComponentConfig(
-        backend="milvus",
-        dsn="http://127.0.0.1:19530",
-        collection=collection_prefix,
-    ),
-    cache=StorageComponentConfig(
-        backend="redis",
-        dsn="redis://127.0.0.1:6379/0",
-        namespace=collection_prefix,
-    ),
-    object_store=StorageComponentConfig(backend="local"),
-)
-
-request = AssemblyRequest(
-    requirements=CapabilityRequirements(
-        require_chat=True,
-        require_rerank=True,
-        allow_degraded=False,
-    ),
-    overrides=to_assembly_overrides(cfg),
-)
-
-with RAGRuntime.from_request(storage=storage, request=request) as runtime:
-    runtime.insert(
-        IngestRequest(
-            location="memory://manual/travel-policy",
-            source_type=SourceType.PLAIN_TEXT,
-            owner="manual",
-            title="差旅制度",
-            content_text="单笔国内差旅报销金额超过 12000 元时，必须由业务线 VP 审批。",
-        )
-    )
-
-    runtime.insert(
-        IngestRequest(
-            location="/absolute/path/to/开票量明细.xlsx",
-            source_type=SourceType.XLSX,
-            owner="manual",
-            title="开票量明细",
-            file_path=Path("/absolute/path/to/开票量明细.xlsx"),
-        )
-    )
-
-    result = runtime.query_public(
-        "请计算华东区域 Q1 的开票量合计是多少？",
-        options=QueryOptions(retrieval_profile="asset", top_k=6, retrieval_pool_k=12),
-    )
-    print(result.answer.answer_text)
-```
-
-检查真实后端：
-
-```bash
-uv run python - <<'PY'
-from pymilvus import connections, utility
-
-prefix = "rag_manual_run_v1"
-connections.connect(alias="check", uri="http://127.0.0.1:19530")
-try:
-    print([name for name in utility.list_collections(using="check") if name.startswith(prefix)])
-finally:
-    connections.disconnect("check")
-PY
-```
-
-## 测试命令
-
-完整测试：
-
-```bash
-uv run pytest -q
-```
-
-模型配置、CLI、registry：
-
-```bash
-uv run pytest \
-  tests/core/test_cli_runtime_model_loading.py \
-  tests/ui/test_cli.py \
-  tests/agent/test_llm_registry.py
-```
-
-表格计算、grounding、Postgres metadata：
-
-```bash
-uv run pytest \
-  tests/core/test_table_compute_integration.py \
-  tests/service/test_grounding_service.py \
-  tests/repo/test_postgres_metadata_repo.py
-```
-
-复杂 RAG / Agent 回归：
-
-```bash
-uv run pytest \
-  tests/agent/test_complex_agent_rag_loop.py \
-  tests/service/test_complex_rag_retrieval.py
-```
-
-最近一次完整结果：
-
-```text
-565 passed, 1 skipped, 2 warnings in 11.51s
 ```
 
 ## 运行注意事项
