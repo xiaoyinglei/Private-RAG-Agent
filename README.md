@@ -1,8 +1,8 @@
 <div align="center">
 
-# 企业知识 RAG 与 Agent 编排系统
+# 面向私有业务文档的本地知识 Agent
 
-面向企业私有知识库的 evidence-first RAG 与 LangGraph Agent 编排项目。
+面向私有知识库的 evidence-first RAG 与 LangGraph Agent 编排项目。
 
 <p>
   <img src="https://img.shields.io/badge/Python-3.12-3776AB?style=for-the-badge&logo=python&logoColor=white" alt="Python 3.12">
