@@ -52,31 +52,25 @@
 ## 系统流程
 
 ```mermaid
-flowchart LR
-    A["原始文件"] --> B["Parser"]
-    B --> C["Document / SectionRecord / AssetRecord"]
-    C --> D["SectionRefiner token 窗口"]
-    D --> E["Doc / Section / Asset summaries"]
-    E --> F["Embedding"]
-    F --> G["Milvus summary indexes"]
-    G --> H["Planning"]
-    H --> I["Retrieval / Rerank"]
-    I --> J["Grounding / Asset resolution / Table SQL"]
-    J --> K["EvidenceItem"]
-    K --> L["Synthesis with citations"]
+%%{init: {"theme": "base", "themeVariables": {"fontSize": "11px", "primaryColor": "#f8fafc", "primaryTextColor": "#0f172a", "primaryBorderColor": "#cbd5e1", "lineColor": "#94a3b8", "clusterBkg": "#ffffff", "clusterBorder": "#e2e8f0"}, "flowchart": {"nodeSpacing": 18, "rankSpacing": 22, "curve": "basis", "padding": 4}} }%%
+flowchart TB
+    subgraph RAG["RAG pipeline"]
+        direction LR
+        r1["文件"] --> r2["解析"] --> r3["切片"] --> r4["摘要"] --> r5["向量"] --> r6["检索"] --> r7["证据"] --> r8["回答"]
+    end
+
+    subgraph AG["Agent orchestration"]
+        direction LR
+        a1["定义"] --> a2["工具"] --> a3["预算"] --> a4["图执行"] --> a5["子任务"] --> a6["结果"]
+    end
+
+    classDef rag fill:#eef6ff,stroke:#7aa7d9,color:#0f172a;
+    classDef agent fill:#f4f0ff,stroke:#a78bfa,color:#0f172a;
+    class r1,r2,r3,r4,r5,r6,r7,r8 rag;
+    class a1,a2,a3,a4,a5,a6 agent;
 ```
 
-Agent 编排层运行在 RAG 能力之上：
-
-```mermaid
-flowchart LR
-    A["AgentDefinition"] --> B["ToolSpec / ToolRegistry"]
-    B --> C["AgentRunConfig / BudgetLedger"]
-    C --> D["AgentState reducers"]
-    D --> E["LangGraph route / plan / execute / evaluate / synthesize"]
-    E --> F["TaskDAG + Send() 子任务并行"]
-    F --> G["AgentRunResult"]
-```
+RAG 负责把原始资料变成可引用证据，Agent 运行在 RAG 能力之上，用工具契约、预算和 LangGraph 状态流转处理复杂任务。
 
 ## 架构总览
 
