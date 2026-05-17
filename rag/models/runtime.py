@@ -5,7 +5,6 @@ from dataclasses import dataclass
 from rag.models.catalog import ModelCatalog
 from rag.models.config import ModelCapability, ModelRuntimeConfig, ModelSpec
 
-
 _DISABLED_RERANKER_ALIASES = {"", "none", "null", "off", "false"}
 
 
@@ -45,6 +44,7 @@ def resolve_runtime_config(
         embedding_model=embedding_model,
         reranker_model=reranker_model,
         generation=catalog.generation,
+        tokenizer=catalog.tokenizer,
     )
 
 

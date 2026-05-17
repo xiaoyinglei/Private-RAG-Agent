@@ -35,14 +35,15 @@ RESEARCH_AGENT = AgentDefinition(
     agent_type="research",
     description="Deep single-topic research with grounded evidence and citations.",
     system_prompt=RESEARCH_AGENT_SYSTEM_PROMPT,
+    # TODO: agent_* / rag_* / llm_* tool names must match ToolRegistry registration.
     allowed_tools=[
         "vector_search",
         "keyword_search",
         "grounding",
         "rerank",
         "llm_summarize",
-        "rag_search_answer",
     ],
+    # TODO: migrate estimated_token_budget / max_iterations / max_depth to runtime config
     estimated_token_budget=10000,
     model_selection=ModelSelectionPolicy(thinking=True),
     max_iterations=10,

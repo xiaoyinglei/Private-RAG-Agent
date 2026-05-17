@@ -6,8 +6,6 @@ from enum import StrEnum
 from pydantic import BaseModel, ConfigDict, Field
 
 
-
-
 class PageRangeConstraint(BaseModel):
     model_config = ConfigDict(frozen=True)
 
@@ -182,7 +180,7 @@ class KnowledgeArtifact(BaseModel):
     title: str
     supported_evidence_ids: list[str]
     confidence: float | None = None
-    status: ArtifactStatus
+    status: ArtifactStatus | None = None
     last_reviewed_at: datetime
     body_markdown: str
     source_scope: list[str] = Field(default_factory=list)

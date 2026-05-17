@@ -60,6 +60,13 @@ models:
     model: mlx-community/Qwen3-Embedding-8B-4bit-DWQ
     embedding_space: mlx/Qwen3-Embedding-8B-4bit-DWQ
 
+  qwen3_embedding_4b_4bit_dwq:
+    capability: embedding
+    provider: qwen
+    protocol: mlx_embedding
+    model: mlx-community/Qwen3-Embedding-4B-4bit-DWQ
+    embedding_space: mlx/Qwen3-Embedding-4B-4bit-DWQ
+
   bge_reranker_v2_m3:
     capability: reranker
     provider: bge
@@ -74,7 +81,7 @@ models:
 
 defaults:
   primary_model: deepseek_v4_flash
-  embedding_model: qwen3_embedding_8b_4bit_dwq
+  embedding_model: qwen3_embedding_4b_4bit_dwq
   reranker_model: bge_reranker_v2_m3
 
 generation:
@@ -102,3 +109,11 @@ generation:
     model: deepseek_v4_flash
     max_tokens: 2048
     temperature: 0.1
+
+tokenizer:
+  tokenizer_backend: auto
+  chunk_token_size: 480
+  chunk_overlap_tokens: 64
+  max_context_tokens: 4096
+  prompt_reserved_tokens: 256
+  local_files_only: true

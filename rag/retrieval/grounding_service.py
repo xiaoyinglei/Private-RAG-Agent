@@ -14,6 +14,7 @@ from typing import Any, Protocol, cast
 from rag.ingest.asset_anchors import asset_anchor
 from rag.schema.core import AssetRecord, LayoutMetaCacheRecord, SectionRecord
 from rag.schema.query import EvidenceItem, GroundingTarget
+from rag.utils.guard import CircuitBreaker
 from rag.utils.text import DEFAULT_TOKENIZER_FALLBACK_MODEL, keyword_overlap, search_terms
 
 MAX_COMPUTE_BLOCK_TOKENS = 1_500
@@ -24,12 +25,6 @@ class _TokenAccounting(Protocol):
     def count(self, text: str) -> int: ...
     def clip(self, text: str, token_budget: int, *, add_ellipsis: bool = ...) -> str: ...
     def chunk_text(self, text: str, *, chunk_token_size: int, chunk_overlap_tokens: int) -> list[str]: ...
-
-
-class _CircuitBreaker(Protocol):
-    def allow(self) -> bool: ...
-    def on_failure(self) -> None: ...
-    def on_success(self) -> None: ...
 
 
 _logger = logging.getLogger("rag.grounding")
@@ -121,7 +116,7 @@ class GroundingService:
     token_accounting: _TokenAccounting = field(default_factory=_default_token_accounting)
     budgets: GroundingBudgets = field(default_factory=GroundingBudgets)
     rerank_binding: _RerankBinding | object | None = None
-    s3_circuit_breaker: _CircuitBreaker | None = None
+    s3_circuit_breaker: CircuitBreaker | None = None
     _executor: ThreadPoolExecutor | None = field(default=None, init=False, repr=False)
     _semaphore: BoundedSemaphore | None = field(default=None, init=False, repr=False)
 

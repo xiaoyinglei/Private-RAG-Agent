@@ -5,7 +5,7 @@ from collections.abc import Sequence
 from typing import Any
 
 import httpx
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 
 class EmbeddingHealthResponse(BaseModel):
@@ -60,12 +60,23 @@ class EmbeddingHttpClient:
 
     # ── Embedder protocol ──
 
+    # Server-side max batch size (matching embedding-service _MAX_BATCH_SIZE).
+    _SERVER_MAX_BATCH = 32
+
     def embed(self, texts: Sequence[str], **kwargs: Any) -> list[list[float]]:
         if not texts:
             return []
 
         mode = str(kwargs.get("mode", "document"))
         batch_size = kwargs.get("batch_size")
+
+        # Split into chunks if the batch exceeds the server limit.
+        if len(texts) > self._SERVER_MAX_BATCH:
+            all_vectors: list[list[float]] = []
+            for offset in range(0, len(texts), self._SERVER_MAX_BATCH):
+                chunk = texts[offset : offset + self._SERVER_MAX_BATCH]
+                all_vectors.extend(self.embed(chunk, mode=mode, batch_size=batch_size))
+            return all_vectors
 
         request_body = EmbeddingRequest(
             texts=list(texts),

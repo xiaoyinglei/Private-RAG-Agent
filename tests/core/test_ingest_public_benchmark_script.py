@@ -124,7 +124,7 @@ def test_ingest_script_passes_chat_model_override_for_graph_extraction(
             "--variant",
             "mini",
             "--chat-provider",
-            "local-hf",
+            "openai-compatible",
             "--chat-model",
             "Qwen3-14B-4bit",
             "--chat-model-path",
@@ -136,7 +136,7 @@ def test_ingest_script_passes_chat_model_override_for_graph_extraction(
 
     assert exit_code == 0
     assert captured["require_chat"] is True
-    assert captured["chat_provider_kind"] == "local-hf"
+    assert captured["chat_provider_kind"] == "openai-compatible"
     assert captured["chat_model"] == "Qwen3-14B-4bit"
     assert captured["chat_model_path"] == "/models/Qwen3-14B-4bit"
     assert captured["chat_backend"] == "mlx"

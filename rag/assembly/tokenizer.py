@@ -9,35 +9,8 @@ from typing import Any
 from rag.utils.text import (
     DEFAULT_TOKENIZER_FALLBACK_MODEL,
     _token_unit_spans,
-    load_env_file,
     text_unit_count,
 )
-
-
-def _env_int(name: str, default: int) -> int:
-    import os
-
-    value = os.environ.get(name)
-    if value is None or not value.strip():
-        return default
-    try:
-        return int(value.strip())
-    except ValueError:
-        return default
-
-
-def _env_bool(name: str, default: bool) -> bool:
-    import os
-
-    value = os.environ.get(name)
-    if value is None or not value.strip():
-        return default
-    lowered = value.strip().lower()
-    if lowered in {"1", "true", "yes", "on"}:
-        return True
-    if lowered in {"0", "false", "no", "off"}:
-        return False
-    return default
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,49 +24,6 @@ class TokenizerContract:
     max_context_tokens: int = 1024
     prompt_reserved_tokens: int = 256
     local_files_only: bool = True
-
-    @classmethod
-    def from_env(
-        cls,
-        *,
-        embedding_model_name: str,
-        default_context_tokens: int = 1024,
-        default_chunk_token_size: int = 480,
-        default_chunk_overlap_tokens: int = 64,
-        default_prompt_reserved_tokens: int = 256,
-    ) -> TokenizerContract:
-        import os
-
-        load_env_file()
-        locked_embedding_model = (
-            os.environ.get("RAG_EMBEDDING_MODEL")
-            or os.environ.get("RAG_INDEX_EMBEDDING_MODEL")
-            or embedding_model_name
-            or DEFAULT_TOKENIZER_FALLBACK_MODEL
-        )
-        tokenizer_model_name = (
-            os.environ.get("RAG_TOKENIZER_MODEL")
-            or os.environ.get("RAG_BUDGET_TOKENIZER_MODEL")
-            or locked_embedding_model
-            or DEFAULT_TOKENIZER_FALLBACK_MODEL
-        )
-        chunking_tokenizer_model_name = (
-            os.environ.get("RAG_CHUNKING_TOKENIZER_MODEL")
-            or os.environ.get("RAG_DOCLING_TOKENIZER_MODEL")
-            or tokenizer_model_name
-            or DEFAULT_TOKENIZER_FALLBACK_MODEL
-        )
-        return cls(
-            embedding_model_name=locked_embedding_model,
-            tokenizer_model_name=tokenizer_model_name,
-            chunking_tokenizer_model_name=chunking_tokenizer_model_name,
-            tokenizer_backend=os.environ.get("RAG_TOKENIZER_BACKEND", "auto").strip().lower() or "auto",
-            chunk_token_size=max(32, _env_int("RAG_CHUNK_TOKEN_SIZE", default_chunk_token_size)),
-            chunk_overlap_tokens=max(0, _env_int("RAG_CHUNK_OVERLAP_TOKENS", default_chunk_overlap_tokens)),
-            max_context_tokens=max(64, _env_int("RAG_MAX_CONTEXT_TOKENS", default_context_tokens)),
-            prompt_reserved_tokens=max(32, _env_int("RAG_PROMPT_RESERVED_TOKENS", default_prompt_reserved_tokens)),
-            local_files_only=_env_bool("RAG_TOKENIZER_LOCAL_FILES_ONLY", True),
-        )
 
     def normalized_chunk_overlap_tokens(self) -> int:
         return min(self.chunk_overlap_tokens, max(self.chunk_token_size - 1, 0))

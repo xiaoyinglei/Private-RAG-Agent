@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 from typing import TYPE_CHECKING
 
-from rag.assembly.models import AssemblyOverrides, ProviderConfig
+from rag.assembly.models import AssemblyOverrides, ProviderConfig, TokenizerConfig
 from rag.models.config import GenerationTaskConfig, ModelRuntimeConfig, ModelSpec
 
 if TYPE_CHECKING:
@@ -36,10 +36,26 @@ def to_assembly_overrides(config: ModelRuntimeConfig) -> AssemblyOverrides:
     ONLY converts configuration — does NOT create provider instances.
     Provider instantiation stays in rag.assembly.support.build_provider.
     """
+    tokenizer_config = config.tokenizer
     return AssemblyOverrides(
         chat=_to_chat_provider_config(config.primary_model),
         embedding=_to_embedding_provider_config(config.embedding_model),
         rerank=_to_reranker_provider_config(config.reranker_model),
+        tokenizer=TokenizerConfig(
+            tokenizer_backend=tokenizer_config.tokenizer_backend,
+            chunk_token_size=tokenizer_config.chunk_token_size,
+            chunk_overlap_tokens=tokenizer_config.chunk_overlap_tokens,
+            max_context_tokens=tokenizer_config.max_context_tokens,
+            prompt_reserved_tokens=tokenizer_config.prompt_reserved_tokens,
+            local_files_only=tokenizer_config.local_files_only,
+        ) if (
+            tokenizer_config.tokenizer_backend is not None
+            or tokenizer_config.chunk_token_size is not None
+            or tokenizer_config.chunk_overlap_tokens is not None
+            or tokenizer_config.max_context_tokens is not None
+            or tokenizer_config.prompt_reserved_tokens is not None
+            or tokenizer_config.local_files_only is not None
+        ) else None,
     )
 
 

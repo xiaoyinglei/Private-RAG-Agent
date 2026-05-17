@@ -7,7 +7,7 @@ from typing import Any, Literal
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
-_MAX_BATCH_SIZE = 64
+_MAX_BATCH_SIZE = 32
 _MAX_REQUEST_BYTES = 10 * 1024 * 1024  # 10 MB
 _REQUEST_BODY_LIMIT = _MAX_REQUEST_BYTES
 

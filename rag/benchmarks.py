@@ -5,6 +5,7 @@ import gzip
 import io
 import json
 import math
+import os
 import random
 import statistics
 import time
@@ -15,6 +16,7 @@ from contextlib import ExitStack, redirect_stderr, redirect_stdout
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import TYPE_CHECKING, cast
 
 import httpx
 from datasets import load_dataset
@@ -32,7 +34,6 @@ from rag.schema.runtime import (
     DataContractMetadataRepo,
     RuntimeMode,
 )
-from typing import TYPE_CHECKING, cast
 
 if TYPE_CHECKING:
     from typing import Literal
@@ -407,7 +408,10 @@ class RetrievalBenchmarkEvaluator:
                     query_record.query_text,
                     access_policy=self.access_policy,
                     query_options=QueryOptions(
-                        retrieval_profile=cast("Literal['bypass', 'fast', 'auto', 'deep', 'asset']", self.retrieval_profile),
+                        retrieval_profile=cast(
+                            "Literal['bypass', 'fast', 'auto', 'deep', 'asset']",
+                            self.retrieval_profile,
+                        ),
                         top_k=self.top_k,
                         evidence_top_k=self.evidence_top_k,
                         retrieval_pool_k=self.retrieval_pool_k,
@@ -1656,7 +1660,7 @@ def build_runtime_for_benchmark(
     model_config = to_assembly_overrides(resolve_runtime_config(RuntimeOverrides()))
     chat_override = (
         ProviderConfig(
-            provider_kind=chat_provider_kind or ("local-hf" if chat_model_path is not None else "ollama"),
+            provider_kind=chat_provider_kind or "ollama",
             location="local",
             chat_model=chat_model,
             chat_model_path=chat_model_path,
@@ -1669,6 +1673,38 @@ def build_runtime_for_benchmark(
         embedding=model_config.embedding if embedding_override is None else None,
         chat=model_config.chat if require_chat and chat_override is None else None,
         rerank=model_config.rerank if require_rerank and rerank_override is None else None,
+    )
+
+    # ── service URL env vars → pre-built HTTP providers (env > YAML) ──
+    _embedding_service_url = os.environ.get("RAG_EMBEDDING_SERVICE_URL", "").strip()
+    _rerank_service_url = os.environ.get("RAG_RERANK_SERVICE_URL", "").strip()
+    _http_embedding_provider: object | None = None
+    _http_rerank_provider: object | None = None
+
+    if _embedding_service_url:
+        from rag.assembly.support import _CompositeProvider  # noqa: F811
+        from rag.providers.embedding_http import EmbeddingHttpClient
+
+        _http_embedding_provider = _CompositeProvider(
+            provider_name="embedding-http",
+            embedder=EmbeddingHttpClient(base_url=_embedding_service_url),
+        )
+    if _rerank_service_url:
+        from rag.assembly.support import _CompositeProvider  # noqa: F811
+        from rag.providers.rerank_http import RerankHttpClient
+
+        _http_rerank_provider = _CompositeProvider(
+            provider_name="rerank-http",
+            reranker=RerankHttpClient(base_url=_rerank_service_url),
+        )
+
+    _has_override = (
+        embedding_override is not None
+        or rerank_override is not None
+        or chat_override is not None
+        or tokenizer_override is not None
+        or _http_embedding_provider is not None
+        or _http_rerank_provider is not None
     )
     request = AssemblyRequest(
         requirements=CapabilityRequirements(
@@ -1683,11 +1719,10 @@ def build_runtime_for_benchmark(
                 rerank=rerank_override,
                 chat=chat_override,
                 tokenizer=tokenizer_override,
+                embedding_provider=_http_embedding_provider,
+                rerank_provider=_http_rerank_provider,
             )
-            if embedding_override is not None
-            or rerank_override is not None
-            or chat_override is not None
-            or tokenizer_override is not None
+            if _has_override
             else None
         ),
     )
@@ -1703,9 +1738,24 @@ def build_runtime_for_benchmark(
         request=request,
         assembly_service=assembly_service,
     )
-    if summary_model is not None or summary_model_path is not None or summary_provider_kind is not None:
+    if summary_provider_kind == "none":
+        from rag.ingest.retrievalsummarizer import RetrievalSummarizer, RetrievalSummaryConfig
+
+        class _RawTextLLMClient:
+            def generate_text(self, *, prompt: str, **kwargs: object) -> str:
+                raise RuntimeError("LLM generation is disabled (summary_provider=none)")
+
+        raw_config = RetrievalSummaryConfig(raw_text_mode=True)
+        runtime.ingest_pipeline.configure_summarizer(
+            RetrievalSummarizer(
+                llm_client=_RawTextLLMClient(),
+                config=raw_config,
+                token_accounting=runtime.token_accounting,
+            )
+        )
+    elif summary_model is not None or summary_model_path is not None or summary_provider_kind is not None:
         runtime.configure_summary_generator(
-            provider_kind=summary_provider_kind or ("local-hf" if summary_model_path is not None else "ollama"),
+            provider_kind=summary_provider_kind or "ollama",
             model=summary_model,
             model_path=summary_model_path,
             backend=summary_backend,

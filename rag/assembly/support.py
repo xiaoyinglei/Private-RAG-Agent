@@ -13,10 +13,8 @@ from rag.assembly.models import (
 )
 from rag.providers.fallback import FallbackEmbeddingRepo
 from rag.providers.huggingface.embedder import BgeM3Embedder, HuggingFaceEmbedder
-from rag.providers.huggingface.generator import HuggingFaceGenerator
 from rag.providers.huggingface.rerank import FlagEmbeddingReranker
 from rag.providers.mlx.embedder import MLXEmbedder
-from rag.providers.mlx.generator import MLXGenerator
 from rag.providers.ollama.embedder import OllamaEmbedder
 from rag.providers.ollama.generator import OllamaGenerator
 
@@ -304,22 +302,6 @@ def compatibility_config_from_environment() -> tuple[AssemblyConfig, dict[str, s
         "local_bge_rerank_batch_size",
         env_int("PKP_LOCAL_BGE__RERANK_BATCH_SIZE", "RAG_LOCAL_BGE_RERANK_BATCH_SIZE"),
     )
-    local_hf_chat_model = remember(
-        "local_hf_chat_model",
-        first_env("RAG_LOCAL_HF_CHAT_MODEL", "PKP_LOCAL_HF__CHAT_MODEL"),
-    )
-    local_hf_chat_model_path = remember(
-        "local_hf_chat_model_path",
-        first_env("RAG_LOCAL_HF_CHAT_MODEL_PATH", "PKP_LOCAL_HF__CHAT_MODEL_PATH"),
-    )
-    local_hf_chat_backend = remember(
-        "local_hf_chat_backend",
-        first_env("RAG_LOCAL_HF_CHAT_BACKEND", "PKP_LOCAL_HF__CHAT_BACKEND"),
-    )
-    local_hf_chat_device = remember(
-        "local_hf_chat_device",
-        first_env("RAG_LOCAL_HF_CHAT_DEVICE", "PKP_LOCAL_HF__CHAT_DEVICE"),
-    )
     local_bge_allowed = (str(local_bge_enabled).lower() if local_bge_enabled is not None else "") not in {
         "0",
         "false",
@@ -353,40 +335,10 @@ def compatibility_config_from_environment() -> tuple[AssemblyConfig, dict[str, s
                 ),
             )
         )
-    if local_hf_chat_model or local_hf_chat_model_path:
-        profiles.append(
-            ProviderConfig(
-                profile_id="local-hf-chat",
-                provider_kind="local-hf",
-                location="local",
-                label=f"Local HF Chat / {local_hf_chat_model or local_hf_chat_model_path or 'custom'}",
-                chat_model=None if local_hf_chat_model is None else str(local_hf_chat_model),
-                chat_model_path=None if local_hf_chat_model_path is None else str(local_hf_chat_model_path),
-                chat_backend=None if local_hf_chat_backend is None else str(local_hf_chat_backend),
-                device=None if local_hf_chat_device is None else str(local_hf_chat_device),
-            )
-        )
+    # local-hf provider removed; all models are cloud or OpenAI-compatible now.
 
-    tokenizer_config = TokenizerConfig(
-        embedding_model_name=first_env(
-            "RAG_EMBEDDING_MODEL",
-            "RAG_INDEX_EMBEDDING_MODEL",
-        ),
-        tokenizer_model_name=first_env(
-            "RAG_TOKENIZER_MODEL",
-            "RAG_BUDGET_TOKENIZER_MODEL",
-        ),
-        chunking_tokenizer_model_name=first_env(
-            "RAG_CHUNKING_TOKENIZER_MODEL",
-            "RAG_DOCLING_TOKENIZER_MODEL",
-        ),
-        tokenizer_backend=first_env("RAG_TOKENIZER_BACKEND"),
-        chunk_token_size=env_int("RAG_CHUNK_TOKEN_SIZE"),
-        chunk_overlap_tokens=env_int("RAG_CHUNK_OVERLAP_TOKENS"),
-        max_context_tokens=env_int("RAG_MAX_CONTEXT_TOKENS"),
-        prompt_reserved_tokens=env_int("RAG_PROMPT_RESERVED_TOKENS"),
-        local_files_only=env_bool("RAG_TOKENIZER_LOCAL_FILES_ONLY"),
-    )
+    # Tokenizer config comes from models.yaml + assembly defaults, not env vars.
+    tokenizer_config = TokenizerConfig()
     return AssemblyConfig(profiles=tuple(profiles), tokenizer=tokenizer_config), compatibility_inputs
 
 
@@ -556,32 +508,6 @@ def build_provider(provider_config: ProviderConfig) -> object:
             provider_name="ollama",
             generator=generator,
             embedder=embedder,
-        )
-    if kind == "local-hf":
-        model_ref = first_non_blank(provider_config.chat_model, provider_config.chat_model_path)
-        if model_ref is None:
-            return _UnavailableProvider(
-                provider_name="local-hf",
-                reason="local-hf provider requires chat_model or chat_model_path",
-            )
-        backend = (provider_config.chat_backend or "huggingface").strip().lower()
-        if backend == "mlx":
-            generator = MLXGenerator(model_name_or_path=model_ref)
-        elif backend in {"huggingface", "hf", "transformers", ""}:
-            generator = HuggingFaceGenerator(
-                model_name_or_path=model_ref,
-                device=provider_config.device,
-                local_files_only=True,
-            )
-        else:
-            return _UnavailableProvider(
-                provider_name="local-hf",
-                reason=f"Unsupported local-hf chat backend: {provider_config.chat_backend!r}",
-                chat_model_name=model_ref,
-            )
-        return _CompositeProvider(
-            provider_name="local-hf",
-            generator=generator,
         )
     if kind == "mlx-embedding":
         embedding_model_ref = first_non_blank(

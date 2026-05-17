@@ -3,7 +3,7 @@ from __future__ import annotations
 from rag.agent.core.task import SubTaskNode, SubTaskResult, SubTaskStatus
 from rag.retrieval.models import ContextEvidence
 from rag.schema.core import PartitionKey, StorageTier
-from rag.schema.query import EvidenceItem
+from rag.schema.query import ArtifactStatus, EvidenceItem, KnowledgeArtifact
 
 
 def test_context_evidence_extends_evidence_item_contract() -> None:
@@ -62,3 +62,26 @@ def test_partition_key_is_independent_index_layer_enum() -> None:
     assert PartitionKey.HOT is not StorageTier.HOT
     assert PartitionKey.HOT.value == StorageTier.HOT.value
     assert PartitionKey.COLD.value == "cold"
+
+
+def test_knowledge_artifact_status_is_backward_compatible_optional_field() -> None:
+    artifact = KnowledgeArtifact(
+        artifact_id="artifact-1",
+        artifact_type="note",
+        title="Evidence note",
+        supported_evidence_ids=["ev-1"],
+        last_reviewed_at="2026-05-17T00:00:00Z",
+        body_markdown="Supported by evidence.",
+    )
+    legacy_artifact = KnowledgeArtifact(
+        artifact_id="artifact-2",
+        artifact_type="note",
+        title="Approved evidence note",
+        supported_evidence_ids=["ev-1"],
+        status=ArtifactStatus.APPROVED,
+        last_reviewed_at="2026-05-17T00:00:00Z",
+        body_markdown="Supported by evidence.",
+    )
+
+    assert artifact.status is None
+    assert legacy_artifact.status is ArtifactStatus.APPROVED

@@ -492,7 +492,7 @@ def test_build_runtime_for_benchmark_accepts_chat_and_rerank_overrides(
         runtime.close()
 
 
-def test_build_runtime_for_benchmark_accepts_local_hf_chat_overrides(
+def test_build_runtime_for_benchmark_accepts_chat_overrides(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -517,7 +517,7 @@ def test_build_runtime_for_benchmark_accepts_local_hf_chat_overrides(
         storage_root=tmp_path / "benchmarks" / "medical_retrieval" / "index",
         require_chat=True,
         require_rerank=False,
-        chat_provider_kind="local-hf",
+        chat_provider_kind="ollama",
         chat_model_path="/models/Qwen3-14B-4bit",
         chat_backend="mlx",
     )
@@ -526,7 +526,7 @@ def test_build_runtime_for_benchmark_accepts_local_hf_chat_overrides(
         overrides = request.overrides
         assert overrides is not None
         assert overrides.chat is not None
-        assert overrides.chat.provider_kind == "local-hf"
+        assert overrides.chat.provider_kind == "ollama"
         assert overrides.chat.chat_model_path == "/models/Qwen3-14B-4bit"
         assert overrides.chat.chat_backend == "mlx"
     finally:
@@ -561,7 +561,7 @@ def test_build_runtime_for_benchmark_configures_summary_model_without_requiring_
         storage_root=tmp_path / "benchmarks" / "medical_retrieval" / "index",
         require_chat=False,
         require_rerank=False,
-        summary_provider_kind="local-hf",
+        summary_provider_kind="ollama",
         summary_model_path="/models/Qwen3-8B-MLX-4bit",
         summary_backend="mlx",
     )
@@ -570,7 +570,7 @@ def test_build_runtime_for_benchmark_configures_summary_model_without_requiring_
         assert request.requirements.require_chat is False
         assert request.overrides is None or request.overrides.chat is None
         assert captured["summary_generator"] == {
-            "provider_kind": "local-hf",
+            "provider_kind": "ollama",
             "model": None,
             "model_path": "/models/Qwen3-8B-MLX-4bit",
             "backend": "mlx",

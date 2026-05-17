@@ -200,3 +200,73 @@ def test_table_sampler_keeps_full_shape_when_only_sample_rows_are_profiled() -> 
     assert profile.estimated_tokens > 10
     assert "Table shape: rows=100, columns=4" in profile.summary_sample
     assert "2 more columns" in profile.summary_sample
+
+
+def test_raw_text_mode_returns_section_text_directly() -> None:
+    summarizer = RetrievalSummarizer(
+        llm_client=_RecordingGenerator(""),
+        config=RetrievalSummaryConfig(raw_text_mode=True),
+        token_accounting=_WordTokenAccounting(),
+    )
+    section = ParsedSection(
+        toc_path=("Policy",),
+        heading_level=1,
+        page_range=None,
+        order_index=0,
+        text="单笔差旅报销超过 12000 元时，必须由业务线 VP 审批。",
+        char_range_start=0,
+        char_range_end=30,
+    )
+    result = summarizer.summarize_section_with_metadata(section, "差旅制度")
+    assert result.method == "raw_text"
+    assert result.provider_name is None
+    assert result.model_name is None
+    assert "差旅报销" in result.text
+    assert "12000 元" in result.text
+
+
+def test_raw_text_mode_does_not_call_llm_for_section() -> None:
+    generator = _RecordingGenerator("ignored")
+    summarizer = RetrievalSummarizer(
+        llm_client=generator,
+        config=RetrievalSummaryConfig(raw_text_mode=True),
+    )
+    section = ParsedSection(
+        toc_path=("Policy",),
+        heading_level=1,
+        page_range=None,
+        text="some text",
+        order_index=0,
+        char_range_start=0,
+        char_range_end=9,
+    )
+    summarizer.summarize_section_with_metadata(section, "doc")
+    assert len(generator.prompts) == 0
+
+
+def test_raw_text_mode_does_not_call_llm_for_doc() -> None:
+    generator = _RecordingGenerator("ignored")
+    summarizer = RetrievalSummarizer(
+        llm_client=generator,
+        config=RetrievalSummaryConfig(raw_text_mode=True),
+    )
+    summarizer.summarize_doc_with_metadata(
+        document_title="test doc",
+        section_summaries=["s1"],
+    )
+    assert len(generator.prompts) == 0
+
+
+def test_raw_text_mode_does_not_call_llm_for_asset() -> None:
+    generator = _RecordingGenerator("ignored")
+    summarizer = RetrievalSummarizer(
+        llm_client=generator,
+        config=RetrievalSummaryConfig(raw_text_mode=True),
+    )
+    summarizer.summarize_asset_with_metadata(
+        asset_type="table",
+        asset_text="col1, col2",
+        document_title="doc",
+        toc_path=[],
+    )
+    assert len(generator.prompts) == 0

@@ -33,6 +33,8 @@ from rag.ingest.pipeline import (
     IngestPipelineResult,
     IngestRequest,
     MetadataWriterRepo,
+)
+from rag.ingest.pipeline import (
     SummaryIndexRepo as PipelineSummaryIndexRepo,
 )
 from rag.ingest.retrievalsummarizer import RetrievalSummarizer, RetrievalSummaryConfig
@@ -46,7 +48,12 @@ from rag.retrieval.context import (
     EvidenceTruncator,
 )
 from rag.retrieval.evidence import ContextEvidenceMerger, EvidenceService
-from rag.retrieval.graph import GraphExpansionService, RetrievalMetadataRepoProtocol, SearchBackedRetrievalFactory, VectorSearchRepoProtocol
+from rag.retrieval.graph import (
+    GraphExpansionService,
+    RetrievalMetadataRepoProtocol,
+    SearchBackedRetrievalFactory,
+    VectorSearchRepoProtocol,
+)
 from rag.retrieval.grounding_service import GroundingService
 from rag.retrieval.models import (
     PublicQueryResult,
@@ -55,13 +62,14 @@ from rag.retrieval.models import (
 )
 from rag.retrieval.orchestrator import RetrievalService, RetrievalServiceConfig, RetrieverFn
 from rag.retrieval.planning_graph import PlanningGraph
-from rag.retrieval.rerank_service import ModelBackedRerankService
+from rag.retrieval.reranker import ModelBackedRerankService
 from rag.retrieval.synthesis_service import SynthesisService
 from rag.schema.core import Document, ProcessingStateRecord, Source, SourceType, StorageTier
 from rag.schema.graph import GraphEdge, GraphNode
 from rag.schema.runtime import CacheEntry, DataContractMetadataRepo, ProviderAttempt, VisualDescriptionRepo
 from rag.storage import StorageBundle, StorageConfig
-from rag.storage.data_contract_service import DataContractService, SummaryIndexRepo as DataContractSummaryIndexRepo
+from rag.storage.data_contract_service import DataContractService
+from rag.storage.data_contract_service import SummaryIndexRepo as DataContractSummaryIndexRepo
 from rag.storage.index_sync_worker import IndexSyncWorker
 from rag.storage.storage_lifecycle_service import StorageLifecycleService
 from rag.storage.storage_lifecycle_worker import StorageLifecycleWorker
@@ -469,7 +477,10 @@ class RAGRuntime:
                 status="deleting",
             )
             data_contract_service.deactivate_document(document.doc_id)
-            cast(DataContractMetadataRepo, self.stores.metadata_repo).set_document_storage_tier(document.doc_id, storage_tier=StorageTier.COLD)
+            cast(DataContractMetadataRepo, self.stores.metadata_repo).set_document_storage_tier(
+                document.doc_id,
+                storage_tier=StorageTier.COLD,
+            )
             self._save_runtime_processing_state(
                 doc_id=document.doc_id,
                 source_id=document.source_id,

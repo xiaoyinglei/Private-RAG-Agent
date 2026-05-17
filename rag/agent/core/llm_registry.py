@@ -157,8 +157,8 @@ class ModelRegistry:
     def _spec_to_provider_config(spec: ModelSpec) -> ProviderConfig:
         if spec.provider == ModelProvider.MLX:
             return ProviderConfig(
-                provider_kind="local-hf",
-                chat_backend="mlx",
+                provider_kind="openai-compatible",
+                base_url=spec.base_url or "http://127.0.0.1:8080/v1",
                 chat_model=spec.model,
             )
         if spec.provider == ModelProvider.OLLAMA:

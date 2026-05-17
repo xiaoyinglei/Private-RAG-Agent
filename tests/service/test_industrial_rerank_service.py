@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from rag.retrieval.rerank_service import CandidatePoolPolicy, IndustrialRerankService
+from rag.retrieval.reranker import CandidatePoolPolicy, IndustrialRerankService
 
 
 @dataclass(frozen=True)
@@ -32,6 +32,12 @@ class _CapturingReranker:
         del query
         self.calls.append(list(candidates))
         return [1.0 - index * 0.001 for index, _candidate in enumerate(candidates)]
+
+
+def test_legacy_rerank_service_import_path_exports_service() -> None:
+    from rag.retrieval.rerank_service import IndustrialRerankService as LegacyIndustrialRerankService
+
+    assert LegacyIndustrialRerankService is IndustrialRerankService
 
 
 def test_industrial_rerank_service_applies_hard_cap_before_model_rerank() -> None:

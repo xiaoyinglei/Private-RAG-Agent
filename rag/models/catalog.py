@@ -5,7 +5,7 @@ from typing import Any
 
 import yaml
 
-from rag.models.config import GenerationConfig, GenerationTaskConfig, ModelCapability, ModelSpec
+from rag.models.config import GenerationConfig, GenerationTaskConfig, ModelCapability, ModelSpec, TokenizerModelConfig
 
 _DEFAULT_CATALOG_PATH = "configs/models.yaml"
 
@@ -23,10 +23,12 @@ class ModelCatalog:
         models: dict[str, ModelSpec],
         defaults: dict[str, str],
         generation: GenerationConfig,
+        tokenizer: TokenizerModelConfig,
     ) -> None:
         self._models = models
         self._defaults = defaults
         self._generation = generation
+        self._tokenizer = tokenizer
 
     @classmethod
     def from_yaml(cls, path: str = _DEFAULT_CATALOG_PATH) -> ModelCatalog:
@@ -69,7 +71,8 @@ class ModelCatalog:
         }
 
         generation = cls._parse_generation(data.get("generation"), defaults)
-        return cls(models=models, defaults=defaults, generation=generation)
+        tokenizer = cls._parse_tokenizer(data.get("tokenizer"))
+        return cls(models=models, defaults=defaults, generation=generation, tokenizer=tokenizer)
 
     @staticmethod
     def _parse_generation(raw: object, defaults: dict[str, str]) -> GenerationConfig:
@@ -98,6 +101,10 @@ class ModelCatalog:
     def generation(self) -> GenerationConfig:
         return self._generation
 
+    @property
+    def tokenizer(self) -> TokenizerModelConfig:
+        return self._tokenizer
+
     def get_model(self, alias: str) -> ModelSpec:
         spec = self._models.get(alias)
         if spec is None:
@@ -122,6 +129,19 @@ class ModelCatalog:
         if not alias:
             return None
         return self.get_model(alias)
+
+    @staticmethod
+    def _parse_tokenizer(raw: object) -> TokenizerModelConfig:
+        if not isinstance(raw, dict):
+            return TokenizerModelConfig()
+        return TokenizerModelConfig(
+            tokenizer_backend=raw.get("tokenizer_backend"),
+            chunk_token_size=int(raw["chunk_token_size"]) if "chunk_token_size" in raw else None,
+            chunk_overlap_tokens=int(raw["chunk_overlap_tokens"]) if "chunk_overlap_tokens" in raw else None,
+            max_context_tokens=int(raw["max_context_tokens"]) if "max_context_tokens" in raw else None,
+            prompt_reserved_tokens=int(raw["prompt_reserved_tokens"]) if "prompt_reserved_tokens" in raw else None,
+            local_files_only=bool(raw["local_files_only"]) if "local_files_only" in raw else None,
+        )
 
     def list_models(self, capability: ModelCapability | None = None) -> list[ModelSpec]:
         models = list(self._models.values())

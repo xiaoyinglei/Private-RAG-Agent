@@ -12,7 +12,7 @@ from rag.retrieval.evidence import (
 from rag.retrieval.graph import GraphExpansionService
 from rag.retrieval.models import FusedCandidateView, QueryOptions, RankPipelineResult, RetrievalProfile
 from rag.retrieval.planning_graph import PlanningGraph, PlanningState
-from rag.retrieval.rerank_service import IndustrialRerankService
+from rag.retrieval.reranker import IndustrialRerankService
 from rag.retrieval.retrieval_adapter import BranchCollectionResult, RetrievalAdapter
 from rag.retrieval.runtime_coordinator import CoreRetrievalPayload, RoutingDecision
 from rag.schema.model_protocols import Reranker

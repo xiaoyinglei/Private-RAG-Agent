@@ -501,7 +501,10 @@ def benchmark_evaluate(
 
 @app.command("embedding-service")
 def embedding_service(
-    model: Annotated[str, typer.Option("--model", help="MLX embedding model name or path")] = "mlx-community/Qwen3-Embedding-8B-4bit-DWQ",
+    model: Annotated[
+        str,
+        typer.Option("--model", help="MLX embedding model name or path"),
+    ] = "mlx-community/Qwen3-Embedding-4B-4bit-DWQ",
     port: Annotated[int, typer.Option("--port", help="HTTP port")] = 9090,
     batch_size: Annotated[int, typer.Option("--batch-size", help="Embedding batch size")] = 8,
     host: Annotated[str, typer.Option("--host", help="Bind address")] = "127.0.0.1",

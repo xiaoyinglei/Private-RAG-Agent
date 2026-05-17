@@ -49,8 +49,24 @@ class GenerationConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class TokenizerModelConfig:
+    """Tokenizer / chunking parameters from models.yaml.
+
+    All fields are optional — assembly layer provides defaults for any missing value.
+    """
+
+    tokenizer_backend: str | None = None
+    chunk_token_size: int | None = None
+    chunk_overlap_tokens: int | None = None
+    max_context_tokens: int | None = None
+    prompt_reserved_tokens: int | None = None
+    local_files_only: bool | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class ModelRuntimeConfig:
     primary_model: ModelSpec
     embedding_model: ModelSpec
     reranker_model: ModelSpec | None = None
     generation: GenerationConfig = field(default_factory=GenerationConfig)
+    tokenizer: TokenizerModelConfig = field(default_factory=TokenizerModelConfig)

@@ -49,6 +49,10 @@ class RetrievalSummaryConfig:
     # 生成温度，None 表示不透传（使用 LLM 默认值）
     temperature: float | None = None
 
+    # 跳过 LLM 摘要，直接使用原文作为 summary_text
+    # 适用于公开 benchmark 等纯文本 passage 的 fast ingest
+    raw_text_mode: bool = False
+
 
 class RetrievalSummarizer:
     """
@@ -98,6 +102,15 @@ class RetrievalSummarizer:
         raw_text = normalize_whitespace(section.text)
         provider_name = self._provider_name()
         model_name = self._model_name()
+
+        # 0. raw_text_mode：跳过 LLM，直接使用原文
+        if self._config.raw_text_mode:
+            return RetrievalSummaryResult(
+                text=raw_text or "",
+                method="raw_text",
+                provider_name=None,
+                model_name=None,
+            )
 
         # 1. 空文本兜底
         if not raw_text:
@@ -170,6 +183,16 @@ class RetrievalSummarizer:
         raw_text = self._normalize_asset_text(asset_text)
         provider_name = self._provider_name()
         model_name = self._model_name()
+
+        if self._config.raw_text_mode:
+            content = raw_text or normalize_whitespace(caption or "") or asset_type
+            return RetrievalSummaryResult(
+                text=content,
+                method="raw_text",
+                provider_name=None,
+                model_name=None,
+            )
+
         if not raw_text and caption:
             raw_text = normalize_whitespace(caption)
         if not raw_text:
@@ -233,6 +256,19 @@ class RetrievalSummarizer:
     ) -> RetrievalSummaryResult:
         provider_name = self._provider_name()
         model_name = self._model_name()
+
+        if self._config.raw_text_mode:
+            child_text = self._child_summary_text(
+                section_summaries=section_summaries,
+                asset_summaries=asset_summaries,
+            )
+            return RetrievalSummaryResult(
+                text=normalize_whitespace(document_title) if not child_text else child_text,
+                method="raw_text",
+                provider_name=None,
+                model_name=None,
+            )
+
         child_summary_text = self._child_summary_text(
             section_summaries=section_summaries,
             asset_summaries=asset_summaries,

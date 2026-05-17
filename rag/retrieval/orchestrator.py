@@ -17,7 +17,7 @@ from rag.retrieval.models import (
     RetrievalResult,
 )
 from rag.retrieval.planning_graph import PlanningGraph
-from rag.retrieval.rerank_service import IndustrialRerankService
+from rag.retrieval.reranker import IndustrialRerankService
 from rag.retrieval.retrieval_adapter import RetrievalAdapter
 from rag.retrieval.runtime_coordinator import (
     CoreRetrievalPayload,
