@@ -43,7 +43,7 @@ class HuggingFaceGenerator(Generator):
         }
 
         if torch_dtype is not None:
-            model_kwargs["torch_dtype"] = self._resolve_torch_dtype(torch_dtype)
+            model_kwargs["dtype"] = self._resolve_torch_dtype(torch_dtype)
 
         self._tokenizer = cast(Any, AutoTokenizer.from_pretrained(
             model_name_or_path,
