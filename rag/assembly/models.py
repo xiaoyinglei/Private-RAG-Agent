@@ -23,6 +23,7 @@ class ProviderConfig:
     chat_model_path: str | None = None
     chat_backend: str | None = None
     embedding_model: str | None = None
+    embedding_space: str | None = None
     rerank_model: str | None = None
     embedding_model_path: str | None = None
     rerank_model_path: str | None = None

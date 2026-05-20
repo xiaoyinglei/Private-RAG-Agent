@@ -137,7 +137,7 @@ class _SparseRepo:
         distinct_records: bool = False,
     ) -> int:
         del distinct_records
-        return 1 if embedding_space == "default" and item_kind == "section_summary" else 0
+        return 1 if embedding_space == "bge-m3" and item_kind == "section_summary" else 0
 
     async def hybrid_search_async(
         self,
@@ -160,6 +160,22 @@ class _SparseRepo:
                 "sparse_query_vector": sparse_query_vector,
             }
         )
+        return []
+
+
+class _DefaultOnlyRepo(_SparseRepo):
+    def count_vectors(
+        self,
+        *,
+        embedding_space: str | None = None,
+        item_kind: str | None = None,
+        distinct_records: bool = False,
+    ) -> int:
+        del distinct_records
+        return 1 if embedding_space == "default" and item_kind == "section_summary" else 0
+
+    async def hybrid_search_async(self, **kwargs) -> list[VectorSearchResult]:
+        self.calls.append(dict(kwargs))
         return []
 
 
@@ -208,6 +224,50 @@ def test_summary_hybrid_retriever_falls_back_from_section_to_doc_when_stage_is_w
 
     assert retriever._vector_repo.calls == ["section_summary", "doc_summary"]  # type: ignore[attr-defined]
     assert [item.evidence_id for item in results] == ["doc_summary-7"]
+
+
+def test_summary_hybrid_retriever_does_not_fallback_to_default_for_named_embedding_space() -> None:
+    binding = _SparseBinding(space="model/fake-embed-v1")
+    repo = _DefaultOnlyRepo()
+    retriever = MilvusSummaryHybridRetriever(
+        factory=_Factory(),
+        vector_repo=repo,
+        bindings=[binding],
+        item_kinds=("section_summary",),
+        branch_name="vector",
+    )
+    plan = PlanningState(
+        original_query="alpha",
+        rewritten_query="alpha",
+        sparse_query="alpha",
+        retrieval_profile=RetrievalProfile.AUTO,
+        complexity_gate=ComplexityGate.STANDARD,
+        semantic_route="text_first",
+        target_collections=("section_summary",),
+        predicate_plan=PredicatePlan(),
+        retrieval_paths=(RetrievalPath("vector", 6),),
+        allow_web=False,
+        allow_graph_expansion=False,
+        web_limit=0,
+        graph_limit=0,
+        branch_stage_plans=(
+            BranchStagePlan(
+                branch="vector",
+                stages=(CollectionStage(collection="section_summary", limit=6, min_hits=2, trigger="always"),),
+            ),
+        ),
+    )
+
+    results = asyncio.run(
+        retriever.aretrieve_with_plan(
+            query="alpha",
+            source_scope=[],
+            plan=plan,
+        )
+    )
+
+    assert results == []
+    assert repo.calls == []
 
 
 def test_summary_hybrid_retriever_uses_query_subtasks_and_sparse_vectors() -> None:

@@ -34,6 +34,7 @@ from rag.schema.runtime import (
     DataContractMetadataRepo,
     RuntimeMode,
 )
+from rag.utils.text import load_env_file
 
 if TYPE_CHECKING:
     from typing import Literal
@@ -1620,12 +1621,14 @@ def build_runtime_for_benchmark(
     summary_model: str | None = None,
     summary_model_path: str | None = None,
     summary_backend: str | None = None,
+    strict_summary_generation: bool = False,
     vector_backend: str | None = None,
     vector_dsn: str | None = None,
     vector_namespace: str | None = None,
     vector_collection_prefix: str | None = None,
 ) -> RAGRuntime:
     storage_root.mkdir(parents=True, exist_ok=True)
+    load_env_file()
     assembly_service = CapabilityAssemblyService()
     tokenizer_override = (
         TokenizerConfig(
@@ -1641,6 +1644,7 @@ def build_runtime_for_benchmark(
             location="local",
             embedding_model=embedding_model,
             embedding_model_path=embedding_model_path,
+            embedding_space=embedding_model or embedding_model_path,
             embedding_batch_size=embedding_batch_size,
             device=embedding_device,
         )
@@ -1657,7 +1661,8 @@ def build_runtime_for_benchmark(
         if rerank_model is not None or rerank_model_path is not None
         else None
     )
-    model_config = to_assembly_overrides(resolve_runtime_config(RuntimeOverrides()))
+    runtime_config = resolve_runtime_config(RuntimeOverrides())
+    model_config = to_assembly_overrides(runtime_config)
     chat_override = (
         ProviderConfig(
             provider_kind=chat_provider_kind or "ollama",
@@ -1687,9 +1692,12 @@ def build_runtime_for_benchmark(
 
         _http_embedding_provider = _CompositeProvider(
             provider_name="embedding-http",
-            embedder=EmbeddingHttpClient(base_url=_embedding_service_url),
+            embedder=EmbeddingHttpClient(
+                base_url=_embedding_service_url,
+                batch_size=embedding_batch_size,
+            ),
         )
-    if _rerank_service_url:
+    if require_rerank and _rerank_service_url:
         from rag.assembly.support import _CompositeProvider  # noqa: F811
         from rag.providers.rerank_http import RerankHttpClient
 
@@ -1738,28 +1746,21 @@ def build_runtime_for_benchmark(
         request=request,
         assembly_service=assembly_service,
     )
+    runtime.generation_config = runtime_config.generation
     if summary_provider_kind == "none":
-        from rag.ingest.retrievalsummarizer import RetrievalSummarizer, RetrievalSummaryConfig
-
-        class _RawTextLLMClient:
-            def generate_text(self, *, prompt: str, **kwargs: object) -> str:
-                raise RuntimeError("LLM generation is disabled (summary_provider=none)")
-
-        raw_config = RetrievalSummaryConfig(raw_text_mode=True)
-        runtime.ingest_pipeline.configure_summarizer(
-            RetrievalSummarizer(
-                llm_client=_RawTextLLMClient(),
-                config=raw_config,
-                token_accounting=runtime.token_accounting,
-            )
-        )
+        runtime.configure_default_summary_generator(raw_text_mode=True, strict_generation=False)
     elif summary_model is not None or summary_model_path is not None or summary_provider_kind is not None:
-        runtime.configure_summary_generator(
-            provider_kind=summary_provider_kind or "ollama",
-            model=summary_model,
-            model_path=summary_model_path,
-            backend=summary_backend,
-        )
+        summary_generator_kwargs: dict[str, object] = {
+            "provider_kind": summary_provider_kind or "ollama",
+            "model": summary_model,
+            "model_path": summary_model_path,
+            "backend": summary_backend,
+        }
+        if strict_summary_generation:
+            summary_generator_kwargs["strict_generation"] = True
+        runtime.configure_summary_generator(**summary_generator_kwargs)
+    elif strict_summary_generation:
+        runtime.configure_default_summary_generator(strict_generation=True)
     if skip_graph_extraction:
         runtime.ingest_pipeline.extractor = None  # type: ignore[attr-defined]
         runtime.ingest_pipeline.merger = None  # type: ignore[attr-defined]
@@ -1782,6 +1783,9 @@ def _benchmark_storage_config(
     vector_collection_prefix: str | None = None,
 ) -> StorageConfig:
     backend = (vector_backend or DEFAULT_VECTOR_BACKEND).strip().lower()
+    vector_dsn = _normalize_optional_string(vector_dsn)
+    vector_namespace = _normalize_optional_string(vector_namespace)
+    vector_collection_prefix = _normalize_optional_string(vector_collection_prefix)
     if backend in {"", "sqlite", "in_memory"}:
         return StorageConfig(root=root)
     if backend == "milvus" and vector_dsn is None:
@@ -1795,6 +1799,13 @@ def _benchmark_storage_config(
             collection=vector_collection_prefix,
         ),
     )
+
+
+def _normalize_optional_string(value: str | None) -> str | None:
+    if value is None:
+        return None
+    normalized = value.strip()
+    return normalized or None
 
 
 def configure_runtime_embedding(

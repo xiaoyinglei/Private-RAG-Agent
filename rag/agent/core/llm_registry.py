@@ -89,7 +89,7 @@ class ModelRegistry:
             if entry.get("capability") != "chat":
                 continue
             agent_models[alias] = {
-                "provider": entry["provider"],
+                "provider": _agent_provider_kind(entry),
                 "model": entry["model"],
                 "max_tokens": entry.get("max_tokens", 2048),
                 "base_url": entry.get("base_url"),
@@ -174,3 +174,21 @@ class ModelRegistry:
                 chat_model=spec.model,
             )
         raise ValueError(f"Unsupported provider: {spec.provider}")
+
+
+def _agent_provider_kind(entry: dict[str, object]) -> str:
+    protocol = _normalized_provider_value(entry.get("protocol"))
+    provider = _normalized_provider_value(entry.get("provider"))
+    if protocol == "openai_compatible":
+        return ModelProvider.OPENAI_COMPATIBLE.value
+    if provider in {"openai_compatible", "qwen", "deepseek"}:
+        return ModelProvider.OPENAI_COMPATIBLE.value
+    if provider == "ollama":
+        return ModelProvider.OLLAMA.value
+    if provider == "mlx":
+        return ModelProvider.MLX.value
+    return provider
+
+
+def _normalized_provider_value(value: object) -> str:
+    return str(value or "").strip().lower().replace("-", "_")

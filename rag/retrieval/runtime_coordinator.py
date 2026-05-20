@@ -47,6 +47,7 @@ class CoreRetrievalPayload:
     sparse_query: str | None = None
     embedding_provider: str | None = None
     rerank_provider: str | None = None
+    rerank_skipped: bool = False
     attempts: list[ProviderAttempt] = field(default_factory=list)
     fusion_strategy: str | None = None
     fusion_alpha: float | None = None
@@ -93,6 +94,7 @@ def build_retrieval_diagnostics(payload: CoreRetrievalPayload) -> RetrievalDiagn
         reranked_benchmark_doc_ids=list(payload.reranked_benchmark_doc_ids or []),
         embedding_provider=payload.embedding_provider,
         rerank_provider=payload.rerank_provider,
+        rerank_skipped=payload.rerank_skipped,
         attempts=list(payload.attempts or []),
         fusion_strategy=payload.fusion_strategy,
         fusion_alpha=payload.fusion_alpha,

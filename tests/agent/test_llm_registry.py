@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pytest
+import yaml
 
 from rag.agent.core.llm_config import AgentModelsConfig, ModelProvider, ModelSpec
 from rag.agent.core.llm_registry import (
@@ -30,6 +31,33 @@ def _make_config(
         default_model=default_model,
         fallback_model=fallback_model,
     )
+
+
+def test_load_configs_models_maps_openai_compatible_protocol(tmp_path) -> None:
+    config_path = tmp_path / "models.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "models": {
+                    "qwen3_8b_mlx_4bit": {
+                        "capability": "chat",
+                        "provider": "qwen",
+                        "protocol": "openai_compatible",
+                        "model": "Qwen/Qwen3-8B-MLX-4bit",
+                        "base_url": "http://127.0.0.1:8080/v1",
+                    }
+                },
+                "defaults": {"primary_model": "qwen3_8b_mlx_4bit"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    config = ModelRegistry._load_yaml_file(config_path)
+
+    assert config.default_model == "qwen3_8b_mlx_4bit"
+    assert config.models["qwen3_8b_mlx_4bit"].provider is ModelProvider.OPENAI_COMPATIBLE
+    assert config.models["qwen3_8b_mlx_4bit"].base_url == "http://127.0.0.1:8080/v1"
 
 
 class TestModelRegistryProperties:

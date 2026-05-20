@@ -48,6 +48,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--summary-model", default=None)
     parser.add_argument("--summary-model-path", default=None)
     parser.add_argument("--summary-backend", default=None, choices=["auto", "mlx", "transformers"])
+    parser.add_argument("--strict-summary-generation", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--vector-backend", default="milvus", choices=["milvus", "sqlite"])
     parser.add_argument("--vector-dsn", default=None)
     parser.add_argument("--vector-namespace", default=None)
@@ -116,7 +117,7 @@ def main(argv: list[str] | None = None) -> int:
 
     runtime = build_runtime_for_benchmark(
         storage_root=Path(args.storage_root),
-        require_chat=False,
+        require_chat=args.summary_provider != "none",
         require_rerank=False,
         skip_graph_extraction=True,
         embedding_batch_size=args.embedding_batch_size,
@@ -134,6 +135,7 @@ def main(argv: list[str] | None = None) -> int:
         summary_model=args.summary_model,
         summary_model_path=args.summary_model_path,
         summary_backend=args.summary_backend,
+        strict_summary_generation=args.strict_summary_generation and args.summary_provider != "none",
         vector_backend=args.vector_backend,
         vector_dsn=args.vector_dsn,
         vector_namespace=args.vector_namespace,

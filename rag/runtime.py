@@ -275,6 +275,7 @@ class RAGRuntime:
         assembly_service: CapabilityAssemblyService | None = None,
         telemetry_service: TelemetryService | None = None,
         vlm_repo: VisualDescriptionRepo | None = None,
+        generation_config: object | None = None,
     ) -> RAGRuntime:
         return cls(
             storage=storage,
@@ -282,6 +283,7 @@ class RAGRuntime:
             assembly_service=assembly_service or CapabilityAssemblyService(),
             telemetry_service=telemetry_service,
             vlm_repo=vlm_repo,
+            generation_config=generation_config,
         )
 
     @property
@@ -303,6 +305,7 @@ class RAGRuntime:
         model: str | None = None,
         model_path: str | None = None,
         backend: str | None = None,
+        strict_generation: bool | None = None,
     ) -> None:
         provider_config = ProviderConfig(
             provider_kind=provider_kind,
@@ -317,8 +320,51 @@ class RAGRuntime:
             RetrievalSummarizer(
                 llm_client=_ChatGeneratorAdapter(binding),
                 token_accounting=self.token_accounting,
+                config=self._summary_config(strict_generation=strict_generation),
             )
         )
+
+    def configure_default_summary_generator(
+        self,
+        *,
+        raw_text_mode: bool = False,
+        strict_generation: bool | None = None,
+    ) -> None:
+        chat_binding = self.capability_bundle.chat_bindings[0] if self.capability_bundle.chat_bindings else None
+        self.ingest_pipeline.configure_summarizer(
+            RetrievalSummarizer(
+                llm_client=_LazySummaryGeneratorAdapter(binding=chat_binding),
+                token_accounting=self.token_accounting,
+                config=self._summary_config(
+                    raw_text_mode=raw_text_mode,
+                    strict_generation=strict_generation,
+                ),
+            )
+        )
+
+    def _summary_config(
+        self,
+        *,
+        raw_text_mode: bool = False,
+        strict_generation: bool | None = None,
+    ) -> RetrievalSummaryConfig:
+        summary_config = RetrievalSummaryConfig(
+            raw_text_mode=raw_text_mode,
+            strict_generation=bool(strict_generation),
+        )
+        if self.generation_config is None:
+            return summary_config
+        gen_summary = getattr(self.generation_config, "summary", None)
+        if gen_summary is None:
+            return summary_config
+        updates: dict[str, object] = {}
+        max_tokens = getattr(gen_summary, "max_tokens", None)
+        if max_tokens is not None:
+            updates["max_output_tokens"] = max_tokens
+        temperature = getattr(gen_summary, "temperature", None)
+        if temperature is not None:
+            updates["temperature"] = temperature
+        return replace(summary_config, **updates) if updates else summary_config
 
     def diagnostics_payload(self) -> dict[str, object]:
         return {
@@ -629,27 +675,19 @@ class RAGRuntime:
         )
         chat_binding = self.capability_bundle.chat_bindings[0] if self.capability_bundle.chat_bindings else None
 
-        # Build summarizer config from generation.summary if available, otherwise use defaults
-        summarizer_config = RetrievalSummaryConfig()
-        if self.generation_config is not None:
-            gen_summary = getattr(self.generation_config, "summary", None)
-            if gen_summary is not None:
-                max_tokens = getattr(gen_summary, "max_tokens", None)
-                if max_tokens is not None:
-                    summarizer_config = RetrievalSummaryConfig(max_output_tokens=max_tokens)
-
         self.ingest_pipeline = IngestPipeline(
             dispatcher=dispatcher,
             summarizer=RetrievalSummarizer(
                 llm_client=_LazySummaryGeneratorAdapter(binding=chat_binding),
                 token_accounting=self.token_accounting,
-                config=summarizer_config,
+                config=self._summary_config(),
             ),
             embedder=embedding_binding,
             metadata_repo=cast(MetadataWriterRepo, self.stores.metadata_repo),
             summary_repo=cast(PipelineSummaryIndexRepo, self.stores.vector_repo),
             object_store=self.stores.object_store,
             embedding_model_id=embedding_binding.model_name or embedding_binding.provider_name,
+            embedding_space=embedding_binding.space,
             section_refiner=SectionRefiner(token_accounting=self.token_accounting),
         )
         self.retrieval_service = self._build_retrieval_service()

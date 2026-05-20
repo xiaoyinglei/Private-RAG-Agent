@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import os
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, TypeVar
@@ -19,6 +21,10 @@ from rag.providers.ollama.embedder import OllamaEmbedder
 from rag.providers.ollama.generator import OllamaGenerator
 
 T = TypeVar("T")
+_JSON_CODE_FENCE_RE = re.compile(
+    r"^\s*```\s*(?:[A-Za-z0-9_-]+)?\s*(?P<body>.*?)\s*```\s*$",
+    re.DOTALL,
+)
 
 
 @dataclass(slots=True)
@@ -59,6 +65,11 @@ class _CompositeProvider:
     @property
     def embedding_model_name(self) -> str | None:
         return _backend_model_name(self.embedder, "embedding")
+
+    @property
+    def embedding_space(self) -> str | None:
+        value = getattr(self.embedder, "embedding_space", None)
+        return value if isinstance(value, str) and value else None
 
     @property
     def rerank_model_name(self) -> str | None:
@@ -137,11 +148,32 @@ class _OpenAICompatibleChatGenerator:
         content = response.choices[0].message.content
         return str(content) if content is not None else ""
 
+    def generate_structured(
+        self,
+        *,
+        prompt: str,
+        schema: type[T],
+        system_prompt: str | None = None,
+        **kwargs: object,
+    ) -> T:
+        raw_output = self.generate_text(prompt=prompt, system_prompt=system_prompt, **kwargs)
+        candidate = _strip_json_code_fence(raw_output).strip()
+        try:
+            payload = json.loads(candidate)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("OpenAI-compatible structured fallback returned invalid JSON") from exc
+        return schema.model_validate(payload)  # type: ignore[attr-defined, no-any-return]
+
     def __repr__(self) -> str:
         return (
             f"_OpenAICompatibleChatGenerator(model={self.chat_model_name!r}, "
             f"base_url={self._base_url!r})"
         )
+
+
+def _strip_json_code_fence(text: str) -> str:
+    match = _JSON_CODE_FENCE_RE.match(text)
+    return match.group("body") if match else text
 
 
 def _backend_model_name(backend: object | None, capability: str) -> str | None:
@@ -248,6 +280,7 @@ def compatibility_config_from_environment() -> tuple[AssemblyConfig, dict[str, s
                 base_url=None if openai_base_url is None else str(openai_base_url),
                 chat_model=None if openai_chat_model is None else str(openai_chat_model),
                 embedding_model=None if openai_embedding_model is None else str(openai_embedding_model),
+                embedding_space=None if openai_embedding_model is None else str(openai_embedding_model),
             )
         )
 
@@ -267,6 +300,7 @@ def compatibility_config_from_environment() -> tuple[AssemblyConfig, dict[str, s
                 base_url=str(ollama_base_url),
                 chat_model=None if ollama_chat_model is None else str(ollama_chat_model),
                 embedding_model=None if ollama_embedding_model is None else str(ollama_embedding_model),
+                embedding_space=None if ollama_embedding_model is None else str(ollama_embedding_model),
             )
         )
 
@@ -321,6 +355,7 @@ def compatibility_config_from_environment() -> tuple[AssemblyConfig, dict[str, s
                 location="local",
                 label=f"Local BGE / {local_bge_embedding_model or local_bge_rerank_model or 'custom'}",
                 embedding_model=None if local_bge_embedding_model is None else str(local_bge_embedding_model),
+                embedding_space=None if local_bge_embedding_model is None else str(local_bge_embedding_model),
                 embedding_model_path=None
                 if local_bge_embedding_model_path is None
                 else str(local_bge_embedding_model_path),
@@ -376,6 +411,7 @@ def merge_provider_config(
         chat_model_path=chat_model_path,
         chat_backend=first_non_blank(high.chat_backend, low.chat_backend),
         embedding_model=first_non_blank(high.embedding_model, low.embedding_model),
+        embedding_space=first_non_blank(high.embedding_space, low.embedding_space),
         rerank_model=first_non_blank(high.rerank_model, low.rerank_model),
         embedding_model_path=embedding_model_path,
         rerank_model_path=rerank_model_path,

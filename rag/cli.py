@@ -11,18 +11,18 @@ import click
 import typer
 from pydantic import BaseModel
 
-from rag import AssemblyRequest, CapabilityRequirements, RAGRuntime, StorageComponentConfig, StorageConfig
+from rag import AssemblyRequest, CapabilityRequirements, RAGRuntime, StorageConfig
 from rag.agent.cli import agent_app
 from rag.models.assembly_adapter import to_assembly_overrides
 from rag.models.runtime import RuntimeOverrides, resolve_runtime_config
 from rag.retrieval import QueryOptions, RetrievalProfile
 from rag.schema.core import SourceType
+from rag.storage.runtime_config import DEFAULT_VECTOR_BACKEND, runtime_storage_config
+from rag.utils.text import load_env_file
 
 app = typer.Typer(add_completion=False, no_args_is_help=True)
 app.add_typer(agent_app, name="agent")
 DEFAULT_STORAGE_ROOT = Path(".rag")
-DEFAULT_VECTOR_BACKEND = "milvus"
-DEFAULT_VECTOR_DSN = "http://127.0.0.1:19530"
 FIQA_DATASET = "fiqa"
 MEDICAL_RETRIEVAL_DATASET = "medical_retrieval"
 STORAGE_ROOT_OPTION = typer.Option("--storage-root")
@@ -43,6 +43,13 @@ MODEL_OPTION = typer.Option("--model", help="Chat model alias from configs/model
 EMBEDDING_MODEL_OPTION = typer.Option("--embedding-model", help="Embedding model alias from configs/models.yaml.")
 RERANKER_MODEL_OPTION = typer.Option("--reranker-model", help="Reranker model alias from configs/models.yaml.")
 DATASET_OPTION = typer.Option("--dataset", help="Public benchmark dataset.")
+VECTOR_BACKEND_OPTION = typer.Option("--vector-backend", help="Vector backend: milvus or sqlite.")
+VECTOR_DSN_OPTION = typer.Option("--vector-dsn", help="Vector backend DSN, for example Milvus URI.")
+VECTOR_NAMESPACE_OPTION = typer.Option("--vector-namespace", help="Vector backend namespace/database.")
+VECTOR_COLLECTION_PREFIX_OPTION = typer.Option(
+    "--vector-collection-prefix",
+    help="Milvus collection prefix. Must match the prefix used at ingest time.",
+)
 
 
 def _runtime(
@@ -53,6 +60,10 @@ def _runtime(
     model: str | None = None,
     embedding_model: str | None = None,
     reranker_model: str | None = None,
+    vector_backend: str = DEFAULT_VECTOR_BACKEND,
+    vector_dsn: str | None = None,
+    vector_namespace: str | None = None,
+    vector_collection_prefix: str | None = None,
 ) -> RAGRuntime:
     # ── service URL env vars (higher priority than YAML) ──
     embedding_service_url = os.environ.get("RAG_EMBEDDING_SERVICE_URL", "").strip()
@@ -71,6 +82,7 @@ def _runtime(
         )
 
     # ── resolve YAML config (CLI override > YAML default) ──
+    load_env_file()
     runtime_config = resolve_runtime_config(
         RuntimeOverrides(
             model_alias=model,
@@ -117,21 +129,35 @@ def _runtime(
         default_context_tokens=QueryOptions().max_context_tokens,
     )
     return RAGRuntime.from_request(
-        storage=_default_storage_config(storage_root),
+        storage=_default_storage_config(
+            storage_root,
+            vector_backend=vector_backend,
+            vector_dsn=vector_dsn,
+            vector_namespace=vector_namespace,
+            vector_collection_prefix=vector_collection_prefix,
+        ),
         request=AssemblyRequest(
             requirements=request,
             overrides=overrides,
         ),
+        generation_config=runtime_config.generation,
     )
 
 
-def _default_storage_config(storage_root: Path) -> StorageConfig:
-    return StorageConfig(
-        root=storage_root,
-        vectors=StorageComponentConfig(
-            backend=DEFAULT_VECTOR_BACKEND,
-            dsn=DEFAULT_VECTOR_DSN,
-        ),
+def _default_storage_config(
+    storage_root: Path,
+    *,
+    vector_backend: str = DEFAULT_VECTOR_BACKEND,
+    vector_dsn: str | None = None,
+    vector_namespace: str | None = None,
+    vector_collection_prefix: str | None = None,
+) -> StorageConfig:
+    return runtime_storage_config(
+        storage_root,
+        vector_backend=vector_backend,
+        vector_dsn=vector_dsn,
+        vector_namespace=vector_namespace,
+        vector_collection_prefix=vector_collection_prefix,
     )
 
 
@@ -166,6 +192,10 @@ def ingest(
     model: Annotated[str | None, MODEL_OPTION] = None,
     embedding_model: Annotated[str | None, EMBEDDING_MODEL_OPTION] = None,
     reranker_model: Annotated[str | None, RERANKER_MODEL_OPTION] = None,
+    vector_backend: Annotated[str, VECTOR_BACKEND_OPTION] = DEFAULT_VECTOR_BACKEND,
+    vector_dsn: Annotated[str | None, VECTOR_DSN_OPTION] = None,
+    vector_namespace: Annotated[str | None, VECTOR_NAMESPACE_OPTION] = None,
+    vector_collection_prefix: Annotated[str | None, VECTOR_COLLECTION_PREFIX_OPTION] = None,
     source_type: Annotated[SourceType | None, SOURCE_TYPE_OPTION] = None,
     location: Annotated[str | None, LOCATION_OPTION] = None,
     content: Annotated[str | None, CONTENT_OPTION] = None,
@@ -186,6 +216,10 @@ def ingest(
         model=model,
         embedding_model=embedding_model,
         reranker_model=reranker_model,
+        vector_backend=vector_backend,
+        vector_dsn=vector_dsn,
+        vector_namespace=vector_namespace,
+        vector_collection_prefix=vector_collection_prefix,
     ) as runtime:
         result = runtime.insert(
             source_type=source_type.value,
@@ -203,6 +237,10 @@ def query(
     model: Annotated[str | None, MODEL_OPTION] = None,
     embedding_model: Annotated[str | None, EMBEDDING_MODEL_OPTION] = None,
     reranker_model: Annotated[str | None, RERANKER_MODEL_OPTION] = None,
+    vector_backend: Annotated[str, VECTOR_BACKEND_OPTION] = DEFAULT_VECTOR_BACKEND,
+    vector_dsn: Annotated[str | None, VECTOR_DSN_OPTION] = None,
+    vector_namespace: Annotated[str | None, VECTOR_NAMESPACE_OPTION] = None,
+    vector_collection_prefix: Annotated[str | None, VECTOR_COLLECTION_PREFIX_OPTION] = None,
     query: Annotated[str | None, QUERY_OPTION] = None,
     retrieval_profile: Annotated[RetrievalProfile, RETRIEVAL_PROFILE_OPTION] = RetrievalProfile.AUTO,
     json_output: Annotated[bool, JSON_OPTION] = False,
@@ -216,6 +254,10 @@ def query(
         model=model,
         embedding_model=embedding_model,
         reranker_model=reranker_model,
+        vector_backend=vector_backend,
+        vector_dsn=vector_dsn,
+        vector_namespace=vector_namespace,
+        vector_collection_prefix=vector_collection_prefix,
     ) as runtime:
         result = runtime.query_public(query, options=QueryOptions(retrieval_profile=retrieval_profile.value))
     if json_output:
@@ -255,6 +297,10 @@ def delete(
     model: Annotated[str | None, MODEL_OPTION] = None,
     embedding_model: Annotated[str | None, EMBEDDING_MODEL_OPTION] = None,
     reranker_model: Annotated[str | None, RERANKER_MODEL_OPTION] = None,
+    vector_backend: Annotated[str, VECTOR_BACKEND_OPTION] = DEFAULT_VECTOR_BACKEND,
+    vector_dsn: Annotated[str | None, VECTOR_DSN_OPTION] = None,
+    vector_namespace: Annotated[str | None, VECTOR_NAMESPACE_OPTION] = None,
+    vector_collection_prefix: Annotated[str | None, VECTOR_COLLECTION_PREFIX_OPTION] = None,
     doc_id: Annotated[str | None, DOC_ID_OPTION] = None,
     source_id: Annotated[str | None, SOURCE_ID_OPTION] = None,
     location: Annotated[str | None, LOCATION_OPTION] = None,
@@ -268,6 +314,10 @@ def delete(
         model=model,
         embedding_model=embedding_model,
         reranker_model=reranker_model,
+        vector_backend=vector_backend,
+        vector_dsn=vector_dsn,
+        vector_namespace=vector_namespace,
+        vector_collection_prefix=vector_collection_prefix,
     ) as runtime:
         result = runtime.delete(doc_id=doc_id, source_id=source_id, location=location)
     _echo_json(result)
@@ -279,6 +329,10 @@ def rebuild(
     model: Annotated[str | None, MODEL_OPTION] = None,
     embedding_model: Annotated[str | None, EMBEDDING_MODEL_OPTION] = None,
     reranker_model: Annotated[str | None, RERANKER_MODEL_OPTION] = None,
+    vector_backend: Annotated[str, VECTOR_BACKEND_OPTION] = DEFAULT_VECTOR_BACKEND,
+    vector_dsn: Annotated[str | None, VECTOR_DSN_OPTION] = None,
+    vector_namespace: Annotated[str | None, VECTOR_NAMESPACE_OPTION] = None,
+    vector_collection_prefix: Annotated[str | None, VECTOR_COLLECTION_PREFIX_OPTION] = None,
     doc_id: Annotated[str | None, DOC_ID_OPTION] = None,
     source_id: Annotated[str | None, SOURCE_ID_OPTION] = None,
     location: Annotated[str | None, LOCATION_OPTION] = None,
@@ -293,6 +347,10 @@ def rebuild(
             model=model,
             embedding_model=embedding_model,
             reranker_model=reranker_model,
+            vector_backend=vector_backend,
+            vector_dsn=vector_dsn,
+            vector_namespace=vector_namespace,
+            vector_collection_prefix=vector_collection_prefix,
         ) as runtime:
             result = runtime.rebuild(doc_id=doc_id, source_id=source_id, location=location)
     except ValueError as exc:

@@ -87,6 +87,28 @@ def test_capability_assembly_assembles_capabilities_from_structured_request(
     assert bundle.token_contract.max_context_tokens == 1536
 
 
+def test_capability_assembly_uses_configured_embedding_space(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = _isolated_service(monkeypatch)
+
+    bundle = service.assemble_request(
+        AssemblyRequest(
+            requirements=CapabilityRequirements(require_embedding=True),
+            overrides=AssemblyOverrides(
+                embedding=ProviderConfig(
+                    provider_kind="fake-core",
+                    embedding_model="fake-embed-model",
+                    embedding_space="model/fake-embed-v1",
+                ),
+            ),
+        )
+    )
+
+    assert bundle.embedding_bindings[0].space == "model/fake-embed-v1"
+    assert bundle.runtime_contract_payload["embedding_space"] == "model/fake-embed-v1"
+
+
 def test_assembly_prefers_explicit_over_config_and_compat_env(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -360,12 +382,12 @@ def test_assembly_raises_for_invalid_request_and_runtime_contract_mismatch(
         bundle=valid_bundle,
         stored_payload={
             **valid_bundle.runtime_contract_payload,
-            "embedding_model_name": "other-embed-model",
+            "chunk_token_size": valid_bundle.runtime_contract_payload["chunk_token_size"] + 1,
         },
     )
     assert isinstance(governance, RuntimeContractGovernance)
     assert governance.status == "invalid"
-    assert "embedding_model_name" in governance.mismatches
+    assert "chunk_token_size" in governance.mismatches
     with pytest.raises(RuntimeError, match="runtime contract does not match"):
         governance.raise_for_invalid()
 

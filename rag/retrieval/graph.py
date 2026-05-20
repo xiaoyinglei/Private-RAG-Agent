@@ -165,29 +165,24 @@ class MultiProviderBackedVectorRetriever:
         self.last_attempts = []
         ordered_bindings = self._ordered_bindings()
         for binding in ordered_bindings:
-            candidates = self._search_binding(
-                binding,
-                query=query,
-                source_scope=source_scope,
-                target_space=binding.space,
-            )
-            if candidates:
-                self.last_provider = binding.provider_name
-                return candidates
-        for binding in ordered_bindings:
-            candidates = self._search_binding(
-                binding,
-                query=query,
-                source_scope=source_scope,
-                target_space="default",
-            )
-            if candidates:
-                self.last_provider = binding.provider_name
-                return candidates
+            for target_space in self._target_spaces(binding):
+                candidates = self._search_binding(
+                    binding,
+                    query=query,
+                    source_scope=source_scope,
+                    target_space=target_space,
+                )
+                if candidates:
+                    self.last_provider = binding.provider_name
+                    return candidates
         return []
 
     def _ordered_bindings(self) -> list[EmbeddingCapabilityBinding]:
         return list(self._bindings)
+
+    @staticmethod
+    def _target_spaces(binding: EmbeddingCapabilityBinding) -> tuple[str, ...]:
+        return ("default",) if binding.space == "default" else (binding.space,)
 
     def _search_binding(
         self,
@@ -272,31 +267,25 @@ class MilvusSummaryHybridRetriever:
         self.last_attempts = []
         ordered_bindings = self._ordered_bindings()
         for binding in ordered_bindings:
-            candidates = await self._search_binding(
-                binding,
-                query=query,
-                source_scope=source_scope,
-                target_space=binding.space,
-                plan=plan,
-            )
-            if candidates:
-                self.last_provider = binding.provider_name
-                return candidates
-        for binding in ordered_bindings:
-            candidates = await self._search_binding(
-                binding,
-                query=query,
-                source_scope=source_scope,
-                target_space="default",
-                plan=plan,
-            )
-            if candidates:
-                self.last_provider = binding.provider_name
-                return candidates
+            for target_space in self._target_spaces(binding):
+                candidates = await self._search_binding(
+                    binding,
+                    query=query,
+                    source_scope=source_scope,
+                    target_space=target_space,
+                    plan=plan,
+                )
+                if candidates:
+                    self.last_provider = binding.provider_name
+                    return candidates
         return []
 
     def _ordered_bindings(self) -> list[EmbeddingCapabilityBinding]:
         return list(self._bindings)
+
+    @staticmethod
+    def _target_spaces(binding: EmbeddingCapabilityBinding) -> tuple[str, ...]:
+        return ("default",) if binding.space == "default" else (binding.space,)
 
     async def _search_binding(
         self,

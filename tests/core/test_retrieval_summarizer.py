@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from rag.ingest.retrievalsummarizer import (
     RetrievalSummarizer,
     RetrievalSummaryConfig,
@@ -46,6 +48,15 @@ class _RecordingGenerator:
     def generate_text(self, *, prompt: str) -> str:
         self.prompts.append(prompt)
         return self.output
+
+
+class _FailingGenerator:
+    provider_name = "test-provider"
+    model_name = "test-model"
+
+    def generate_text(self, *, prompt: str) -> str:
+        del prompt
+        raise RuntimeError("summary service unavailable")
 
 
 _STRUCTURED_SUMMARY = """Semantic Core: reimbursement approval workflow
@@ -270,3 +281,26 @@ def test_raw_text_mode_does_not_call_llm_for_asset() -> None:
         toc_path=[],
     )
     assert len(generator.prompts) == 0
+
+
+def test_strict_generation_raises_when_section_summary_generation_fails() -> None:
+    summarizer = RetrievalSummarizer(
+        llm_client=_FailingGenerator(),
+        token_accounting=_WordTokenAccounting(),  # type: ignore[arg-type]
+        config=RetrievalSummaryConfig(
+            direct_return_token_threshold=1,
+            strict_generation=True,
+        ),
+    )
+    section = ParsedSection(
+        toc_path=("Policy",),
+        heading_level=1,
+        page_range=None,
+        text=" ".join(["policy"] * 120),
+        order_index=0,
+        char_range_start=0,
+        char_range_end=720,
+    )
+
+    with pytest.raises(RuntimeError, match="section summary generation failed"):
+        summarizer.summarize_section_with_metadata(section, "doc")

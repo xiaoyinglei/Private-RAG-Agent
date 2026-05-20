@@ -37,11 +37,13 @@ class EmbeddingHttpClient:
         self,
         base_url: str,
         *,
+        batch_size: int | None = None,
         timeout: float = 120.0,
         client: httpx.Client | None = None,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._client = client or httpx.Client(timeout=httpx.Timeout(timeout), trust_env=False)
+        self._batch_size = self._normalize_batch_size(batch_size)
         self._model_name: str = ""
         self._embedding_space: str = "default"
         self._dim: int = 0
@@ -53,6 +55,10 @@ class EmbeddingHttpClient:
     @property
     def embedding_model_name(self) -> str:
         return self._model_name
+
+    @property
+    def embedding_space(self) -> str:
+        return self._embedding_space
 
     @property
     def dimension(self) -> int:
@@ -68,13 +74,20 @@ class EmbeddingHttpClient:
             return []
 
         mode = str(kwargs.get("mode", "document"))
-        batch_size = kwargs.get("batch_size")
+        requested_batch_size = kwargs.get("batch_size")
+        batch_size = (
+            self._normalize_batch_size(requested_batch_size)
+            if requested_batch_size is not None
+            else self._batch_size
+        )
+        request_chunk_size = batch_size or self._SERVER_MAX_BATCH
 
-        # Split into chunks if the batch exceeds the server limit.
-        if len(texts) > self._SERVER_MAX_BATCH:
+        # Split into bounded HTTP requests. The server may do its own internal
+        # batching too, but large request bodies can still exceed client timeout.
+        if len(texts) > request_chunk_size:
             all_vectors: list[list[float]] = []
-            for offset in range(0, len(texts), self._SERVER_MAX_BATCH):
-                chunk = texts[offset : offset + self._SERVER_MAX_BATCH]
+            for offset in range(0, len(texts), request_chunk_size):
+                chunk = texts[offset : offset + request_chunk_size]
                 all_vectors.extend(self.embed(chunk, mode=mode, batch_size=batch_size))
             return all_vectors
 
@@ -150,6 +163,20 @@ class EmbeddingHttpClient:
         self._model_name = health.model
         self._embedding_space = health.embedding_space
         self._dim = health.dimension
+
+    @classmethod
+    def _normalize_batch_size(cls, value: object | None) -> int | None:
+        if value is None:
+            return None
+        try:
+            batch_size = int(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"embedding batch_size must be an integer, got {value!r}") from exc
+        if batch_size < 1 or batch_size > cls._SERVER_MAX_BATCH:
+            raise ValueError(
+                f"embedding batch_size must be between 1 and {cls._SERVER_MAX_BATCH}, got {batch_size}"
+            )
+        return batch_size
 
 
 def _extract_detail(response: httpx.Response) -> str:

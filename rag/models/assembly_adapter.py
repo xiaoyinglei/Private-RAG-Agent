@@ -72,6 +72,7 @@ def _to_embedding_provider_config(spec: ModelSpec) -> ProviderConfig:
     return ProviderConfig(
         provider_kind=_map_kind(spec.provider),
         embedding_model=spec.model,
+        embedding_space=spec.embedding_space or spec.model,
         base_url=spec.base_url,
     )
 
