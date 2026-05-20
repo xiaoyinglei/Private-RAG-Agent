@@ -53,6 +53,10 @@ class RetrievalSummaryConfig:
     # 适用于公开 benchmark 等纯文本 passage 的 fast ingest
     raw_text_mode: bool = False
 
+    # 私有语料入库等场景需要确认摘要确实由生成模型产出。
+    # 开启后，模型调用失败或输出空内容会让入库失败，而不是写入 fallback 摘要。
+    strict_generation: bool = False
+
 
 class RetrievalSummarizer:
     """
@@ -143,6 +147,7 @@ class RetrievalSummarizer:
         try:
             generated = self._generate_text(prompt=prompt)
         except Exception as exc:
+            self._raise_if_strict("section summary generation failed", exc)
             return RetrievalSummaryResult(
                 text=self._fallback_summary(raw_text),
                 method="fallback",
@@ -156,6 +161,7 @@ class RetrievalSummarizer:
 
         # 6. 如果模型输出空、废话、异常，回退到原文截断
         if not cleaned:
+            self._raise_if_strict("section summary generation returned empty output")
             return RetrievalSummaryResult(
                 text=self._fallback_summary(raw_text),
                 method="fallback",
@@ -215,6 +221,7 @@ class RetrievalSummarizer:
         try:
             generated = self._generate_text(prompt=prompt)
         except Exception as exc:
+            self._raise_if_strict("asset summary generation failed", exc)
             return RetrievalSummaryResult(
                 text=self._fallback_asset_summary(
                     asset_type=asset_type,
@@ -229,6 +236,7 @@ class RetrievalSummarizer:
 
         cleaned = self._clean_summary(generated)
         if not cleaned:
+            self._raise_if_strict("asset summary generation returned empty output")
             return RetrievalSummaryResult(
                 text=self._fallback_asset_summary(
                     asset_type=asset_type,
@@ -286,6 +294,7 @@ class RetrievalSummarizer:
         try:
             generated = self._generate_text(prompt=prompt)
         except Exception as exc:
+            self._raise_if_strict("document summary generation failed", exc)
             return RetrievalSummaryResult(
                 text=self._fallback_summary(child_summary_text),
                 method="fallback",
@@ -296,6 +305,7 @@ class RetrievalSummarizer:
 
         cleaned = self._clean_summary(generated)
         if not cleaned:
+            self._raise_if_strict("document summary generation returned empty output")
             return RetrievalSummaryResult(
                 text=self._fallback_summary(child_summary_text),
                 method="fallback",
@@ -317,7 +327,15 @@ class RetrievalSummarizer:
             "direct_return_token_threshold": self._config.direct_return_token_threshold,
             "max_input_tokens": self._config.max_input_tokens,
             "max_output_tokens": self._config.max_output_tokens,
+            "strict_generation": self._config.strict_generation,
         }
+
+    def _raise_if_strict(self, message: str, exc: Exception | None = None) -> None:
+        if not self._config.strict_generation:
+            return
+        if exc is None:
+            raise RuntimeError(message)
+        raise RuntimeError(message) from exc
 
     def _provider_name(self) -> str | None:
         provider_name = getattr(self._llm, "provider_name", None)

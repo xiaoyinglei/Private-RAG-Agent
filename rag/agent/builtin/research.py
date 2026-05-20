@@ -42,6 +42,7 @@ RESEARCH_AGENT = AgentDefinition(
         "grounding",
         "rerank",
         "llm_summarize",
+        "rag_search_answer",
     ],
     # TODO: migrate estimated_token_budget / max_iterations / max_depth to runtime config
     estimated_token_budget=10000,

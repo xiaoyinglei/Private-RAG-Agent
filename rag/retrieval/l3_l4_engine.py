@@ -278,6 +278,7 @@ class L3L4RetrievalEngine:
             sparse_query=plan.sparse_query,
             embedding_provider=self._embedding_provider(),
             rerank_provider=getattr(getattr(self.reranker, "reranker", None), "last_provider", None),
+            rerank_skipped=self._rerank_skipped(decision=decision, query_options=query_options),
             attempts=self._provider_attempts(),
             fusion_strategy=plan.fusion_strategy,
             fusion_alpha=plan.fusion_alpha,
@@ -464,6 +465,12 @@ class L3L4RetrievalEngine:
             if isinstance(provider, str) and provider:
                 return provider
         return None
+
+    def _rerank_skipped(self, *, decision: RoutingDecision, query_options: QueryOptions | None) -> bool:
+        if not decision.rerank_required:
+            return False
+        query_rerank_enabled = query_options is None or query_options.enable_rerank
+        return not query_rerank_enabled or not bool(getattr(self.reranker, "enabled", False))
 
     def _provider_attempts(self) -> list[ProviderAttempt]:
         attempts: list[ProviderAttempt] = []

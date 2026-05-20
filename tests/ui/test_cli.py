@@ -24,8 +24,21 @@ def _use_isolated_cli_runtime(monkeypatch: MonkeyPatch) -> None:
         model: str | None = None,
         embedding_model: str | None = None,
         reranker_model: str | None = None,
+        vector_backend: str = "milvus",
+        vector_dsn: str | None = None,
+        vector_namespace: str | None = None,
+        vector_collection_prefix: str | None = None,
     ):
-        del model, embedding_model, reranker_model, require_rerank
+        del (
+            model,
+            embedding_model,
+            reranker_model,
+            require_rerank,
+            vector_backend,
+            vector_dsn,
+            vector_namespace,
+            vector_collection_prefix,
+        )
         return make_runtime(storage=StorageConfig(root=storage_root), require_chat=require_chat)
 
     monkeypatch.setattr(cli, "_runtime", _runtime)
@@ -259,6 +272,7 @@ def test_cli_query_help_uses_new_retrieval_profile_option() -> None:
     assert result.exit_code == 0
     assert "--retrieval-profile" in result.output
     assert "--model" in result.output
+    assert "--vector-collection-prefix" in result.output
 
 
 def test_agent_run_help_exposes_explicit_agent_selector() -> None:
@@ -266,6 +280,7 @@ def test_agent_run_help_exposes_explicit_agent_selector() -> None:
 
     assert result.exit_code == 0
     assert "--agent" in result.output
+    assert "--vector-collection-prefix" in result.output
     assert "research" in result.output
     assert "orchestrator" in result.output
 

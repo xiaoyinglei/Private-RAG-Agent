@@ -80,6 +80,7 @@ class RetrievalDiagnostics(BaseModel):
     
     embedding_provider: str | None = None
     rerank_provider: str | None = None
+    rerank_skipped: bool = False
     attempts: list[ProviderAttempt] = Field(default_factory=list)
     fusion_strategy: str | None = None
     fusion_alpha: float | None = None

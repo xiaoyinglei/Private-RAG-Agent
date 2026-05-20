@@ -388,6 +388,14 @@ def test_benchmark_storage_config_defaults_to_milvus_vectors(tmp_path: Path) -> 
     assert storage.vectors.dsn == "http://127.0.0.1:19530"
 
 
+def test_benchmark_storage_config_treats_blank_milvus_dsn_as_default(tmp_path: Path) -> None:
+    storage = benchmarks._benchmark_storage_config(root=tmp_path / "index", vector_backend="milvus", vector_dsn=" ")
+
+    assert storage.vectors is not None
+    assert storage.vectors.backend == "milvus"
+    assert storage.vectors.dsn == "http://127.0.0.1:19530"
+
+
 def test_build_runtime_for_benchmark_passes_milvus_vector_config(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict[str, object] = {}
 
@@ -423,6 +431,42 @@ def test_build_runtime_for_benchmark_passes_milvus_vector_config(tmp_path, monke
         assert storage.vectors.dsn == "http://127.0.0.1:19530"
         assert storage.vectors.namespace == "rag_benchmarks"
         assert storage.vectors.collection == "medical_retrieval_mini"
+    finally:
+        runtime.close()
+
+
+def test_build_runtime_for_benchmark_ignores_rerank_service_url_when_not_required(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    class _FakeRuntime:
+        def __init__(self) -> None:
+            self.capability_bundle = type("_Bundle", (), {"embedding_bindings": []})()
+
+        def close(self) -> None:
+            return None
+
+    def _fake_from_request(*, storage, request, assembly_service):
+        captured["request"] = request
+        return _FakeRuntime()
+
+    monkeypatch.delenv("RAG_EMBEDDING_SERVICE_URL", raising=False)
+    monkeypatch.setenv("RAG_RERANK_SERVICE_URL", "http://127.0.0.1:9")
+    monkeypatch.setattr(benchmarks.RAGRuntime, "from_request", staticmethod(_fake_from_request))
+
+    runtime = build_runtime_for_benchmark(
+        storage_root=tmp_path / "benchmarks" / "medical_retrieval" / "index",
+        require_chat=False,
+        require_rerank=False,
+        vector_backend="sqlite",
+    )
+    try:
+        request = captured["request"]
+        assert isinstance(request, benchmarks.AssemblyRequest)
+        assert request.requirements.require_rerank is False
+        assert request.overrides is None or request.overrides.rerank_provider is None
     finally:
         runtime.close()
 

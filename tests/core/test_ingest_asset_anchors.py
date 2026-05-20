@@ -96,7 +96,8 @@ class _SummaryRepo:
     def __init__(self) -> None:
         self.records: list[Any] = []
 
-    def upsert_records(self, items: list[tuple[Any, list[float]]]) -> None:
+    def upsert_records(self, items: list[tuple[Any, list[float]]], *, embedding_space: str = "default") -> None:
+        del embedding_space
         self.records.extend(record for record, _ in items)
 
 

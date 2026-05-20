@@ -156,7 +156,11 @@ class CapabilityAssemblyService:
         contracts = AssemblyContracts(
             token_contract=token_contract,
             token_accounting=token_accounting,
-            runtime_contract_payload=self._runtime_contract_payload(token_contract, token_accounting),
+            runtime_contract_payload=self._runtime_contract_payload(
+                token_contract,
+                token_accounting,
+                embedding_binding=embedding_bindings[0],
+            ),
         )
         diagnostics = AssemblyDiagnostics(
             status=self._diagnostics_status(issues),
@@ -190,14 +194,7 @@ class CapabilityAssemblyService:
         if stored_payload is None:
             return RuntimeContractGovernance(status="valid", should_persist=True)
         mismatches: dict[str, tuple[Any | None, Any | None]] = {}
-        for key in (
-            "embedding_model_name",
-            "tokenizer_model_name",
-            "chunking_tokenizer_model_name",
-            "tokenizer_backend",
-            "chunk_token_size",
-            "chunk_overlap_tokens",
-        ):
+        for key in ("tokenizer_backend", "chunk_token_size", "chunk_overlap_tokens"):
             if stored_payload.get(key) != current_payload.get(key):
                 mismatches[key] = (current_payload.get(key), stored_payload.get(key))
         if not mismatches:
@@ -261,7 +258,7 @@ class CapabilityAssemblyService:
             if capability == "embedding":
                 binding: CapabilityBinding = EmbeddingCapabilityBinding(
                     backend=runtime_provider,
-                    space=default_space,
+                    space=self._embedding_space_from_provider(runtime_provider, default_space),
                     location="runtime",
                 )
             else:
@@ -394,7 +391,10 @@ class CapabilityAssemblyService:
             if capability == "embedding":
                 binding: CapabilityBinding = EmbeddingCapabilityBinding(
                     backend=provider,
-                    space=default_space,
+                    space=(
+                        candidate.provider_config.embedding_space
+                        or self._embedding_space_from_provider(provider, default_space)
+                    ),
                     location=candidate.provider_config.location,
                 )
             elif capability == "chat":
@@ -563,16 +563,24 @@ class CapabilityAssemblyService:
     def _runtime_contract_payload(
         token_contract: TokenizerContract,
         token_accounting: TokenAccountingService,
+        *,
+        embedding_binding: EmbeddingCapabilityBinding,
     ) -> dict[str, str | int | bool]:
         tokenizer_backend, _tokenizer_model = token_accounting.backend_descriptor()
         return {
             "embedding_model_name": token_contract.embedding_model_name,
+            "embedding_space": embedding_binding.space,
             "tokenizer_model_name": token_contract.tokenizer_model_name,
             "chunking_tokenizer_model_name": token_contract.chunking_tokenizer_model_name,
             "tokenizer_backend": tokenizer_backend,
             "chunk_token_size": token_contract.chunk_token_size,
             "chunk_overlap_tokens": token_contract.normalized_chunk_overlap_tokens(),
         }
+
+    @staticmethod
+    def _embedding_space_from_provider(provider: object, default_space: str) -> str:
+        value = getattr(provider, "embedding_space", None)
+        return value if isinstance(value, str) and value.strip() else default_space
 
     @staticmethod
     def _diagnostics_status(issues: Sequence[AssemblyIssue]) -> AssemblyStatus:

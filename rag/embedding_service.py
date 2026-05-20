@@ -7,6 +7,9 @@ from typing import Any, Literal
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
+from rag.models.catalog import ModelCatalog
+from rag.models.config import ModelCapability
+
 _MAX_BATCH_SIZE = 32
 _MAX_REQUEST_BYTES = 10 * 1024 * 1024  # 10 MB
 _REQUEST_BODY_LIMIT = _MAX_REQUEST_BYTES
@@ -74,9 +77,24 @@ def create_app(
 
     _dimension = len(warmup_vecs[0])
     _model_name = _embedder.embedding_model_name
-    _embedding_space = "default"
+    _embedding_space = embedding_space_for_model(model_name_or_path)
 
     return app
+
+
+def embedding_space_for_model(model_name_or_path: str) -> str:
+    """Resolve the stable vector-space identifier for an embedding model."""
+    model_name_or_path = model_name_or_path.strip()
+    if not model_name_or_path:
+        return "default"
+    try:
+        catalog = ModelCatalog.from_yaml()
+    except Exception:
+        return model_name_or_path
+    for spec in catalog.list_models(ModelCapability.EMBEDDING):
+        if spec.model == model_name_or_path:
+            return spec.embedding_space or spec.model
+    return model_name_or_path
 
 
 @app.get("/health", response_model=HealthResponse)

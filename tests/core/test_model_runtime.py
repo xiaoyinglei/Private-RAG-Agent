@@ -4,6 +4,7 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
+from pydantic import BaseModel
 
 from rag.assembly.models import ProviderConfig
 from rag.assembly.support import _OpenAICompatibleChatGenerator, build_provider
@@ -12,6 +13,10 @@ from rag.models.catalog import ModelCatalog
 from rag.models.config import GenerationTaskConfig, ModelCapability, ModelRuntimeConfig
 from rag.models.guard import EmbeddingSpaceMismatchError, assert_embedding_space_compatible
 from rag.models.runtime import RuntimeOverrides, resolve_runtime_config
+
+
+class _StructuredPayload(BaseModel):
+    answer: str
 
 CATALOG_YAML = """
 models:
@@ -305,6 +310,25 @@ def test_openai_compatible_generator_null_content() -> None:
         assert result == ""
     finally:
         gen._client.chat.completions.create = original_create
+
+
+def test_openai_compatible_generator_structured_fallback_parses_fenced_json() -> None:
+    gen = _OpenAICompatibleChatGenerator(
+        model="test-model",
+        base_url="http://127.0.0.1:8080/v1",
+    )
+    mock_response = MagicMock()
+    mock_response.choices = [MagicMock()]
+    mock_response.choices[0].message.content = '```json\n{"answer": "ok"}\n```'
+
+    original_create = gen._client.chat.completions.create
+    gen._client.chat.completions.create = lambda **kw: mock_response
+    try:
+        result = gen.generate_structured(prompt="return json", schema=_StructuredPayload)
+    finally:
+        gen._client.chat.completions.create = original_create
+
+    assert result == _StructuredPayload(answer="ok")
 
 
 # ── 端到端集成测试：模拟数据跑完整 RAG 链路 ──

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 import time
 from collections.abc import Sequence
@@ -26,6 +27,11 @@ from rag.schema.runtime import (
 from rag.utils.text import keyword_overlap, looks_command_like, search_terms, split_sentences
 
 _DOC_ALIAS_RE = re.compile(r"\[(Doc-\d+)\]")
+_JSON_CODE_FENCE_RE = re.compile(
+    r"^\s*```\s*(?:[A-Za-z0-9_-]+)?\s*(?P<body>.*?)\s*```\s*$",
+    re.DOTALL,
+)
+_STRUCTURED_ANSWER_KEYS = {"answer_text", "answer_sections", "insufficient_evidence_flag"}
 
 _GENERIC_QUERY_TERMS = {
     "这个",
@@ -354,6 +360,16 @@ class AnswerGenerationService:
         if self._evidence_is_insufficient(query, evidence, trust_evidence_pack=trust_evidence_pack):
             return self.insufficient_answer()
 
+        structured_payload = self._structured_payload_from_text_output(model_output)
+        if structured_payload is not None:
+            return self.answer_from_structured_payload(
+                query=query,
+                evidence_pack=evidence,
+                grounded_candidate=grounded_candidate,
+                payload=structured_payload,
+                trust_evidence_pack=trust_evidence_pack,
+            )
+
         stripped = model_output.strip()
         answer_text = stripped if stripped else grounded_candidate
 
@@ -362,6 +378,29 @@ class AnswerGenerationService:
             sections=[AnswerSectionPayload(title="直接回答", text=answer_text, evidence_ids=[])],
             evidence_pack=evidence,
         )
+
+    @classmethod
+    def _structured_payload_from_text_output(cls, model_output: str) -> StructuredAnswerPayload | None:
+        candidate = cls._strip_markdown_code_fence(model_output).strip()
+        if not candidate.startswith("{"):
+            return None
+        try:
+            raw_payload = json.loads(candidate)
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(raw_payload, dict):
+            return None
+        if not _STRUCTURED_ANSWER_KEYS.issubset(raw_payload):
+            return None
+        try:
+            return StructuredAnswerPayload.model_validate(raw_payload)
+        except ValidationError:
+            return None
+
+    @staticmethod
+    def _strip_markdown_code_fence(text: str) -> str:
+        match = _JSON_CODE_FENCE_RE.match(text)
+        return match.group("body") if match else text
 
     def grounded_fallback(
         self,

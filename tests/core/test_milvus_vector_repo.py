@@ -254,6 +254,46 @@ def test_milvus_vector_repo_search_injects_system_guardrail(monkeypatch: pytest.
         repo.close()
 
 
+def test_milvus_vector_repo_search_rejects_dimension_mismatch_before_milvus(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(MilvusVectorRepo, "_connect", lambda self: setattr(self, "_connected", True))
+
+    class _Connections:
+        def disconnect(self, alias: str) -> None:
+            return None
+
+    monkeypatch.setitem(sys.modules, "pymilvus", types.SimpleNamespace(connections=_Connections()))
+
+    class _Field:
+        name = "embedding"
+        params = {"dim": 4096}
+
+    class _Schema:
+        fields = [_Field()]
+
+    class _FakeCollection:
+        name = "summary_index__section_summary__default"
+        schema = _Schema()
+
+        def search(self, **kwargs):
+            raise AssertionError("dimension mismatch must be rejected before Milvus search")
+
+        def release(self) -> None:
+            return None
+
+    repo = MilvusVectorRepo("http://127.0.0.1:19530")
+    fake_collection = _FakeCollection()
+    monkeypatch.setattr(repo, "_has_collection", lambda **kwargs: True)
+    monkeypatch.setattr(repo, "_collection", lambda **kwargs: fake_collection)
+    repo._collections[fake_collection.name] = fake_collection
+    try:
+        with pytest.raises(RuntimeError, match="embedding dimension mismatch"):
+            repo.search([0.1] * 2560, item_kind="section_summary", embedding_space="default")
+    finally:
+        repo.close()
+
+
 def test_milvus_vector_repo_hybrid_search_passes_expr_to_every_ann_request(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

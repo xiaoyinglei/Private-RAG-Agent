@@ -117,6 +117,7 @@ class MilvusVectorRepo:
         if not self._has_collection(item_kind=item_kind, embedding_space=embedding_space):
             return []
         collection = self._collection(item_kind=item_kind, embedding_space=embedding_space)
+        self._validate_query_dimension(collection, query_vector, embedding_space=embedding_space, item_kind=item_kind)
         final_expr = self._search_expr(doc_ids=doc_ids, user_expr=expr)
         output_fields = self._output_fields(item_kind=item_kind, include_embedding=False)
         hits = self._search_collection(
@@ -591,6 +592,49 @@ class MilvusVectorRepo:
             results = cast(list[Any], cast(Any, collection).search(**kwargs))
         return [] if not results else list(results[0])
 
+    def _validate_query_dimension(
+        self,
+        collection: Any,
+        query_vector: Sequence[float],
+        *,
+        embedding_space: str,
+        item_kind: str,
+    ) -> None:
+        expected = self._collection_embedding_dimension(collection)
+        if expected is None or expected == len(query_vector):
+            return
+        raise RuntimeError(
+            "Milvus embedding dimension mismatch before search: "
+            f"collection={getattr(collection, 'name', '<unknown>')!r}, "
+            f"item_kind={item_kind!r}, embedding_space={embedding_space!r}, "
+            f"expected_dimension={expected}, actual_dimension={len(query_vector)}. "
+            "Use the same embedding model/embedding space as the indexed vectors, "
+            "or rebuild into a new collection prefix."
+        )
+
+    @staticmethod
+    def _collection_embedding_dimension(collection: Any) -> int | None:
+        schema = getattr(collection, "schema", None)
+        fields = getattr(schema, "fields", None)
+        if fields is None and isinstance(schema, dict):
+            fields = schema.get("fields")
+        if not fields:
+            return None
+        for field in fields:
+            name = getattr(field, "name", None)
+            params = getattr(field, "params", None)
+            if isinstance(field, dict):
+                name = field.get("name")
+                params = field.get("params")
+            if name != "embedding" or not isinstance(params, dict):
+                continue
+            value = params.get("dim")
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                return None
+        return None
+
     def _query_collection(self, collection: Any, *, expr: str, output_fields: list[str]) -> list[dict[str, Any]]:
         kwargs: dict[str, Any] = {
             "expr": expr,
@@ -731,6 +775,7 @@ class MilvusVectorRepo:
         if not self._has_collection(item_kind=item_kind, embedding_space=embedding_space):
             return []
         collection = self._collection(item_kind=item_kind, embedding_space=embedding_space)
+        self._validate_query_dimension(collection, dense_vector, embedding_space=embedding_space, item_kind=item_kind)
         supports_bm25 = self._supports_bm25_schema(collection)
         if not supports_bm25:
             raise RuntimeError(

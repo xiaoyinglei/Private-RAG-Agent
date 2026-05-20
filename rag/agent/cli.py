@@ -24,6 +24,8 @@ from rag.agent.tools.llm_tools import (
     LLMTextOutput,
 )
 from rag.agent.tools.registry import ToolRunner
+from rag.storage.runtime_config import DEFAULT_VECTOR_BACKEND, runtime_storage_config
+from rag.utils.text import load_env_file
 
 agent_app = typer.Typer(add_completion=False, no_args_is_help=True)
 
@@ -274,13 +276,21 @@ def agent_chat(
             help="Reranker 模型别名，对应 configs/models.yaml 中 capability=reranker 的条目",
         ),
     ] = None,
+    vector_backend: Annotated[str, typer.Option("--vector-backend", help="Vector backend: milvus or sqlite.")] = DEFAULT_VECTOR_BACKEND,
+    vector_dsn: Annotated[str | None, typer.Option("--vector-dsn", help="Vector backend DSN.")] = None,
+    vector_namespace: Annotated[str | None, typer.Option("--vector-namespace", help="Vector namespace/database.")] = None,
+    vector_collection_prefix: Annotated[
+        str | None,
+        typer.Option("--vector-collection-prefix", help="Milvus collection prefix used at ingest time."),
+    ] = None,
 ) -> None:
     """交互式 Agent 对话。暂停时支持工具审批。"""
-    from rag import AssemblyRequest, CapabilityRequirements, RAGRuntime, StorageComponentConfig, StorageConfig
+    from rag import AssemblyRequest, CapabilityRequirements, RAGRuntime
     from rag.models.assembly_adapter import to_assembly_overrides
     from rag.models.runtime import RuntimeOverrides, resolve_runtime_config
     from rag.retrieval import QueryOptions
 
+    load_env_file()
     runtime_config = resolve_runtime_config(
         RuntimeOverrides(
             model_alias=model,
@@ -290,9 +300,12 @@ def agent_chat(
     )
     assembly_overrides = to_assembly_overrides(runtime_config)
 
-    storage = StorageConfig(
-        root=storage_root,
-        vectors=StorageComponentConfig(backend="milvus", dsn="http://127.0.0.1:19530"),
+    storage = runtime_storage_config(
+        storage_root,
+        vector_backend=vector_backend,
+        vector_dsn=vector_dsn,
+        vector_namespace=vector_namespace,
+        vector_collection_prefix=vector_collection_prefix,
     )
     requirements = CapabilityRequirements(
         require_chat=True,
@@ -304,6 +317,7 @@ def agent_chat(
             requirements=requirements,
             overrides=assembly_overrides,
         ),
+        generation_config=runtime_config.generation,
     )
 
     with runtime:
@@ -395,13 +409,21 @@ def agent_run(
             help="Reranker 模型别名，对应 configs/models.yaml 中 capability=reranker 的条目",
         ),
     ] = None,
+    vector_backend: Annotated[str, typer.Option("--vector-backend", help="Vector backend: milvus or sqlite.")] = DEFAULT_VECTOR_BACKEND,
+    vector_dsn: Annotated[str | None, typer.Option("--vector-dsn", help="Vector backend DSN.")] = None,
+    vector_namespace: Annotated[str | None, typer.Option("--vector-namespace", help="Vector namespace/database.")] = None,
+    vector_collection_prefix: Annotated[
+        str | None,
+        typer.Option("--vector-collection-prefix", help="Milvus collection prefix used at ingest time."),
+    ] = None,
 ) -> None:
     """单次 Agent 运行。传入 --checkpoint-db 后支持跨进程恢复。"""
-    from rag import AssemblyRequest, CapabilityRequirements, RAGRuntime, StorageComponentConfig, StorageConfig
+    from rag import AssemblyRequest, CapabilityRequirements, RAGRuntime
     from rag.models.assembly_adapter import to_assembly_overrides
     from rag.models.runtime import RuntimeOverrides, resolve_runtime_config
     from rag.retrieval import QueryOptions
 
+    load_env_file()
     runtime_config = resolve_runtime_config(
         RuntimeOverrides(
             model_alias=model,
@@ -411,9 +433,12 @@ def agent_run(
     )
     assembly_overrides = to_assembly_overrides(runtime_config)
 
-    storage = StorageConfig(
-        root=storage_root,
-        vectors=StorageComponentConfig(backend="milvus", dsn="http://127.0.0.1:19530"),
+    storage = runtime_storage_config(
+        storage_root,
+        vector_backend=vector_backend,
+        vector_dsn=vector_dsn,
+        vector_namespace=vector_namespace,
+        vector_collection_prefix=vector_collection_prefix,
     )
     requirements = CapabilityRequirements(
         require_chat=True,
@@ -422,6 +447,7 @@ def agent_run(
     runtime = RAGRuntime.from_request(
         storage=storage,
         request=AssemblyRequest(requirements=requirements, overrides=assembly_overrides),
+        generation_config=runtime_config.generation,
     )
 
     with runtime:
@@ -504,13 +530,21 @@ def agent_resume(
             help="Reranker 模型别名，对应 configs/models.yaml 中 capability=reranker 的条目",
         ),
     ] = None,
+    vector_backend: Annotated[str, typer.Option("--vector-backend", help="Vector backend: milvus or sqlite.")] = DEFAULT_VECTOR_BACKEND,
+    vector_dsn: Annotated[str | None, typer.Option("--vector-dsn", help="Vector backend DSN.")] = None,
+    vector_namespace: Annotated[str | None, typer.Option("--vector-namespace", help="Vector namespace/database.")] = None,
+    vector_collection_prefix: Annotated[
+        str | None,
+        typer.Option("--vector-collection-prefix", help="Milvus collection prefix used at ingest time."),
+    ] = None,
 ) -> None:
     """从 SQLite checkpoint 恢复暂停的 Agent 运行。"""
-    from rag import AssemblyRequest, CapabilityRequirements, RAGRuntime, StorageComponentConfig, StorageConfig
+    from rag import AssemblyRequest, CapabilityRequirements, RAGRuntime
     from rag.models.assembly_adapter import to_assembly_overrides
     from rag.models.runtime import RuntimeOverrides, resolve_runtime_config
     from rag.retrieval import QueryOptions
 
+    load_env_file()
     runtime_config = resolve_runtime_config(
         RuntimeOverrides(
             model_alias=model,
@@ -520,9 +554,12 @@ def agent_resume(
     )
     assembly_overrides = to_assembly_overrides(runtime_config)
 
-    storage = StorageConfig(
-        root=storage_root,
-        vectors=StorageComponentConfig(backend="milvus", dsn="http://127.0.0.1:19530"),
+    storage = runtime_storage_config(
+        storage_root,
+        vector_backend=vector_backend,
+        vector_dsn=vector_dsn,
+        vector_namespace=vector_namespace,
+        vector_collection_prefix=vector_collection_prefix,
     )
     requirements = CapabilityRequirements(
         require_chat=True,
@@ -531,6 +568,7 @@ def agent_resume(
     runtime = RAGRuntime.from_request(
         storage=storage,
         request=AssemblyRequest(requirements=requirements, overrides=assembly_overrides),
+        generation_config=runtime_config.generation,
     )
 
     with runtime:

@@ -244,6 +244,7 @@ class IngestPipeline:
         summary_repo: SummaryIndexRepo,
         object_store: ObjectStore | None = None,
         embedding_model_id: str = "default",
+        embedding_space: str = "default",
         section_refiner: SectionRefiner | None = None,
     ) -> None:
         self._dispatcher = dispatcher
@@ -253,6 +254,7 @@ class IngestPipeline:
         self._summary_repo = summary_repo
         self._object_store = object_store
         self._embedding_model_id = embedding_model_id or "default"
+        self._embedding_space = embedding_space or "default"
         self._section_refiner = section_refiner or SectionRefiner()
 
     def configure_summarizer(self, summarizer: RetrievalSummarizer) -> None:
@@ -1254,10 +1256,10 @@ class IngestPipeline:
             )
         upsert_records = getattr(self._summary_repo, "upsert_records", None)
         if callable(upsert_records):
-            upsert_records(list(zip(records, vectors, strict=True)))
+            upsert_records(list(zip(records, vectors, strict=True)), embedding_space=self._embedding_space)
             return
         for record, vector in zip(records, vectors, strict=True):
-            self._summary_repo.upsert_record(record, vector)
+            self._summary_repo.upsert_record(record, vector, embedding_space=self._embedding_space)
 
     def _write_prepared_summary_records(self, prepared_items: Sequence[_PreparedIngestItem]) -> None:
         records_to_embed: list[DocSummaryRecord | SectionSummaryRecord | AssetSummaryRecord] = []
@@ -1288,10 +1290,10 @@ class IngestPipeline:
         upsert_items = [(record, vectors[vector_index]) for record, vector_index in vector_indexes]
         upsert_records = getattr(self._summary_repo, "upsert_records", None)
         if callable(upsert_records):
-            upsert_records(upsert_items)
+            upsert_records(upsert_items, embedding_space=self._embedding_space)
             return
         for record, vector in upsert_items:
-            self._summary_repo.upsert_record(record, vector)
+            self._summary_repo.upsert_record(record, vector, embedding_space=self._embedding_space)
 
     def _doc_summary_record(
         self,
