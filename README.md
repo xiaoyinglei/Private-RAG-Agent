@@ -33,7 +33,8 @@
 
 ## News
 
-- 2026-05-17：默认模型切到 `deepseek-v4-flash`、`mlx-community/Qwen3-Embedding-4B-4bit-DWQ`、`BAAI/bge-reranker-v2-m3`。
+- 2026-05-20：README 补齐本地 Qwen / embedding / rerank 服务管理、私有文档入库、RAG 查询、Agent 查询、JSON diagnostics 和省内存运行手册。
+- 2026-05-17：历史默认模型切到 `deepseek-v4-flash`、`mlx-community/Qwen3-Embedding-4B-4bit-DWQ`、`BAAI/bge-reranker-v2-m3`。
 - 2026-05-17：README 保留 HTML badge、导航和 Mermaid 版式，同时保留历史 baseline 用来对比后续改进。
 - 2026-05-16：完成真实 `PostgreSQL + parquet object store + Milvus + Redis` 端到端验证，表格问题通过 DuckDB 返回 `375`。
 - 2026-05-16：README 恢复历史 baseline，并补齐 Agent 设计说明、文件级目录和当前运行命令。
@@ -477,10 +478,27 @@ lsof -nP -iTCP:6379 -sTCP:LISTEN
 | Milvus Web/metrics | `9091` | 已被 Milvus docker 占用，不要给 rerank 用 |
 | Postgres | `5432` | metadata |
 | Redis | `6379` | cache |
+| Qwen generation service | `8080` | `Qwen/Qwen3-8B-MLX-4bit` |
 | Embedding service | `9090` | `mlx-community/Qwen3-Embedding-4B-4bit-DWQ` |
 | Rerank service | `9092` | `BAAI/bge-reranker-v2-m3` |
 
 ## 模型服务管理
+
+当前默认模型配置在 `configs/models.yaml`：
+
+| 能力 | 默认别名 | 实际模型 / 服务 |
+| --- | --- | --- |
+| 生成 / 摘要 / Agent 路由 | `qwen3_8b_mlx_4bit` | `Qwen/Qwen3-8B-MLX-4bit`，OpenAI-compatible，`127.0.0.1:8080` |
+| Embedding | `qwen3_embedding_4b_4bit_dwq` | `mlx-community/Qwen3-Embedding-4B-4bit-DWQ`，HTTP service，`127.0.0.1:9090` |
+| Rerank | `bge_reranker_v2_m3` | `BAAI/bge-reranker-v2-m3`，HTTP service，`127.0.0.1:9092` |
+
+内存策略：
+
+- 不要一次把生成模型、embedding、rerank 都常驻，Mac 内存容易爆。
+- 入库阶段需要生成摘要时：启动 Qwen 生成服务 + embedding 服务；不要启动 rerank。
+- 普通 RAG / Agent 查询：启动 Qwen 生成服务 + embedding 服务；rerank 默认先关。
+- 只有做排序质量评测或需要更强重排时，才单独启动 rerank。
+- 切换 embedding 模型后必须换新的 Milvus collection prefix，旧向量不能混用。
 
 先检查是否已经有同模型服务，避免重复常驻占内存：
 
@@ -492,39 +510,57 @@ lsof -nP -iTCP -sTCP:LISTEN \
   | rg ':(8080|8081|8000|8001|9090|9091|9092|11434|19530|5432|6379)\b' || true
 ```
 
-如果发现重复的 embedding/rerank 服务，先杀旧进程。不要杀 Milvus、Postgres、Redis：
+如果发现重复的 Qwen / embedding / rerank 服务，先杀旧进程。不要杀 Milvus、Postgres、Redis：
 
 ```bash
-kill <old_embedding_pid> <old_rerank_pid>
+kill <old_qwen_pid> <old_embedding_pid> <old_rerank_pid>
 ```
 
-启动唯一一份 embedding 服务：
+启动 Qwen 生成服务。`enable_thinking=false` 很重要，否则 Qwen3 可能把内容放到 reasoning 字段，导致摘要生成空输出：
+
+```bash
+screen -S rag_qwen_8080 -X quit >/dev/null 2>&1 || true
+screen -dmS rag_qwen_8080 zsh -lc '
+cd "/Users/leixiaoying/LLM/RAG学习"
+uv run python -m mlx_lm.server \
+  --model Qwen/Qwen3-8B-MLX-4bit \
+  --host 127.0.0.1 \
+  --port 8080 \
+  --chat-template-args '"'"'{"enable_thinking": false}'"'"'
+'
+```
+
+启动 embedding 服务。内存紧张时用 `--batch-size 1`，更稳；内存充足时可以调到 `2/4/8`：
 
 ```bash
 screen -S rag_embedding_9090 -X quit >/dev/null 2>&1 || true
 screen -dmS rag_embedding_9090 zsh -lc '
-cd /Users/leixiaoying/LLM/RAG学习 &&
+cd "/Users/leixiaoying/LLM/RAG学习"
 uv run rag embedding-service \
   --model mlx-community/Qwen3-Embedding-4B-4bit-DWQ \
-  --port 9090
+  --port 9090 \
+  --batch-size 1
 '
 ```
 
-启动唯一一份 rerank 服务：
+rerank 是可选服务。先不要开；需要重排时再启动。注意 `9091` 被 Milvus 占用，rerank 用 `9092`：
 
 ```bash
 screen -S rag_rerank_9092 -X quit >/dev/null 2>&1 || true
 screen -dmS rag_rerank_9092 zsh -lc '
-cd /Users/leixiaoying/LLM/RAG学习 &&
+cd "/Users/leixiaoying/LLM/RAG学习"
 uv run rag rerank-service \
   --model BAAI/bge-reranker-v2-m3 \
-  --port 9092
+  --port 9092 \
+  --batch-size 4 \
+  --max-length 1024
 '
 ```
 
 健康检查：
 
 ```bash
+curl -sS http://127.0.0.1:8080/v1/models
 curl -sS http://127.0.0.1:9090/health
 curl -sS http://127.0.0.1:9092/health
 screen -ls
@@ -532,25 +568,226 @@ screen -ls
 
 预期返回：
 
-```json
-{"model":"mlx-community/Qwen3-Embedding-4B-4bit-DWQ","embedding_space":"default","dimension":2560}
+```text
+{"object":"list","data":[...]}
+{"model":"mlx-community/Qwen3-Embedding-4B-4bit-DWQ","embedding_space":"mlx/Qwen3-Embedding-4B-4bit-DWQ","dimension":2560}
 {"model":"BAAI/bge-reranker-v2-m3"}
 ```
 
-## 快速开始
-
-CLI 会读取 `configs/models.yaml` 的默认模型。若已经启动 `9090/9092` 服务，可以通过 HTTP provider 复用常驻模型，避免 CLI 每次重新加载：
+关闭服务：
 
 ```bash
-export RAG_EMBEDDING_SERVICE_URL=http://127.0.0.1:9090
-export RAG_RERANK_SERVICE_URL=http://127.0.0.1:9092
+screen -S rag_qwen_8080 -X quit >/dev/null 2>&1 || true
+screen -S rag_embedding_9090 -X quit >/dev/null 2>&1 || true
+screen -S rag_rerank_9092 -X quit >/dev/null 2>&1 || true
 ```
 
-文本入库：
+如果只想临时释放某个模型的内存，关对应 screen 即可。例如入库完成后可以先关 Qwen，之后要生成答案时再开；做纯检索评测时可以不开 Qwen。
+
+## 私有文档端到端运行手册
+
+下面是当前推荐的本地私有知识库流程：启动服务、入库、RAG 查询、Agent 查询、可选 rerank。
+
+统一设置变量。入库和查询必须使用同一套 `STORAGE_ROOT / VECTOR_DSN / VECTOR_PREFIX`：
+
+```bash
+cd "/Users/leixiaoying/LLM/RAG学习"
+
+export STORAGE_ROOT="data/longpai_agent_milvus_v3"
+export VECTOR_DSN="http://127.0.0.1:19530"
+export VECTOR_PREFIX="longpai_agent_milvus_v3"
+export INPUT_DIR="data/longpai_agent_input_docx"
+
+# 让 CLI 复用常驻 embedding 服务，避免每次命令重新加载 embedding 模型。
+export RAG_EMBEDDING_SERVICE_URL="http://127.0.0.1:9090"
+
+# 默认省内存：不使用 rerank。
+unset RAG_RERANK_SERVICE_URL
+```
+
+检查变量，空字符串最容易导致 Milvus DSN 错误：
+
+```bash
+echo "$STORAGE_ROOT"
+echo "$VECTOR_DSN"
+echo "$VECTOR_PREFIX"
+echo "$INPUT_DIR"
+echo "$RAG_EMBEDDING_SERVICE_URL"
+```
+
+确认 Milvus 能连：
+
+```bash
+uv run python - <<'PY'
+from pymilvus import connections, utility
+connections.connect(alias="check", uri="http://127.0.0.1:19530")
+try:
+    print("milvus ok")
+    print(utility.list_collections(using="check"))
+finally:
+    connections.disconnect("check")
+PY
+```
+
+### 入库
+
+入库会做：解析文档 -> 切分 section / asset -> 生成 doc / section / asset 摘要 -> embedding -> 写 Milvus summary index。入库阶段不需要 rerank。
+
+```bash
+uv run python scripts/ingest_private_documents.py \
+  --input "$INPUT_DIR" \
+  --storage-root "$STORAGE_ROOT" \
+  --batch-size 1 \
+  --embedding-batch-size 2 \
+  --strict-summary-generation \
+  --vector-backend milvus \
+  --vector-dsn "$VECTOR_DSN" \
+  --vector-collection-prefix "$VECTOR_PREFIX" \
+  --output data/longpai_agent_milvus_v3/ingest_result.json
+```
+
+内存不足或进度条很久不动时，先用更保守参数：
+
+```bash
+uv run python scripts/ingest_private_documents.py \
+  --input "$INPUT_DIR" \
+  --storage-root "$STORAGE_ROOT" \
+  --batch-size 1 \
+  --embedding-batch-size 1 \
+  --strict-summary-generation \
+  --vector-backend milvus \
+  --vector-dsn "$VECTOR_DSN" \
+  --vector-collection-prefix "$VECTOR_PREFIX" \
+  --output data/longpai_agent_milvus_v3/ingest_result.json
+```
+
+入库结果检查：
+
+```bash
+cat data/longpai_agent_milvus_v3/ingest_result.json
+
+uv run python - <<'PY'
+import os
+from pymilvus import connections, utility
+prefix = os.environ["VECTOR_PREFIX"]
+connections.connect(alias="check", uri=os.environ["VECTOR_DSN"])
+try:
+    print([name for name in utility.list_collections(using="check") if name.startswith(prefix)])
+finally:
+    connections.disconnect("check")
+PY
+```
+
+### RAG 查询
+
+普通文本输出，适合人工看效果：
+
+```bash
+uv run rag query \
+  --storage-root "$STORAGE_ROOT" \
+  --vector-backend milvus \
+  --vector-dsn "$VECTOR_DSN" \
+  --vector-collection-prefix "$VECTOR_PREFIX" \
+  --reranker-model none \
+  --retrieval-profile auto \
+  --query "单笔国内差旅报销金额超过 12000 元需要谁审批？请给出处"
+```
+
+JSON 输出，适合看 evidence、citations、diagnostics、generation attempts：
+
+```bash
+uv run rag query \
+  --storage-root "$STORAGE_ROOT" \
+  --vector-backend milvus \
+  --vector-dsn "$VECTOR_DSN" \
+  --vector-collection-prefix "$VECTOR_PREFIX" \
+  --reranker-model none \
+  --retrieval-profile auto \
+  --query "单笔国内差旅报销金额超过 12000 元需要谁审批？请给出处" \
+  --json
+```
+
+常用检查字段：
+
+- `answer.answer_text`：最终自然语言答案。
+- `answer.citations`：引用位置。
+- `context.evidence`：进入生成模型的证据。
+- `retrieval_diagnostics.operator_plan`：检索算子计划。
+- `retrieval_diagnostics.rerank_skipped`：不启用 rerank 时应为 `true`。
+- `generation_attempts`：structured generation / text fallback 是否成功。
+
+### Agent 查询
+
+ResearchAgent 单次运行：
+
+```bash
+uv run rag agent run "单笔国内差旅报销金额超过 12000 元需要谁审批？请给出处" \
+  --agent research \
+  --storage-root "$STORAGE_ROOT" \
+  --vector-backend milvus \
+  --vector-dsn "$VECTOR_DSN" \
+  --vector-collection-prefix "$VECTOR_PREFIX" \
+  --reranker-model none \
+  --verbose
+```
+
+ResearchAgent 交互式运行：
+
+```bash
+uv run rag agent chat \
+  --agent research \
+  --storage-root "$STORAGE_ROOT" \
+  --vector-backend milvus \
+  --vector-dsn "$VECTOR_DSN" \
+  --vector-collection-prefix "$VECTOR_PREFIX" \
+  --reranker-model none
+```
+
+Agent 正常输出应包含最终回答；`--verbose` 时会显示工具执行摘要。如果看到：
+
+```text
+No answer was generated because no tool results were available.
+停止原因: no_pending_tools
+```
+
+说明 Agent 没有生成工具调用。优先检查 Qwen 生成服务是否启动、`configs/models.yaml` 默认模型是否可访问、以及 `curl http://127.0.0.1:8080/v1/models` 是否正常。
+
+### 是否开启 rerank
+
+默认省内存命令都使用：
+
+```bash
+--reranker-model none
+unset RAG_RERANK_SERVICE_URL
+```
+
+需要开启 rerank 时：
+
+```bash
+export RAG_RERANK_SERVICE_URL="http://127.0.0.1:9092"
+
+uv run rag query \
+  --storage-root "$STORAGE_ROOT" \
+  --vector-backend milvus \
+  --vector-dsn "$VECTOR_DSN" \
+  --vector-collection-prefix "$VECTOR_PREFIX" \
+  --retrieval-profile auto \
+  --query "单笔国内差旅报销金额超过 12000 元需要谁审批？请给出处" \
+  --json
+```
+
+开启 HTTP rerank 时不要再传 `--reranker-model none`。如果同时设置了 `RAG_RERANK_SERVICE_URL` 又传了 `--reranker-model`，CLI 会报冲突。
+
+### 快速 smoke 测试
+
+文本 smoke 入库：
 
 ```bash
 uv run rag ingest \
   --storage-root data/smoke_milvus \
+  --vector-backend milvus \
+  --vector-dsn "$VECTOR_DSN" \
+  --vector-collection-prefix smoke_milvus_v1 \
   --source-type plain_text \
   --location memory://smoke/travel-policy \
   --title "差旅制度 Smoke" \
@@ -558,32 +795,20 @@ uv run rag ingest \
   --content "单笔国内差旅报销金额超过 12000 元时，必须由业务线 VP 审批。"
 ```
 
-Excel 入库：
-
-```bash
-uv run rag ingest \
-  --storage-root data/smoke_milvus \
-  --source-type xlsx \
-  --location /absolute/path/to/开票量明细.xlsx \
-  --title "开票量明细" \
-  --owner smoke
-```
-
-查询：
+文本 smoke 查询：
 
 ```bash
 uv run rag query \
   --storage-root data/smoke_milvus \
+  --vector-backend milvus \
+  --vector-dsn "$VECTOR_DSN" \
+  --vector-collection-prefix smoke_milvus_v1 \
+  --reranker-model none \
   --retrieval-profile auto \
   --query "单笔国内差旅报销金额超过 12000 元需要谁审批？"
-
-uv run rag query \
-  --storage-root data/smoke_milvus \
-  --retrieval-profile asset \
-  --query "请计算华东区域 Q1 的开票量合计是多少？"
 ```
 
-说明：当前 CLI 的 metadata 默认仍是本地 metadata repo，适合快速验证。正式端到端使用下面的 `Postgres + parquet object + Milvus` runtime 配置。
+说明：CLI 默认 metadata 仍是本地 metadata repo，适合快速验证。正式端到端可以使用下面的 `Postgres + parquet object + Milvus` runtime 配置。
 
 ## 真实 Postgres + Milvus 端到端
 
