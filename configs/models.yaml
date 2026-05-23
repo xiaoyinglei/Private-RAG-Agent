@@ -94,28 +94,25 @@ defaults:
   reranker_model: bge_reranker_v2_m3
 
 generation:
+  # 默认继承 defaults.primary_model。
+  # 只有某个任务必须使用特殊模型时，才在该任务下单独写 model: <chat_model_alias>。
   summary:
-    model: qwen3_8b_mlx_4bit
     max_tokens: 2048
     temperature: 0.3
 
   answer:
-    model: qwen3_8b_mlx_4bit
     max_tokens: 4096
     temperature: 0.7
 
   planner:
-    model: qwen3_8b_mlx_4bit
     max_tokens: 4096
     temperature: 0.3
 
   synthesize:
-    model: qwen3_8b_mlx_4bit
     max_tokens: 8192
     temperature: 0.5
 
   factcheck:
-    model: qwen3_8b_mlx_4bit
     max_tokens: 2048
     temperature: 0.1
 
