@@ -479,6 +479,7 @@ uv sync
 ```bash
 cat > .env <<'EOF'
 DEEPSEEK_API_KEY=your_deepseek_key
+MIMO_API_KEY=your_mimo_key
 EOF
 ```
 

@@ -85,7 +85,7 @@ models:
     protocol: openai_compatible
     model: mimo-v2-flash
     base_url: https://api.xiaomimimo.com/v1/chat/completions
-    api_key_env: sk-cp93p0qwwuecp6on7d5jaounrszhsh3eufgl2xdzew5kzcbb
+    api_key_env: MIMO_API_KEY
 
 
 defaults:
