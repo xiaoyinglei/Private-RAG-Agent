@@ -11,6 +11,8 @@ __pycache__/
 coverage.xml
 htmlcov/
 .superpowers/
+docs/superpowers/plans/
+docs/superpowers/specs/
 data/runtime/
 .rag*/
 *.db
