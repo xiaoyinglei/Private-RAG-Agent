@@ -79,8 +79,17 @@ models:
     protocol: sentence_transformers
     model: Qwen/Qwen3-Reranker-4B
 
+  mimo_cloud:
+    capability: chat
+    provider: mimo
+    protocol: openai_compatible
+    model: mimo-v2-flash
+    base_url: https://api.xiaomimimo.com/v1/chat/completions
+    api_key_env: sk-cp93p0qwwuecp6on7d5jaounrszhsh3eufgl2xdzew5kzcbb
+
+
 defaults:
-  primary_model: qwen3_8b_mlx_4bit
+  primary_model: mimo_cloud
   embedding_model: qwen3_embedding_4b_4bit_dwq
   reranker_model: bge_reranker_v2_m3
 

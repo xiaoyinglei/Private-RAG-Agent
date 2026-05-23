@@ -182,6 +182,17 @@ def test_detect_header_does_not_hardcode_anything(tmp_path: Path) -> None:
     assert result2.normalized_columns == ["Xyzzy", "Quux", "Corge"]
 
 
+def test_detect_header_normalizes_multiline_column_names(tmp_path: Path) -> None:
+    df = _sheet_from_rows([
+        ["区域公司", "月累计\n提货量", "月提货量\n同比"],
+        ["总计", 9125.1182, 0.127967],
+    ], tmp_path)
+
+    result = detect_header(df)
+
+    assert result.normalized_columns == ["区域公司", "月累计 提货量", "月提货量 同比"]
+
+
 __all__ = [
     "test_single_row_header",
     "test_title_then_header",
@@ -194,4 +205,5 @@ __all__ = [
     "test_sparse_title_rows",
     "test_result_has_all_fields",
     "test_detect_header_does_not_hardcode_anything",
+    "test_detect_header_normalizes_multiline_column_names",
 ]

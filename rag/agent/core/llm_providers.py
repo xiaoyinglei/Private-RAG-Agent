@@ -283,20 +283,36 @@ def create_default_providers(
 ) -> tuple[LLMRouteProvider, LLMEvaluateDecisionProvider, LLMPlanProvider]:
     """根据 ModelSelectionPolicy + ModelRegistry 创建三个 LLM provider。"""
 
-    def _resolve(node_model: str | None, node_name: str, temperature: float) -> tuple[Any, dict[str, Any]]:
+    def _resolve(
+        node_model: str | None,
+        node_name: str,
+        temperature: float,
+        max_tokens: int | None,
+    ) -> tuple[Any, dict[str, Any]]:
         resolved = registry.resolve_for_node(node_model=node_model, node_name=node_name)
         kwargs = dict(resolved.kwargs)
         kwargs.setdefault("temperature", temperature)
+        if max_tokens is not None:
+            kwargs["max_tokens"] = max_tokens
         return resolved.generator, kwargs
 
     router_gen, router_kwargs = _resolve(
-        selection.route_model, "route", selection.route_temperature
+        selection.route_model,
+        "route",
+        selection.route_temperature,
+        selection.route_max_tokens,
     )
     evaluator_gen, evaluator_kwargs = _resolve(
-        selection.evaluate_model, "evaluate", selection.evaluate_temperature
+        selection.evaluate_model,
+        "evaluate",
+        selection.evaluate_temperature,
+        selection.evaluate_max_tokens,
     )
     planner_gen, planner_kwargs = _resolve(
-        selection.plan_model, "plan", selection.plan_temperature
+        selection.plan_model,
+        "plan",
+        selection.plan_temperature,
+        selection.plan_max_tokens,
     )
 
     return (

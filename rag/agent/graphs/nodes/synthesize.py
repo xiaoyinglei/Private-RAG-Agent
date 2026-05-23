@@ -96,6 +96,8 @@ def _should_delegate_to_synthesis_agent(state: AgentState) -> bool:
     if state.get("status") == "failed":
         return False
     tool_results = state.get("tool_results", [])
+    if _has_grounded_answer_tool_result(tool_results):
+        return False
     subtask_results = list(state.get("subtask_results", {}).values())
     return (
         bool(state.get("evidence"))
@@ -105,6 +107,19 @@ def _should_delegate_to_synthesis_agent(state: AgentState) -> bool:
             for result in subtask_results
         )
     )
+
+
+def _has_grounded_answer_tool_result(tool_results: list[ToolResult]) -> bool:
+    for result in tool_results:
+        if result.status != "ok" or result.tool_name != "rag_search_answer" or result.output is None:
+            continue
+        text = getattr(result.output, "text", None)
+        if not isinstance(text, str) or not text.strip():
+            continue
+        if bool(getattr(result.output, "insufficient_evidence", False)):
+            continue
+        return True
+    return False
 
 
 def _synthesis_agent_update(state: AgentState, result: SynthesisRunResult) -> dict[str, Any]:

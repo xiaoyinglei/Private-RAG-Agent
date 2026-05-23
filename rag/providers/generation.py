@@ -174,6 +174,7 @@ class AnswerGenerationService:
 
         doc_aliases = self._doc_aliases(evidence_pack)
         has_compute_only_table = self._has_compute_only_table(evidence_pack)
+        has_compute_result = self._has_compute_result(evidence_pack)
 
         if prompt_style == "minimal":
             lines = [
@@ -233,11 +234,21 @@ class AnswerGenerationService:
                 [
                     "表格计算例外：",
                     "- 如果问题要求读取表格真实数据、筛选、求和、计数、排序、排名、对比或聚合，"
-                    "不要输出 JSON。",
+                    "不要输出最终答案 JSON。",
                     "- 必须只输出证据中指定格式的 <compute_request>...</compute_request>，"
-                    "并填入可执行的 SELECT SQL。",
+                    "其中内容必须是 JSON 对象，格式为 "
+                    '{"asset_id": 证据中的 asset_id, "sql": "SELECT ... FROM sheet WHERE ..."}。',
                     "- 不要基于 Sample rows 估算答案，也不要因为 Sample rows 没有目标行就回答证据不足。",
                     "- 后端会执行 SQL，并带着 TABLE_COMPUTE_RESULT 再次调用你生成最终 JSON 回答。",
+                ]
+            )
+        elif has_compute_result:
+            lines.extend(
+                [
+                    "表格计算结果已返回：",
+                    "- 必须基于 TABLE_COMPUTE_RESULT 合成最终 JSON 回答。",
+                    "- 禁止再次输出 <compute_request>。",
+                    "- 不要在答案中原样粘贴 SQL；只报告计算结果、筛选条件和必要口径。",
                 ]
             )
 
@@ -310,9 +321,67 @@ class AnswerGenerationService:
 
         return "\n".join(lines)
 
+    def build_compute_request_prompt(
+        self,
+        *,
+        query: str,
+        evidence_pack: Sequence[EvidenceItem],
+        grounded_candidate: str,
+        runtime_mode: RuntimeMode,
+    ) -> str:
+        del runtime_mode
+
+        doc_aliases = self._doc_aliases(evidence_pack)
+        lines = [
+            grounded_candidate,
+            "",
+            "你是表格查询规划器。当前证据包含 TABLE_COMPUTE_ONLY，且还没有 TABLE_COMPUTE_RESULT，",
+            "所以这一步不是最终回答阶段。",
+            "",
+            "你的任务：先判断用户问题是否需要读取真实表格数据。",
+            "- 如果问题需要读取单元格数值、按行筛选、求和、计数、排序、排名、比较、同比/环比、",
+            "  聚合或查找最高/最低值，必须只输出 <compute_request>...</compute_request>。",
+            "- <compute_request> 内必须是 JSON 对象：",
+            '  {"asset_id": 证据中的 asset_id, "sql": "SELECT ... FROM sheet WHERE ..."}。',
+            "- SQL 使用 DuckDB 方言；表名固定为 sheet；中文或特殊列名必须用双引号包裹。",
+            "- 不要输出自然语言解释，不要说“需要计算”，不要输出最终答案 JSON。",
+            "- 只有问题明确只是询问表结构、列名、行数或字段含义时，才可以不输出 compute_request。",
+            "",
+            f"问题：{query}",
+            "",
+            "证据：",
+        ]
+
+        for index, item in enumerate(evidence_pack, start=1):
+            evidence_id = self._evidence_id(index)
+            alias_label = self._doc_alias_label(item.doc_id, doc_aliases)
+            section = " > ".join(item.section_path) if item.section_path else item.citation_anchor
+            page_hint = (
+                ""
+                if item.page_start is None
+                else (
+                    f" | page={item.page_start}"
+                    if item.page_end in {None, item.page_start}
+                    else f" | pages={item.page_start}-{item.page_end}"
+                )
+            )
+            lines.append(
+                f"{evidence_id} | ref={alias_label or '[Doc-?]'} | "
+                f"section={section}{page_hint} | record_type={item.record_type or 'unknown'}"
+            )
+            lines.append(item.text)
+
+        return "\n".join(lines)
+
     @staticmethod
     def _has_compute_only_table(evidence_pack: Sequence[EvidenceItem]) -> bool:
-        return any("[TABLE_COMPUTE_ONLY:" in item.text for item in evidence_pack)
+        return any("[TABLE_COMPUTE_ONLY:" in item.text for item in evidence_pack) and not (
+            AnswerGenerationService._has_compute_result(evidence_pack)
+        )
+
+    @staticmethod
+    def _has_compute_result(evidence_pack: Sequence[EvidenceItem]) -> bool:
+        return any("[TABLE_COMPUTE_RESULT:" in item.text for item in evidence_pack)
 
     # ------------------------------------------------------------
     # public APIs
@@ -419,6 +488,19 @@ class AnswerGenerationService:
                     evidence_ids=supporting_ids,
                 )
             ],
+            evidence_pack=evidence_pack,
+        )
+
+    def grounded_structured_answer(
+        self,
+        *,
+        answer_text: str,
+        sections: Sequence[AnswerSectionPayload],
+        evidence_pack: Sequence[EvidenceItem],
+    ) -> GroundedAnswer:
+        return self._materialize_answer(
+            answer_text=answer_text,
+            sections=sections,
             evidence_pack=evidence_pack,
         )
 

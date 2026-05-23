@@ -11,7 +11,9 @@ from rag.agent.core.task import SubTaskNode, SubTaskResult, SubTaskStatus
 from rag.agent.graphs.nodes.synthesize import synthesize_node
 from rag.agent.state import AgentState
 from rag.agent.tools.builtin_registry import create_builtin_tool_registry
+from rag.agent.tools.fast_path_tools import RAGSearchAnswerOutput
 from rag.agent.tools.llm_tools import LLMGenerateInput, LLMTextOutput
+from rag.agent.tools.spec import ToolResult
 from rag.schema.query import AnswerCitation, EvidenceItem, RetrievalSignals
 from rag.schema.runtime import AccessPolicy
 
@@ -123,4 +125,55 @@ async def test_synthesize_node_delegates_to_builtin_synthesize_agent() -> None:
     assert payload.evidence_ids == ["ev-child"]
     assert payload.citation_ids == ["cit-child"]
     assert any("Child finding" in section for section in payload.context_sections)
+    RuntimeRegistry.remove("synthesis-parent")
+
+
+@pytest.mark.anyio
+async def test_synthesize_node_preserves_grounded_rag_search_answer() -> None:
+    called = False
+
+    def llm_generate(payload: LLMGenerateInput) -> LLMTextOutput:
+        nonlocal called
+        called = True
+        return LLMTextOutput(text=f"rewritten: {payload.prompt}")
+
+    state = _state()
+    state["subtask_results"] = {}
+    state["terminal_subtasks"] = set()
+    state["successful_subtasks"] = set()
+    state["tool_results"] = [
+        ToolResult(
+            tool_call_id="call-rag",
+            tool_name="rag_search_answer",
+            status="ok",
+            output=RAGSearchAnswerOutput(
+                text="日提货总量是131.074462。 [1]",
+                evidence=state["evidence"],
+                citations=state["citations"],
+                groundedness_flag=True,
+                insufficient_evidence=False,
+            ),
+            latency_ms=10.0,
+        )
+    ]
+
+    agent_registry = AgentRegistry()
+    agent_registry.register(SYNTHESIZE_AGENT)
+    service_factory = AgentServiceFactory(
+        tool_registry=create_builtin_tool_registry(runners={"llm_generate": llm_generate}),
+        model_registry=None,
+    )
+    synthesis_runner = BuiltinSynthesisRunner(
+        agent_registry=agent_registry,
+        service_factory=service_factory,
+    )
+    service_factory.bind_synthesis_runner(synthesis_runner)
+
+    update = await synthesize_node(state, synthesis_runner=synthesis_runner)
+
+    assert update["status"] == "done"
+    assert update["final_answer"] == "日提货总量是131.074462。 [1]"
+    assert update["groundedness_flag"] is True
+    assert update["insufficient_evidence_flag"] is False
+    assert called is False
     RuntimeRegistry.remove("synthesis-parent")

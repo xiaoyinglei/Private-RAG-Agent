@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 import duckdb
+import pytest
 from openpyxl import Workbook
 
 from rag.assembly import TokenAccountingService, TokenizerContract
@@ -511,6 +512,96 @@ def test_excel_source_to_parquet_uses_requested_sheet_name(tmp_path: Path) -> No
         con.close()
 
     assert rows == [("second-sheet", 2)]
+
+
+def test_excel_source_to_parquet_evaluates_common_formula_cells(tmp_path: Path) -> None:
+    source_path = tmp_path / "formula-report.xlsx"
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Report"
+    sheet.append(["区域", "品类", "当日 提货"])
+    sheet.append(["北方", "石膏板", 19.2])
+    sheet.append(["东北", "石膏板", 6.3])
+    sheet.append(["合计", "石膏板", '=SUM(C2:C3)'])
+    workbook.save(source_path)
+
+    object_store = FileObjectStore(tmp_path / "objects")
+    storage_key = object_store.put_bytes(source_path.read_bytes(), suffix=".xlsx")
+    pipeline = IngestPipeline(
+        dispatcher=None,  # type: ignore[arg-type]
+        summarizer=None,  # type: ignore[arg-type]
+        embedder=None,  # type: ignore[arg-type]
+        metadata_repo=_MetadataRepo(),  # type: ignore[arg-type]
+        summary_repo=_SummaryRepo(),  # type: ignore[arg-type]
+        object_store=object_store,
+    )
+
+    parquet_bytes = pipeline._excel_source_to_parquet(storage_key, sheet_name="Report")
+    assert parquet_bytes is not None
+
+    parquet_path = tmp_path / "formula.parquet"
+    parquet_path.write_bytes(parquet_bytes)
+    con = duckdb.connect(":memory:")
+    try:
+        rows = con.execute('SELECT "区域", "当日 提货" FROM read_parquet(?)', [str(parquet_path)]).fetchall()
+    finally:
+        con.close()
+
+    assert rows == [("北方", 19.2), ("东北", 6.3), ("合计", 25.5)]
+
+
+def test_excel_source_to_parquet_skips_empty_dimension_tail(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_path = tmp_path / "wide-empty-tail.xlsx"
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Report"
+    sheet.append(["区域", "品类", "当日 提货"])
+    sheet.append(["北方", "石膏板", 19.2])
+    sheet.cell(row=1, column=20, value="")
+    workbook.save(source_path)
+
+    from rag.ingest.excel_formula_evaluator import ExcelFormulaEvaluator
+
+    original_cell_value = ExcelFormulaEvaluator.cell_value
+
+    def guarded_cell_value(
+        self: ExcelFormulaEvaluator,
+        sheet_name: str,
+        row: int,
+        column: int,
+    ) -> object:
+        if column > 3:
+            raise AssertionError(f"unexpected formula evaluation for empty tail column {column}")
+        return original_cell_value(self, sheet_name, row, column)
+
+    monkeypatch.setattr(ExcelFormulaEvaluator, "cell_value", guarded_cell_value)
+
+    object_store = FileObjectStore(tmp_path / "objects")
+    storage_key = object_store.put_bytes(source_path.read_bytes(), suffix=".xlsx")
+    pipeline = IngestPipeline(
+        dispatcher=None,  # type: ignore[arg-type]
+        summarizer=None,  # type: ignore[arg-type]
+        embedder=None,  # type: ignore[arg-type]
+        metadata_repo=_MetadataRepo(),  # type: ignore[arg-type]
+        summary_repo=_SummaryRepo(),  # type: ignore[arg-type]
+        object_store=object_store,
+    )
+
+    parquet_bytes = pipeline._excel_source_to_parquet(storage_key, sheet_name="Report")
+    assert parquet_bytes is not None
+
+    parquet_path = tmp_path / "trimmed.parquet"
+    parquet_path.write_bytes(parquet_bytes)
+    con = duckdb.connect(":memory:")
+    try:
+        rows = con.execute('SELECT "区域", "品类", "当日 提货" FROM read_parquet(?)', [str(parquet_path)]).fetchall()
+    finally:
+        con.close()
+
+    assert rows == [("北方", "石膏板", 19.2)]
 
 
 def test_doc_summary_reduces_generated_section_and_asset_summaries(tmp_path: Path) -> None:

@@ -184,7 +184,10 @@ async def test_rag_search_answer_runner_uses_fast_runtime_query_and_preserves_co
         RAGSearchAnswerInput(
             query="runtime query",
             top_k=5,
-            retrieval_signals=RetrievalSignals(quoted_terms=["runtime"]),
+            retrieval_signals=RetrievalSignals(
+                special_targets=["table"],
+                quoted_terms=["runtime"],
+            ),
         )
     )
 
@@ -197,3 +200,8 @@ async def test_rag_search_answer_runner_uses_fast_runtime_query_and_preserves_co
     assert query == "runtime query"
     assert options.retrieval_profile == "fast"
     assert options.top_k == 5
+    assert options.retrieval_signals is not None
+    assert options.retrieval_signals.special_targets == []
+    assert options.retrieval_signals.quoted_terms == ["runtime"]
+    assert options.retrieval_signals_debug["special_targets"] == ["table"]
+    assert options.retrieval_signals_debug["answer_path_special_targets_skipped"] == ["table"]

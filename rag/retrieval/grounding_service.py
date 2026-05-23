@@ -326,7 +326,7 @@ class GroundingService:
             return [item]
         text = (
             self._compute_only_table_block(asset)
-            if asset.asset_type == "table"
+            if asset.asset_type == "table" and self._should_use_compute_table_block(asset)
             else self._asset_text(asset, session=session).strip()
         )
         if not text:
@@ -524,7 +524,11 @@ class GroundingService:
         assets = self._section_assets(section) if assets is None else assets
         grounded_assets: list[EvidenceItem] = []
         for asset in assets[: self.budgets.max_neighbor_assets]:
-            text = self._asset_text(asset, session=session).strip()
+            text = (
+                self._compute_only_table_block(asset)
+                if asset.asset_type == "table" and self._should_use_compute_table_block(asset)
+                else self._asset_text(asset, session=session).strip()
+            )
             if not text:
                 continue
             grounded_assets.append(
@@ -587,7 +591,9 @@ class GroundingService:
     ) -> str:
         if asset.asset_type != "table":
             return self._asset_text(asset, session=session)
-        return self._compute_only_table_block(asset)
+        if self._should_use_compute_table_block(asset):
+            return self._compute_only_table_block(asset)
+        return self._asset_text(asset, session=session)
 
     def _compute_only_table_block(self, asset: AssetRecord) -> str:
         parts: list[str] = []
@@ -623,6 +629,8 @@ class GroundingService:
         parts.append("")
         parts.append(f"[TABLE_COMPUTE_ONLY:asset_id={asset.asset_id}]")
         parts.append(f"Source: {sheet}")
+        if asset.caption:
+            parts.append(f"Caption: {asset.caption}")
         parts.append(f"Shape: {asset.row_count or '?'} rows x {asset.column_count or '?'} columns")
         estimated = asset.metadata_json.get("estimated_tokens", "?")
         parts.append(f"Estimated full size: ~{estimated} tokens (too large to load in context)")
@@ -661,6 +669,22 @@ class GroundingService:
             return self.token_accounting.clip(block, MAX_COMPUTE_BLOCK_TOKENS, add_ellipsis=True)
         except Exception:
             return block
+
+    @staticmethod
+    def _should_use_compute_table_block(asset: AssetRecord) -> bool:
+        if asset.asset_type != "table":
+            return False
+        storage_key = str(asset.storage_key or "").lower()
+        return any(
+            (
+                bool(asset.schema),
+                bool(asset.sample_rows),
+                asset.row_count is not None,
+                asset.column_count is not None,
+                bool(asset.metadata_json.get("table_policy")),
+                storage_key.endswith((".parquet", ".xlsx", ".xls")),
+            )
+        )
 
     @staticmethod
     def _asset_anchor(asset: AssetRecord) -> str | None:

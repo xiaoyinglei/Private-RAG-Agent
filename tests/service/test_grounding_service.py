@@ -439,6 +439,83 @@ def test_grounding_service_direct_table_asset_uses_compute_block() -> None:
     assert "Sample row 华南 Q1 999" not in grounded[0].text
 
 
+def test_grounding_service_neighbor_table_asset_includes_compute_contract_without_semantic_rules() -> None:
+    metadata_repo = _MetadataRepo(
+        sections={
+            7: _section_record(
+                section_id=7,
+                doc_id=42,
+                source_id=9,
+                toc_path=["日报", "总表"],
+                order_index=1,
+                page_start=4,
+                page_end=4,
+                byte_range_start=0,
+                byte_range_end=12,
+                visible_text_key="doc-42.txt",
+                section_kind="body",
+                content_hash="section-hash",
+                has_table=True,
+                neighbor_asset_count=1,
+            )
+        },
+        assets={
+            14: AssetRecord(
+                asset_id=14,
+                doc_id=42,
+                source_id=9,
+                section_id=7,
+                asset_type="table",
+                page_no=4,
+                content_hash="asset-hash",
+                storage_key="asset-14.parquet",
+                sheet_name="2024-0317新增",
+                row_count=3,
+                column_count=3,
+                sample_rows=[
+                    {"区域公司": "总计（不含一体化）", "日_日提货": "131.074462", "日_日提货量": "601.2868"},
+                    {"区域公司": "北方", "日_日提货": "19.22484", "日_日提货量": "136.3149"},
+                    {"区域公司": "东北", "日_日提货": "6.307968", "日_日提货量": "2.81"},
+                ],
+                schema=[
+                    {"name": "区域公司", "type": "text"},
+                    {"name": "日_日提货", "type": "number(min=0, max=131.074462)"},
+                    {"name": "日_日提货量", "type": "number(min=0, max=601.2868)"},
+                ],
+                metadata_json={"table_policy": "compute_only", "estimated_tokens": 80},
+            )
+        },
+    )
+    service = GroundingService(
+        metadata_repo=metadata_repo,
+        object_store=_ObjectStore(payloads={"doc-42.txt": b"daily table."}),
+        token_accounting=_PassthroughTokenAccounting(),
+        budgets=GroundingBudgets(max_neighbor_assets=1),
+    )
+
+    grounded = service.ground(
+        query="日提货总量是多少",
+        evidence=[
+            _evidence_item(
+                evidence_id="summary:section_summary:7",
+                doc_id=42,
+                source_id=9,
+                citation_anchor="日报 / 总表",
+                text="section summary",
+                score=0.91,
+                grounding_target=GroundingTarget(kind="section", doc_id=42, source_id=9, section_id=7),
+            )
+        ],
+    )
+
+    asset_texts = [item.text for item in grounded if item.record_type == "asset"]
+    assert asset_texts
+    assert "[TABLE_COMPUTE_ONLY:asset_id=14]" in asset_texts[0]
+    assert "Schema:" in asset_texts[0]
+    assert "Sample rows" in asset_texts[0]
+    assert "131.074462" in asset_texts[0]
+
+
 def test_grounding_service_uses_layout_meta_cache_for_geometric_neighbor_assets() -> None:
     metadata_repo = _MetadataRepo(
         sections={

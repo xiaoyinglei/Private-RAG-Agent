@@ -18,6 +18,9 @@ class ModelSelectionPolicy:
     route_temperature: float = 0.0
     evaluate_temperature: float = 0.0
     plan_temperature: float = 0.0
+    route_max_tokens: int | None = None
+    evaluate_max_tokens: int | None = None
+    plan_max_tokens: int | None = None
 
 
 @dataclass(frozen=True)

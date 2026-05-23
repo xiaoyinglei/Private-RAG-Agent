@@ -54,13 +54,14 @@ class RAGSearchAnswerRunner:
             "retrieval_profile": "fast",
             "top_k": payload.top_k,
             "max_context_tokens": self.max_context_tokens,
-            "retrieval_signals": payload.retrieval_signals,
+            "retrieval_signals": _answer_path_retrieval_signals(payload.retrieval_signals),
         }
         if payload.retrieval_signals is not None:
             options_kwargs["retrieval_signals_debug"] = {
                 "signals_source": "agent_tool_input",
                 "special_targets": list(payload.retrieval_signals.special_targets),
                 "quoted_terms": list(payload.retrieval_signals.quoted_terms),
+                "answer_path_special_targets_skipped": list(payload.retrieval_signals.special_targets),
             }
         if access_policy := getattr(self.runtime, "access_policy", None):
             options_kwargs["access_policy"] = access_policy
@@ -90,3 +91,9 @@ def _context_evidence(context: object | None) -> list[EvidenceItem]:
             item = item.as_evidence_item()
         items.append(EvidenceItem.model_validate(item))
     return items
+
+
+def _answer_path_retrieval_signals(signals: RetrievalSignals | None) -> RetrievalSignals | None:
+    if signals is None or not signals.special_targets:
+        return signals
+    return signals.model_copy(update={"special_targets": []})
