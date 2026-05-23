@@ -94,3 +94,38 @@ def test_excel_parser_ignores_trailing_styled_blank_rows_when_sheet_is_fully_pre
     assert element.metadata["row_count"] == 1
     assert element.metadata["profile_rows_read"] == 1
     assert element.metadata["row_count_source"] == "preview"
+
+
+def test_excel_parser_evaluates_common_formula_cells_without_cached_values(tmp_path) -> None:
+    source_path = tmp_path / "formula-report.xlsx"
+    workbook = Workbook()
+    report = workbook.active
+    report.title = "Report"
+    report.append(["Key", "Group", "Amount", "GroupTotal", "LookupAmount"])
+    report.append(["north-a", "North", 10, '=SUMIF($B$2:$B$3,$B2,$C$2:$C$3)', '=IFERROR(VLOOKUP($A2,Data!$A:$B,2,0),0)'])
+    report.append(["north-b", "North", 20, '=SUMIF($B$2:$B$3,$B3,$C$2:$C$3)', '=IFERROR(VLOOKUP($A3,Data!$A:$B,2,0),0)'])
+    report.append(["total", "All", '=SUM(C2:C3)', '=SUM(D2:D3)', ""])
+    data = workbook.create_sheet("Data")
+    data.append(["Key", "LookupAmount"])
+    data.append(["north-a", 100])
+    data.append(["north-b", 200])
+    workbook.save(source_path)
+
+    parsed = ExcelParserRepo().parse(
+        source_path,
+        location=str(source_path),
+        source_type=SourceType.XLSX,
+        title="Formula Report",
+        owner="tester",
+    )
+
+    report_element = parsed.elements[0]
+    assert report_element.metadata["sample_rows"][0] == {
+        "Key": "north-a",
+        "Group": "North",
+        "Amount": "10",
+        "GroupTotal": "30",
+        "LookupAmount": "100",
+    }
+    assert report_element.metadata["sample_rows"][2]["Amount"] == "30"
+    assert report_element.metadata["sample_rows"][2]["GroupTotal"] == "60"

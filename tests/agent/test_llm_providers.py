@@ -432,3 +432,53 @@ class TestCreateDefaultProviders:
 
         assert result["status"] == "decompose"
         assert result["execution_mode"] == "decompose"
+
+    def test_per_node_max_tokens_override_model_default(self) -> None:
+        gen = _StubGenerator([
+            {"route": "fast_path", "reason": "single lookup"},
+            {
+                "action": "synthesize",
+                "thought": "enough evidence",
+                "confidence": 0.9,
+            },
+            {"subtasks": [], "edges": []},
+        ])
+        reg = _FakeModelRegistry(gen)
+        selection = ModelSelectionPolicy(
+            route_max_tokens=128,
+            evaluate_max_tokens=256,
+            plan_max_tokens=512,
+        )
+
+        router, evaluator, planner = create_default_providers(
+            reg,  # type: ignore[arg-type]
+            selection,
+        )
+        router.route(_make_state(task="查一个数"))
+        evaluator.decide(
+            _make_state(task="查一个数"),
+            definition=AgentDefinition(
+                agent_type="research",
+                description="test",
+                system_prompt="test",
+                allowed_tools=[],
+            ),
+            budget_remaining=1000,
+            context=InjectedContext(
+                sections=[],
+                context_budget=ContextBudgetSnapshot(max_context_tokens=1000),
+            ),
+        )
+        planner.create_plan(
+            _make_state(task="查一个数"),
+            definition=AgentDefinition(
+                agent_type="orchestrator",
+                description="test",
+                system_prompt="test",
+                allowed_tools=[],
+            ),
+        )
+
+        assert gen.calls[0][2]["max_tokens"] == 128
+        assert gen.calls[1][2]["max_tokens"] == 256
+        assert gen.calls[2][2]["max_tokens"] == 512

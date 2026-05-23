@@ -540,8 +540,9 @@ class TestQueryOptionsToRetrievalServiceSignalFlow:
 
         import rag.agent.tools.fast_path_tools as m
         src = inspect.getsource(m.RAGSearchAnswerRunner.answer)
-        assert '"retrieval_signals": payload.retrieval_signals' in src
+        assert '"retrieval_signals": _answer_path_retrieval_signals(payload.retrieval_signals)' in src
         assert '"signals_source": "agent_tool_input"' in src
+        assert '"answer_path_special_targets_skipped"' in src
 
     def test_aretrieve_payload_signals_plumbing(self) -> None:
         """验证 aretrieve_payload 的信号解析逻辑（不构造完整 service）"""

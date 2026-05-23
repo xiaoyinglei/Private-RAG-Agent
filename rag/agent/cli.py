@@ -87,6 +87,9 @@ def _build_agent_service(
     只在可以构造 RAGRuntime / retrieval_service 时成功。
     无法构造时报错，不静默使用 stub。
     """
+    agent_registry = create_builtin_agent_registry()
+    definition = _resolve_cli_agent_definition(agent_registry, agent_type)
+
     chat_bindings = list(runtime.capability_bundle.chat_bindings)
     primary_chat = chat_bindings[0] if chat_bindings else None
 
@@ -105,6 +108,20 @@ def _build_agent_service(
     fast_path_runner = RAGSearchAnswerRunner(runtime=runtime)
     runners["rag_search_answer"] = cast(ToolRunner, fast_path_runner.answer)
 
+    from rag.agent.tools.asset_tools import AssetToolRunner
+
+    stores = getattr(runtime, "stores", None)
+    metadata_repo = getattr(stores, "metadata_repo", None)
+    object_store = getattr(stores, "object_store", None)
+    if metadata_repo is not None and object_store is not None:
+        asset_runner = AssetToolRunner(
+            metadata_repo=metadata_repo,
+            object_store=object_store,
+        )
+        runners["asset_list"] = cast(ToolRunner, asset_runner.list_assets)
+        runners["asset_inspect"] = cast(ToolRunner, asset_runner.inspect_asset)
+        runners["asset_analyze"] = cast(ToolRunner, asset_runner.analyze_asset)
+
     runners.update(_build_llm_tool_runners(primary_chat))
 
     tool_registry = create_builtin_tool_registry(runners=runners)
@@ -113,8 +130,6 @@ def _build_agent_service(
     except Exception:
         model_registry = None
 
-    agent_registry = create_builtin_agent_registry()
-    definition = _resolve_cli_agent_definition(agent_registry, agent_type)
     service_factory = AgentServiceFactory(
         tool_registry=tool_registry,
         model_registry=model_registry,

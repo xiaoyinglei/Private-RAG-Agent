@@ -14,9 +14,10 @@ def build_route_prompt(state: AgentState) -> str:
 
 路由标准（按执行需求，不按固定分类）：
 
-- fast_path：单次 RAG 检索即可回答。不需要拆分子任务、并行 Agent、用户确认或外部副作用。
+- fast_path：单次 RAG 检索即可回答。不需要拆分子任务、并行 Agent、用户确认、文件/资产分析或外部副作用。
 - decompose：需要多个独立检索、多维度证据、多对象对比，或需要并行子 Agent / 任务 DAG。
-- direct：需要 Agent 循环调用工具（search/grounding/rerank 等），或需要多轮 evaluate、用户确认。
+- direct：需要 Agent 循环调用工具（search/grounding/rerank/asset_list/asset_inspect/asset_analyze 等），或需要多轮 evaluate、用户确认。
+  如果任务要求检查文件/结构化资产、读取表格、执行计算、列出候选资产、消除多资产歧义，或需要用户选择口径/对象，再走 direct。
 
 当前任务: {task}
 待执行工具数: {pending_count}
@@ -85,7 +86,9 @@ def build_evaluate_prompt(
 - 还需要检索 → action="execute"，给出具体 tool_calls
 - 需要用户决策 → action="pause"，needs_user_input 说明问题
 - 预算耗尽 → action="synthesize"，stop_reason="budget_exhausted"
-- 如果证据已包含 retrieval_channels 冲突标记，考虑是否需要用户选择"""
+- 如果证据已包含 retrieval_channels 冲突标记，考虑是否需要用户选择
+- 对文件/结构化资产问题，先用检索工具找到 asset_id；拿到 asset_id 后优先调用 asset_inspect 理解资产结构和可用 analysis_capabilities，再用 asset_analyze 做读数、筛选、排序、聚合或校验。不要只根据摘要文本回答可执行资产里的计算。
+- 如果任务没有指定资产、sheet、产品、场景、口径等范围，但已有多个候选资产都可能回答同一指标，不要任选一个 asset_id；应调用 asset_list/asset_inspect 收集候选，分别计算并标注候选答案，或在必须给唯一答案时 pause 请求用户澄清。"""
 
 
 # ── Planner prompt ──

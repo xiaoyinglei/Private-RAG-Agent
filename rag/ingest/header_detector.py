@@ -20,6 +20,8 @@ from typing import Any
 
 import pandas as pd
 
+from rag.ingest.table_semantics import deduplicate_table_columns, normalize_table_column_name
+
 _logger = logging.getLogger("rag.header_detector")
 
 MAX_SCAN_ROWS = 30
@@ -419,15 +421,12 @@ def _build_columns(
     # SINGLE / TITLED / INFERRED: 用最后一行表头
     header_row = rows[header_indices[-1]]
     columns: list[str] = []
-    seen: set[str] = set()
     for c in range(total_cols):
-        raw = str(header_row[c]).strip()
+        raw = normalize_table_column_name(header_row[c])
         if not raw:
             raw = f"column_{c + 1}"
-        deduped = _deduplicate_column(raw, seen)
-        seen.add(deduped)
-        columns.append(deduped)
-    return columns
+        columns.append(raw)
+    return deduplicate_table_columns(columns)
 
 
 def _flatten_multi_level(
@@ -445,18 +444,12 @@ def _flatten_multi_level(
     for c in range(total_cols):
         parts: list[str] = []
         for row in header_rows:
-            val = str(row[c]).strip() if c < len(row) else ""
+            val = normalize_table_column_name(row[c]) if c < len(row) else ""
             if val and val not in parts:
                 parts.append(val)
         col_name = "_".join(parts) if parts else f"column_{c + 1}"
         columns.append(col_name)
-    seen: set[str] = set()
-    deduped: list[str] = []
-    for col in columns:
-        d = _deduplicate_column(col, seen)
-        seen.add(d)
-        deduped.append(d)
-    return deduped
+    return deduplicate_table_columns(columns)
 
 
 def _deduplicate_column(name: str, seen: set[str]) -> str:

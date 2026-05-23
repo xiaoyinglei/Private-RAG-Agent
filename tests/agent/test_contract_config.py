@@ -259,6 +259,9 @@ class TestAgentDefinition:
         assert ms.route_temperature == 0.0
         assert ms.evaluate_temperature == 0.0
         assert ms.plan_temperature == 0.0
+        assert ms.route_max_tokens is None
+        assert ms.evaluate_max_tokens is None
+        assert ms.plan_max_tokens is None
 
 
 class TestAgentRegistry:

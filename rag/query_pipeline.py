@@ -277,6 +277,8 @@ class _QueryPipeline:
         generated, merged_evidence, truncated, prompt_build = self._maybe_execute_compute_loop(
             generated=generated,
             merged_evidence=merged_evidence,
+            prompt_evidence=truncated.evidence,
+            grounded_candidate=prompt_build.grounded_candidate,
             query=query,
             options=options,
             retrieval=retrieval,
@@ -320,6 +322,8 @@ class _QueryPipeline:
         *,
         generated: object,
         merged_evidence: list[EvidenceItem],
+        prompt_evidence: Sequence[EvidenceItem],
+        grounded_candidate: str,
         query: str,
         options: QueryOptions,
         retrieval: RetrievalResult,
@@ -348,20 +352,37 @@ class _QueryPipeline:
         if executor is None or not hasattr(executor, "execute"):
             return _passthrough()
 
-        answer_text = getattr(getattr(generated, "answer", None), "answer_text", None)
-        if not answer_text or not isinstance(answer_text, str):
+        answer_text = self._compute_request_search_text(generated)
+        if not answer_text:
             return _passthrough()
 
-        match = self._compute_request_re().search(answer_text)
-        if match is None:
-            return _passthrough()
-
-        try:
-            payload = json.loads(match.group(1))
-            asset_id = int(payload.get("asset_id", 0))
-            sql = str(payload.get("sql", "")).strip()
-        except (json.JSONDecodeError, ValueError, TypeError, KeyError):
-            return _passthrough()
+        compute_request = self._parse_compute_request(answer_text, list(prompt_evidence))
+        if compute_request is None:
+            if not self._has_pending_compute_only_table(prompt_evidence):
+                return _passthrough()
+            retry_prompt = (
+                self.prompt_builder.answer_generation_service.build_compute_request_prompt(
+                    query=query,
+                    evidence_pack=[item.as_evidence_item() for item in prompt_evidence],
+                    grounded_candidate=grounded_candidate,
+                    runtime_mode=retrieval.decision.runtime_mode,
+                )
+            )
+            generated = self._generate_with_breaker(
+                self.answer_generator.generate(
+                    query=query,
+                    prompt=retry_prompt,
+                    evidence_pack=[item.as_evidence_item() for item in prompt_evidence],
+                    grounded_candidate=grounded_candidate,
+                    runtime_mode=retrieval.decision.runtime_mode,
+                    access_policy=access_policy,
+                )
+            )
+            answer_text = self._compute_request_search_text(generated)
+            compute_request = self._parse_compute_request(answer_text, list(prompt_evidence))
+            if compute_request is None:
+                return _passthrough()
+        asset_id, sql = compute_request
 
         if not sql or asset_id <= 0:
             return _passthrough()
@@ -378,7 +399,11 @@ class _QueryPipeline:
             merged_evidence, asset_id=asset_id, result=compute_result,
         )
         stripped_evidence = self._strip_system_instructions(updated_evidence)
-        ev, t, pb = _recontext(stripped_evidence)
+        focused_evidence = self._focus_compute_result_context(
+            stripped_evidence,
+            asset_id=asset_id,
+        )
+        ev, t, pb = _recontext(focused_evidence)
         context_evidence_items = [item.as_evidence_item() for item in t.evidence]
         regenerated = self._generate_with_breaker(
             self.answer_generator.generate(
@@ -395,9 +420,190 @@ class _QueryPipeline:
     def _compute_request_re(self) -> re.Pattern[str]:
         if self._COMPUTE_REQUEST_PATTERN is None:
             self._COMPUTE_REQUEST_PATTERN = re.compile(
-                r"<compute_request>\s*(\{.*?\})\s*</compute_request>", re.DOTALL
+                r"<compute_request>\s*(.*?)\s*</compute_request>", re.DOTALL
             )
         return self._COMPUTE_REQUEST_PATTERN
+
+    @staticmethod
+    def _has_pending_compute_only_table(evidence: Sequence[EvidenceItem]) -> bool:
+        has_compute_only = any("[TABLE_COMPUTE_ONLY:" in item.text for item in evidence)
+        has_compute_result = any("[TABLE_COMPUTE_RESULT:" in item.text for item in evidence)
+        return has_compute_only and not has_compute_result
+
+    def _parse_compute_request(
+        self,
+        answer_text: str,
+        evidence: list[EvidenceItem],
+    ) -> tuple[int, str] | None:
+        match = self._compute_request_re().search(answer_text)
+        if match is None:
+            return self._parse_bare_select_compute_request(answer_text, evidence)
+        body = self._strip_compute_request_body(match.group(1))
+        if not body:
+            return None
+
+        asset_id = 0
+        sql = ""
+        try:
+            payload = json.loads(body)
+        except json.JSONDecodeError:
+            sql = body
+        else:
+            if isinstance(payload, dict):
+                try:
+                    asset_id = int(payload.get("asset_id", 0) or 0)
+                except (TypeError, ValueError):
+                    asset_id = 0
+                sql = str(payload.get("sql", "") or "").strip()
+            elif isinstance(payload, str):
+                sql = payload.strip()
+            else:
+                return None
+
+        if asset_id <= 0:
+            inferred_asset_id = self._single_compute_asset_id(evidence)
+            if inferred_asset_id is None:
+                return None
+            asset_id = inferred_asset_id
+        sql = self._prepare_compute_sql(sql, evidence)
+        if not sql:
+            return None
+        return asset_id, sql
+
+    @staticmethod
+    def _compute_request_search_text(generated: object) -> str:
+        answer = getattr(generated, "answer", None)
+        if answer is None:
+            return ""
+        parts: list[str] = []
+        answer_text = getattr(answer, "answer_text", None)
+        if isinstance(answer_text, str) and answer_text.strip():
+            parts.append(answer_text)
+        sections = getattr(answer, "answer_sections", None)
+        if isinstance(sections, Sequence) and not isinstance(sections, (str, bytes)):
+            for section in sections:
+                section_text = getattr(section, "text", None)
+                if isinstance(section_text, str) and section_text.strip():
+                    parts.append(section_text)
+        return "\n\n".join(dict.fromkeys(parts))
+
+    def _parse_bare_select_compute_request(
+        self,
+        answer_text: str,
+        evidence: list[EvidenceItem],
+    ) -> tuple[int, str] | None:
+        asset_id = self._single_compute_asset_id(evidence)
+        if asset_id is None:
+            return None
+        sql = self._extract_single_select_statement(answer_text)
+        if sql is None:
+            return None
+        sql = self._prepare_compute_sql(sql, evidence)
+        if not sql:
+            return None
+        return asset_id, sql
+
+    @staticmethod
+    def _extract_single_select_statement(text: str) -> str | None:
+        def _find_selects(candidate_text: str) -> list[str]:
+            pattern = re.compile(
+                r"\bSELECT\b.+?\bFROM\s+sheet\b.*?(?:;|(?=\n\s*\n)|$)",
+                re.IGNORECASE | re.DOTALL,
+            )
+            results: list[str] = []
+            for match in pattern.finditer(candidate_text):
+                candidate = _QueryPipeline._clean_sql_fragment(match.group(0))
+                if candidate:
+                    results.append(candidate)
+            return results
+
+        fenced_results: list[str] = []
+        for fence_match in re.finditer(r"```(?:sql)?\s*(.*?)```", text, re.IGNORECASE | re.DOTALL):
+            fenced_results.extend(_find_selects(fence_match.group(1)))
+        results = fenced_results or _find_selects(text)
+        unique_results = list(dict.fromkeys(results))
+        if len(unique_results) != 1:
+            return None
+        return unique_results[0]
+
+    @staticmethod
+    def _clean_sql_fragment(text: str) -> str:
+        sql = _QueryPipeline._strip_compute_request_body(text)
+        sql = re.sub(r"\s*\[(?:\d+:\d+|\d+)(?:,\s*(?:\d+:\d+|\d+))*\]", "", sql)
+        return sql.strip()
+
+    @staticmethod
+    def _prepare_compute_sql(sql: str, evidence: list[EvidenceItem]) -> str:
+        cleaned = _QueryPipeline._clean_sql_fragment(sql)
+        if not cleaned:
+            return ""
+        quoted = _QueryPipeline._quote_known_table_columns(cleaned, evidence)
+        return quoted
+
+    @staticmethod
+    def _quote_known_table_columns(sql: str, evidence: list[EvidenceItem]) -> str:
+        columns = _QueryPipeline._known_table_columns(evidence)
+        if not columns:
+            return sql
+        quoted_sql = sql
+        for column in sorted(columns, key=len, reverse=True):
+            pattern = re.compile(rf"(?<![\"'\w]){re.escape(column)}(?![\"'\w])")
+            quoted_sql = pattern.sub(f'"{column}"', quoted_sql)
+        return quoted_sql
+
+    @staticmethod
+    def _known_table_columns(evidence: list[EvidenceItem]) -> tuple[str, ...]:
+        columns: list[str] = []
+
+        def _add(name: str) -> None:
+            column = name.strip().strip('`"')
+            if column and column not in columns:
+                columns.append(column)
+
+        for item in evidence:
+            for line in item.text.splitlines():
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                if stripped.startswith("Table columns:"):
+                    _, value = stripped.split(":", 1)
+                    for part in value.split("|"):
+                        _add(part)
+                    continue
+                if stripped.startswith("Schema:"):
+                    _, value = stripped.split(":", 1)
+                    for part in re.split(r"[|,]", value):
+                        _add(part)
+                    continue
+                if "->" in stripped:
+                    name, _type_hint = stripped.split("->", 1)
+                    _add(name)
+        return tuple(columns)
+
+    @staticmethod
+    def _strip_compute_request_body(text: str) -> str:
+        body = text.strip()
+        if not body.startswith("```"):
+            return body
+        lines = body.splitlines()
+        if not lines:
+            return body
+        if lines[0].strip().startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        return "\n".join(lines).strip()
+
+    @staticmethod
+    def _single_compute_asset_id(evidence: list[EvidenceItem]) -> int | None:
+        asset_ids = {
+            int(match.group(1))
+            for item in evidence
+            for match in re.finditer(r"\[TABLE_COMPUTE_ONLY:asset_id=(\d+)\]", item.text)
+        }
+        if len(asset_ids) != 1:
+            return None
+        return next(iter(asset_ids))
 
     @staticmethod
     def _inject_compute_result(
@@ -470,6 +676,28 @@ class _QueryPipeline:
                     continue
                 break
         return "\n".join(cleaned)
+
+    @staticmethod
+    def _focus_compute_result_context(
+        evidence: list[EvidenceItem],
+        *,
+        asset_id: int,
+    ) -> list[EvidenceItem]:
+        marker = f"[TABLE_COMPUTE_RESULT:asset_id={asset_id}]"
+        result_items = [item for item in evidence if marker in item.text]
+        if not result_items:
+            return evidence
+        return [
+            item.model_copy(
+                update={"text": _QueryPipeline._strip_post_compute_planning_context(item.text)}
+            )
+            for item in result_items
+        ]
+
+    @staticmethod
+    def _strip_post_compute_planning_context(text: str) -> str:
+        schema_pattern = re.compile(r"\nSchema:\s.*?(?=\n\S|\Z)", re.DOTALL)
+        return schema_pattern.sub("", text).strip()
 
     @staticmethod
     def _section_diversity_filter(evidence: list[EvidenceItem], *, max_per_section: int = 2) -> list[EvidenceItem]:

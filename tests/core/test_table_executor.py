@@ -50,6 +50,17 @@ def _create_test_xlsx(data: dict[str, list[object]], sheet_name: str = "Sheet1")
         Path(path).unlink(missing_ok=True)
 
 
+def _create_test_parquet(data: dict[str, list[object]]) -> bytes:
+    df = pd.DataFrame(data)
+    with tempfile.NamedTemporaryFile(suffix=".parquet", delete=False) as f:
+        path = f.name
+    try:
+        df.to_parquet(path)
+        return Path(path).read_bytes()
+    finally:
+        Path(path).unlink(missing_ok=True)
+
+
 def test_validate_sql_rejects_non_select() -> None:
     assert TableExecutor._validate_sql("") is False
     assert TableExecutor._validate_sql("   ") is False
@@ -141,6 +152,112 @@ def test_execute_handles_empty_result() -> None:
     assert result.truncated is False
 
 
+def test_execute_aggregates_numeric_strings_from_parquet() -> None:
+    parquet_bytes = _create_test_parquet(
+        {
+            "区域公司": ["总计（不含一体化）", "北方", "东北"],
+            "日_日提货": ["131.074462", "19.22484", "6.307968"],
+        }
+    )
+    repo = _FakeMetadataRepo()
+    repo.register(14, storage_key="daily.parquet")
+    store = _FakeObjectStore({"daily.parquet": parquet_bytes})
+    executor = TableExecutor(object_store=store, metadata_repo=repo)
+
+    result = executor.execute(
+        asset_id=14,
+        sql='SELECT SUM("日_日提货") AS total FROM sheet WHERE "区域公司" = \'总计（不含一体化）\'',
+    )
+
+    assert result is not None
+    assert result.columns == ["total"]
+    assert result.rows == [["131.074462"]]
+    assert "TABLE_COMPUTE_RESULT:asset_id=14" in result.markdown
+
+
+def test_execute_normalizes_multiline_parquet_column_names() -> None:
+    parquet_bytes = _create_test_parquet(
+        {
+            "区域公司": ["总计", "北方"],
+            "月累计\n提货量": ["9125.1182", "1693.432"],
+        }
+    )
+    repo = _FakeMetadataRepo()
+    repo.register(14, storage_key="daily.parquet")
+    store = _FakeObjectStore({"daily.parquet": parquet_bytes})
+    executor = TableExecutor(object_store=store, metadata_repo=repo)
+
+    result = executor.execute(
+        asset_id=14,
+        sql='SELECT "月累计 提货量" FROM sheet WHERE "区域公司" = \'总计\'',
+    )
+
+    assert result is not None
+    assert result.columns == ["月累计 提货量"]
+    assert result.rows == [["9125.1182"]]
+
+
+def test_execute_trims_trailing_sparse_footer_rows_before_ranking() -> None:
+    parquet_bytes = _create_test_parquet(
+        {
+            "区域公司": [
+                "总计（不含一体化）",
+                "北方",
+                "东北",
+                "华东",
+                "制表：",
+                "",
+                "日",
+                "月",
+            ],
+            "日_日提货": ["131.074462", "19.22484", "6.307968", "29.137104", "", "0", "131.074462", "1868.351764"],
+            "月累计_月累计提货": ["1868.351764", "281.059297", "66.189168", "435.377389", "", "0", "6.33998", "6.35034"],
+            "月提货同比": ["-0.024129", "0.029459", "0.006566", "0.064241", "", "", "", ""],
+            "年累计_年累计提货": ["12354.342395", "1661.394877", "511.311048", "3040.898458", "", "", "", ""],
+            "年提货同比": ["-0.024033", "-0.073234", "0.05879", "0.120539", "", "", "", ""],
+        }
+    )
+    repo = _FakeMetadataRepo()
+    repo.register(14, storage_key="daily.parquet")
+    store = _FakeObjectStore({"daily.parquet": parquet_bytes})
+    executor = TableExecutor(object_store=store, metadata_repo=repo)
+
+    result = executor.execute(
+        asset_id=14,
+        sql='SELECT "区域公司", "日_日提货" FROM sheet ORDER BY "日_日提货" DESC LIMIT 1',
+    )
+
+    assert result is not None
+    assert result.rows == [["总计（不含一体化）", "131.074462"]]
+
+
+def test_execute_preserves_wide_sparse_report_rows() -> None:
+    data: dict[str, list[object]] = {
+        "区域": ["总计", "北方", "东北", "制表：", "日", "月"],
+        "品类": ["全部", "全部", "全部", "", "", ""],
+        "当日 提货": ["99.0", "19.2", "6.3", "", "99.0", "1800.0"],
+    }
+    for index in range(1, 32):
+        data[f"空列{index}"] = ["", "", "", "", "", ""]
+    parquet_bytes = _create_test_parquet(data)
+    repo = _FakeMetadataRepo()
+    repo.register(88, storage_key="wide-sparse.parquet")
+    store = _FakeObjectStore({"wide-sparse.parquet": parquet_bytes})
+    executor = TableExecutor(object_store=store, metadata_repo=repo)
+
+    inspected = executor.inspect(asset_id=88, head_rows=3, tail_rows=0)
+    result = executor.execute(
+        asset_id=88,
+        sql='SELECT SUM("当日 提货") AS total FROM sheet WHERE "区域" IN (\'北方\', \'东北\')',
+    )
+
+    assert inspected is not None
+    assert inspected.row_count == 3
+    assert inspected.head_rows[0]["区域"] == "总计"
+    assert result is not None
+    assert result.rows == [["25.5"]]
+
+
 def test_execute_returns_none_for_invalid_sql() -> None:
     xlsx_bytes = _create_test_xlsx({"a": [1]})
     repo = _FakeMetadataRepo()
@@ -203,6 +320,8 @@ __all__ = [
     "test_execute_simple_select_returns_result",
     "test_execute_truncates_to_max_rows",
     "test_execute_handles_empty_result",
+    "test_execute_aggregates_numeric_strings_from_parquet",
+    "test_execute_normalizes_multiline_parquet_column_names",
     "test_execute_returns_none_for_invalid_sql",
     "test_execute_handles_sql_error_gracefully",
     "test_markdown_format_includes_metadata",

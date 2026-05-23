@@ -180,5 +180,11 @@ def _evidence_to_output(evidence: Any) -> SearchOutput:
             value = getattr(item, field, None)
             if value is not None:
                 entry[field] = value
+        target = getattr(item, "grounding_target", None)
+        if target is not None:
+            for field in ("asset_id", "section_id", "page_start", "page_end"):
+                value = getattr(target, field, None)
+                if value is not None:
+                    entry[field] = value
         items.append(entry)
     return SearchOutput(items=items)

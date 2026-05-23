@@ -7,6 +7,7 @@ import pandas as pd
 from openpyxl import load_workbook
 
 from rag.ingest.asset_anchors import asset_anchor
+from rag.ingest.excel_formula_evaluator import ExcelFormulaEvaluator
 from rag.ingest.header_detector import MAX_SCAN_ROWS, HeaderKind, detect_header
 from rag.ingest.parsers.util import default_title_from_location, normalize_whitespace, slugify
 from rag.ingest.table_sampler import profile_table_data
@@ -36,8 +37,14 @@ class ExcelParserRepo:
     ) -> ParsedDocument:
         doc_title = title or default_title_from_location(location)
 
+        formula_workbook = None
         try:
             workbook = load_workbook(file_path, read_only=True, data_only=True)
+            formula_workbook = load_workbook(file_path, read_only=True, data_only=False)
+            formula_evaluator = ExcelFormulaEvaluator(
+                value_workbook=workbook,
+                formula_workbook=formula_workbook,
+            )
             sheet_names = workbook.sheetnames
         except Exception as exc:
             raise ValueError(f"Excel parser failed to read {location}: {exc}") from exc
@@ -53,14 +60,14 @@ class ExcelParserRepo:
             total_sheets = len(sheet_names)
 
             for sheet_idx, sheet_name in enumerate(sheet_names):
-                worksheet = workbook[sheet_name]
+                worksheet = formula_workbook[sheet_name]
                 (
                     raw_df,
                     total_sheet_rows,
                     total_column_count,
                     profile_columns_read,
                     row_count_source,
-                ) = self._read_sheet_preview(worksheet)
+                ) = self._read_sheet_preview(worksheet, evaluator=formula_evaluator)
 
                 if raw_df.empty:
                     continue
@@ -198,17 +205,34 @@ class ExcelParserRepo:
             )
         finally:
             workbook.close()
+            if formula_workbook is not None:
+                formula_workbook.close()
 
-    def _read_sheet_preview(self, worksheet: Any) -> tuple[pd.DataFrame, int, int, int, str]:
+    def _read_sheet_preview(
+        self,
+        worksheet: Any,
+        *,
+        evaluator: ExcelFormulaEvaluator | None = None,
+    ) -> tuple[pd.DataFrame, int, int, int, str]:
         max_row = int(worksheet.max_row or 0)
         max_column = int(worksheet.max_column or 0)
         if max_row <= 0 or max_column <= 0:
             return pd.DataFrame(), 0, 0, 0, "preview"
 
+        scan_evaluator = (
+            evaluator
+            if self._worksheet_has_formulas(
+                worksheet,
+                max_row=min(max_row, MAX_SCAN_ROWS),
+                max_column=max_column,
+            )
+            else None
+        )
         scan_rows = self._worksheet_rows(
             worksheet,
             max_row=min(max_row, MAX_SCAN_ROWS),
             max_column=max_column,
+            evaluator=scan_evaluator,
         )
         active_column_indices = self._active_column_indices(scan_rows)
         if not active_column_indices:
@@ -219,11 +243,22 @@ class ExcelParserRepo:
         preview_row_count = min(max_row, _MAX_SHEET_ROWS + MAX_SCAN_ROWS)
         row_count_source = "preview" if preview_row_count >= max_row else "worksheet_dimension"
         preview_max_column = preview_column_indices[-1] + 1
+        preview_evaluator = (
+            evaluator
+            if self._worksheet_has_formulas(
+                worksheet,
+                max_row=preview_row_count,
+                max_column=preview_max_column,
+                column_indices=preview_column_indices,
+            )
+            else None
+        )
         preview_rows = self._worksheet_rows(
             worksheet,
             max_row=preview_row_count,
             max_column=preview_max_column,
             column_indices=preview_column_indices,
+            evaluator=preview_evaluator,
         )
         raw_df = pd.DataFrame(preview_rows)
         if raw_df.empty:
@@ -245,19 +280,52 @@ class ExcelParserRepo:
         max_row: int,
         max_column: int,
         column_indices: list[int] | None = None,
+        evaluator: ExcelFormulaEvaluator | None = None,
     ) -> list[list[object]]:
         rows: list[list[object]] = []
-        for row in worksheet.iter_rows(min_row=1, max_row=max_row, max_col=max_column, values_only=True):
-            if column_indices is None:
-                rows.append([None if cls._is_empty_cell(value) else value for value in row])
-                continue
-            rows.append(
-                [
-                    None if index >= len(row) or cls._is_empty_cell(row[index]) else row[index]
-                    for index in column_indices
-                ]
-            )
+        if evaluator is None:
+            for row in worksheet.iter_rows(min_row=1, max_row=max_row, max_col=max_column, values_only=True):
+                if column_indices is None:
+                    rows.append([None if cls._is_empty_cell(value) else value for value in row])
+                    continue
+                rows.append(
+                    [
+                        None if index >= len(row) or cls._is_empty_cell(row[index]) else row[index]
+                        for index in column_indices
+                    ]
+                )
+            return rows
+
+        selected_indices = column_indices or list(range(max_column))
+        for row_number in range(1, max_row + 1):
+            row_values: list[object] = []
+            for column_index in selected_indices:
+                if column_index >= max_column:
+                    row_values.append(None)
+                    continue
+                value = (
+                    evaluator.cell_value(worksheet.title, row_number, column_index + 1)
+                    if evaluator is not None
+                    else worksheet.cell(row=row_number, column=column_index + 1).value
+                )
+                row_values.append(None if cls._is_empty_cell(value) else value)
+            rows.append(row_values)
         return rows
+
+    @classmethod
+    def _worksheet_has_formulas(
+        cls,
+        worksheet: Any,
+        *,
+        max_row: int,
+        max_column: int,
+        column_indices: list[int] | None = None,
+    ) -> bool:
+        for row in worksheet.iter_rows(min_row=1, max_row=max_row, max_col=max_column, values_only=True):
+            values = row if column_indices is None else [row[index] if index < len(row) else None for index in column_indices]
+            if any(isinstance(value, str) and value.startswith("=") for value in values):
+                return True
+        return False
 
     @classmethod
     def _active_column_indices(cls, rows: list[list[object]]) -> list[int]:
@@ -288,5 +356,7 @@ class ExcelParserRepo:
 
     @staticmethod
     def _cell_text(value: object) -> str:
+        if isinstance(value, float) and value.is_integer():
+            value = int(value)
         text = "" if value is None else str(value).strip()
         return normalize_whitespace(text)

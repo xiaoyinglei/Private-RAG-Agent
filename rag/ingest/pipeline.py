@@ -1058,15 +1058,47 @@ class IngestPipeline:
         """用 header=None 重读 Excel 源文件，走 header detector 获取干净列名，存全量 Parquet。"""
         try:
             import pandas as pd
+            from openpyxl import load_workbook
 
+            from rag.ingest.excel_formula_evaluator import ExcelFormulaEvaluator
             from rag.ingest.header_detector import HeaderKind, detect_header
 
             local_path = self._resolve_local_path(storage_key)
             if local_path is None:
                 return None
 
-            sheet_arg: str | int = sheet_name if sheet_name else 0
-            raw = pd.read_excel(local_path, sheet_name=sheet_arg, header=None)
+            value_workbook = load_workbook(local_path, read_only=True, data_only=True)
+            formula_workbook = load_workbook(local_path, read_only=True, data_only=False)
+            try:
+                selected_sheet = (
+                    sheet_name
+                    if sheet_name and sheet_name in formula_workbook.sheetnames
+                    else formula_workbook.sheetnames[0]
+                )
+                worksheet = formula_workbook[selected_sheet]
+                value_worksheet = value_workbook[selected_sheet]
+                active_columns = self._active_excel_columns(value_worksheet, worksheet)
+                if not active_columns:
+                    return None
+                evaluator = ExcelFormulaEvaluator(
+                    value_workbook=value_workbook,
+                    formula_workbook=formula_workbook,
+                )
+                raw = pd.DataFrame(
+                    [
+                        [
+                            self._excel_cell_value_for_dataframe(
+                                evaluator.cell_value(selected_sheet, row_number, column_number)
+                            )
+                            for column_number in active_columns
+                        ]
+                        for row_number in range(1, int(worksheet.max_row or 0) + 1)
+                    ]
+                )
+            finally:
+                formula_workbook.close()
+                value_workbook.close()
+
             raw = raw.dropna(how="all").dropna(axis=1, how="all").fillna("")
             result = detect_header(raw)
 
@@ -1096,6 +1128,33 @@ class IngestPipeline:
                 con.close()
         except Exception:
             return None
+
+    @classmethod
+    def _active_excel_columns(cls, *worksheets: Any) -> list[int]:
+        active_columns: set[int] = set()
+        for worksheet in worksheets:
+            max_row = int(getattr(worksheet, "max_row", 0) or 0)
+            max_column = int(getattr(worksheet, "max_column", 0) or 0)
+            if max_row <= 0 or max_column <= 0:
+                continue
+            for row in worksheet.iter_rows(
+                min_row=1,
+                max_row=max_row,
+                max_col=max_column,
+                values_only=True,
+            ):
+                for column_index, value in enumerate(row, start=1):
+                    if cls._excel_cell_value_for_dataframe(value) is not None:
+                        active_columns.add(column_index)
+        return sorted(active_columns)
+
+    @staticmethod
+    def _excel_cell_value_for_dataframe(value: object) -> object:
+        if value is None:
+            return None
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
 
     def _resolve_local_path(self, storage_key: str) -> str | None:
         """从 storage_key 解析本地文件路径。"""

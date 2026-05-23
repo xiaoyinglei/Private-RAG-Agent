@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Protocol
 
+from rag.ingest.table_semantics import deduplicate_table_columns
 from rag.utils.text import text_unit_count
 
 SUMMARY_SAMPLE_ROWS = 3
@@ -165,10 +166,10 @@ def _safe_count(value: int | None) -> int:
 def _columns(header: list[str], column_count: int) -> list[str]:
     if not header:
         return [f"column_{index + 1}" for index in range(column_count)]
-    return [
+    return deduplicate_table_columns([
         header[index].strip() if index < len(header) and header[index].strip() else f"column_{index + 1}"
         for index in range(column_count)
-    ]
+    ])
 
 
 def _table_policy(*, row_count: int, estimated_tokens: int) -> str:

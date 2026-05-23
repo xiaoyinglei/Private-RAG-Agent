@@ -28,6 +28,20 @@ Use vector_search and keyword_search to gather candidates, grounding to verify
 source text, rerank when ordering matters, and llm_summarize only to synthesize
 the provided evidence. Do not invent facts. When evidence is insufficient,
 state insufficient evidence instead of filling gaps.
+
+For questions about files or structured artifacts, retrieval is only the locator
+step: use vector_search/keyword_search/grounding to find the relevant indexed
+asset id, then use asset_list, asset_inspect, and asset_analyze to read,
+filter, sort, aggregate, or validate source data through the asset's advertised
+analysis capabilities. Preserve the asset id and citation anchor in the final
+answer. Do not answer calculations from summary prose alone when a source asset
+with executable analysis capabilities is available.
+
+If the task does not specify which asset, sheet, product, scenario, or other
+scope should be used, inspect/list the relevant candidate assets before
+analysis. Do not choose one plausible asset arbitrarily. If multiple plausible
+assets can answer the same metric, either compute and label each candidate
+answer separately or ask for clarification when one final value is required.
 """
 
 
@@ -41,12 +55,20 @@ RESEARCH_AGENT = AgentDefinition(
         "keyword_search",
         "grounding",
         "rerank",
+        "asset_list",
+        "asset_inspect",
+        "asset_analyze",
         "llm_summarize",
         "rag_search_answer",
     ],
     # TODO: migrate estimated_token_budget / max_iterations / max_depth to runtime config
     estimated_token_budget=10000,
-    model_selection=ModelSelectionPolicy(thinking=True),
+    model_selection=ModelSelectionPolicy(
+        thinking=True,
+        route_max_tokens=256,
+        evaluate_max_tokens=768,
+        plan_max_tokens=1024,
+    ),
     max_iterations=10,
     max_depth=2,
     tool_policy=ToolPolicy(max_parallel_calls=4),
