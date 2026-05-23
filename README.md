@@ -40,9 +40,8 @@
 - 2026-05-23：`--reranker-model none` 时诊断明确关闭 rerank；Agent route/evaluate/plan 节点增加独立 max token 控制，减少本地小模型控制节点延迟。
 - 2026-05-20：README 补齐本地 Qwen / embedding / rerank 服务管理、私有文档入库、RAG 查询、Agent 查询、JSON diagnostics 和省内存运行手册。
 - 2026-05-17：历史默认模型切到 `deepseek-v4-flash`、`mlx-community/Qwen3-Embedding-4B-4bit-DWQ`、`BAAI/bge-reranker-v2-m3`。
-- 2026-05-17：README 保留 HTML badge、导航和 Mermaid 版式，同时保留历史 baseline 用来对比后续改进。
-- 2026-05-16：完成真实 `PostgreSQL + parquet object store + Milvus + Redis` 端到端验证，表格问题通过 DuckDB 返回 `375`。
-- 2026-05-16：README 恢复历史 baseline，并补齐 Agent 设计说明、文件级目录和当前运行命令。
+- 2026-05-16：完成真实 `PostgreSQL + parquet object store + Milvus` 端到端验证。
+
 
 ## 能力一览
 
@@ -607,7 +606,7 @@ screen -S rag_rerank_9092 -X quit >/dev/null 2>&1 || true
 
 ## 私有文档端到端运行手册
 
-下面只保留常用命令。先启动 Qwen 和 embedding 服务；rerank 默认不开，需要时再按“常用开关”打开。
+先启动 Qwen 和 embedding 服务；rerank 默认不开，需要时再按“常用开关”打开。
 
 ### 统一变量
 
@@ -829,13 +828,13 @@ uv run rag ingest \
   --vector-dsn "$VECTOR_DSN" \
   --vector-collection-prefix smoke_milvus_v1 \
   --source-type plain_text \
-  --location memory://smoke/travel-policy \
-  --title "差旅制度 Smoke" \
+  --location memory://smoke/support-sla \
+  --title "示例客服 SLA Smoke" \
   --owner smoke \
-  --content "单笔国内差旅报销金额超过 12000 元时，必须由业务线 VP 审批。"
+  --content "示例客服 SLA：P1 工单首次响应目标为 30 分钟，解决目标为 4 小时。"
 
 uv run rag query \
-  --query "单笔国内差旅报销金额超过 12000 元需要谁审批？" \
+  --query "P1 工单首次响应目标是多少？" \
   --storage-root data/smoke_milvus \
   --vector-backend milvus \
   --vector-dsn "$VECTOR_DSN" \
@@ -874,7 +873,7 @@ storage = StorageConfig(
     root=root,
     metadata=StorageComponentConfig(
         backend="postgres",
-        dsn="postgresql://leixiaoying:@127.0.0.1:5432/postgres",
+        dsn="postgresql://user:password@127.0.0.1:5432/postgres",
         namespace=schema,
     ),
     vectors=StorageComponentConfig(
@@ -902,26 +901,26 @@ request = AssemblyRequest(
 with RAGRuntime.from_request(storage=storage, request=request) as runtime:
     runtime.insert(
         IngestRequest(
-            location="memory://manual/travel-policy",
+            location="memory://demo/support-sla",
             source_type=SourceType.PLAIN_TEXT,
-            owner="manual",
-            title="差旅制度",
-            content_text="单笔国内差旅报销金额超过 12000 元时，必须由业务线 VP 审批。",
+            owner="demo",
+            title="示例客服 SLA",
+            content_text="示例客服 SLA：P1 工单首次响应目标为 30 分钟，解决目标为 4 小时。",
         )
     )
 
     runtime.insert(
         IngestRequest(
-            location="/absolute/path/to/开票量明细.xlsx",
+            location="/absolute/path/to/sample_sales.xlsx",
             source_type=SourceType.XLSX,
-            owner="manual",
-            title="开票量明细",
-            file_path=Path("/absolute/path/to/开票量明细.xlsx"),
+            owner="demo",
+            title="示例销售明细",
+            file_path=Path("/absolute/path/to/sample_sales.xlsx"),
         )
     )
 
     result = runtime.query_public(
-        "请计算华东区域 Q1 的开票量合计是多少？",
+        "请计算示例销售明细中华北区域 2026-05 的销售额合计是多少？",
         options=QueryOptions(retrieval_profile="asset", top_k=6, retrieval_pool_k=12),
     )
     print(result.answer.answer_text)
