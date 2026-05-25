@@ -9,12 +9,15 @@ from pydantic import BaseModel, Field
 
 from rag.agent.core.context import AgentRunConfig, derive_child_config
 from rag.agent.core.definition import AgentDefinition
+from rag.agent.core.delegation import (
+    DEFAULT_DELEGATION_TOKEN_BUDGET,
+    AgentDelegationRequest,
+    DelegatedAgentResult,
+    DelegatedAgentRunner,
+)
 from rag.agent.core.registry import AgentRegistry
-from rag.agent.core.task import DEFAULT_SUBTASK_TOKEN_BUDGET, SubTaskNode
-from rag.agent.graphs.nodes.evaluate import EvaluateDecisionProvider
-from rag.agent.graphs.nodes.execute_subagent import SubAgentRunner, SubAgentRunResult
-from rag.agent.graphs.nodes.plan import PlanProvider
-from rag.agent.graphs.nodes.route import RouteProvider
+from rag.agent.graphs.nodes.llm_decide import ToolDecisionProvider
+from rag.agent.graphs.nodes.retrieval_hint import RetrievalHintProvider
 from rag.agent.state import AgentState
 from rag.agent.tools.registry import ToolRegistry
 from rag.agent.tools.spec import ToolError, ToolPermissions, ToolSpec
@@ -50,7 +53,7 @@ class AgentAsToolExecutionError(RuntimeError):
 # ── Tool I/O schemas ───────────────────────────────────────────
 
 class AgentToolInput(BaseModel):
-    """Agent-as-tool 输入。不暴露完整 SubTaskNode，只包含稳定业务字段。"""
+    """Agent-as-tool input containing only stable delegation fields."""
 
     task: str = Field(min_length=1, description="子任务描述")
     goal: str | None = Field(default=None, description="期望产出")
@@ -73,7 +76,7 @@ class AgentToolOutput(BaseModel):
     agent_name: str = Field(default="", description="执行的 Agent 类型")
 
     @classmethod
-    def from_run_result(cls, result: SubAgentRunResult, agent_name: str) -> AgentToolOutput:
+    def from_run_result(cls, result: DelegatedAgentResult, agent_name: str) -> AgentToolOutput:
         """从 AgentRunResult 提取脱水结果。"""
         return cls(
             conclusion=result.final_answer or "",
@@ -94,7 +97,7 @@ class AgentToolOutput(BaseModel):
         )
 
 
-def _extract_key_facts(result: SubAgentRunResult) -> list[str]:
+def _extract_key_facts(result: DelegatedAgentResult) -> list[str]:
     facts: list[str] = []
     for item in result.evidence:
         text = getattr(item, "text", None)
@@ -103,7 +106,7 @@ def _extract_key_facts(result: SubAgentRunResult) -> list[str]:
     return facts[:10]
 
 
-def _derive_confidence(result: SubAgentRunResult) -> float:
+def _derive_confidence(result: DelegatedAgentResult) -> float:
     if result.status == "done":
         return 0.8 if bool(getattr(result, "groundedness_flag", False)) else 0.5
     return 0.1
@@ -119,7 +122,7 @@ class AgentAsToolAdapter:
 
     def __init__(
         self,
-        runner: SubAgentRunner,
+        runner: DelegatedAgentRunner,
         agent_type: str,
         run_config: AgentRunConfig,
     ) -> None:
@@ -129,8 +132,7 @@ class AgentAsToolAdapter:
 
     async def __call__(self, payload: BaseModel) -> AgentToolOutput:
         request = AgentToolInput.model_validate(payload)
-        # 构造最小父上下文（不是完整 LangGraph state，仅用于 derive_child_config）
-        # run_subtask 只访问 parent_state["run_config"]，不读取其他 state 字段
+        # Minimal parent context needed to derive a bounded child run config.
         parent_state: AgentState = {
             "run_config": self._run_config,
             "messages": [],
@@ -140,10 +142,9 @@ class AgentAsToolAdapter:
             "task": request.task,
             "retrieval_signals": RetrievalSignals(),
             "retrieval_signals_debug": None,
-            "plan": None,
             "iteration": 0,
             "status": "running",
-            "route_reason": None,
+            "decision_reason": None,
             "stop_reason": None,
             "needs_user_input": None,
             "pending_tool_calls": [],
@@ -153,30 +154,41 @@ class AgentAsToolAdapter:
             "user_message": None,
             "human_input_request": None,
             "human_input_response": None,
-            "next_subtasks": None,
             "working_summary": None,
             "extracted_facts": [],
             "context_budget": None,
-            "subtask_results": {},
-            "terminal_subtasks": set(),
-            "successful_subtasks": set(),
             "final_answer": None,
             "groundedness_flag": False,
             "insufficient_evidence_flag": False,
+            "goal_spec": None,
+            "goal_requirements": [],
+            "satisfied_requirements": [],
+            "open_gaps": [],
+            "evidence_refs": [],
+            "answer_candidates": [],
+            "computation_results": [],
+            "structured_observations": [],
+            "context_units": [],
+            "context_bindings": [],
+            "locators": [],
+            "asset_refs": [],
+            "conflicts": [],
+            "no_progress_count": 0,
+            "satisfaction_report": None,
+            "controller_next": None,
         }
 
-        prompt = _build_subtask_prompt(request)
-        subtask = SubTaskNode(
-            subtask_id=f"{self._agent_type}-tool-{uuid4().hex[:8]}",
+        prompt = _build_delegation_prompt(request)
+        delegation = AgentDelegationRequest(
+            delegation_id=f"{self._agent_type}-tool-{uuid4().hex[:8]}",
             agent_type=self._agent_type,
             prompt=prompt,
-            priority=1,
-            estimated_tokens=DEFAULT_SUBTASK_TOKEN_BUDGET,
+            estimated_tokens=DEFAULT_DELEGATION_TOKEN_BUDGET,
         )
 
         try:
-            raw_result = self._runner.run_subtask(
-                subtask=subtask,
+            raw_result = self._runner.run_delegated_task(
+                request=delegation,
                 parent_state=parent_state,
             )
             result = await raw_result if inspect.isawaitable(raw_result) else raw_result
@@ -200,7 +212,7 @@ class AgentAsToolAdapter:
         return AgentToolOutput.from_run_result(result, self._agent_type)
 
 
-def _build_subtask_prompt(payload: AgentToolInput) -> str:
+def _build_delegation_prompt(payload: AgentToolInput) -> str:
     parts = [f"## Task\n{payload.task}"]
     if payload.goal:
         parts.append(f"## Goal\n{payload.goal}")
@@ -275,7 +287,7 @@ def build_agent_tool_spec(agent_definition: AgentDefinition) -> AgentToolSpec:
 
 def _make_tool_description(definition: AgentDefinition) -> str:
     return (
-        f"Delegate a subtask to the {definition.agent_type} agent. "
+        f"Delegate bounded work to the {definition.agent_type} agent. "
         f"{definition.description} "
         f"Use this when the task requires specialized {definition.agent_type} capabilities."
     )
@@ -287,39 +299,36 @@ class AgentAsToolRunner:
         *,
         tool_registry: ToolRegistry,
         agent_registry: AgentRegistry,
-        evaluate_decision_provider: EvaluateDecisionProvider | None = None,
-        plan_provider: PlanProvider | None = None,
-        route_provider: RouteProvider | None = None,
+        tool_decision_provider: ToolDecisionProvider | None = None,
+        retrieval_hint_provider: RetrievalHintProvider | None = None,
     ) -> None:
         self._tool_registry = tool_registry
         self._agent_registry = agent_registry
-        self._evaluate_decision_provider = evaluate_decision_provider
-        self._plan_provider = plan_provider
-        self._route_provider = route_provider
+        self._tool_decision_provider = tool_decision_provider
+        self._retrieval_hint_provider = retrieval_hint_provider
 
-    async def run_subtask(
+    async def run_delegated_task(
         self,
         *,
-        subtask: SubTaskNode,
+        request: AgentDelegationRequest,
         parent_state: AgentState,
     ) -> AgentRunResult:
         from rag.agent.service import AgentService
 
         parent_config = parent_state["run_config"]
-        child_definition = self._agent_registry.get(subtask.agent_type)
+        child_definition = self._agent_registry.get(request.agent_type)
         child_config = derive_child_config(parent_config, child_definition)
-        if subtask.estimated_tokens is not None:
-            child_config = replace(child_config, budget_total=subtask.estimated_tokens)
+        if request.estimated_tokens is not None:
+            child_config = replace(child_config, budget_total=request.estimated_tokens)
 
         service = AgentService(
             definition=child_definition,
             tool_registry=self._tool_registry,
-            evaluate_decision_provider=self._evaluate_decision_provider,
-            plan_provider=self._plan_provider,
-            route_provider=self._route_provider,
+            tool_decision_provider=self._tool_decision_provider,
+            retrieval_hint_provider=self._retrieval_hint_provider,
             subagent_runner=self,
         )
         return await service.run_with_config(
-            task=subtask.prompt,
+            task=request.prompt,
             run_config=child_config,
         )

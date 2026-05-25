@@ -17,13 +17,11 @@ from rag.agent.tools.spec import ToolResult
 from rag.schema.query import AnswerCitation, EvidenceItem, RetrievalSignals
 
 
-class _TableRouteProvider:
-    def route(self, state: AgentState) -> dict[str, object]:
+class _TableRetrievalHintProvider:
+    def hint(self, state: AgentState) -> dict[str, object]:
         del state
         return {
-            "status": "direct",
-            "execution_mode": "direct",
-            "route_reason": "complex_table_question",
+            "decision_reason": "complex_table_question",
             "retrieval_signals": RetrievalSignals(
                 special_targets=["table"],
                 quoted_terms=["开票量"],
@@ -164,8 +162,8 @@ async def test_agent_loop_routes_table_query_injects_rag_signals_and_synthesizes
                 "llm_summarize": summarize_runner,
             }
         ),
-        route_provider=_TableRouteProvider(),
-        evaluate_decision_provider=_TwoStepDecisionProvider(),
+        retrieval_hint_provider=_TableRetrievalHintProvider(),
+        tool_decision_provider=_TwoStepDecisionProvider(),
         synthesis_runner=_ToolAwareSynthesisRunner(),
     )
 

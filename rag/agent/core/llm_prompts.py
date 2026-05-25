@@ -1,31 +1,28 @@
 from __future__ import annotations
 
-from rag.agent.core.task import DEFAULT_SUBTASK_TOKEN_BUDGET
+from collections.abc import Sequence
+
 from rag.agent.state import AgentState
 
-# ── Router prompt ──
+# ── Retrieval hint prompt ──
 
 
-def build_route_prompt(state: AgentState) -> str:
+def build_retrieval_hint_prompt(state: AgentState) -> str:
     task = state.get("task", "")
     pending_count = len(state.get("pending_tool_calls", []))
 
-    return f"""你是任务路由器。根据用户任务判断应走哪条执行路径，并生成结构化检索信号。
+    return f"""你是检索提示分析器。根据用户任务生成结构化检索信号，供 AgentLoop 的模型工具决策使用。
 
-路由标准（按执行需求，不按固定分类）：
-
-- fast_path：单次 RAG 检索即可回答。不需要拆分子任务、并行 Agent、用户确认、文件/资产分析或外部副作用。
-- decompose：需要多个独立检索、多维度证据、多对象对比，或需要并行子 Agent / 任务 DAG。
-- direct：需要 Agent 循环调用工具（search/grounding/rerank/asset_list/asset_inspect/asset_analyze 等），或需要多轮 evaluate、用户确认。
-  如果任务要求检查文件/结构化资产、读取表格、执行计算、列出候选资产、消除多资产歧义，或需要用户选择口径/对象，再走 direct。
+不要决定执行路径，不要生成工具调用，不要建立并行规划工作流。模型会在主循环中选择
+search/grounding/rerank/asset_list/asset_inspect/asset_read_slice/asset_analyze
+或 agent_* 工具。
 
 当前任务: {task}
 待执行工具数: {pending_count}
 
-请判断路由并生成检索信号。返回 JSON:
+请生成检索信号。返回 JSON:
 {{
-    "route": "fast_path | decompose | direct",
-    "reason": "判断依据",
+    "reason": "检索提示依据",
     "retrieval_signals": {{
         "special_targets": ["table"] 或 [],
         "quoted_terms": ["精确词1", "精确词2"] 或 [],
@@ -44,14 +41,15 @@ def build_route_prompt(state: AgentState) -> str:
 - quoted_terms 只从任务原文提取，不要凭空生成。"""
 
 
-# ── Evaluator prompt ──
+# ── Tool decision prompt ──
 
 
-def build_evaluate_prompt(
+def build_tool_decision_prompt(
     state: AgentState,
     *,
     budget_remaining: int,
     context_text: str,
+    allowed_tools: Sequence[str] = (),
 ) -> str:
     task = state.get("task", "")
     iteration = state.get("iteration", 0)
@@ -65,8 +63,11 @@ def build_evaluate_prompt(
 迭代次数: {iteration}
 预算剩余 tokens: {budget_remaining}
 工具结果: {ok_count} 成功, {error_count} 失败
+可用工具: {", ".join(allowed_tools) if allowed_tools else "未显式限制"}
 
 {context_text}
+
+{_format_tool_contracts(allowed_tools)}
 
 请判断下一步。返回 JSON:
 {{
@@ -86,50 +87,51 @@ def build_evaluate_prompt(
 - 还需要检索 → action="execute"，给出具体 tool_calls
 - 需要用户决策 → action="pause"，needs_user_input 说明问题
 - 预算耗尽 → action="synthesize"，stop_reason="budget_exhausted"
+- 每一次 LLM 决策必须对应当前 open_gaps；如果没有 open_gaps，不要继续调用工具
 - 如果证据已包含 retrieval_channels 冲突标记，考虑是否需要用户选择
-- 对文件/结构化资产问题，先用检索工具找到 asset_id；拿到 asset_id 后优先调用 asset_inspect 理解资产结构和可用 analysis_capabilities，再用 asset_analyze 做读数、筛选、排序、聚合或校验。不要只根据摘要文本回答可执行资产里的计算。
-- 如果任务没有指定资产、sheet、产品、场景、口径等范围，但已有多个候选资产都可能回答同一指标，不要任选一个 asset_id；应调用 asset_list/asset_inspect 收集候选，分别计算并标注候选答案，或在必须给唯一答案时 pause 请求用户澄清。"""
+- 对文件/结构化资产问题，先用检索工具找到 asset_id；拿到 asset_id 后优先调用
+  asset_inspect 理解资产结构和可用 analysis_capabilities。需要局部行列内容时用
+  asset_read_slice 读取有边界的切片；需要读数、筛选、排序、聚合或校验时用
+  asset_analyze。不要只根据摘要文本回答可执行资产里的计算。
+- 如果已经 inspect 到一个资产，并且它有 dataframe_sql 能力，且列名/预览行足以回答
+  当前 open_gaps，应立即调用 asset_analyze 做计算或校验；不要因为还存在其他候选资产
+  就继续逐个 asset_inspect。只有当你能说明具体未解决歧义时，才继续 inspect 其他资产。
+- 不要把完整表格放进状态或上下文；只保留候选 asset_id、结构摘要、切片、分析规格、计算结果和 evidence/citation 定位。
+- 如果任务没有指定资产、sheet、产品、场景、口径等范围，但已有多个候选资产都可能回答同一指标，
+  不要任选一个 asset_id；应调用 asset_list/asset_inspect 收集候选，分别计算并标注候选答案，
+  或在必须给唯一答案时 pause 请求用户澄清。"""
 
 
-# ── Planner prompt ──
-
-
-def build_plan_prompt(
-    state: AgentState,
-    *,
-    allowed_tools: list[str],
-    max_depth: int,
-) -> str:
-    task = state.get("task", "")
-    tools_list = ", ".join(allowed_tools) if allowed_tools else "无"
-
-    return f"""你是任务规划器。将复杂任务拆解为可并行或串行的子任务 DAG。
-
-当前任务: {task}
-可用工具: {tools_list}
-允许的 Agent 类型: research, compare, factcheck
-最大嵌套深度: {max_depth}
-
-请生成一个 TaskDAG。返回 JSON:
-{{
-    "subtasks": [
-        {{
-            "subtask_id": "唯一 ID（如 s1, s2）",
-            "agent_type": "research | compare | factcheck",
-            "prompt": "该子任务的完整指令",
-            "priority": 0~10（数字越大越优先）,
-            "estimated_tokens": {DEFAULT_SUBTASK_TOKEN_BUDGET}
-        }}
-    ],
-    "edges": [
-        {{"from_id": "s1", "to_id": "s3"}}
+def _format_tool_contracts(allowed_tools: Sequence[str]) -> str:
+    contracts = {
+        "vector_search": 'vector_search: {"query": str, "top_k": int}',
+        "keyword_search": 'keyword_search: {"query": str, "top_k": int}',
+        "grounding": 'grounding: {"query": str, "evidence_ids": list[str]}',
+        "rerank": 'rerank: {"query": str, "items": list[object]}',
+        "asset_list": (
+            'asset_list: {"doc_id": int?, "source_id": int?, "section_id": int?, '
+            '"asset_type": str?, "limit": int}'
+        ),
+        "asset_inspect": (
+            'asset_inspect: {"asset_id": int, "head_rows": int, "tail_rows": int}'
+        ),
+        "asset_read_slice": (
+            'asset_read_slice: {"asset_id": int, "row_start": int, "row_count": int, '
+            '"columns": list[str]?}'
+        ),
+        "asset_analyze": (
+            'asset_analyze: {"asset_id": int, "operation": "dataframe_sql", '
+            '"query": "SELECT ... FROM sheet ..."}'
+        ),
+        "llm_summarize": 'llm_summarize: {"task": str, "context_sections": list[str]}',
+        "rag_search_answer": 'rag_search_answer: {"query": str, "top_k": int}',
+    }
+    names = list(allowed_tools)
+    lines = [
+        contracts[name]
+        for name in names
+        if name in contracts
     ]
-}}
-
-规则：
-- subtask_id 必须唯一
-- edges 表示依赖：to_id 依赖 from_id 完成
-- 无依赖的子任务可并行执行（留空 edges 即可）
-- 不要创建循环依赖
-- priority 用于同批次内的排序
-- 每个子任务只做一件事，不要合并多个独立问题"""
+    if not lines:
+        return ""
+    return "可用工具输入契约:\n" + "\n".join(f"- {line}" for line in lines)

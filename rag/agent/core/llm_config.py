@@ -22,11 +22,12 @@ class ModelSpec(BaseModel):
     max_tokens: int = 2048
     timeout_seconds: float = 120.0
     base_url: str | None = None
+    api_key_env: str | None = None
     defaults: dict[str, Any] = Field(default_factory=dict)
 
 
 class AgentModelsConfig(BaseModel):
-    """Agent 模型配置：只声明可用模型，不绑定 planner/evaluator/router 等节点角色。"""
+    """Agent 模型配置：只声明可用模型，不绑定具体运行节点角色。"""
 
     version: int = 1
     models: dict[str, ModelSpec] = Field(default_factory=dict)

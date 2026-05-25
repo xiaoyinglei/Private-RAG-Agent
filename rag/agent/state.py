@@ -9,7 +9,6 @@ from typing_extensions import TypedDict
 
 from rag.agent.core.context import AgentRunConfig
 from rag.agent.core.human_input import HumanInputRequest, HumanInputResponse
-from rag.agent.core.task import SubTaskResult, TaskDAG
 from rag.agent.memory.models import ContextBudgetSnapshot, ExtractedFact, WorkingSummary
 from rag.schema.query import RetrievalSignals
 
@@ -48,10 +47,9 @@ class AgentState(TypedDict):
     retrieval_signals: RetrievalSignals
     retrieval_signals_debug: dict[str, object] | None
     run_config: AgentRunConfig
-    plan: TaskDAG | None
     iteration: int
     status: str
-    route_reason: str | None
+    decision_reason: str | None
     stop_reason: str | None
     needs_user_input: str | None
     pending_tool_calls: list[ToolCallPlan]
@@ -61,16 +59,28 @@ class AgentState(TypedDict):
     user_message: str | None
     human_input_request: HumanInputRequest | None
     human_input_response: HumanInputResponse | None
-    next_subtasks: list[object] | None
     working_summary: WorkingSummary | None
     extracted_facts: list[ExtractedFact]
     context_budget: ContextBudgetSnapshot | None
-    subtask_results: Annotated[dict[str, SubTaskResult], _merge_subtask_results]
-    terminal_subtasks: Annotated[set[str], _merge_sets]
-    successful_subtasks: Annotated[set[str], _merge_sets]
     final_answer: str | None
     groundedness_flag: bool
     insufficient_evidence_flag: bool
+    goal_spec: Any | None
+    goal_requirements: list[str]
+    satisfied_requirements: list[str]
+    open_gaps: list[Any]
+    evidence_refs: Annotated[list[Any], _merge_keyed_items]
+    answer_candidates: Annotated[list[Any], _merge_keyed_items]
+    computation_results: Annotated[list[Any], _merge_keyed_items]
+    structured_observations: Annotated[list[Any], _merge_keyed_items]
+    context_units: Annotated[list[Any], _merge_keyed_items]
+    context_bindings: Annotated[list[Any], _merge_keyed_items]
+    locators: Annotated[list[Any], _merge_keyed_items]
+    asset_refs: Annotated[list[int], _merge_ints]
+    conflicts: list[Any]
+    no_progress_count: int
+    satisfaction_report: Any | None
+    controller_next: str | None
 
 
 def _merge_evidence(left: list[Any], right: list[Any]) -> list[Any]:
@@ -114,12 +124,33 @@ def _merge_tool_results(left: list[Any], right: list[Any]) -> list[Any]:
     return list({result.tool_call_id: result for result in left + right}.values())
 
 
-def _merge_subtask_results(left: dict[str, SubTaskResult], right: dict[str, SubTaskResult]) -> dict[str, SubTaskResult]:
-    return {**left, **right}
+def _merge_keyed_items(left: list[Any], right: list[Any]) -> list[Any]:
+    merged: dict[str, Any] = {}
+    for index, item in enumerate(left + right):
+        key = _item_key(item, fallback=str(index))
+        merged[key] = item
+    return list(merged.values())
 
 
-def _merge_sets(left: set[str], right: set[str]) -> set[str]:
-    return left | right
+def _item_key(item: Any, *, fallback: str) -> str:
+    key = getattr(item, "key", None)
+    if isinstance(key, str) and key:
+        return key
+    for attr in ("tool_call_id", "source_tool_call_id", "evidence_id", "citation_id"):
+        value = getattr(item, attr, None)
+        if value:
+            return f"{attr}:{value}"
+    if isinstance(item, dict):
+        for attr in ("tool_call_id", "source_tool_call_id", "evidence_id", "citation_id"):
+            value = item.get(attr)
+            if value:
+                return f"{attr}:{value}"
+        return str(sorted(item.items()))
+    return fallback
+
+
+def _merge_ints(left: list[int], right: list[int]) -> list[int]:
+    return list(dict.fromkeys([*left, *right]))
 
 
 __all__ = [
@@ -131,7 +162,7 @@ __all__ = [
     "WorkingSummary",
     "_merge_citations",
     "_merge_evidence",
-    "_merge_sets",
-    "_merge_subtask_results",
+    "_merge_ints",
+    "_merge_keyed_items",
     "_merge_tool_results",
 ]

@@ -2,21 +2,18 @@ from __future__ import annotations
 
 from typing import Any
 
-import pytest
 from pydantic import BaseModel
 
 from rag.agent.core.context import AgentRunConfig
 from rag.agent.core.definition import AgentDefinition, ModelSelectionPolicy
 from rag.agent.core.llm_config import AgentModelsConfig, ModelProvider, ModelSpec
 from rag.agent.core.llm_providers import (
-    LLMEvaluateDecisionProvider,
-    LLMPlanProvider,
-    LLMRouteProvider,
+    LLMRetrievalHintProvider,
+    LLMToolDecisionProvider,
     _generate_structured,
     create_default_providers,
 )
 from rag.agent.core.llm_registry import ModelRegistry, ResolvedModel
-from rag.agent.core.task import TaskDAG
 from rag.agent.memory.models import ContextBudgetSnapshot, ContextSection, InjectedContext
 from rag.agent.state import ThinkOutput
 from rag.schema.runtime import AccessPolicy
@@ -90,23 +87,18 @@ def _make_state(**overrides: Any) -> dict:
         "tool_results": [],
         "task": "test task",
         "run_config": _make_config(),
-        "plan": None,
         "iteration": 0,
         "status": "running",
-        "route_reason": None,
+        "decision_reason": None,
         "stop_reason": None,
         "needs_user_input": None,
         "pending_tool_calls": [],
         "approved_tool_call_ids": [],
         "denied_tool_call_ids": [],
         "user_decision": None,
-        "next_subtasks": None,
         "working_summary": None,
         "extracted_facts": [],
         "context_budget": None,
-        "subtask_results": {},
-        "terminal_subtasks": set(),
-        "successful_subtasks": set(),
         "final_answer": None,
         "groundedness_flag": False,
         "insufficient_evidence_flag": False,
@@ -144,61 +136,43 @@ class TestGenerateStructured:
         assert result is None
 
 
-# ── LLMRouteProvider ──
+# ── LLMRetrievalHintProvider ──
 
 
-class TestLLMRouteProvider:
-    def test_routes_fast_path(self) -> None:
-        gen = _StubGenerator([{"route": "fast_path", "reason": "simple query"}])
-        provider = LLMRouteProvider(gen)
-        result = provider.route(_make_state(task="简单查询"))
-        assert result["status"] == "fast_path"
-        assert result["execution_mode"] == "fast_path"
-        assert result["route_reason"] == "simple query"
+class TestLLMRetrievalHintProvider:
+    def test_returns_retrieval_hint_without_execution_route(self) -> None:
+        gen = _StubGenerator([{"reason": "simple query"}])
+        provider = LLMRetrievalHintProvider(gen)
+        result = provider.hint(_make_state(task="简单查询"))
+        assert result["decision_reason"] == "simple query"
+        assert "status" not in result
+        assert "execution_mode" not in result
 
-    def test_routes_decompose(self) -> None:
-        gen = _StubGenerator([{"route": "decompose", "reason": "multi-hop"}])
-        provider = LLMRouteProvider(gen, decompose_enabled=True)
-        result = provider.route(_make_state(task="对比 A 和 B"))
-        assert result["status"] == "decompose"
-        assert result["execution_mode"] == "decompose"
+    def test_multi_hop_hint_does_not_create_decompose_branch(self) -> None:
+        gen = _StubGenerator([
+            {
+                "reason": "multi-hop",
+                "retrieval_signals": {"allow_graph_expansion": True},
+            }
+        ])
+        provider = LLMRetrievalHintProvider(gen)
+        result = provider.hint(_make_state(task="对比 A 和 B"))
+        assert result["retrieval_signals"].allow_graph_expansion is True
+        assert "status" not in result
+        assert "execution_mode" not in result
 
-    def test_decompose_downgrades_when_disabled(self) -> None:
-        """子 Agent 编排未启用时，decompose → direct，execution_mode 同步降级"""
-        gen = _StubGenerator([{"route": "decompose", "reason": "multi-hop"}])
-        provider = LLMRouteProvider(gen)
-        result = provider.route(_make_state(task="对比 A 和 B"))
-        assert result["status"] == "direct"
-        assert result["execution_mode"] == "direct"
-        assert result["decompose_disabled_single_agent_mode"] is True
-        assert "decompose_disabled" in result["route_reason"]
-
-    def test_routes_direct(self) -> None:
-        gen = _StubGenerator([{"route": "direct", "reason": "needs tools"}])
-        provider = LLMRouteProvider(gen)
-        result = provider.route(_make_state())
-        assert result["status"] == "direct"
-        assert result["execution_mode"] == "direct"
-        assert result["status"] == "direct"
-
-    def test_unparseable_falls_back_to_direct(self) -> None:
+    def test_unparseable_falls_back_to_generic_hint(self) -> None:
         gen = _FailingGenerator()
-        provider = LLMRouteProvider(gen)
-        result = provider.route(_make_state())
-        assert result["status"] == "direct"
-        assert result["route_reason"] == "agent_research"
-
-    def test_invalid_route_falls_back_to_direct(self) -> None:
-        gen = _StubGenerator([{"route": "unknown_path", "reason": "bad"}])
-        provider = LLMRouteProvider(gen)
-        result = provider.route(_make_state())
-        assert result["status"] == "direct"
+        provider = LLMRetrievalHintProvider(gen)
+        result = provider.hint(_make_state())
+        assert result["decision_reason"] == "agent_research"
+        assert "status" not in result
 
 
-# ── LLMEvaluateDecisionProvider ──
+# ── LLMToolDecisionProvider ──
 
 
-class TestLLMEvaluateDecisionProvider:
+class TestLLMToolDecisionProvider:
     def test_decide_execute(self) -> None:
         gen = _StubGenerator([
             {
@@ -214,7 +188,7 @@ class TestLLMEvaluateDecisionProvider:
                 "confidence": 0.8,
             }
         ])
-        provider = LLMEvaluateDecisionProvider(gen)
+        provider = LLMToolDecisionProvider(gen)
         result = provider.decide(
             _make_state(),
             definition=AgentDefinition(
@@ -241,7 +215,7 @@ class TestLLMEvaluateDecisionProvider:
                 "stop_reason": "sufficient_evidence",
             }
         ])
-        provider = LLMEvaluateDecisionProvider(gen)
+        provider = LLMToolDecisionProvider(gen)
         result = provider.decide(
             _make_state(),
             definition=AgentDefinition(
@@ -266,7 +240,7 @@ class TestLLMEvaluateDecisionProvider:
                 "needs_user_input": "choose data source",
             }
         ])
-        provider = LLMEvaluateDecisionProvider(gen)
+        provider = LLMToolDecisionProvider(gen)
         result = provider.decide(
             _make_state(),
             definition=AgentDefinition(
@@ -284,7 +258,7 @@ class TestLLMEvaluateDecisionProvider:
 
     def test_unparseable_pauses(self) -> None:
         gen = _FailingGenerator()
-        provider = LLMEvaluateDecisionProvider(gen)
+        provider = LLMToolDecisionProvider(gen)
         result = provider.decide(
             _make_state(),
             definition=AgentDefinition(
@@ -301,93 +275,11 @@ class TestLLMEvaluateDecisionProvider:
         assert result.confidence == 0.0
 
 
-# ── LLMPlanProvider ──
-
-
-class TestLLMPlanProvider:
-    def test_creates_plan(self) -> None:
-        gen = _StubGenerator([
-            {
-                "subtasks": [
-                    {
-                        "subtask_id": "s1",
-                        "agent_type": "research",
-                        "prompt": "search for A",
-                        "priority": 5,
-                    },
-                    {
-                        "subtask_id": "s2",
-                        "agent_type": "research",
-                        "prompt": "search for B",
-                        "priority": 5,
-                    },
-                ],
-                "edges": [],
-            }
-        ])
-        provider = LLMPlanProvider(gen)
-        plan = provider.create_plan(
-            _make_state(task="对比 A 和 B"),
-            definition=AgentDefinition(
-                agent_type="orchestrator",
-                description="test",
-                system_prompt="test",
-                allowed_tools=[],
-            ),
-        )
-        assert isinstance(plan, TaskDAG)
-        assert len(plan.subtasks) == 2
-
-    def test_unparseable_raises(self) -> None:
-        gen = _FailingGenerator()
-        provider = LLMPlanProvider(gen)
-        with pytest.raises(ValueError, match="valid TaskDAG"):
-            provider.create_plan(
-                _make_state(),
-                definition=AgentDefinition(
-                    agent_type="orchestrator",
-                    description="test",
-                    system_prompt="test",
-                    allowed_tools=[],
-                ),
-            )
-
-    def test_plan_prompt_uses_default_subtask_budget_10000(self) -> None:
-        gen = _StubGenerator([
-            {
-                "subtasks": [
-                    {
-                        "subtask_id": "s1",
-                        "agent_type": "research",
-                        "prompt": "Research",
-                        "priority": 1,
-                        "estimated_tokens": 10000,
-                    }
-                ],
-                "edges": [],
-            }
-        ])
-        provider = LLMPlanProvider(gen)
-
-        provider.create_plan(
-            _make_state(),
-            definition=AgentDefinition(
-                agent_type="orchestrator",
-                description="test",
-                system_prompt="test",
-                allowed_tools=[],
-            ),
-        )
-
-        prompt = gen.calls[0][0]
-        assert '"estimated_tokens": 10000' in prompt
-
-
 # ── create_default_providers ──
 
 
 class TestCreateDefaultProviders:
-    def test_creates_three_providers_with_defaults(self) -> None:
+    def test_creates_two_providers_with_defaults(self) -> None:
         spec = ModelSpec(provider=ModelProvider.OLLAMA, model="test")
         config = AgentModelsConfig(
             models={"main": spec},
@@ -396,12 +288,11 @@ class TestCreateDefaultProviders:
         reg = ModelRegistry(config)
         selection = ModelSelectionPolicy()
 
-        router, evaluator, planner = create_default_providers(reg, selection)
-        assert isinstance(router, LLMRouteProvider)
-        assert isinstance(evaluator, LLMEvaluateDecisionProvider)
-        assert isinstance(planner, LLMPlanProvider)
+        hint_provider, decision_provider = create_default_providers(reg, selection)
+        assert isinstance(hint_provider, LLMRetrievalHintProvider)
+        assert isinstance(decision_provider, LLMToolDecisionProvider)
 
-    def test_creates_three_providers_with_per_node_models(self) -> None:
+    def test_creates_two_providers_with_per_node_models(self) -> None:
         main = ModelSpec(provider=ModelProvider.OLLAMA, model="main-model")
         fast = ModelSpec(provider=ModelProvider.OLLAMA, model="fast-model")
         config = AgentModelsConfig(
@@ -410,52 +301,34 @@ class TestCreateDefaultProviders:
             fallback_model="fast",
         )
         reg = ModelRegistry(config)
-        selection = ModelSelectionPolicy(route_model="fast")
+        selection = ModelSelectionPolicy(retrieval_hint_model="fast")
 
-        router, evaluator, planner = create_default_providers(reg, selection)
-        assert isinstance(router, LLMRouteProvider)
-        assert isinstance(evaluator, LLMEvaluateDecisionProvider)
-        assert isinstance(planner, LLMPlanProvider)
-        # router uses fast, others use main via default
-
-    def test_decompose_enabled_is_forwarded_to_default_router(self) -> None:
-        gen = _StubGenerator([{"route": "decompose", "reason": "multi-hop"}])
-        reg = _FakeModelRegistry(gen)
-        selection = ModelSelectionPolicy()
-
-        router, _, _ = create_default_providers(
-            reg,  # type: ignore[arg-type]
-            selection,
-            decompose_enabled=True,
-        )
-        result = router.route(_make_state(task="对比 A 和 B"))
-
-        assert result["status"] == "decompose"
-        assert result["execution_mode"] == "decompose"
+        hint_provider, decision_provider = create_default_providers(reg, selection)
+        assert isinstance(hint_provider, LLMRetrievalHintProvider)
+        assert isinstance(decision_provider, LLMToolDecisionProvider)
+        # hints use fast, decisions use main via default
 
     def test_per_node_max_tokens_override_model_default(self) -> None:
         gen = _StubGenerator([
-            {"route": "fast_path", "reason": "single lookup"},
+            {"reason": "single lookup"},
             {
                 "action": "synthesize",
                 "thought": "enough evidence",
                 "confidence": 0.9,
             },
-            {"subtasks": [], "edges": []},
         ])
         reg = _FakeModelRegistry(gen)
         selection = ModelSelectionPolicy(
-            route_max_tokens=128,
-            evaluate_max_tokens=256,
-            plan_max_tokens=512,
+            retrieval_hint_max_tokens=128,
+            tool_decision_max_tokens=256,
         )
 
-        router, evaluator, planner = create_default_providers(
+        hint_provider, decision_provider = create_default_providers(
             reg,  # type: ignore[arg-type]
             selection,
         )
-        router.route(_make_state(task="查一个数"))
-        evaluator.decide(
+        hint_provider.hint(_make_state(task="查一个数"))
+        decision_provider.decide(
             _make_state(task="查一个数"),
             definition=AgentDefinition(
                 agent_type="research",
@@ -469,16 +342,5 @@ class TestCreateDefaultProviders:
                 context_budget=ContextBudgetSnapshot(max_context_tokens=1000),
             ),
         )
-        planner.create_plan(
-            _make_state(task="查一个数"),
-            definition=AgentDefinition(
-                agent_type="orchestrator",
-                description="test",
-                system_prompt="test",
-                allowed_tools=[],
-            ),
-        )
-
         assert gen.calls[0][2]["max_tokens"] == 128
         assert gen.calls[1][2]["max_tokens"] == 256
-        assert gen.calls[2][2]["max_tokens"] == 512

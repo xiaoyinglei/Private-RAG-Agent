@@ -10,12 +10,11 @@ from pydantic import BaseModel, ConfigDict, Field
 from rag.agent.core.compiler import AgentGraphCompiler
 from rag.agent.core.context import AgentRunConfig, RuntimeRegistry
 from rag.agent.core.definition import AgentDefinition
+from rag.agent.core.delegation import DelegatedAgentRunner
 from rag.agent.core.human_input import HumanInputRequest, HumanInputResponse
 from rag.agent.core.llm_registry import ModelRegistry
-from rag.agent.graphs.nodes.evaluate import EvaluateDecisionProvider
-from rag.agent.graphs.nodes.execute_subagent import SubAgentRunner
-from rag.agent.graphs.nodes.plan import PlanProvider
-from rag.agent.graphs.nodes.route import RouteProvider
+from rag.agent.graphs.nodes.llm_decide import ToolDecisionProvider
+from rag.agent.graphs.nodes.retrieval_hint import RetrievalHintProvider
 from rag.agent.graphs.nodes.synthesize import SynthesisRunner
 from rag.agent.state import AgentState, ToolCallPlan
 from rag.agent.tools.registry import ToolRegistry
@@ -99,29 +98,25 @@ class AgentService:
         *,
         definition: AgentDefinition,
         tool_registry: ToolRegistry,
-        evaluate_decision_provider: EvaluateDecisionProvider | None = None,
-        plan_provider: PlanProvider | None = None,
-        route_provider: RouteProvider | None = None,
-        subagent_runner: SubAgentRunner | None = None,
+        tool_decision_provider: ToolDecisionProvider | None = None,
+        retrieval_hint_provider: RetrievalHintProvider | None = None,
+        subagent_runner: DelegatedAgentRunner | None = None,
         synthesis_runner: SynthesisRunner | None = None,
         model_registry: ModelRegistry | None = None,
         checkpointer: BaseCheckpointSaver[str] | None = None,
     ) -> None:
         self._definition = definition
         self._base_tool_registry = tool_registry
-        self._evaluate_decision_provider = evaluate_decision_provider
-        self._plan_provider = plan_provider
-        self._route_provider = route_provider
+        self._tool_decision_provider = tool_decision_provider
+        self._retrieval_hint_provider = retrieval_hint_provider
         self._subagent_runner = subagent_runner
         self._synthesis_runner = synthesis_runner
         self._model_registry = model_registry
         self._checkpointer = checkpointer
         self._compiler = AgentGraphCompiler(
             tool_registry=tool_registry,
-            evaluate_decision_provider=evaluate_decision_provider,
-            plan_provider=plan_provider,
-            route_provider=route_provider,
-            subagent_runner=subagent_runner,
+            tool_decision_provider=tool_decision_provider,
+            retrieval_hint_provider=retrieval_hint_provider,
             synthesis_runner=synthesis_runner,
             model_registry=model_registry,
             checkpointer=checkpointer,
@@ -159,10 +154,9 @@ class AgentService:
             "retrieval_signals": RetrievalSignals(),
             "retrieval_signals_debug": None,
             "run_config": run_config,
-            "plan": None,
             "iteration": 0,
             "status": "running",
-            "route_reason": None,
+            "decision_reason": None,
             "stop_reason": None,
             "needs_user_input": None,
             "pending_tool_calls": list(pending_tool_calls or []),
@@ -172,16 +166,28 @@ class AgentService:
             "user_message": None,
             "human_input_request": None,
             "human_input_response": None,
-            "next_subtasks": None,
             "working_summary": None,
             "extracted_facts": [],
             "context_budget": None,
-            "subtask_results": {},
-            "terminal_subtasks": set(),
-            "successful_subtasks": set(),
             "final_answer": None,
             "groundedness_flag": False,
             "insufficient_evidence_flag": False,
+            "goal_spec": None,
+            "goal_requirements": [],
+            "satisfied_requirements": [],
+            "open_gaps": [],
+            "evidence_refs": [],
+            "answer_candidates": [],
+            "computation_results": [],
+            "structured_observations": [],
+            "context_units": [],
+            "context_bindings": [],
+            "locators": [],
+            "asset_refs": [],
+            "conflicts": [],
+            "no_progress_count": 0,
+            "satisfaction_report": None,
+            "controller_next": None,
         }
 
     async def run(self, request: AgentRunRequest) -> AgentRunResult:
@@ -209,10 +215,8 @@ class AgentService:
         runtime_registry = self._runtime_tool_registry(run_config)
         compiler = AgentGraphCompiler(
             tool_registry=runtime_registry,
-            evaluate_decision_provider=self._evaluate_decision_provider,
-            plan_provider=self._plan_provider,
-            route_provider=self._route_provider,
-            subagent_runner=self._subagent_runner,
+            tool_decision_provider=self._tool_decision_provider,
+            retrieval_hint_provider=self._retrieval_hint_provider,
             synthesis_runner=self._synthesis_runner,
             model_registry=self._model_registry,
             checkpointer=self._checkpointer,

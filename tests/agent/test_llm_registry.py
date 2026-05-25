@@ -60,6 +60,35 @@ def test_load_configs_models_maps_openai_compatible_protocol(tmp_path) -> None:
     assert config.models["qwen3_8b_mlx_4bit"].base_url == "http://127.0.0.1:8080/v1"
 
 
+def test_load_configs_models_preserves_api_key_env_for_cloud_models(tmp_path, monkeypatch) -> None:
+    config_path = tmp_path / "models.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "models": {
+                    "mimo_cloud": {
+                        "capability": "chat",
+                        "provider": "mimo",
+                        "protocol": "openai_compatible",
+                        "model": "mimo-v2-flash",
+                        "base_url": "https://api.xiaomimimo.com/v1",
+                        "api_key_env": "MIMO_API_KEY",
+                    }
+                },
+                "defaults": {"primary_model": "mimo_cloud"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("MIMO_API_KEY", "sk-test")
+
+    config = ModelRegistry._load_yaml_file(config_path)
+    provider_config = ModelRegistry(config)._spec_to_provider_config(config.models["mimo_cloud"])
+
+    assert config.models["mimo_cloud"].api_key_env == "MIMO_API_KEY"
+    assert provider_config.api_key == "sk-test"
+
+
 class TestModelRegistryProperties:
     def test_default_model(self) -> None:
         reg = ModelRegistry(_make_config(default_model="main"))
@@ -127,10 +156,10 @@ class TestModelRegistryResolveForNode:
     def test_uses_explicit_node_model(self) -> None:
         config = _make_config(fallback_model="fast")
         reg = ModelRegistry(config)
-        resolved = reg.resolve_for_node(node_model="fast", node_name="route")
+        resolved = reg.resolve_for_node(node_model="fast", node_name="retrieval_hint")
         assert resolved.generator is not None
 
     def test_uses_default_when_node_model_is_none(self) -> None:
         reg = ModelRegistry(_make_config())
-        resolved = reg.resolve_for_node(node_model=None, node_name="route")
+        resolved = reg.resolve_for_node(node_model=None, node_name="retrieval_hint")
         assert resolved.generator is not None

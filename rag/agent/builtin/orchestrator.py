@@ -4,9 +4,9 @@ from rag.agent.core.definition import AgentDefinition, ModelSelectionPolicy, Too
 
 ORCHESTRATOR_AGENT_SYSTEM_PROMPT = """You are the Orchestrator agent.
 
-Break complex tasks into bounded research, comparison, and fact-check subtasks.
-Use TaskDAG planning to delegate work to child agents; do not perform retrieval
-or fact extraction yourself. Let child agents collect and preserve grounded evidence.
+Delegate bounded research and fact-check work through the available agent_* tools.
+Choose those tools in the normal model-driven loop; do not create a parallel
+planning workflow. Let child agents collect and preserve grounded evidence.
 """
 
 # TODO: agent_* tool names (agent_research, agent_factcheck) must match
@@ -14,7 +14,7 @@ or fact extraction yourself. Let child agents collect and preserve grounded evid
 
 ORCHESTRATOR_AGENT = AgentDefinition(
     agent_type="orchestrator",
-    description="Plan and coordinate child agents through a TaskDAG.",
+    description="Coordinate child agents through ordinary tool calls.",
     system_prompt=ORCHESTRATOR_AGENT_SYSTEM_PROMPT,
     allowed_tools=["agent_research", "agent_factcheck"],
     # TODO: migrate estimated_token_budget / max_iterations / max_depth to runtime config

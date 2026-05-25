@@ -907,7 +907,12 @@ class SQLiteMetadataRepo:
                 saved_at=excluded.saved_at,
                 payload=excluded.payload
             """,
-            (artifact.artifact_id, artifact.status.value, datetime.now(UTC).isoformat(), self._dump(artifact)),
+            (
+                artifact.artifact_id,
+                artifact.status.value if artifact.status is not None else None,
+                datetime.now(UTC).isoformat(),
+                self._dump(artifact),
+            ),
         )
         self._commit()
 

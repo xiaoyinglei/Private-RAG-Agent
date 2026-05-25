@@ -40,10 +40,9 @@ def _state(**overrides: object) -> dict:
         "task": "test task",
         "retrieval_signals": None,
         "run_config": _make_config(),
-        "plan": None,
         "iteration": 0,
         "status": "running",
-        "route_reason": None,
+        "decision_reason": None,
         "stop_reason": None,
         "needs_user_input": None,
         "pending_tool_calls": [],
@@ -53,13 +52,9 @@ def _state(**overrides: object) -> dict:
         "user_message": None,
         "human_input_request": None,
         "human_input_response": None,
-        "next_subtasks": None,
         "working_summary": None,
         "extracted_facts": [],
         "context_budget": None,
-        "subtask_results": {},
-        "terminal_subtasks": set(),
-        "successful_subtasks": set(),
         "final_answer": None,
         "groundedness_flag": False,
         "insufficient_evidence_flag": False,
@@ -253,15 +248,15 @@ class TestResumeRouting:
         result = route_after_pause(_state(user_decision="allow_once"))
         assert result == "execute"
 
-    def test_deny_routes_to_evaluate(self) -> None:
+    def test_deny_routes_to_controller(self) -> None:
         from rag.agent.graphs.base import route_after_pause
         result = route_after_pause(_state(user_decision="deny"))
-        assert result == "evaluate"
+        assert result == "controller"
 
-    def test_continue_routes_to_evaluate(self) -> None:
+    def test_continue_routes_to_controller(self) -> None:
         from rag.agent.graphs.base import route_after_pause
         result = route_after_pause(_state(user_decision="continue"))
-        assert result == "evaluate"
+        assert result == "controller"
 
     def test_abort_routes_to_end(self) -> None:
         from rag.agent.graphs.base import route_after_pause

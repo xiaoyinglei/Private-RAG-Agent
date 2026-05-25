@@ -2,10 +2,14 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Iterator
 from datetime import date
-from typing import Any
+from typing import Any, cast
 
 from openpyxl.formula import Tokenizer
-from openpyxl.utils.cell import column_index_from_string, coordinate_to_tuple, range_boundaries
+from openpyxl.utils.cell import (
+    column_index_from_string,
+    coordinate_to_tuple,
+    range_boundaries,
+)
 
 
 class ExcelFormulaEvaluator:
@@ -82,11 +86,11 @@ class ExcelFormulaEvaluator:
         return "".join(pieces)
 
     def _evaluation_env(self, current_sheet: str) -> dict[str, object]:
-        def REF(reference: str) -> object:
+        def _ref(reference: str) -> object:
             return self._resolve_reference(reference, current_sheet)
 
         return {
-            "REF": REF,
+            "REF": _ref,
             "SUM": _sum_values,
             "SUMIF": _sumif,
             "VLOOKUP": _vlookup,
@@ -116,14 +120,14 @@ class ExcelFormulaEvaluator:
         row, column = coordinate_to_tuple(address)
         return self.cell_value(sheet_name, row=row, column=column)
 
-    def _value_rows(self, sheet_name: str) -> "_WorksheetRows":
+    def _value_rows(self, sheet_name: str) -> _WorksheetRows:
         return self._rows_for_sheet(
             workbook=self._value_workbook,
             cache=self._value_rows_by_sheet,
             sheet_name=sheet_name,
         )
 
-    def _formula_rows(self, sheet_name: str) -> "_WorksheetRows":
+    def _formula_rows(self, sheet_name: str) -> _WorksheetRows:
         return self._rows_for_sheet(
             workbook=self._formula_workbook,
             cache=self._formula_rows_by_sheet,
@@ -134,9 +138,9 @@ class ExcelFormulaEvaluator:
     def _rows_for_sheet(
         *,
         workbook: Any,
-        cache: dict[str, "_WorksheetRows"],
+        cache: dict[str, _WorksheetRows],
         sheet_name: str,
-    ) -> "_WorksheetRows":
+    ) -> _WorksheetRows:
         rows = cache.get(sheet_name)
         if rows is None:
             rows = _WorksheetRows(workbook[sheet_name])
@@ -214,7 +218,7 @@ def _range_bounds(address: str, worksheet: Any) -> tuple[int, int, int, int]:
             column_index_from_string(right),
             int(worksheet.max_row or 1),
         )
-    return range_boundaries(address)
+    return cast(tuple[int, int, int, int], range_boundaries(address))
 
 
 def _is_full_column_range(address: str) -> bool:
@@ -275,20 +279,22 @@ def _matches_criteria(value: object, criteria: object) -> bool:
 def _compare(left: object, right: object, operator: str) -> bool:
     left_num = _try_number(left)
     right_num = _try_number(right)
-    left_value: object = left_num if left_num is not None and right_num is not None else _normalize_compare(left)
-    right_value: object = right_num if left_num is not None and right_num is not None else _normalize_compare(right)
+    left_value: float | str = left_num if left_num is not None and right_num is not None else _normalize_compare(left)
+    right_value: float | str = (
+        right_num if left_num is not None and right_num is not None else _normalize_compare(right)
+    )
     if operator in {"=", "=="}:
         return left_value == right_value
     if operator == "<>":
         return left_value != right_value
     if operator == ">":
-        return left_value > right_value  # type: ignore[operator]
+        return bool(left_value > right_value)  # type: ignore[operator]
     if operator == "<":
-        return left_value < right_value  # type: ignore[operator]
+        return bool(left_value < right_value)  # type: ignore[operator]
     if operator == ">=":
-        return left_value >= right_value  # type: ignore[operator]
+        return bool(left_value >= right_value)  # type: ignore[operator]
     if operator == "<=":
-        return left_value <= right_value  # type: ignore[operator]
+        return bool(left_value <= right_value)  # type: ignore[operator]
     return False
 
 

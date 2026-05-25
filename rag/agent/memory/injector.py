@@ -25,6 +25,11 @@ if TYPE_CHECKING:
 class ContextInjector:
     """Assemble bounded LLM context in the authority order defined by the spec."""
 
+    _MAX_LOCATORS_PER_OBSERVATION = 20
+    _MAX_COLUMNS_PER_LOCATOR = 40
+    _MAX_HEAD_ROWS_PER_LOCATOR = 8
+    _MAX_ROW_CELLS = 12
+
     def __init__(
         self,
         *,
@@ -81,7 +86,7 @@ class ContextInjector:
         self._add_section(
             candidates,
             "tool_results",
-            self._format_tool_results(state.get("tool_results", [])),
+            self._format_tool_observations(state),
             required=True,
         )
         self._add_section(
@@ -91,6 +96,10 @@ class ContextInjector:
                 pending_tool_calls=state.get("pending_tool_calls", []),
                 needs_user_input=state.get("needs_user_input"),
                 user_decision=state.get("user_decision"),
+                goal_spec=state.get("goal_spec"),
+                open_gaps=state.get("open_gaps", []),
+                satisfied_requirements=state.get("satisfied_requirements", []),
+                conflicts=state.get("conflicts", []),
             ),
             required=True,
         )
@@ -263,6 +272,124 @@ class ContextInjector:
         lines.extend(self._format_message(message) for message in messages)
         return "\n".join(lines)
 
+    def _format_tool_observations(self, state: AgentState) -> str:
+        structured = state.get("structured_observations", [])
+        if structured:
+            return self._format_structured_observations(structured)
+        return self._format_tool_results(state.get("tool_results", []))
+
+    def _format_structured_observations(self, observations: Sequence[Any]) -> str:
+        lines = ["Structured tool observations:"]
+        for observation in observations:
+            prefix = (
+                f"- tool_call_id={getattr(observation, 'tool_call_id', '<unknown>')} "
+                f"tool_name={getattr(observation, 'tool_name', '<unknown>')} "
+                f"status={getattr(observation, 'status', '<unknown>')}"
+            )
+            lines.append(prefix)
+            answer = getattr(observation, "answer_candidate", None)
+            if answer is not None:
+                text = getattr(answer, "text", "")
+                if isinstance(text, str) and text.strip():
+                    lines.append(f"  answer_candidate: {self._one_line(text)}")
+            evidence_refs = getattr(observation, "evidence_refs", []) or []
+            if evidence_refs:
+                refs = ", ".join(
+                    self._one_line(str(getattr(ref, "key", ref)))
+                    for ref in evidence_refs
+                )
+                lines.append(f"  evidence_refs: {refs}")
+            context_units = getattr(observation, "context_units", []) or []
+            if context_units:
+                lines.append("  context_units:")
+                for unit in context_units[: self._MAX_LOCATORS_PER_OBSERVATION]:
+                    lines.append(
+                        "    - "
+                        f"unit_id={self._one_line(str(getattr(unit, 'unit_id', '<unknown>')))} "
+                        f"unit_type={self._one_line(str(getattr(unit, 'unit_type', '<unknown>')))} "
+                        f"{self._format_locator(getattr(unit, 'locator', {}))}"
+                    )
+                    preview = getattr(unit, "preview", None)
+                    if preview:
+                        lines.append(f"      preview: {self._one_line(str(preview))}")
+            locators = [] if context_units else (getattr(observation, "locators", []) or [])
+            if locators:
+                lines.append("  locators:")
+                for locator in locators[: self._MAX_LOCATORS_PER_OBSERVATION]:
+                    lines.append(f"    - {self._format_locator(locator)}")
+                remaining = len(locators) - self._MAX_LOCATORS_PER_OBSERVATION
+                if remaining > 0:
+                    lines.append(f"    - ... {remaining} more locators")
+            if error := getattr(observation, "error", None):
+                lines.append(f"  error: {self._one_line(str(error))}")
+        return "\n".join(lines)
+
+    def _format_locator(self, locator: Any) -> str:
+        if not isinstance(locator, dict):
+            return self._one_line(str(locator))
+
+        fields = (
+            "asset_id",
+            "doc_id",
+            "source_id",
+            "section_id",
+            "asset_type",
+            "sheet_name",
+            "page_no",
+            "element_ref",
+            "citation_anchor",
+            "evidence_id",
+            "row_count",
+            "column_count",
+        )
+        parts = [
+            f"{field}={self._one_line(str(locator[field]))}"
+            for field in fields
+            if locator.get(field) not in (None, "", [])
+        ]
+
+        capabilities = locator.get("analysis_capabilities")
+        if isinstance(capabilities, list) and capabilities:
+            parts.append("analysis_capabilities=" + self._format_list(capabilities))
+
+        columns = locator.get("columns") or locator.get("column_names")
+        if isinstance(columns, list) and columns:
+            parts.append(
+                "columns="
+                + self._format_list(
+                    columns,
+                    limit=self._MAX_COLUMNS_PER_LOCATOR,
+                )
+            )
+
+        head_rows = locator.get("head_rows")
+        if isinstance(head_rows, list) and head_rows:
+            rows = [
+                self._format_row_preview(row)
+                for row in head_rows[: self._MAX_HEAD_ROWS_PER_LOCATOR]
+            ]
+            parts.append("head_rows=" + self._format_list(rows, limit=len(rows)))
+
+        return " ".join(parts) if parts else self._one_line(str(locator))
+
+    def _format_row_preview(self, row: Any) -> str:
+        if not isinstance(row, dict):
+            return self._one_line(str(row))
+        cells: list[str] = []
+        for index, (key, value) in enumerate(row.items()):
+            if index >= self._MAX_ROW_CELLS:
+                cells.append("...")
+                break
+            cells.append(f"{key}={value}")
+        return "{" + self._one_line(", ".join(cells)) + "}"
+
+    def _format_list(self, values: Sequence[Any], *, limit: int | None = None) -> str:
+        effective_limit = limit if limit is not None else len(values)
+        shown = [self._one_line(str(value)) for value in values[:effective_limit]]
+        remaining = len(values) - effective_limit
+        suffix = f", ...(+{remaining})" if remaining > 0 else ""
+        return "[" + ", ".join(shown) + suffix + "]"
+
     def _format_tool_results(self, tool_results: Sequence[ToolResult]) -> str:
         if not tool_results:
             return ""
@@ -293,8 +420,34 @@ class ContextInjector:
         pending_tool_calls: Sequence[ToolCallPlan],
         needs_user_input: str | None,
         user_decision: str | None,
+        goal_spec: Any | None = None,
+        open_gaps: Sequence[Any] = (),
+        satisfied_requirements: Sequence[str] = (),
+        conflicts: Sequence[Any] = (),
     ) -> str:
         lines: list[str] = []
+        if goal_spec is not None:
+            original_query = getattr(goal_spec, "original_query", None)
+            if isinstance(original_query, str) and original_query.strip():
+                lines.append(f"goal: {self._one_line(original_query)}")
+        if open_gaps:
+            lines.append(
+                "open_gaps: "
+                + ", ".join(
+                    str(getattr(gap, "gap_id", gap))
+                    for gap in open_gaps
+                )
+            )
+        if satisfied_requirements:
+            lines.append("satisfied_requirements: " + ", ".join(satisfied_requirements))
+        if conflicts:
+            lines.append(
+                "conflicts: "
+                + ", ".join(
+                    str(getattr(conflict, "description", conflict))
+                    for conflict in conflicts
+                )
+            )
         if needs_user_input:
             lines.append(f"needs_user_input: {self._one_line(needs_user_input)}")
         if user_decision:

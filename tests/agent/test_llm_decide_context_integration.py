@@ -5,7 +5,7 @@ from langchain_core.messages import HumanMessage
 
 from rag.agent.core.context import AgentRunConfig, RuntimeRegistry
 from rag.agent.core.definition import AgentDefinition
-from rag.agent.graphs.nodes.evaluate import evaluate_node
+from rag.agent.graphs.nodes.llm_decide import llm_decide_node
 from rag.agent.memory.models import InjectedContext, WorkingSummary
 from rag.agent.state import AgentState, ThinkOutput
 from rag.schema.query import AnswerCitation, EvidenceItem
@@ -54,17 +54,15 @@ def _state(run_id: str) -> AgentState:
         "tool_results": [],
         "task": "Explain policy",
         "run_config": config,
-        "plan": None,
         "iteration": 0,
         "status": "running",
-        "route_reason": None,
+        "decision_reason": None,
         "stop_reason": None,
         "needs_user_input": None,
         "pending_tool_calls": [],
         "approved_tool_call_ids": [],
         "denied_tool_call_ids": [],
         "user_decision": None,
-        "next_subtasks": None,
         "working_summary": WorkingSummary(
             summary="Prior task context",
             covered_message_ids=["old"],
@@ -73,9 +71,6 @@ def _state(run_id: str) -> AgentState:
         ),
         "extracted_facts": [],
         "context_budget": None,
-        "subtask_results": {},
-        "terminal_subtasks": set(),
-        "successful_subtasks": set(),
         "final_answer": None,
         "groundedness_flag": False,
         "insufficient_evidence_flag": False,
@@ -100,9 +95,9 @@ class _ContextAwareDecisionProvider:
 
 
 @pytest.mark.anyio
-async def test_evaluate_passes_injected_context_to_decision_provider() -> None:
+async def test_llm_decide_passes_injected_context_to_tool_decision_provider() -> None:
     provider = _ContextAwareDecisionProvider()
-    result = await evaluate_node(
+    result = await llm_decide_node(
         _state("eval-context"),
         definition=_definition(),
         decision_provider=provider,

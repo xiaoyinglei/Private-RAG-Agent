@@ -5,11 +5,10 @@ from collections.abc import Mapping
 from langgraph.checkpoint.base import BaseCheckpointSaver
 
 from rag.agent.core.definition import AgentDefinition, ModelSelectionPolicy, ToolPolicy
+from rag.agent.core.delegation import DelegatedAgentRunner
 from rag.agent.core.llm_registry import ModelRegistry
-from rag.agent.graphs.nodes.evaluate import EvaluateDecisionProvider
-from rag.agent.graphs.nodes.execute_subagent import SubAgentRunner
-from rag.agent.graphs.nodes.plan import PlanProvider
-from rag.agent.graphs.nodes.route import RouteProvider
+from rag.agent.graphs.nodes.llm_decide import ToolDecisionProvider
+from rag.agent.graphs.nodes.retrieval_hint import RetrievalHintProvider
 from rag.agent.service import AgentService
 from rag.agent.tools.builtin_registry import create_builtin_tool_registry
 from rag.agent.tools.registry import ToolRunner
@@ -31,11 +30,16 @@ state insufficient evidence instead of filling gaps.
 
 For questions about files or structured artifacts, retrieval is only the locator
 step: use vector_search/keyword_search/grounding to find the relevant indexed
-asset id, then use asset_list, asset_inspect, and asset_analyze to read,
-filter, sort, aggregate, or validate source data through the asset's advertised
-analysis capabilities. Preserve the asset id and citation anchor in the final
-answer. Do not answer calculations from summary prose alone when a source asset
-with executable analysis capabilities is available.
+asset id, then use asset_list, asset_inspect, asset_read_slice, and
+asset_analyze to read, filter, sort, aggregate, or validate source data through
+the asset's advertised analysis capabilities. Preserve the asset id and
+citation anchor in the final answer. Do not answer calculations from summary
+prose alone when a source asset with executable analysis capabilities is
+available.
+
+Use asset_read_slice for bounded local inspection when you need rows, columns,
+or nearby context that is larger than asset_inspect preview but smaller than
+the full asset. Do not load full tables into long-lived state.
 
 If the task does not specify which asset, sheet, product, scenario, or other
 scope should be used, inspect/list the relevant candidate assets before
@@ -57,6 +61,7 @@ RESEARCH_AGENT = AgentDefinition(
         "rerank",
         "asset_list",
         "asset_inspect",
+        "asset_read_slice",
         "asset_analyze",
         "llm_summarize",
         "rag_search_answer",
@@ -65,9 +70,8 @@ RESEARCH_AGENT = AgentDefinition(
     estimated_token_budget=10000,
     model_selection=ModelSelectionPolicy(
         thinking=True,
-        route_max_tokens=256,
-        evaluate_max_tokens=768,
-        plan_max_tokens=1024,
+        retrieval_hint_max_tokens=256,
+        tool_decision_max_tokens=768,
     ),
     max_iterations=10,
     max_depth=2,
@@ -78,10 +82,9 @@ RESEARCH_AGENT = AgentDefinition(
 def create_research_agent_service(
     *,
     runners: Mapping[str, ToolRunner] | None = None,
-    evaluate_decision_provider: EvaluateDecisionProvider | None = None,
-    plan_provider: PlanProvider | None = None,
-    route_provider: RouteProvider | None = None,
-    subagent_runner: SubAgentRunner | None = None,
+    tool_decision_provider: ToolDecisionProvider | None = None,
+    retrieval_hint_provider: RetrievalHintProvider | None = None,
+    subagent_runner: DelegatedAgentRunner | None = None,
     model_registry: ModelRegistry | None | object = _SENTINEL,
     checkpointer: BaseCheckpointSaver[str] | None = None,
 ) -> AgentService:
@@ -97,9 +100,8 @@ def create_research_agent_service(
     return AgentService(
         definition=RESEARCH_AGENT,
         tool_registry=create_builtin_tool_registry(runners=runners),
-        evaluate_decision_provider=evaluate_decision_provider,
-        plan_provider=plan_provider,
-        route_provider=route_provider,
+        tool_decision_provider=tool_decision_provider,
+        retrieval_hint_provider=retrieval_hint_provider,
         subagent_runner=subagent_runner,
         model_registry=registry,
         checkpointer=checkpointer,

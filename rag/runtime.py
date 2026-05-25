@@ -357,14 +357,17 @@ class RAGRuntime:
         gen_summary = getattr(self.generation_config, "summary", None)
         if gen_summary is None:
             return summary_config
-        updates: dict[str, object] = {}
         max_tokens = getattr(gen_summary, "max_tokens", None)
-        if max_tokens is not None:
-            updates["max_output_tokens"] = max_tokens
         temperature = getattr(gen_summary, "temperature", None)
-        if temperature is not None:
-            updates["temperature"] = temperature
-        return replace(summary_config, **updates) if updates else summary_config
+        if max_tokens is None and temperature is None:
+            return summary_config
+        return replace(
+            summary_config,
+            max_output_tokens=(
+                summary_config.max_output_tokens if max_tokens is None else int(max_tokens)
+            ),
+            temperature=summary_config.temperature if temperature is None else float(temperature),
+        )
 
     def diagnostics_payload(self) -> dict[str, object]:
         return {

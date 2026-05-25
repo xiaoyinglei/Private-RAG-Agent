@@ -77,6 +77,7 @@ module = [
   "datasets",
   "ocrmac",
   "openpyxl",
+  "openpyxl.*",
   "pandas",
   "pymilvus",
   "tqdm",

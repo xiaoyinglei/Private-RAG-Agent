@@ -16,13 +16,13 @@ from rag.agent.core.registry import AgentRegistry
 from rag.agent.core.subagent_runner import BuiltinSubAgentRunner, BuiltinSynthesisRunner
 from rag.agent.service import AgentRunRequest, AgentRunResult, AgentService
 from rag.agent.tools.builtin_registry import create_builtin_tool_registry
-from rag.agent.tools.fast_path_tools import RAGSearchAnswerRunner
 from rag.agent.tools.llm_tools import (
     LLMCompareInput,
     LLMGenerateInput,
     LLMSummarizeInput,
     LLMTextOutput,
 )
+from rag.agent.tools.rag_answer_tools import RAGSearchAnswerRunner
 from rag.agent.tools.registry import ToolRunner
 from rag.storage.runtime_config import DEFAULT_VECTOR_BACKEND, runtime_storage_config
 from rag.utils.text import load_env_file
@@ -38,7 +38,11 @@ def _build_llm_tool_runners(primary_chat: Any) -> dict[str, ToolRunner]:
 
     def _llm_generate(payload: LLMGenerateInput) -> LLMTextOutput:
         text = primary_chat.chat(payload.prompt)
-        return LLMTextOutput(text=text)
+        return LLMTextOutput(
+            text=text,
+            evidence_ids=payload.evidence_ids,
+            citation_ids=payload.citation_ids,
+        )
 
     def _llm_summarize(payload: LLMSummarizeInput) -> LLMTextOutput:
         prompt = payload.task
@@ -81,6 +85,7 @@ def _build_agent_service(
     *,
     checkpoint_db: Path | None = None,
     agent_type: str = "research",
+    model_alias: str | None = None,
 ) -> AgentService:
     """从 RAGRuntime 构造 AgentService，注册真实 RAG tool runners。
 
@@ -105,8 +110,8 @@ def _build_agent_service(
     )
     for name in ("vector_search", "keyword_search", "grounding", "rerank", "graph_expand"):
         runners[name] = cast(ToolRunner, rag_runner.retrieve_evidence)
-    fast_path_runner = RAGSearchAnswerRunner(runtime=runtime)
-    runners["rag_search_answer"] = cast(ToolRunner, fast_path_runner.answer)
+    rag_answer_runner = RAGSearchAnswerRunner(runtime=runtime)
+    runners["rag_search_answer"] = cast(ToolRunner, rag_answer_runner.answer)
 
     from rag.agent.tools.asset_tools import AssetToolRunner
 
@@ -120,13 +125,14 @@ def _build_agent_service(
         )
         runners["asset_list"] = cast(ToolRunner, asset_runner.list_assets)
         runners["asset_inspect"] = cast(ToolRunner, asset_runner.inspect_asset)
+        runners["asset_read_slice"] = cast(ToolRunner, asset_runner.read_slice)
         runners["asset_analyze"] = cast(ToolRunner, asset_runner.analyze_asset)
 
     runners.update(_build_llm_tool_runners(primary_chat))
 
     tool_registry = create_builtin_tool_registry(runners=runners)
     try:
-        model_registry = ModelRegistry.from_env()
+        model_registry = ModelRegistry.from_env(default_model=model_alias)
     except Exception:
         model_registry = None
 
@@ -291,9 +297,18 @@ def agent_chat(
             help="Reranker 模型别名，对应 configs/models.yaml 中 capability=reranker 的条目",
         ),
     ] = None,
-    vector_backend: Annotated[str, typer.Option("--vector-backend", help="Vector backend: milvus or sqlite.")] = DEFAULT_VECTOR_BACKEND,
-    vector_dsn: Annotated[str | None, typer.Option("--vector-dsn", help="Vector backend DSN.")] = None,
-    vector_namespace: Annotated[str | None, typer.Option("--vector-namespace", help="Vector namespace/database.")] = None,
+    vector_backend: Annotated[
+        str,
+        typer.Option("--vector-backend", help="Vector backend: milvus or sqlite."),
+    ] = DEFAULT_VECTOR_BACKEND,
+    vector_dsn: Annotated[
+        str | None,
+        typer.Option("--vector-dsn", help="Vector backend DSN."),
+    ] = None,
+    vector_namespace: Annotated[
+        str | None,
+        typer.Option("--vector-namespace", help="Vector namespace/database."),
+    ] = None,
     vector_collection_prefix: Annotated[
         str | None,
         typer.Option("--vector-collection-prefix", help="Milvus collection prefix used at ingest time."),
@@ -336,7 +351,7 @@ def agent_chat(
     )
 
     with runtime:
-        service = _build_agent_service(runtime, agent_type=agent)
+        service = _build_agent_service(runtime, agent_type=agent, model_alias=model)
         run_id = f"chat_{id(service):x}"
         verbose = False
 
@@ -424,9 +439,18 @@ def agent_run(
             help="Reranker 模型别名，对应 configs/models.yaml 中 capability=reranker 的条目",
         ),
     ] = None,
-    vector_backend: Annotated[str, typer.Option("--vector-backend", help="Vector backend: milvus or sqlite.")] = DEFAULT_VECTOR_BACKEND,
-    vector_dsn: Annotated[str | None, typer.Option("--vector-dsn", help="Vector backend DSN.")] = None,
-    vector_namespace: Annotated[str | None, typer.Option("--vector-namespace", help="Vector namespace/database.")] = None,
+    vector_backend: Annotated[
+        str,
+        typer.Option("--vector-backend", help="Vector backend: milvus or sqlite."),
+    ] = DEFAULT_VECTOR_BACKEND,
+    vector_dsn: Annotated[
+        str | None,
+        typer.Option("--vector-dsn", help="Vector backend DSN."),
+    ] = None,
+    vector_namespace: Annotated[
+        str | None,
+        typer.Option("--vector-namespace", help="Vector namespace/database."),
+    ] = None,
     vector_collection_prefix: Annotated[
         str | None,
         typer.Option("--vector-collection-prefix", help="Milvus collection prefix used at ingest time."),
@@ -466,7 +490,12 @@ def agent_run(
     )
 
     with runtime:
-        service = _build_agent_service(runtime, checkpoint_db=checkpoint_db, agent_type=agent)
+        service = _build_agent_service(
+            runtime,
+            checkpoint_db=checkpoint_db,
+            agent_type=agent,
+            model_alias=model,
+        )
         effective_run_id = run_id or f"run_{id(service):x}"
         result = asyncio.run(
             service.run(
@@ -545,9 +574,18 @@ def agent_resume(
             help="Reranker 模型别名，对应 configs/models.yaml 中 capability=reranker 的条目",
         ),
     ] = None,
-    vector_backend: Annotated[str, typer.Option("--vector-backend", help="Vector backend: milvus or sqlite.")] = DEFAULT_VECTOR_BACKEND,
-    vector_dsn: Annotated[str | None, typer.Option("--vector-dsn", help="Vector backend DSN.")] = None,
-    vector_namespace: Annotated[str | None, typer.Option("--vector-namespace", help="Vector namespace/database.")] = None,
+    vector_backend: Annotated[
+        str,
+        typer.Option("--vector-backend", help="Vector backend: milvus or sqlite."),
+    ] = DEFAULT_VECTOR_BACKEND,
+    vector_dsn: Annotated[
+        str | None,
+        typer.Option("--vector-dsn", help="Vector backend DSN."),
+    ] = None,
+    vector_namespace: Annotated[
+        str | None,
+        typer.Option("--vector-namespace", help="Vector namespace/database."),
+    ] = None,
     vector_collection_prefix: Annotated[
         str | None,
         typer.Option("--vector-collection-prefix", help="Milvus collection prefix used at ingest time."),
@@ -587,7 +625,12 @@ def agent_resume(
     )
 
     with runtime:
-        service = _build_agent_service(runtime, checkpoint_db=checkpoint_db, agent_type=agent)
+        service = _build_agent_service(
+            runtime,
+            checkpoint_db=checkpoint_db,
+            agent_type=agent,
+            model_alias=model,
+        )
         request = asyncio.run(service.apending_human_input_request(run_id=run_id))
         response = _build_resume_response(request, decision)
         result = asyncio.run(service.resume(run_id=run_id, response=response))
