@@ -27,6 +27,7 @@ class _AssetMetadataRepo(Protocol):
 
 MAX_RESULT_ROWS = 100
 MAX_SQL_TIMEOUT_SECONDS = 5.0
+MAX_SLICE_ROWS = 50
 _TRAILING_SPARSE_TRIM_MIN_COLUMNS = 4
 _TRAILING_SPARSE_ROW_MIN_FILL_RATIO = 0.6
 
@@ -74,6 +75,17 @@ class TableInspectionResult:
     column_count: int
     head_rows: list[dict[str, str]]
     tail_rows: list[dict[str, str]]
+
+
+@dataclass(frozen=True, slots=True)
+class TableSliceResult:
+    asset_id: int
+    columns: list[str]
+    rows: list[dict[str, str]]
+    row_start: int
+    row_end_exclusive: int
+    raw_row_count: int
+    truncated: bool
 
 
 class TableExecutor:
@@ -148,6 +160,64 @@ class TableExecutor:
             )
         except Exception:
             return None
+        finally:
+            if is_temp:
+                try:
+                    Path(local_path).unlink(missing_ok=True)
+                except OSError:
+                    pass
+
+    def read_slice(
+        self,
+        *,
+        asset_id: int,
+        row_start: int = 0,
+        row_count: int = 20,
+        columns: list[str] | None = None,
+        column_start: int | None = None,
+        column_count: int | None = None,
+    ) -> TableSliceResult | None:
+        asset = self._metadata_repo.get_asset(asset_id)
+        if asset is None:
+            return None
+
+        storage_key = str(getattr(asset, "storage_key", "") or "").strip()
+        sheet_name = str(getattr(asset, "sheet_name", "") or "").strip() or None
+        if not storage_key:
+            return None
+
+        local_path, is_temp = self._download_to_temp(storage_key)
+        if local_path is None:
+            return None
+
+        try:
+            df = self._load_dataframe_from_file(
+                local_path,
+                sheet_name=sheet_name,
+                coerce_numeric=False,
+            )
+            if df is None:
+                return None
+            bounded_row_count = min(max(1, row_count), MAX_SLICE_ROWS)
+            selected = self._select_columns(
+                df,
+                columns=columns,
+                column_start=column_start,
+                column_count=column_count,
+            )
+            raw_row_count = len(selected)
+            bounded_start = min(max(0, row_start), raw_row_count)
+            bounded_end = min(bounded_start + bounded_row_count, raw_row_count)
+            sliced = selected.iloc[bounded_start:bounded_end]
+            return TableSliceResult(
+                asset_id=asset_id,
+                columns=[str(column) for column in selected.columns],
+                rows=self._rows_to_records(sliced),
+                row_start=bounded_start,
+                row_end_exclusive=bounded_end,
+                raw_row_count=raw_row_count,
+                truncated=bounded_row_count < max(1, row_count),
+            )
         finally:
             if is_temp:
                 try:
@@ -294,6 +364,27 @@ class TableExecutor:
         return converted
 
     @staticmethod
+    def _select_columns(
+        df: pd.DataFrame,
+        *,
+        columns: list[str] | None,
+        column_start: int | None,
+        column_count: int | None,
+    ) -> pd.DataFrame:
+        if columns:
+            missing = [column for column in columns if column not in df.columns]
+            if missing:
+                raise ValueError(f"columns not found in table asset: {', '.join(missing)}")
+            return df.loc[:, columns]
+
+        if column_start is None:
+            return df
+
+        start = min(max(0, column_start), len(df.columns))
+        end = len(df.columns) if column_count is None else min(start + column_count, len(df.columns))
+        return df.iloc[:, start:end]
+
+    @staticmethod
     def _trim_trailing_sparse_rows(df: pd.DataFrame) -> pd.DataFrame:
         column_count = len(df.columns)
         if df.empty or column_count < _TRAILING_SPARSE_TRIM_MIN_COLUMNS:
@@ -348,6 +439,8 @@ __all__ = [
     "ComputeResult",
     "TableExecutor",
     "TableInspectionResult",
+    "TableSliceResult",
     "MAX_RESULT_ROWS",
+    "MAX_SLICE_ROWS",
     "MAX_SQL_TIMEOUT_SECONDS",
 ]

@@ -4,8 +4,8 @@ from collections.abc import Mapping
 
 from rag.agent.core.agent_as_tool import build_agent_tool_spec
 from rag.agent.tools.asset_tools import ALL_ASSET_TOOLS
-from rag.agent.tools.fast_path_tools import ALL_FAST_PATH_TOOLS
 from rag.agent.tools.llm_tools import ALL_LLM_TOOLS
+from rag.agent.tools.rag_answer_tools import ALL_RAG_ANSWER_TOOLS
 from rag.agent.tools.rag_tools import ALL_RAG_TOOLS
 from rag.agent.tools.registry import ToolRegistry, ToolRunner
 
@@ -25,7 +25,7 @@ def create_builtin_tool_registry(
     registry = ToolRegistry()
 
     # 1. 标准工具（RAG + Indexed assets + LLM + Fast Path）
-    all_tools = [*ALL_RAG_TOOLS, *ALL_ASSET_TOOLS, *ALL_LLM_TOOLS, *ALL_FAST_PATH_TOOLS]
+    all_tools = [*ALL_RAG_TOOLS, *ALL_ASSET_TOOLS, *ALL_LLM_TOOLS, *ALL_RAG_ANSWER_TOOLS]
 
     # 2. Agent-as-tool 工具（静态注册 ToolSpec，不带 runner）
     agent_defs = [RESEARCH_AGENT, COMPARE_AGENT, FACTCHECK_AGENT, SYNTHESIZE_AGENT]

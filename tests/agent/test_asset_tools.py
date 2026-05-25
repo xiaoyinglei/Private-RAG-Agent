@@ -15,6 +15,8 @@ from rag.agent.tools.asset_tools import (
     AssetAnalyzeOutput,
     AssetInspectInput,
     AssetListInput,
+    AssetReadSliceInput,
+    AssetReadSliceOutput,
     AssetToolRunner,
 )
 from rag.agent.tools.builtin_registry import create_builtin_tool_registry
@@ -101,9 +103,9 @@ def test_builtin_registry_exposes_generic_asset_tools_not_file_type_specific_too
     registry = create_builtin_tool_registry()
     tool_names = {spec.name for spec in registry.list_all()}
 
-    assert {"asset_list", "asset_inspect", "asset_analyze"} <= tool_names
+    assert {"asset_list", "asset_inspect", "asset_read_slice", "asset_analyze"} <= tool_names
     assert {"table_list", "table_inspect", "table_query_sql"}.isdisjoint(tool_names)
-    assert {"asset_list", "asset_inspect", "asset_analyze"} <= set(RESEARCH_AGENT.allowed_tools)
+    assert {"asset_list", "asset_inspect", "asset_read_slice", "asset_analyze"} <= set(RESEARCH_AGENT.allowed_tools)
 
 
 def test_asset_runner_lists_bounded_asset_metadata_and_capabilities() -> None:
@@ -119,7 +121,7 @@ def test_asset_runner_lists_bounded_asset_metadata_and_capabilities() -> None:
     assert asset.section_id == 5
     assert asset.page_no == 4
     assert asset.columns == ["区域公司", "日_日提货"]
-    assert asset.analysis_capabilities == ["dataframe_preview", "dataframe_sql"]
+    assert asset.analysis_capabilities == ["dataframe_preview", "dataframe_slice", "dataframe_sql"]
     assert output.truncated is True
 
 
@@ -140,7 +142,8 @@ def test_asset_runner_inspects_schema_head_tail_without_full_dump() -> None:
 
     assert output.asset_id == 14
     assert output.asset_type == "table"
-    assert output.analysis_capabilities == ["dataframe_preview", "dataframe_sql"]
+    assert output.sheet_name == "日报"
+    assert output.analysis_capabilities == ["dataframe_preview", "dataframe_slice", "dataframe_sql"]
     assert output.columns == ["区域公司", "日_日提货"]
     assert output.row_count == 4
     assert output.head_rows == [
@@ -176,7 +179,70 @@ def test_asset_runner_executes_capability_based_read_only_analysis() -> None:
     assert output.columns == ["total"]
     assert output.rows == [["25.532808"]]
     assert output.raw_row_count == 1
+    assert output.observation_only is False
     assert "TABLE_COMPUTE_RESULT:asset_id=14" in output.markdown
+
+
+def test_asset_runner_marks_probe_analysis_as_observation_only() -> None:
+    parquet = _create_parquet(
+        {
+            "区域公司": ["北方", "东北"],
+            "日_日提货": ["19.22484", "6.307968"],
+        }
+    )
+    runner = AssetToolRunner(
+        metadata_repo=_FakeMetadataRepo([_asset(14)]),
+        object_store=_FakeObjectStore({"daily.parquet": parquet}),
+    )
+
+    output = runner.analyze_asset(
+        AssetAnalyzeInput(
+            asset_id=14,
+            operation="dataframe_sql",
+            query='SELECT DISTINCT "区域公司" AS "__goal_probe__" FROM sheet',
+        )
+    )
+
+    assert output.observation_only is True
+
+
+def test_asset_runner_reads_bounded_table_slice_with_locator() -> None:
+    parquet = _create_parquet(
+        {
+            "区域公司": ["总计（不含一体化）", "北方", "东北", "华东"],
+            "日_日提货": ["131.074462", "19.22484", "6.307968", "29.137104"],
+            "月_累计": ["1000", "200", "80", "300"],
+        }
+    )
+    repo = _FakeMetadataRepo([_asset(14)])
+    runner = AssetToolRunner(
+        metadata_repo=repo,
+        object_store=_FakeObjectStore({"daily.parquet": parquet}),
+    )
+
+    output = runner.read_slice(
+        AssetReadSliceInput(
+            asset_id=14,
+            row_start=1,
+            row_count=2,
+            columns=["区域公司", "日_日提货"],
+        )
+    )
+
+    assert output.asset_id == 14
+    assert output.locator.asset_id == 14
+    assert output.locator.doc_id == 7
+    assert output.locator.sheet_name == "日报"
+    assert output.locator.page_no == 4
+    assert output.locator.row_start == 1
+    assert output.locator.row_end_exclusive == 3
+    assert output.locator.column_names == ["区域公司", "日_日提货"]
+    assert output.columns == ["区域公司", "日_日提货"]
+    assert output.rows == [
+        {"区域公司": "北方", "日_日提货": "19.22484"},
+        {"区域公司": "东北", "日_日提货": "6.307968"},
+    ]
+    assert output.truncated is False
 
 
 def test_rag_search_output_preserves_asset_ids_for_followup_asset_tools() -> None:
@@ -239,10 +305,9 @@ async def test_execute_node_runs_generic_asset_analysis_tool() -> None:
         "retrieval_signals": RetrievalSignals(),
         "retrieval_signals_debug": None,
         "run_config": run_config,
-        "plan": None,
         "iteration": 0,
         "status": "running",
-        "route_reason": None,
+        "decision_reason": None,
         "stop_reason": None,
         "needs_user_input": None,
         "pending_tool_calls": [
@@ -264,13 +329,9 @@ async def test_execute_node_runs_generic_asset_analysis_tool() -> None:
         "user_message": None,
         "human_input_request": None,
         "human_input_response": None,
-        "next_subtasks": None,
         "working_summary": None,
         "extracted_facts": [],
         "context_budget": None,
-        "subtask_results": {},
-        "terminal_subtasks": set(),
-        "successful_subtasks": set(),
         "final_answer": None,
         "groundedness_flag": False,
         "insufficient_evidence_flag": False,
@@ -289,4 +350,81 @@ async def test_execute_node_runs_generic_asset_analysis_tool() -> None:
     output = tool_result.output
     assert isinstance(output, AssetAnalyzeOutput)
     assert output.rows == [["25.532808"]]
+    RuntimeRegistry.remove(run_config.run_id)
+
+
+@pytest.mark.anyio
+async def test_execute_node_runs_generic_asset_read_slice_tool() -> None:
+    parquet = _create_parquet(
+        {
+            "区域公司": ["总计（不含一体化）", "北方", "东北"],
+            "日_日提货": ["131.074462", "19.22484", "6.307968"],
+        }
+    )
+    repo = _FakeMetadataRepo([_asset(14)])
+    runner = AssetToolRunner(
+        metadata_repo=repo,
+        object_store=_FakeObjectStore({"daily.parquet": parquet}),
+    )
+    run_config = AgentRunConfig(
+        run_id="asset-read-slice-execute",
+        thread_id="asset-read-slice-execute",
+        budget_total=10000,
+        max_depth=2,
+        access_policy=AccessPolicy.default(),
+    )
+    RuntimeRegistry.remove(run_config.run_id)
+    RuntimeRegistry.get_or_create(run_config)
+    state: AgentState = {
+        "messages": [],
+        "evidence": [],
+        "citations": [],
+        "tool_results": [],
+        "task": "读取日报局部内容",
+        "retrieval_signals": RetrievalSignals(),
+        "retrieval_signals_debug": None,
+        "run_config": run_config,
+        "iteration": 0,
+        "status": "running",
+        "decision_reason": None,
+        "stop_reason": None,
+        "needs_user_input": None,
+        "pending_tool_calls": [
+            ToolCallPlan.create(
+                "asset_read_slice",
+                {
+                    "asset_id": 14,
+                    "row_start": 1,
+                    "row_count": 1,
+                    "columns": ["区域公司"],
+                },
+            )
+        ],
+        "approved_tool_call_ids": [],
+        "denied_tool_call_ids": [],
+        "user_decision": None,
+        "user_message": None,
+        "human_input_request": None,
+        "human_input_response": None,
+        "working_summary": None,
+        "extracted_facts": [],
+        "context_budget": None,
+        "final_answer": None,
+        "groundedness_flag": False,
+        "insufficient_evidence_flag": False,
+    }
+    registry = create_builtin_tool_registry(runners={"asset_read_slice": runner.read_slice})
+
+    update = await execute_node(
+        state,
+        tool_registry=registry,
+        allowed_tools=frozenset({"asset_read_slice"}),
+    )
+
+    [tool_result] = update["tool_results"]
+    assert tool_result.status == "ok"
+    assert tool_result.tool_name == "asset_read_slice"
+    output = tool_result.output
+    assert isinstance(output, AssetReadSliceOutput)
+    assert output.rows == [{"区域公司": "北方"}]
     RuntimeRegistry.remove(run_config.run_id)

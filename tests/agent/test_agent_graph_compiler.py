@@ -5,9 +5,8 @@ from pydantic import BaseModel
 
 from rag.agent.core.compiler import AgentGraphCompiler
 from rag.agent.core.definition import AgentDefinition
-from rag.agent.core.task import SubTaskNode
-from rag.agent.graphs.nodes.execute_subagent import SubAgentRunResult
-from rag.agent.state import AgentState
+from rag.agent.service import AgentRunRequest, AgentService
+from rag.agent.state import AgentState, ThinkOutput
 from rag.agent.tools.registry import ToolRegistry
 from rag.agent.tools.spec import ToolError, ToolPermissions, ToolSpec
 
@@ -60,71 +59,44 @@ def test_compiler_rejects_unregistered_agent_tools() -> None:
         compiler.compile(_definition(allowed_tools=["vector_search", "missing_tool"]))
 
 
-class _RouteProvider:
-    def route(self, state: AgentState) -> dict[str, object]:
+class _HintProvider:
+    def hint(self, state: AgentState) -> dict[str, object]:
         del state
-        return {"status": "direct", "execution_mode": "direct", "route_reason": "test"}
+        return {"decision_reason": "test"}
 
 
-class _EvaluateProvider:
-    pass
-
-
-class _PlanProvider:
-    pass
-
-
-class _SubAgentRunner:
-    async def run_subtask(
+class _ToolDecisionProvider:
+    def decide(
         self,
+        state: AgentState,
         *,
-        subtask: SubTaskNode,
-        parent_state: AgentState,
-    ) -> SubAgentRunResult:
-        del subtask, parent_state
-        raise RuntimeError("not used")
+        definition: AgentDefinition,
+        budget_remaining: int,
+        context: object,
+    ) -> ThinkOutput:
+        del state, definition, budget_remaining, context
+        return ThinkOutput(action="synthesize", thought="done")
 
 
-def test_compiler_enables_decompose_when_subagent_runner_is_bound(monkeypatch: pytest.MonkeyPatch) -> None:
-    seen: list[bool] = []
+class _RaisingHintProvider:
+    def hint(self, state: AgentState) -> dict[str, object]:
+        del state
+        raise AssertionError("default LLM retrieval hint provider should not be called")
+
+
+def test_compiler_constructs_only_model_driven_runtime_providers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = 0
 
     def fake_create_default_providers(
         registry: object,
         selection: object,
-        *,
-        decompose_enabled: bool = False,
-    ) -> tuple[_RouteProvider, _EvaluateProvider, _PlanProvider]:
+    ) -> tuple[_HintProvider, _ToolDecisionProvider]:
+        nonlocal calls
         del registry, selection
-        seen.append(decompose_enabled)
-        return _RouteProvider(), _EvaluateProvider(), _PlanProvider()
-
-    monkeypatch.setattr(
-        "rag.agent.core.compiler.create_default_providers",
-        fake_create_default_providers,
-    )
-    compiler = AgentGraphCompiler(
-        tool_registry=_registry(),
-        model_registry=object(),  # type: ignore[arg-type]
-        subagent_runner=_SubAgentRunner(),
-    )
-
-    compiler.compile(_definition(allowed_tools=["vector_search"]))
-
-    assert seen == [True]
-
-
-def test_compiler_keeps_decompose_disabled_without_subagent_runner(monkeypatch: pytest.MonkeyPatch) -> None:
-    seen: list[bool] = []
-
-    def fake_create_default_providers(
-        registry: object,
-        selection: object,
-        *,
-        decompose_enabled: bool = False,
-    ) -> tuple[_RouteProvider, _EvaluateProvider, _PlanProvider]:
-        del registry, selection
-        seen.append(decompose_enabled)
-        return _RouteProvider(), _EvaluateProvider(), _PlanProvider()
+        calls += 1
+        return _HintProvider(), _ToolDecisionProvider()
 
     monkeypatch.setattr(
         "rag.agent.core.compiler.create_default_providers",
@@ -137,4 +109,37 @@ def test_compiler_keeps_decompose_disabled_without_subagent_runner(monkeypatch: 
 
     compiler.compile(_definition(allowed_tools=["vector_search"]))
 
-    assert seen == [False]
+    assert calls == 1
+
+
+@pytest.mark.anyio
+async def test_compiler_does_not_attach_default_llm_retrieval_hint_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_create_default_providers(
+        registry: object,
+        selection: object,
+    ) -> tuple[_RaisingHintProvider, _ToolDecisionProvider]:
+        del registry, selection
+        return _RaisingHintProvider(), _ToolDecisionProvider()
+
+    monkeypatch.setattr(
+        "rag.agent.core.compiler.create_default_providers",
+        fake_create_default_providers,
+    )
+    service = AgentService(
+        definition=_definition(allowed_tools=["vector_search"]),
+        tool_registry=_registry(),
+        model_registry=object(),  # type: ignore[arg-type]
+    )
+
+    result = await service.run(
+        AgentRunRequest(
+            task="Explain policy",
+            run_id="default-route-disabled",
+            thread_id="default-route-disabled",
+        )
+    )
+
+    assert result.status == "done"
+    assert result.stop_reason == "synthesize"

@@ -19,9 +19,9 @@ from rag.agent.core.agent_as_tool import (
 from rag.agent.core.agent_service_factory import AgentServiceFactory
 from rag.agent.core.context import AgentRunConfig, RuntimeRegistry
 from rag.agent.core.definition import AgentDefinition
+from rag.agent.core.delegation import AgentDelegationRequest
 from rag.agent.core.registry import AgentRegistry
 from rag.agent.core.subagent_runner import BuiltinSubAgentRunner
-from rag.agent.core.task import SubTaskNode
 from rag.agent.graphs.nodes.execute import execute_node
 from rag.agent.service import AgentRunRequest, AgentRunResult
 from rag.agent.state import AgentState, ThinkOutput, ToolCallPlan
@@ -99,23 +99,18 @@ def _parent_state(run_id: str = "parent-run", *, max_depth: int = 2) -> AgentSta
         "tool_results": [],
         "task": "Parent task",
         "run_config": config,
-        "plan": None,
         "iteration": 0,
         "status": "running",
-        "route_reason": None,
+        "decision_reason": None,
         "stop_reason": None,
         "needs_user_input": None,
         "pending_tool_calls": [],
         "approved_tool_call_ids": [],
         "denied_tool_call_ids": [],
         "user_decision": None,
-        "next_subtasks": None,
         "working_summary": None,
         "extracted_facts": [],
         "context_budget": None,
-        "subtask_results": {},
-        "terminal_subtasks": set(),
-        "successful_subtasks": set(),
         "final_answer": None,
         "groundedness_flag": False,
         "insufficient_evidence_flag": False,
@@ -146,15 +141,14 @@ async def test_agent_as_tool_runner_executes_registered_child_with_derived_confi
             }
         ),
 
-        evaluate_decision_provider=decision_provider,
+        tool_decision_provider=decision_provider,
     )
 
-    result = await runner.run_subtask(
-        subtask=SubTaskNode(
-            subtask_id="s1",
+    result = await runner.run_delegated_task(
+        request=AgentDelegationRequest(
+            delegation_id="s1",
             agent_type="child_research_runner",
             prompt="Child task",
-            priority=1,
             estimated_tokens=2400,
         ),
         parent_state=_parent_state(),
@@ -189,12 +183,11 @@ async def test_agent_as_tool_runner_rejects_exhausted_parent_depth() -> None:
     )
 
     with pytest.raises(RuntimeError, match="Agent nesting depth exceeded"):
-        await runner.run_subtask(
-            subtask=SubTaskNode(
-                subtask_id="s1",
+        await runner.run_delegated_task(
+            request=AgentDelegationRequest(
+                delegation_id="s1",
                 agent_type="child_depth_runner",
                 prompt="Child task",
-                priority=1,
             ),
             parent_state=_parent_state("parent-depth-run", max_depth=0),
         )
@@ -366,17 +359,48 @@ class TestAgentAsToolAdapter:
     @pytest.mark.anyio
     async def test_adapter_is_callable_compatible_with_tool_runner(self) -> None:
         """adapter 实例可直接作为 ToolRunner 使用"""
-        adapter = self._make_adapter()
+        class _CompletedSubAgentRunner:
+            async def run_delegated_task(
+                self,
+                *,
+                request: AgentDelegationRequest,
+                parent_state: AgentState,
+            ) -> AgentRunResult:
+                del request, parent_state
+                return AgentRunResult(
+                    run_id="child-done",
+                    thread_id="child-done",
+                    status="done",
+                    final_answer="Completed child output",
+                )
+
+        adapter = AgentAsToolAdapter(
+            runner=_CompletedSubAgentRunner(),
+            agent_type="research",
+            run_config=AgentRunConfig(
+                run_id="test-run",
+                thread_id="test-thread",
+                budget_total=10000,
+                max_depth=2,
+                access_policy=AccessPolicy.default(),
+            ),
+        )
         inp = AgentToolInput(task="Test task", goal="Verify callability")
         result = await adapter(inp)
         assert isinstance(result, AgentToolOutput)
         assert result.agent_name == "research"
+        assert result.conclusion == "Completed child output"
 
     @pytest.mark.anyio
     async def test_adapter_failure_becomes_tool_error(self) -> None:
         class _FailingSubAgentRunner:
-            async def run_subtask(self, *, subtask: SubTaskNode, parent_state: AgentState) -> AgentRunResult:
-                del subtask, parent_state
+            async def run_delegated_task(
+                self,
+                *,
+                request: AgentDelegationRequest,
+                parent_state: AgentState,
+            ) -> AgentRunResult:
+                del request, parent_state
                 raise RuntimeError("child failed")
 
         run_config = AgentRunConfig(
@@ -543,7 +567,7 @@ async def test_builtin_subagent_runner_is_injected_for_agent_tool_calls() -> Non
             }
         ),
         model_registry=None,
-        evaluate_decision_provider=decision_provider,
+        tool_decision_provider=decision_provider,
     )
     runner = BuiltinSubAgentRunner(agent_registry=agent_registry, service_factory=factory)
     factory.bind_subagent_runner(runner)

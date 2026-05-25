@@ -28,7 +28,7 @@ class RAGSearchAnswerOutput(BaseModel):
 
 rag_search_answer = ToolSpec(
     name="rag_search_answer",
-    description="Run the fast RAG query-and-answer path and return grounded answer text.",
+    description="Run a grounded RAG query-and-answer tool and return answer text with evidence.",
     input_model=RAGSearchAnswerInput,
     output_model=RAGSearchAnswerOutput,
     error_model=ToolError,
@@ -39,7 +39,7 @@ rag_search_answer = ToolSpec(
 )
 
 
-ALL_FAST_PATH_TOOLS = [rag_search_answer]
+ALL_RAG_ANSWER_TOOLS = [rag_search_answer]
 
 
 @dataclass

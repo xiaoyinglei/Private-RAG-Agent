@@ -11,16 +11,13 @@ from rag.schema.runtime import AccessPolicy
 class ModelSelectionPolicy:
     """每个 Agent 节点的模型选择策略。None = 使用 ModelRegistry.default_model。"""
 
-    route_model: str | None = None
-    evaluate_model: str | None = None
-    plan_model: str | None = None
+    retrieval_hint_model: str | None = None
+    tool_decision_model: str | None = None
     thinking: bool = True
-    route_temperature: float = 0.0
-    evaluate_temperature: float = 0.0
-    plan_temperature: float = 0.0
-    route_max_tokens: int | None = None
-    evaluate_max_tokens: int | None = None
-    plan_max_tokens: int | None = None
+    retrieval_hint_temperature: float = 0.0
+    tool_decision_temperature: float = 0.0
+    retrieval_hint_max_tokens: int | None = None
+    tool_decision_max_tokens: int | None = None
 
 
 @dataclass(frozen=True)

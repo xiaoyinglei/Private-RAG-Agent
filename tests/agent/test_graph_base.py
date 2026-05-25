@@ -5,10 +5,8 @@ from pydantic import BaseModel
 
 from rag.agent.core.context import AgentRunConfig, RuntimeRegistry
 from rag.agent.core.definition import AgentDefinition, ToolPolicy
-from rag.agent.core.task import SubTaskNode, SubTaskStatus, TaskDAG
 from rag.agent.graphs.base import build_agent_graph
 from rag.agent.memory.models import InjectedContext
-from rag.agent.service import AgentRunResult
 from rag.agent.state import AgentState, ThinkOutput, ToolCallPlan
 from rag.agent.tools.registry import ToolRegistry
 from rag.agent.tools.spec import ToolError, ToolPermissions, ToolSpec
@@ -136,20 +134,15 @@ def _initial_state(
         "task": "research task requiring the agent loop",
         "retrieval_signals": RetrievalSignals(),
         "run_config": config or _make_config(),
-        "plan": None,
         "iteration": 0,
         "status": "running",
         "pending_tool_calls": pending_tool_calls or [],
         "approved_tool_call_ids": [],
         "denied_tool_call_ids": [],
         "user_decision": None,
-        "next_subtasks": None,
         "working_summary": None,
         "extracted_facts": [],
         "context_budget": None,
-        "subtask_results": {},
-        "terminal_subtasks": set(),
-        "successful_subtasks": set(),
         "final_answer": None,
         "groundedness_flag": False,
         "insufficient_evidence_flag": False,
@@ -174,16 +167,12 @@ def _make_graph(
     *,
     definition: AgentDefinition | None = None,
     tool_registry: ToolRegistry | None = None,
-    evaluate_decision_provider: object | None = None,
-    plan_provider: object | None = None,
-    subagent_runner: object | None = None,
+    tool_decision_provider: object | None = None,
 ):
     return build_agent_graph(
         definition=definition or _make_definition(),
         tool_registry=tool_registry or _make_registry(),
-        evaluate_decision_provider=evaluate_decision_provider,
-        plan_provider=plan_provider,
-        subagent_runner=subagent_runner,
+        tool_decision_provider=tool_decision_provider,
     )
 
 
@@ -205,46 +194,24 @@ class _ScriptedDecisionProvider:
         return self._decisions.pop(0)
 
 
-class _SuccessfulSubAgentRunner:
-    def __init__(self) -> None:
-        self.calls: list[str] = []
-
-    async def run_subtask(self, *, subtask: SubTaskNode, parent_state: AgentState) -> AgentRunResult:
-        del parent_state
-        self.calls.append(subtask.subtask_id)
-        return AgentRunResult(
-            run_id=f"child-{subtask.subtask_id}",
-            thread_id=f"child-{subtask.subtask_id}",
-            status="done",
-            final_answer=f"done:{subtask.subtask_id}",
-        )
-
-
-class _ScriptedPlanProvider:
-    def __init__(self, plan: TaskDAG) -> None:
-        self._plan = plan
-        self.calls = 0
-
-    async def create_plan(self, state: AgentState, *, definition: AgentDefinition) -> TaskDAG:
-        del state, definition
-        self.calls += 1
-        return self._plan
-
-
 class TestBaseGraph:
     def test_builds_without_errors(self) -> None:
         graph = _make_graph()
         assert graph is not None
 
     @pytest.mark.anyio
-    async def test_direct_route_without_tools_synthesizes_final_answer(self) -> None:
+    async def test_open_gap_without_tool_decision_provider_pauses(self) -> None:
         graph = _make_graph()
         result = await graph.ainvoke(_initial_state(), config={"configurable": {"thread_id": "graph-test"}})
-        assert result["status"] == "done"
-        assert result["final_answer"] is not None
+        assert result["status"] == "paused"
+        assert result["final_answer"] is None
+        assert (
+            result["needs_user_input"]
+            == "No tool decision provider is available to close the remaining goal gaps."
+        )
 
     @pytest.mark.anyio
-    async def test_evaluate_decision_provider_can_schedule_tool_call(self) -> None:
+    async def test_tool_decision_provider_can_schedule_tool_call(self) -> None:
         call = ToolCallPlan.create("echo", {"message": "from-think"})
         provider = _ScriptedDecisionProvider(
             [
@@ -254,7 +221,7 @@ class TestBaseGraph:
         )
         graph = _make_graph(
             tool_registry=_make_registry_with_echo_runner(),
-            evaluate_decision_provider=provider,
+            tool_decision_provider=provider,
         )
 
         result = await graph.ainvoke(
@@ -263,14 +230,40 @@ class TestBaseGraph:
         )
 
         assert result["status"] == "done"
-        assert result["stop_reason"] == "evidence_sufficient"
-        assert provider.calls == 2
+        assert result["stop_reason"] == "goal_satisfied"
+        assert provider.calls == 1
+        assert result["iteration"] == 1
         [tool_result] = result["tool_results"]
         assert tool_result.status == "ok"
         assert tool_result.output == EchoOutput(message="echo:from-think")
 
     @pytest.mark.anyio
-    async def test_evaluate_decision_provider_can_pause_run(self) -> None:
+    async def test_legacy_task_dag_does_not_preempt_model_tool_choice(self) -> None:
+        provider = _ScriptedDecisionProvider(
+            [ThinkOutput(
+                action="execute",
+                tool_calls=[ToolCallPlan.create("echo", {"message": "model-selected"})],
+                thought="select tool through the loop",
+            )]
+        )
+        graph = _make_graph(
+            tool_registry=_make_registry_with_echo_runner(),
+            tool_decision_provider=provider,
+        )
+        state = _initial_state(config=_make_config(run_id="legacy-plan-ignored"))
+        state["plan"] = {"legacy": "task_dag"}  # type: ignore[typeddict-unknown-key]
+
+        result = await graph.ainvoke(
+            state,
+            config={"configurable": {"thread_id": "legacy-plan-ignored"}},
+        )
+
+        [tool_result] = result["tool_results"]
+        assert provider.calls == 1
+        assert tool_result.output == EchoOutput(message="echo:model-selected")
+
+    @pytest.mark.anyio
+    async def test_tool_decision_provider_can_pause_run(self) -> None:
         provider = _ScriptedDecisionProvider(
             [
                 ThinkOutput(
@@ -280,7 +273,7 @@ class TestBaseGraph:
                 )
             ]
         )
-        graph = _make_graph(evaluate_decision_provider=provider)
+        graph = _make_graph(tool_decision_provider=provider)
 
         result = await graph.ainvoke(
             _initial_state(config=_make_config(run_id="think-pause")),
@@ -292,105 +285,29 @@ class TestBaseGraph:
         assert result["final_answer"] is None
 
     @pytest.mark.anyio
-    async def test_task_dag_send_executes_subagent_and_re_evaluates_to_done(self) -> None:
-        subtask = SubTaskNode(
-            subtask_id="s1",
-            agent_type="research",
-            prompt="Research",
-            priority=1,
-            estimated_tokens=10,
+    async def test_graph_expansion_hint_does_not_preempt_model_tool_choice(self) -> None:
+        provider = _ScriptedDecisionProvider(
+            [ThinkOutput(
+                action="execute",
+                tool_calls=[ToolCallPlan.create("echo", {"message": "model-selected"})],
+                thought="select tool through the loop",
+            )]
         )
-        runner = _SuccessfulSubAgentRunner()
-        graph = _make_graph(subagent_runner=runner)
-        state = _initial_state(config=_make_config(run_id="graph-subagent", budget_total=100))
-        state["plan"] = TaskDAG(subtasks=[subtask])
-
-        result = await graph.ainvoke(
-            state,
-            config={"configurable": {"thread_id": "graph-subagent"}},
-        )
-
-        assert result["status"] == "done"
-        assert result["stop_reason"] == "all_subtasks_terminal"
-        assert result["final_answer"] == "done:s1"
-        assert runner.calls == ["s1"]
-        assert result["terminal_subtasks"] == {"s1"}
-        assert result["successful_subtasks"] == {"s1"}
-        assert result["subtask_results"]["s1"].findings == ["done:s1"]
-
-    @pytest.mark.anyio
-    async def test_task_dag_without_subagent_runner_records_failed_subtask(self) -> None:
-        subtask = SubTaskNode(
-            subtask_id="s1",
-            agent_type="research",
-            prompt="Research",
-            priority=1,
-            estimated_tokens=10,
-        )
-        graph = _make_graph()
-        state = _initial_state(config=_make_config(run_id="graph-subagent-missing", budget_total=100))
-        state["plan"] = TaskDAG(subtasks=[subtask])
-
-        result = await graph.ainvoke(
-            state,
-            config={"configurable": {"thread_id": "graph-subagent-missing"}},
-        )
-
-        subtask_result = result["subtask_results"]["s1"]
-        assert subtask_result.status is SubTaskStatus.FAILED
-        assert subtask_result.error_message == "subagent_runner_missing"
-        assert result["final_answer"] == "No answer was generated because subtask execution failed: s1."
-        assert result["insufficient_evidence_flag"] is True
-        assert result["terminal_subtasks"] == {"s1"}
-        assert result["successful_subtasks"] == set()
-
-    @pytest.mark.anyio
-    async def test_decompose_route_uses_plan_provider_and_executes_subagent(self) -> None:
-        subtask = SubTaskNode(
-            subtask_id="s1",
-            agent_type="research",
-            prompt="Research",
-            priority=1,
-            estimated_tokens=10,
-        )
-        plan_provider = _ScriptedPlanProvider(TaskDAG(subtasks=[subtask]))
-        runner = _SuccessfulSubAgentRunner()
         graph = _make_graph(
-            plan_provider=plan_provider,
-            subagent_runner=runner,
+            tool_registry=_make_registry_with_echo_runner(),
+            tool_decision_provider=provider,
         )
-        state = _initial_state(config=_make_config(run_id="graph-plan", budget_total=100))
+        state = _initial_state(config=_make_config(run_id="graph-hint-ignored"))
         state["retrieval_signals"] = RetrievalSignals(allow_graph_expansion=True)
 
         result = await graph.ainvoke(
             state,
-            config={"configurable": {"thread_id": "graph-plan"}},
+            config={"configurable": {"thread_id": "graph-hint-ignored"}},
         )
 
-        assert result["status"] == "done"
-        assert result["stop_reason"] == "all_subtasks_terminal"
-        assert result["final_answer"] == "done:s1"
-        assert plan_provider.calls == 1
-        assert runner.calls == ["s1"]
-        assert result["plan"] == TaskDAG(subtasks=[subtask])
-
-    @pytest.mark.anyio
-    async def test_decompose_route_without_plan_provider_fails_closed(self) -> None:
-        graph = _make_graph(
-
-
-        )
-        state = _initial_state(config=_make_config(run_id="graph-plan-missing", budget_total=100))
-        state["retrieval_signals"] = RetrievalSignals(allow_graph_expansion=True)
-
-        result = await graph.ainvoke(
-            state,
-            config={"configurable": {"thread_id": "graph-plan-missing"}},
-        )
-
-        assert result["status"] == "failed"
-        assert result["stop_reason"] == "plan_provider_missing"
-        assert result["final_answer"] == "Agent failed: plan_provider_missing."
+        [tool_result] = result["tool_results"]
+        assert provider.calls == 1
+        assert tool_result.output == EchoOutput(message="echo:model-selected")
 
     @pytest.mark.anyio
     async def test_registered_tool_without_runner_fails_closed(self) -> None:
@@ -565,11 +482,11 @@ class TestBaseGraph:
         assert result["stop_reason"] == "max_iterations"
 
     @pytest.mark.anyio
-    async def test_route_node_defaults_to_direct(self) -> None:
+    async def test_default_retrieval_hint_is_agent_research(self) -> None:
         graph = build_agent_graph(
             definition=_make_definition(),
             tool_registry=_make_registry(),
 
         )
         result = await graph.ainvoke(_initial_state(), config={"configurable": {"thread_id": "graph-test"}})
-        assert result["route_reason"] == "agent_research"
+        assert result["decision_reason"] == "agent_research"

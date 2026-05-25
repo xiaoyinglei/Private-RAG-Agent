@@ -5,9 +5,9 @@ from rag.agent.core.agent_service_factory import AgentServiceFactory
 from rag.agent.core.compiler import AgentGraphCompiler
 from rag.agent.core.context import AgentRunConfig, BudgetLedger, RuntimeRegistry, derive_child_config
 from rag.agent.core.definition import AgentDefinition, ModelSelectionPolicy, ToolPolicy
+from rag.agent.core.delegation import AgentDelegationRequest, DelegatedAgentRunner
 from rag.agent.core.registry import AgentRegistry
 from rag.agent.core.subagent_runner import BuiltinSubAgentRunner, BuiltinSynthesisRunner
-from rag.agent.core.task import SubTaskNode, SubTaskResult, SubTaskStatus, TaskDAG, TaskEdge
 from rag.agent.service import AgentRunRequest, AgentRunResult, AgentService
 from rag.agent.state import (
     AgentState,
@@ -31,6 +31,7 @@ __all__ = [
     "AgentService",
     "AgentState",
     "AgentAsToolRunner",
+    "AgentDelegationRequest",
     "AgentToolSpec",
     "BuiltinSubAgentRunner",
     "BuiltinSynthesisRunner",
@@ -39,11 +40,7 @@ __all__ = [
     "ExtractedFact",
     "ModelSelectionPolicy",
     "RuntimeRegistry",
-    "SubTaskNode",
-    "SubTaskResult",
-    "SubTaskStatus",
-    "TaskDAG",
-    "TaskEdge",
+    "DelegatedAgentRunner",
     "ThinkOutput",
     "ToolCallPlan",
     "ToolError",

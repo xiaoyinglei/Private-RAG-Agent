@@ -37,7 +37,7 @@ def test_compare_agent_uses_compare_tool_contract() -> None:
     assert "llm_generate" not in COMPARE_AGENT.allowed_tools
 
 
-def test_research_agent_allows_fast_path_answer_tool() -> None:
+def test_research_agent_allows_grounded_rag_answer_tool() -> None:
     assert "rag_search_answer" in BUILTIN_AGENT_DEFINITIONS["research"].allowed_tools
 
 

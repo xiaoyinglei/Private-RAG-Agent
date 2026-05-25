@@ -46,8 +46,18 @@ class ModelRegistry:
         return self._config.fallback_model
 
     @classmethod
-    def from_env(cls, env_path: str = ".env") -> ModelRegistry:
+    def from_env(cls, env_path: str = ".env", *, default_model: str | None = None) -> ModelRegistry:
+        del env_path
         config = cls._load_config()
+        if default_model is not None:
+            if default_model not in config.models:
+                raise UnknownModelAliasError(f"Model alias {default_model!r} not found in config")
+            config = config.model_copy(
+                update={
+                    "default_model": default_model,
+                    "fallback_model": default_model,
+                }
+            )
         return cls(config)
 
     @classmethod
@@ -93,6 +103,7 @@ class ModelRegistry:
                 "model": entry["model"],
                 "max_tokens": entry.get("max_tokens", 2048),
                 "base_url": entry.get("base_url"),
+                "api_key_env": entry.get("api_key_env"),
             }
 
         default_model = defaults.get("primary_model", "")
@@ -160,6 +171,7 @@ class ModelRegistry:
                 provider_kind="openai-compatible",
                 base_url=spec.base_url or "http://127.0.0.1:8080/v1",
                 chat_model=spec.model,
+                api_key=_api_key_from_env(spec.api_key_env),
             )
         if spec.provider == ModelProvider.OLLAMA:
             return ProviderConfig(
@@ -172,6 +184,7 @@ class ModelRegistry:
                 provider_kind="openai-compatible",
                 base_url=spec.base_url or "http://127.0.0.1:8080/v1",
                 chat_model=spec.model,
+                api_key=_api_key_from_env(spec.api_key_env),
             )
         raise ValueError(f"Unsupported provider: {spec.provider}")
 
@@ -192,3 +205,10 @@ def _agent_provider_kind(entry: dict[str, object]) -> str:
 
 def _normalized_provider_value(value: object) -> str:
     return str(value or "").strip().lower().replace("-", "_")
+
+
+def _api_key_from_env(name: str | None) -> str | None:
+    if not name:
+        return None
+    value = os.environ.get(name)
+    return value.strip() if isinstance(value, str) and value.strip() else None

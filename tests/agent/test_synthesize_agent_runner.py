@@ -7,12 +7,18 @@ from rag.agent.core.agent_service_factory import AgentServiceFactory
 from rag.agent.core.context import AgentRunConfig, RuntimeRegistry
 from rag.agent.core.registry import AgentRegistry
 from rag.agent.core.subagent_runner import BuiltinSynthesisRunner
-from rag.agent.core.task import SubTaskNode, SubTaskResult, SubTaskStatus
+from rag.agent.goal_runtime import (
+    AnswerCandidate,
+    ComputationResult,
+    ContextUnit,
+    EvidenceRef,
+    StructuredObservation,
+)
 from rag.agent.graphs.nodes.synthesize import synthesize_node
 from rag.agent.state import AgentState
 from rag.agent.tools.builtin_registry import create_builtin_tool_registry
-from rag.agent.tools.fast_path_tools import RAGSearchAnswerOutput
 from rag.agent.tools.llm_tools import LLMGenerateInput, LLMTextOutput
+from rag.agent.tools.rag_answer_tools import RAGSearchAnswerOutput
 from rag.agent.tools.spec import ToolResult
 from rag.schema.query import AnswerCitation, EvidenceItem, RetrievalSignals
 from rag.schema.runtime import AccessPolicy
@@ -32,12 +38,6 @@ def _state() -> AgentState:
         record_type="section",
         citation_anchor="doc#1",
     )
-    subtask = SubTaskNode(
-        subtask_id="s1",
-        agent_type="research",
-        prompt="Research child evidence",
-        priority=1,
-    )
     run_config = AgentRunConfig(
         run_id="synthesis-parent",
         thread_id="synthesis-parent",
@@ -56,11 +56,10 @@ def _state() -> AgentState:
         "retrieval_signals": RetrievalSignals(),
         "retrieval_signals_debug": None,
         "run_config": run_config,
-        "plan": None,
         "iteration": 0,
         "status": "done",
-        "route_reason": None,
-        "stop_reason": "all_subtasks_terminal",
+        "decision_reason": None,
+        "stop_reason": "synthesize",
         "needs_user_input": None,
         "pending_tool_calls": [],
         "approved_tool_call_ids": [],
@@ -69,24 +68,27 @@ def _state() -> AgentState:
         "user_message": None,
         "human_input_request": None,
         "human_input_response": None,
-        "next_subtasks": None,
         "working_summary": None,
         "extracted_facts": [],
         "context_budget": None,
-        "subtask_results": {
-            "s1": SubTaskResult(
-                subtask=subtask,
-                status=SubTaskStatus.COMPLETED,
-                findings=["Child finding"],
-                evidence=[evidence],
-                citations=[citation],
-            )
-        },
-        "terminal_subtasks": {"s1"},
-        "successful_subtasks": {"s1"},
         "final_answer": None,
         "groundedness_flag": False,
         "insufficient_evidence_flag": False,
+        "goal_spec": None,
+        "goal_requirements": [],
+        "satisfied_requirements": [],
+        "open_gaps": [],
+        "evidence_refs": [],
+        "answer_candidates": [],
+        "computation_results": [],
+        "structured_observations": [],
+        "context_units": [],
+        "locators": [],
+        "asset_refs": [],
+        "conflicts": [],
+        "no_progress_count": 0,
+        "satisfaction_report": None,
+        "controller_next": None,
     }
 
 
@@ -124,7 +126,7 @@ async def test_synthesize_node_delegates_to_builtin_synthesize_agent() -> None:
     [payload] = seen_payloads
     assert payload.evidence_ids == ["ev-child"]
     assert payload.citation_ids == ["cit-child"]
-    assert any("Child finding" in section for section in payload.context_sections)
+    assert any("Grounded child evidence" in section for section in payload.context_sections)
     RuntimeRegistry.remove("synthesis-parent")
 
 
@@ -138,9 +140,6 @@ async def test_synthesize_node_preserves_grounded_rag_search_answer() -> None:
         return LLMTextOutput(text=f"rewritten: {payload.prompt}")
 
     state = _state()
-    state["subtask_results"] = {}
-    state["terminal_subtasks"] = set()
-    state["successful_subtasks"] = set()
     state["tool_results"] = [
         ToolResult(
             tool_call_id="call-rag",
@@ -175,5 +174,154 @@ async def test_synthesize_node_preserves_grounded_rag_search_answer() -> None:
     assert update["final_answer"] == "日提货总量是131.074462。 [1]"
     assert update["groundedness_flag"] is True
     assert update["insufficient_evidence_flag"] is False
+    assert called is False
+    RuntimeRegistry.remove("synthesis-parent")
+
+
+@pytest.mark.anyio
+async def test_synthesis_runner_uses_structured_observations_instead_of_raw_tool_outputs() -> None:
+    seen_payloads: list[LLMGenerateInput] = []
+
+    def llm_generate(payload: LLMGenerateInput) -> LLMTextOutput:
+        seen_payloads.append(payload)
+        return LLMTextOutput(text="final from structured observation")
+
+    state = _state()
+    state["evidence"] = []
+    state["citations"] = []
+    state["answer_candidates"] = [
+        AnswerCandidate(
+            text="北方和东北日提货合计为 15.491928。",
+            evidence_refs=[EvidenceRef(evidence_id="compute_result:14", citation_id="table@p4")],
+        )
+    ]
+    state["evidence_refs"] = [
+        EvidenceRef(evidence_id="compute_result:14", citation_id="table@p4")
+    ]
+    state["structured_observations"] = [
+        StructuredObservation(
+            tool_call_id="tc-asset",
+            tool_name="asset_analyze",
+            status="ok",
+            answer_candidate=state["answer_candidates"][0],
+            evidence_refs=state["evidence_refs"],
+            raw_result_ref="tc-asset",
+            resolved_gaps=["answer", "evidence"],
+        )
+    ]
+    state["tool_results"] = [
+        ToolResult(
+            tool_call_id="tc-asset",
+            tool_name="asset_analyze",
+            status="ok",
+            output=LLMTextOutput(text="RAW_RESULT " * 1000),
+            latency_ms=10.0,
+        )
+    ]
+
+    agent_registry = AgentRegistry()
+    agent_registry.register(SYNTHESIZE_AGENT)
+    service_factory = AgentServiceFactory(
+        tool_registry=create_builtin_tool_registry(runners={"llm_generate": llm_generate}),
+        model_registry=None,
+    )
+    synthesis_runner = BuiltinSynthesisRunner(
+        agent_registry=agent_registry,
+        service_factory=service_factory,
+    )
+    service_factory.bind_synthesis_runner(synthesis_runner)
+
+    update = await synthesize_node(state, synthesis_runner=synthesis_runner)
+
+    assert update["status"] == "done"
+    assert update["final_answer"] == "final from structured observation"
+    [payload] = seen_payloads
+    context_text = "\n".join(payload.context_sections)
+    assert "Structured observations" in context_text
+    assert "15.491928" in context_text
+    assert "RAW_RESULT" not in context_text
+    assert payload.evidence_ids == ["compute_result:14"]
+    assert payload.citation_ids == ["table@p4"]
+    RuntimeRegistry.remove("synthesis-parent")
+
+
+@pytest.mark.anyio
+async def test_goal_satisfied_asset_analysis_finalizes_without_llm_rewrite() -> None:
+    called = False
+
+    def llm_generate(payload: LLMGenerateInput) -> LLMTextOutput:
+        nonlocal called
+        called = True
+        return LLMTextOutput(text=f"hallucinated: {payload.prompt}")
+
+    state = _state()
+    state["status"] = "done"
+    state["stop_reason"] = "goal_satisfied"
+    state["task"] = "北方和东北日提货合计是多少？请给出处"
+    state["answer_candidates"] = [
+        AnswerCandidate(
+            text="北方和东北日提货合计是多少？请给出处：15.491928000000001",
+            source_tool_call_id="tc-analyze",
+            source_tool_name="asset_analyze",
+            evidence_refs=[EvidenceRef(evidence_id="asset:14", source="asset")],
+        )
+    ]
+    state["computation_results"] = [
+        ComputationResult(
+            source_tool_call_id="tc-analyze",
+            source_tool_name="asset_analyze",
+            operation="dataframe_sql",
+            value_preview="15.491928000000001",
+            expression=(
+                'SELECT SUM("日_日提货") AS "日_日提货" '
+                "FROM sheet WHERE \"区域公司\" IN ('北方', '东北')"
+            ),
+        )
+    ]
+    state["context_units"] = [
+        ContextUnit(
+            unit_id="asset:14",
+            unit_type="table_asset",
+            locator={
+                "asset_id": 14,
+                "doc_id": 2,
+                "source_id": 1,
+                "section_id": 6,
+                "sheet_name": "2024-0317新增",
+                "page_no": 4,
+                "element_ref": "02-日报生成版-20260522-sheet-3-table",
+            },
+            content_ref="asset:14",
+        )
+    ]
+    state["tool_results"] = [
+        ToolResult(
+            tool_call_id="tc-analyze",
+            tool_name="asset_analyze",
+            status="ok",
+            output=LLMTextOutput(text="RAW_RESULT_MUST_NOT_ENTER_FINAL_ANSWER"),
+            latency_ms=10.0,
+        )
+    ]
+
+    agent_registry = AgentRegistry()
+    agent_registry.register(SYNTHESIZE_AGENT)
+    service_factory = AgentServiceFactory(
+        tool_registry=create_builtin_tool_registry(runners={"llm_generate": llm_generate}),
+        model_registry=None,
+    )
+    synthesis_runner = BuiltinSynthesisRunner(
+        agent_registry=agent_registry,
+        service_factory=service_factory,
+    )
+
+    update = await synthesize_node(state, synthesis_runner=synthesis_runner)
+
+    assert update["status"] == "done"
+    assert "15.491928000000001" in update["final_answer"]
+    assert "asset_id=14" in update["final_answer"]
+    assert "sheet=2024-0317新增" in update["final_answer"]
+    assert "SELECT SUM" in update["final_answer"]
+    assert "RAW_RESULT_MUST_NOT_ENTER_FINAL_ANSWER" not in update["final_answer"]
     assert called is False
     RuntimeRegistry.remove("synthesis-parent")

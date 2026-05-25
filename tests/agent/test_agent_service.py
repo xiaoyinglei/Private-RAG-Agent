@@ -40,6 +40,9 @@ def test_agent_service_initial_state_creates_runtime_handles() -> None:
     assert state["task"] == "Explain policy"
     assert state["run_config"].run_id == "svc-state"
     assert state["run_config"].budget_total == RESEARCH_AGENT.estimated_token_budget
+    assert "tool_action_proposals" not in state
+    assert "plan" not in state
+    assert "subtask_results" not in state
     assert RuntimeRegistry.get("svc-state") is not None
     RuntimeRegistry.remove("svc-state")
 

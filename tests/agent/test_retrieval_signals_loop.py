@@ -6,7 +6,7 @@ import pytest
 from pydantic import BaseModel
 
 from rag.agent.core.llm_providers import (
-    LLMRouteProvider,
+    LLMRetrievalHintProvider,
     _extract_quoted_terms,
     _filter_non_empty,
     _merge_quoted_terms,
@@ -41,14 +41,13 @@ def _make_state(**overrides: object) -> dict:
             run_id="sig-test", thread_id="sig-test", budget_total=10000, max_depth=2,
             access_policy=AccessPolicy.default(),
         ),
-        "plan": None, "iteration": 0, "status": "running",
-        "route_reason": None, "stop_reason": None, "needs_user_input": None,
+        "iteration": 0, "status": "running",
+        "decision_reason": None, "stop_reason": None, "needs_user_input": None,
         "pending_tool_calls": [], "approved_tool_call_ids": [], "denied_tool_call_ids": [],
         "user_decision": None, "user_message": None,
         "human_input_request": None, "human_input_response": None,
-        "next_subtasks": None, "working_summary": None,
+        "working_summary": None,
         "extracted_facts": [], "context_budget": None,
-        "subtask_results": {}, "terminal_subtasks": set(), "successful_subtasks": set(),
         "final_answer": None, "groundedness_flag": False, "insufficient_evidence_flag": False,
     }
     s.update(overrides)
@@ -167,10 +166,10 @@ class TestValidateRetrievalSignals:
         assert source == "validation_failed"
 
 
-# ── LLMRouteProvider writes retrieval_signals ──
+# ── LLMRetrievalHintProvider writes retrieval_signals ──
 
 
-class TestLLMRouteProviderSignals:
+class TestLLMRetrievalHintProviderSignals:
     def test_writes_signals_when_llm_produces(self) -> None:
         gen = _stub_gen({
             "route": "direct",
@@ -181,8 +180,8 @@ class TestLLMRouteProviderSignals:
                 "allow_graph_expansion": False,
             },
         })
-        provider = LLMRouteProvider(gen)
-        result = provider.route(_make_state(task="查询公积金"))
+        provider = LLMRetrievalHintProvider(gen)
+        result = provider.hint(_make_state(task="查询公积金"))
         signals = result["retrieval_signals"]
         assert isinstance(signals, RetrievalSignals)
         assert signals.special_targets == ["table"]
@@ -193,15 +192,15 @@ class TestLLMRouteProviderSignals:
             "route": "direct",
             "reason": "simple query",
         })
-        provider = LLMRouteProvider(gen)
-        result = provider.route(_make_state(task="hello"))
+        provider = LLMRetrievalHintProvider(gen)
+        result = provider.hint(_make_state(task="hello"))
         signals = result["retrieval_signals"]
         assert isinstance(signals, RetrievalSignals)
         assert signals.special_targets == []
         assert signals.allow_graph_expansion is False
 
     def test_overwrites_previous_signals(self) -> None:
-        """每轮 route 必须覆盖，不是累积。"""
+        """每轮 retrieval hint 必须覆盖，不是累积。"""
         gen = _stub_gen({
             "route": "direct",
             "reason": "test",
@@ -210,7 +209,7 @@ class TestLLMRouteProviderSignals:
                 "allow_graph_expansion": False,
             },
         })
-        provider = LLMRouteProvider(gen)
+        provider = LLMRetrievalHintProvider(gen)
         state_with_old = _make_state(
             task="新查询",
             retrieval_signals=RetrievalSignals(
@@ -218,7 +217,7 @@ class TestLLMRouteProviderSignals:
                 quoted_terms=["旧词"],
             ),
         )
-        result = provider.route(state_with_old)
+        result = provider.hint(state_with_old)
         signals = result["retrieval_signals"]
         assert signals.allow_graph_expansion is False  # 被新值覆盖
         assert "新词" in signals.quoted_terms
@@ -231,8 +230,8 @@ class TestLLMRouteProviderSignals:
                 "quoted_terms": ["LLM提取"],
             },
         })
-        provider = LLMRouteProvider(gen)
-        result = provider.route(_make_state(task='查询"规则提取"内容'))
+        provider = LLMRetrievalHintProvider(gen)
+        result = provider.hint(_make_state(task='查询"规则提取"内容'))
         signals = result["retrieval_signals"]
         assert "LLM提取" in signals.quoted_terms
         assert "规则提取" in signals.quoted_terms
@@ -245,8 +244,8 @@ class TestLLMRouteProviderSignals:
                 "special_targets": ["table"],
             },
         })
-        provider = LLMRouteProvider(gen)
-        result = provider.route(_make_state())
+        provider = LLMRetrievalHintProvider(gen)
+        result = provider.hint(_make_state())
         debug = result["retrieval_signals_debug"]
         assert debug is not None
         assert debug["signals_source"] == "llm"
@@ -255,11 +254,10 @@ class TestLLMRouteProviderSignals:
     def test_fallback_signals_source_is_rule(self) -> None:
         """LLM 未返回 retrieval_signals → rule_fallback"""
         gen = _stub_gen({
-            "route": "fast_path",
             "reason": "simple",
         })
-        provider = LLMRouteProvider(gen)
-        result = provider.route(_make_state())
+        provider = LLMRetrievalHintProvider(gen)
+        result = provider.hint(_make_state())
         debug = result["retrieval_signals_debug"]
         assert debug is not None
         assert debug["signals_source"] == "rule_fallback"
@@ -273,8 +271,8 @@ class TestLLMRouteProviderSignals:
                 "special_targets": 42,  # not a list → validation fails
             },
         })
-        provider = LLMRouteProvider(gen)
-        result = provider.route(_make_state())
+        provider = LLMRetrievalHintProvider(gen)
+        result = provider.hint(_make_state())
         debug = result["retrieval_signals_debug"]
         assert debug is not None
         assert debug["signals_source"] == "validation_failed"
@@ -534,11 +532,11 @@ class TestQueryOptionsToRetrievalServiceSignalFlow:
         assert "retrieval_signals_debug=" in src
         assert '"signals_source": "agent_tool_input"' in src
 
-    def test_fast_path_answer_runner_passes_signals(self) -> None:
+    def test_rag_answer_runner_passes_signals(self) -> None:
         """RAGSearchAnswerRunner.answer 在 QueryOptions 中传递 retrieval_signals"""
         import inspect
 
-        import rag.agent.tools.fast_path_tools as m
+        import rag.agent.tools.rag_answer_tools as m
         src = inspect.getsource(m.RAGSearchAnswerRunner.answer)
         assert '"retrieval_signals": _answer_path_retrieval_signals(payload.retrieval_signals)' in src
         assert '"signals_source": "agent_tool_input"' in src

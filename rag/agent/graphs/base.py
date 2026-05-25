@@ -7,91 +7,58 @@ from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
 
 from rag.agent.core.definition import AgentDefinition
-from rag.agent.core.task import SubTaskNode
-from rag.agent.graphs.nodes.evaluate import (
-    EvaluateDecisionProvider,
-    evaluate_node,
-    route_after_evaluate,
-)
 from rag.agent.graphs.nodes.execute import execute_node
-from rag.agent.graphs.nodes.execute_subagent import (
-    SubAgentRunner,
-    SubAgentRunResult,
-    execute_subagent_node,
+from rag.agent.graphs.nodes.goal_runtime import (
+    controller_node,
+    initialize_goal_node,
+    reduce_observations_node,
+    route_after_controller,
 )
-from rag.agent.graphs.nodes.fast_path import fast_path_node
-from rag.agent.graphs.nodes.observe import observe_node
+from rag.agent.graphs.nodes.llm_decide import ToolDecisionProvider, llm_decide_node
 from rag.agent.graphs.nodes.pause import pause_node
-from rag.agent.graphs.nodes.plan import PlanProvider, plan_node, route_after_plan
-from rag.agent.graphs.nodes.route import RouteProvider, route_after_route, route_node
+from rag.agent.graphs.nodes.retrieval_hint import RetrievalHintProvider
 from rag.agent.graphs.nodes.synthesize import SynthesisRunner, synthesize_node
 from rag.agent.state import AgentState
 from rag.agent.tools.registry import ToolRegistry
-
-
-class _MissingSubAgentRunner:
-    async def run_subtask(
-        self,
-        *,
-        subtask: SubTaskNode,
-        parent_state: AgentState,
-    ) -> SubAgentRunResult:
-        del subtask, parent_state
-        raise RuntimeError("subagent_runner_missing")
 
 
 def build_agent_graph(
     *,
     definition: AgentDefinition,
     tool_registry: ToolRegistry,
-    evaluate_decision_provider: EvaluateDecisionProvider | None = None,
-    plan_provider: PlanProvider | None = None,
-    route_provider: RouteProvider | None = None,
-    subagent_runner: SubAgentRunner | None = None,
+    tool_decision_provider: ToolDecisionProvider | None = None,
+    retrieval_hint_provider: RetrievalHintProvider | None = None,
     synthesis_runner: SynthesisRunner | None = None,
     checkpointer: BaseCheckpointSaver[str] | MemorySaver | None = None,
 ) -> Any:
     graph = StateGraph(AgentState)
     allowed_tools = frozenset(definition.allowed_tools)
-    effective_subagent_runner = subagent_runner or _MissingSubAgentRunner()
     effective_synthesis_runner = (
         None if definition.agent_type == "synthesize" else synthesis_runner
     )
-    effective_route_provider = route_provider
+    effective_retrieval_hint_provider = retrieval_hint_provider
 
-    async def bound_route_node(state: AgentState) -> dict[str, Any]:
-        if effective_route_provider is not None:
-            result = effective_route_provider.route(state)
-            if hasattr(result, "__await__"):
-                result = await result
-            return result
-        return route_node(state)
+    async def bound_initialize_goal_node(state: AgentState) -> dict[str, Any]:
+        return await initialize_goal_node(
+            state,
+            retrieval_hint_provider=effective_retrieval_hint_provider,
+        )
+
+    async def bound_controller_node(state: AgentState) -> dict[str, Any]:
+        return controller_node(
+            state,
+            definition=definition,
+            has_tool_decision_provider=tool_decision_provider is not None,
+        )
 
     async def bound_execute_node(state: AgentState) -> dict[str, Any]:
         return await execute_node(state, tool_registry=tool_registry, allowed_tools=allowed_tools)
 
-    async def bound_fast_path_node(state: AgentState) -> dict[str, Any]:
-        return await fast_path_node(
-            state,
-            tool_registry=tool_registry,
-            allowed_tools=allowed_tools,
-        )
-
-    async def bound_execute_subagent_node(state: AgentState) -> dict[str, Any]:
-        return await execute_subagent_node(state, subagent_runner=effective_subagent_runner)
-
-    async def bound_evaluate_node(state: AgentState) -> dict[str, Any]:
-        return await evaluate_node(
+    async def bound_llm_decide_node(state: AgentState) -> dict[str, Any]:
+        return await llm_decide_node(
             state,
             definition=definition,
-            decision_provider=evaluate_decision_provider,
-        )
-
-    async def bound_plan_node(state: AgentState) -> dict[str, Any]:
-        return await plan_node(
-            state,
-            definition=definition,
-            plan_provider=plan_provider,
+            decision_provider=tool_decision_provider,
         )
 
     async def bound_synthesize_node(state: AgentState) -> dict[str, Any]:
@@ -100,66 +67,47 @@ def build_agent_graph(
             synthesis_runner=effective_synthesis_runner,
         )
 
-    graph.add_node("route", bound_route_node)
-    graph.add_node("fast_path", bound_fast_path_node)
-    graph.add_node("plan", bound_plan_node)
+    graph.add_node("initialize_goal", bound_initialize_goal_node)
+    graph.add_node("controller", bound_controller_node)
     graph.add_node("execute", bound_execute_node)
-    graph.add_node("execute_subagent", bound_execute_subagent_node)
-    graph.add_node("observe", observe_node)
-    graph.add_node("evaluate", bound_evaluate_node)
+    graph.add_node("reduce_observations", reduce_observations_node)
+    graph.add_node("llm_decide", bound_llm_decide_node)
     graph.add_node("pause", pause_node)
-    graph.add_node("synthesize", bound_synthesize_node)
+    graph.add_node("finalize", bound_synthesize_node)
 
-    graph.add_edge(START, "route")
+    graph.add_edge(START, "initialize_goal")
+    graph.add_edge("initialize_goal", "controller")
     graph.add_conditional_edges(
-        "route",
-        route_after_route,
+        "controller",
+        route_after_controller,
         {
-            "fast_path": "fast_path",
             "execute": "execute",
-            "plan": "plan",
-            "synthesize": "synthesize",
-        },
-    )
-    graph.add_conditional_edges(
-        "plan",
-        route_after_plan,
-        {
-            "evaluate": "evaluate",
-            "synthesize": "synthesize",
+            "llm_decide": "llm_decide",
+            "pause": "pause",
+            "finalize": "finalize",
         },
     )
     graph.add_conditional_edges(
         "execute",
         route_after_execute,
         {
-            "observe": "observe",
+            "reduce_observations": "reduce_observations",
             "pause": "pause",
+            "finalize": "finalize",
         },
     )
-    graph.add_edge("execute_subagent", "evaluate")
-    graph.add_edge("fast_path", END)
-    graph.add_edge("observe", "evaluate")
-    graph.add_conditional_edges(
-        "evaluate",
-        route_after_evaluate,
-        {
-            "execute": "execute",
-            "execute_subagent": "execute_subagent",
-            "pause": "pause",
-            "synthesize": "synthesize",
-        },
-    )
+    graph.add_edge("reduce_observations", "controller")
+    graph.add_edge("llm_decide", "controller")
     graph.add_conditional_edges(
         "pause",
         route_after_pause,
         {
             "execute": "execute",
-            "evaluate": "evaluate",
+            "controller": "controller",
             "end": END,
         },
     )
-    graph.add_edge("synthesize", END)
+    graph.add_edge("finalize", END)
 
     return graph.compile(checkpointer=checkpointer)
 
@@ -168,11 +116,8 @@ def route_after_execute(state: AgentState) -> str:
     if state.get("status") == "paused":
         return "pause"
     if state.get("status") == "failed":
-        return "synthesize"
-    # fast_path：单轮 RAG 后直接 synthesize，不进入 evaluate 循环
-    if state.get("execution_mode") == "fast_path":
-        return "synthesize"
-    return "observe"
+        return "finalize"
+    return "reduce_observations"
 
 
 def route_after_pause(state: AgentState) -> str:
@@ -181,5 +126,5 @@ def route_after_pause(state: AgentState) -> str:
         return "execute"
     if decision == "abort":
         return "end"
-    # deny, continue, 及其他 → 重新评估
-    return "evaluate"
+    # deny, continue, and other responses return to the parent controller.
+    return "controller"

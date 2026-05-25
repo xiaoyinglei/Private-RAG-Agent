@@ -8,15 +8,12 @@ from pydantic import BaseModel
 
 from rag.agent.core.definition import AgentDefinition, ModelSelectionPolicy
 from rag.agent.core.llm_prompts import (
-    build_evaluate_prompt,
-    build_plan_prompt,
-    build_route_prompt,
+    build_retrieval_hint_prompt,
+    build_tool_decision_prompt,
 )
 from rag.agent.core.llm_registry import ModelRegistry
-from rag.agent.core.task import TaskDAG
-from rag.agent.graphs.nodes.evaluate import EvaluateDecisionProvider
-from rag.agent.graphs.nodes.plan import PlanProvider
-from rag.agent.graphs.nodes.route import RouteProvider
+from rag.agent.graphs.nodes.llm_decide import ToolDecisionProvider
+from rag.agent.graphs.nodes.retrieval_hint import RetrievalHintProvider
 from rag.agent.memory.models import InjectedContext
 from rag.agent.state import AgentState, ThinkOutput
 from rag.schema.query import RetrievalSignals
@@ -114,37 +111,31 @@ def _generate_structured[T: BaseModel](
         return None
 
 
-# ── Router ──
+# ── Retrieval hints ──
 
 
-class RouteDecision(BaseModel):
-    route: str  # "fast_path" | "decompose" | "direct"
+class RetrievalHintDecision(BaseModel):
     reason: str
     retrieval_signals: dict[str, object] | None = None
 
 
-class LLMRouteProvider(RouteProvider):
-    """LLM 驱动的路由决策。失败时退回 direct。
-
-    decompose_enabled: 子 Agent 编排是否可用。False 时 decompose 降级为 direct。
-    """
+class LLMRetrievalHintProvider(RetrievalHintProvider):
+    """LLM-generated retrieval hints for the model-driven agent loop."""
 
     def __init__(
         self,
         generator: Any,
         *,
         kwargs: dict[str, Any] | None = None,
-        decompose_enabled: bool = False,
     ) -> None:
         self._generator = generator
         self._kwargs = kwargs or {}
-        self._decompose_enabled = decompose_enabled
 
-    def route(self, state: AgentState) -> dict[Any, Any]:
+    def hint(self, state: AgentState) -> dict[Any, Any]:
         task = state.get("task", "")
-        prompt = build_route_prompt(state)
+        prompt = build_retrieval_hint_prompt(state)
         decision = _generate_structured(
-            self._generator, prompt, RouteDecision, kwargs=self._kwargs
+            self._generator, prompt, RetrievalHintDecision, kwargs=self._kwargs
         )
 
         # 规则提取 quoted_terms（从原始 query），过滤空字符串
@@ -177,41 +168,22 @@ class LLMRouteProvider(RouteProvider):
             "llm_quoted_terms_count": len(llm_quoted),
         }
 
-        route = decision.route if decision is not None else "direct"
         reason = decision.reason if decision is not None else "agent_research"
-        if decision is None or route not in {"fast_path", "decompose", "direct"}:
-            route = "direct"
-            reason = "agent_research"
-
-        # execution_mode 初始等于 route，decompose 降级时同步覆盖
-        execution_mode: str = route
-
-        # decompose 降级：子 Agent 编排未启用时 → direct 循环
-        if route == "decompose" and not self._decompose_enabled:
-            route = "direct"
-            reason = f"decompose_disabled: {reason}"
-            execution_mode = "direct"
 
         update: dict[str, Any] = {
-            "status": route,
-            "execution_mode": execution_mode,
-            "route_reason": reason,
+            "decision_reason": reason,
             "retrieval_signals": signals,
             "retrieval_signals_debug": signals_debug,
         }
 
-        if route == "direct" and execution_mode == "direct" and not self._decompose_enabled:
-            if decision is not None and decision.route == "decompose":
-                update["decompose_disabled_single_agent_mode"] = True
-
         return update
 
 
-# ── Evaluator ──
+# ── Tool decisions ──
 
 
-class LLMEvaluateDecisionProvider(EvaluateDecisionProvider):
-    """LLM 驱动的评估决策。失败时返回 pause。"""
+class LLMToolDecisionProvider(ToolDecisionProvider):
+    """Model tool-choice decision provider. Invalid output pauses visibly."""
 
     def __init__(self, generator: Any, *, kwargs: dict[str, Any] | None = None) -> None:
         self._generator = generator
@@ -225,10 +197,11 @@ class LLMEvaluateDecisionProvider(EvaluateDecisionProvider):
         budget_remaining: int,
         context: InjectedContext,
     ) -> ThinkOutput | dict[str, object] | Awaitable[ThinkOutput | dict[str, object]]:
-        prompt = build_evaluate_prompt(
+        prompt = build_tool_decision_prompt(
             state,
             budget_remaining=budget_remaining,
             context_text=context.as_text(),
+            allowed_tools=definition.allowed_tools,
         )
         decision = _generate_structured(
             self._generator, prompt, ThinkOutput, kwargs=self._kwargs
@@ -236,40 +209,11 @@ class LLMEvaluateDecisionProvider(EvaluateDecisionProvider):
         if decision is None:
             return ThinkOutput(
                 action="pause",
-                thought="LLM evaluate response could not be parsed",
-                needs_user_input="Evaluate provider failed to produce valid decision",
+                thought="LLM tool-decision response could not be parsed",
+                needs_user_input="Tool-decision provider failed to produce a valid decision",
                 confidence=0.0,
             )
         return decision
-
-
-# ── Planner ──
-
-
-class LLMPlanProvider(PlanProvider):
-    """LLM 驱动的任务拆解。失败时由 plan_node 返回 failed。"""
-
-    def __init__(self, generator: Any, *, kwargs: dict[str, Any] | None = None) -> None:
-        self._generator = generator
-        self._kwargs = kwargs or {}
-
-    def create_plan(
-        self,
-        state: AgentState,
-        *,
-        definition: AgentDefinition,
-    ) -> TaskDAG | dict[str, object] | Awaitable[TaskDAG | dict[str, object]]:
-        prompt = build_plan_prompt(
-            state,
-            allowed_tools=definition.allowed_tools,
-            max_depth=definition.max_depth,
-        )
-        plan = _generate_structured(
-            self._generator, prompt, TaskDAG, kwargs=self._kwargs
-        )
-        if plan is None:
-            raise ValueError("Plan provider failed to produce a valid TaskDAG")
-        return plan
 
 
 # ── 从 ModelRegistry 批量创建 ──
@@ -278,10 +222,8 @@ class LLMPlanProvider(PlanProvider):
 def create_default_providers(
     registry: ModelRegistry,
     selection: ModelSelectionPolicy,
-    *,
-    decompose_enabled: bool = False,
-) -> tuple[LLMRouteProvider, LLMEvaluateDecisionProvider, LLMPlanProvider]:
-    """根据 ModelSelectionPolicy + ModelRegistry 创建三个 LLM provider。"""
+) -> tuple[LLMRetrievalHintProvider, LLMToolDecisionProvider]:
+    """Create retrieval-hint and tool-decision providers for an agent loop."""
 
     def _resolve(
         node_model: str | None,
@@ -296,31 +238,19 @@ def create_default_providers(
             kwargs["max_tokens"] = max_tokens
         return resolved.generator, kwargs
 
-    router_gen, router_kwargs = _resolve(
-        selection.route_model,
-        "route",
-        selection.route_temperature,
-        selection.route_max_tokens,
+    hint_gen, hint_kwargs = _resolve(
+        selection.retrieval_hint_model,
+        "retrieval_hint",
+        selection.retrieval_hint_temperature,
+        selection.retrieval_hint_max_tokens,
     )
-    evaluator_gen, evaluator_kwargs = _resolve(
-        selection.evaluate_model,
-        "evaluate",
-        selection.evaluate_temperature,
-        selection.evaluate_max_tokens,
+    decision_gen, decision_kwargs = _resolve(
+        selection.tool_decision_model,
+        "tool_decision",
+        selection.tool_decision_temperature,
+        selection.tool_decision_max_tokens,
     )
-    planner_gen, planner_kwargs = _resolve(
-        selection.plan_model,
-        "plan",
-        selection.plan_temperature,
-        selection.plan_max_tokens,
-    )
-
     return (
-        LLMRouteProvider(
-            router_gen,
-            kwargs=router_kwargs,
-            decompose_enabled=decompose_enabled,
-        ),
-        LLMEvaluateDecisionProvider(evaluator_gen, kwargs=evaluator_kwargs),
-        LLMPlanProvider(planner_gen, kwargs=planner_kwargs),
+        LLMRetrievalHintProvider(hint_gen, kwargs=hint_kwargs),
+        LLMToolDecisionProvider(decision_gen, kwargs=decision_kwargs),
     )

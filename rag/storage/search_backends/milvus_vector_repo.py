@@ -629,6 +629,8 @@ class MilvusVectorRepo:
             if name != "embedding" or not isinstance(params, dict):
                 continue
             value = params.get("dim")
+            if value is None:
+                return None
             try:
                 return int(value)
             except (TypeError, ValueError):

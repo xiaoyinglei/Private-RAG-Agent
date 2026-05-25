@@ -5,9 +5,9 @@ import pytest
 from rag.agent.core.agent_service_factory import AgentServiceFactory
 from rag.agent.core.context import AgentRunConfig, RuntimeRegistry
 from rag.agent.core.definition import AgentDefinition
+from rag.agent.core.delegation import AgentDelegationRequest
 from rag.agent.core.registry import AgentRegistry
 from rag.agent.core.subagent_runner import BuiltinSubAgentRunner
-from rag.agent.core.task import SubTaskNode
 from rag.agent.service import AgentRunResult
 from rag.agent.state import AgentState, ThinkOutput, ToolCallPlan
 from rag.agent.tools.builtin_registry import create_builtin_tool_registry
@@ -75,10 +75,9 @@ def _parent_state(run_id: str = "parent-run", *, max_depth: int = 2) -> AgentSta
         "retrieval_signals": RetrievalSignals(),
         "retrieval_signals_debug": None,
         "run_config": config,
-        "plan": None,
         "iteration": 0,
         "status": "running",
-        "route_reason": None,
+        "decision_reason": None,
         "stop_reason": None,
         "needs_user_input": None,
         "pending_tool_calls": [],
@@ -88,13 +87,9 @@ def _parent_state(run_id: str = "parent-run", *, max_depth: int = 2) -> AgentSta
         "user_message": None,
         "human_input_request": None,
         "human_input_response": None,
-        "next_subtasks": None,
         "working_summary": None,
         "extracted_facts": [],
         "context_budget": None,
-        "subtask_results": {},
-        "terminal_subtasks": set(),
-        "successful_subtasks": set(),
         "final_answer": None,
         "groundedness_flag": False,
         "insufficient_evidence_flag": False,
@@ -124,17 +119,16 @@ async def test_builtin_subagent_runner_returns_agent_run_result_with_derived_con
             }
         ),
         model_registry=None,
-        evaluate_decision_provider=decision_provider,
+        tool_decision_provider=decision_provider,
     )
     runner = BuiltinSubAgentRunner(agent_registry=agent_registry, service_factory=factory)
     factory.bind_subagent_runner(runner)
 
-    result = await runner.run_subtask(
-        subtask=SubTaskNode(
-            subtask_id="s1",
+    result = await runner.run_delegated_task(
+        request=AgentDelegationRequest(
+            delegation_id="s1",
             agent_type="child_research_runner",
             prompt="Child task",
-            priority=1,
             estimated_tokens=2400,
         ),
         parent_state=_parent_state(),
@@ -170,12 +164,11 @@ async def test_builtin_subagent_runner_rejects_exhausted_parent_depth() -> None:
     factory.bind_subagent_runner(runner)
 
     with pytest.raises(RuntimeError, match="Agent nesting depth exceeded"):
-        await runner.run_subtask(
-            subtask=SubTaskNode(
-                subtask_id="s1",
+        await runner.run_delegated_task(
+            request=AgentDelegationRequest(
+                delegation_id="s1",
                 agent_type="child_depth_runner",
                 prompt="Child task",
-                priority=1,
             ),
             parent_state=_parent_state("parent-depth-run", max_depth=0),
         )

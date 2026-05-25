@@ -21,6 +21,7 @@ from rag.retrieval.evidence import ContextEvidenceMerger
 from rag.retrieval.grounding_service import GroundingService
 from rag.retrieval.models import (
     BuiltContext,
+    ContextEvidence,
     PublicQueryResult,
     QueryOptions,
     RAGQueryResult,
@@ -322,7 +323,7 @@ class _QueryPipeline:
         *,
         generated: object,
         merged_evidence: list[EvidenceItem],
-        prompt_evidence: Sequence[EvidenceItem],
+        prompt_evidence: Sequence[ContextEvidence],
         grounded_candidate: str,
         query: str,
         options: QueryOptions,
@@ -433,7 +434,7 @@ class _QueryPipeline:
     def _parse_compute_request(
         self,
         answer_text: str,
-        evidence: list[EvidenceItem],
+        evidence: Sequence[EvidenceItem],
     ) -> tuple[int, str] | None:
         match = self._compute_request_re().search(answer_text)
         if match is None:
@@ -490,7 +491,7 @@ class _QueryPipeline:
     def _parse_bare_select_compute_request(
         self,
         answer_text: str,
-        evidence: list[EvidenceItem],
+        evidence: Sequence[EvidenceItem],
     ) -> tuple[int, str] | None:
         asset_id = self._single_compute_asset_id(evidence)
         if asset_id is None:
@@ -533,7 +534,7 @@ class _QueryPipeline:
         return sql.strip()
 
     @staticmethod
-    def _prepare_compute_sql(sql: str, evidence: list[EvidenceItem]) -> str:
+    def _prepare_compute_sql(sql: str, evidence: Sequence[EvidenceItem]) -> str:
         cleaned = _QueryPipeline._clean_sql_fragment(sql)
         if not cleaned:
             return ""
@@ -541,7 +542,7 @@ class _QueryPipeline:
         return quoted
 
     @staticmethod
-    def _quote_known_table_columns(sql: str, evidence: list[EvidenceItem]) -> str:
+    def _quote_known_table_columns(sql: str, evidence: Sequence[EvidenceItem]) -> str:
         columns = _QueryPipeline._known_table_columns(evidence)
         if not columns:
             return sql
@@ -552,7 +553,7 @@ class _QueryPipeline:
         return quoted_sql
 
     @staticmethod
-    def _known_table_columns(evidence: list[EvidenceItem]) -> tuple[str, ...]:
+    def _known_table_columns(evidence: Sequence[EvidenceItem]) -> tuple[str, ...]:
         columns: list[str] = []
 
         def _add(name: str) -> None:
@@ -595,7 +596,7 @@ class _QueryPipeline:
         return "\n".join(lines).strip()
 
     @staticmethod
-    def _single_compute_asset_id(evidence: list[EvidenceItem]) -> int | None:
+    def _single_compute_asset_id(evidence: Sequence[EvidenceItem]) -> int | None:
         asset_ids = {
             int(match.group(1))
             for item in evidence

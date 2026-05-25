@@ -5,8 +5,6 @@ from pydantic import BaseModel
 from rag.agent.state import (
     _merge_citations,
     _merge_evidence,
-    _merge_sets,
-    _merge_subtask_results,
     _merge_tool_results,
 )
 from rag.schema.query import AnswerCitation, EvidenceItem
@@ -35,20 +33,6 @@ class TestMergeCitations:
         merged = _merge_citations([a], [b])
         assert len(merged) == 1
         assert merged[0].evidence_id == "e2"
-
-
-class TestMergeSets:
-    def test_union(self) -> None:
-        result = _merge_sets({"a", "b"}, {"b", "c"})
-        assert result == {"a", "b", "c"}
-
-
-class TestMergeSubtaskResults:
-    def test_merge_disjoint(self) -> None:
-        left = {"s1": "result1"}
-        right = {"s2": "result2"}
-        merged = _merge_subtask_results(left, right)
-        assert merged == {"s1": "result1", "s2": "result2"}
 
 
 class TestMergeToolResults:

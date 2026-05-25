@@ -216,7 +216,7 @@ class TestAgentDefinition:
         )
         assert ad.agent_type == "research"
         assert ad.allowed_tools == ["vector_search", "grounding"]
-        assert ad.model_selection.route_model is None  # 默认不绑定特定模型
+        assert ad.model_selection.retrieval_hint_model is None  # 默认不绑定特定模型
         assert ad.max_iterations == 10
         assert ad.max_depth == 2
         assert ad.estimated_token_budget == 8000
@@ -252,16 +252,13 @@ class TestAgentDefinition:
 
     def test_model_selection_defaults(self) -> None:
         ms = ModelSelectionPolicy()
-        assert ms.route_model is None
-        assert ms.evaluate_model is None
-        assert ms.plan_model is None
+        assert ms.retrieval_hint_model is None
+        assert ms.tool_decision_model is None
         assert ms.thinking is True
-        assert ms.route_temperature == 0.0
-        assert ms.evaluate_temperature == 0.0
-        assert ms.plan_temperature == 0.0
-        assert ms.route_max_tokens is None
-        assert ms.evaluate_max_tokens is None
-        assert ms.plan_max_tokens is None
+        assert ms.retrieval_hint_temperature == 0.0
+        assert ms.tool_decision_temperature == 0.0
+        assert ms.retrieval_hint_max_tokens is None
+        assert ms.tool_decision_max_tokens is None
 
 
 class TestAgentRegistry:
