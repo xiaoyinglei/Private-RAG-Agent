@@ -68,6 +68,7 @@ async def llm_decide_node(
         decision,
         next_iteration=state.get("iteration", 0),
         used_tool_call_ids=_used_tool_call_ids(state),
+        finalization_authorized=_finalization_authorized(state),
     )
     update["context_budget"] = context.context_budget
     return update
@@ -112,6 +113,7 @@ def _apply_decision(
     *,
     next_iteration: int,
     used_tool_call_ids: set[str] | None = None,
+    finalization_authorized: bool = False,
 ) -> dict[str, Any]:
     if decision.action == "execute":
         tool_calls = _normalize_tool_call_ids(
@@ -140,13 +142,34 @@ def _apply_decision(
             "controller_next": "pause",
         }
     if decision.action == "synthesize":
+        if not finalization_authorized:
+            return {
+                "status": "paused",
+                "stop_reason": "premature_synthesis",
+                "needs_user_input": (
+                    "The model requested finalization before required goal conditions were satisfied."
+                ),
+                "insufficient_evidence_flag": True,
+                "iteration": next_iteration,
+                "controller_next": "pause",
+            }
         return {
             "status": "done",
-            "stop_reason": decision.stop_reason or "synthesize",
+            "stop_reason": "goal_satisfied",
             "iteration": next_iteration,
             "controller_next": "finalize",
         }
     return {"status": "running", "iteration": next_iteration, "controller_next": "finalize"}
+
+
+def _finalization_authorized(state: AgentState) -> bool:
+    report = state.get("satisfaction_report")
+    return bool(
+        getattr(report, "is_done", False)
+        and getattr(report, "reason", None) == "goal_satisfied"
+        and not getattr(report, "open_gaps", [])
+        and not getattr(report, "conflicts", [])
+    )
 
 
 def _used_tool_call_ids(state: AgentState) -> set[str]:

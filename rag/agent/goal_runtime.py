@@ -2,15 +2,21 @@ from __future__ import annotations
 
 import re
 from collections.abc import Sequence
-from typing import Any, Literal, Protocol, TypedDict
+from typing import Any, Literal, Protocol, Self, TypedDict
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from rag.agent.state import ToolCallPlan
 from rag.agent.tools.spec import ToolResult
 from rag.schema.query import AnswerCitation, EvidenceItem
 
 RequirementId = Literal["answer", "evidence"]
+DeliverableKind = Literal["answer", "evidence", "computation"]
+AcceptanceRule = Literal[
+    "non_empty_answer",
+    "traceable_evidence",
+    "reproducible_computation",
+]
 
 
 class GoalConstraint(BaseModel):
@@ -21,6 +27,35 @@ class GoalConstraint(BaseModel):
     metadata: dict[str, object] = Field(default_factory=dict)
 
 
+class GoalDeliverable(BaseModel):
+    """One required output and the rule used to accept it."""
+
+    deliverable_id: str
+    kind: DeliverableKind
+    acceptance_rule: AcceptanceRule
+    required: bool = True
+    metadata: dict[str, object] = Field(default_factory=dict)
+
+    @property
+    def key(self) -> str:
+        return self.deliverable_id
+
+    @model_validator(mode="after")
+    def validate_acceptance_rule(self) -> Self:
+        expected_rules: dict[DeliverableKind, AcceptanceRule] = {
+            "answer": "non_empty_answer",
+            "evidence": "traceable_evidence",
+            "computation": "reproducible_computation",
+        }
+        expected = expected_rules[self.kind]
+        if self.acceptance_rule != expected:
+            raise ValueError(
+                f"acceptance_rule {self.acceptance_rule!r} is invalid for {self.kind!r}; "
+                f"expected {expected!r}"
+            )
+        return self
+
+
 class GoalSpec(BaseModel):
     """Completion contract for a user goal.
 
@@ -29,11 +64,29 @@ class GoalSpec(BaseModel):
     """
 
     original_query: str
+    deliverables: list[GoalDeliverable] = Field(default_factory=list)
+    # Backward-compatible inputs are normalized once into deliverables.
     required_outputs: list[str] = Field(default_factory=lambda: ["answer"])
     required_evidence: list[str] = Field(default_factory=list)
     required_operations: list[str] = Field(default_factory=list)
     constraints: list[GoalConstraint] = Field(default_factory=list)
     success_criteria: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def normalize_legacy_deliverables(self) -> Self:
+        if not self.deliverables:
+            deliverables: list[GoalDeliverable] = []
+            if self.required_outputs:
+                deliverables.append(_answer_deliverable())
+            if self.required_evidence:
+                deliverables.append(_evidence_deliverable())
+            if self.required_operations:
+                deliverables.append(_computation_deliverable())
+            self.deliverables = deliverables
+        deliverable_ids = [deliverable.deliverable_id for deliverable in self.deliverables]
+        if len(deliverable_ids) != len(set(deliverable_ids)):
+            raise ValueError("duplicate deliverable_id values are not allowed")
+        return self
 
     @property
     def requirement_ids(self) -> list[str]:
@@ -42,16 +95,18 @@ class GoalSpec(BaseModel):
             for constraint in self.constraints
             if constraint.required
         ]
-        if self.required_outputs:
-            requirements.append("answer")
-        if self.required_evidence:
-            requirements.append("evidence")
+        requirements.extend(
+            deliverable.deliverable_id
+            for deliverable in self.deliverables
+            if deliverable.required
+        )
         return requirements
 
     def open_gaps(self, satisfied_requirements: Sequence[str] = ()) -> list[GoalGap]:
         descriptions = {
             "answer": "Produce an answer.",
             "evidence": "Provide traceable evidence.",
+            "computation": "Provide a reproducible computation with traceable evidence.",
         }
         gaps: list[GoalGap] = []
         constraints_by_requirement = {
@@ -73,10 +128,18 @@ class GoalSpec(BaseModel):
                     )
                 )
                 continue
+            deliverable = next(
+                (
+                    item
+                    for item in self.deliverables
+                    if item.required and item.deliverable_id == requirement_id
+                ),
+                None,
+            )
             gaps.append(
                 GoalGap(
                     gap_id=requirement_id,
-                    gap_type=requirement_id,
+                    gap_type=requirement_id if deliverable is None else deliverable.kind,
                     description=descriptions.get(requirement_id, f"Satisfy {requirement_id}."),
                 )
             )
@@ -221,10 +284,13 @@ class GoalInitializer:
     def initialize(self, query: str) -> GoalSpec:
         stripped = query.strip()
         required_evidence: list[str] = []
+        deliverables = [_answer_deliverable()]
         if _explicitly_requests_evidence(stripped):
             required_evidence.append("citation")
+            deliverables.append(_evidence_deliverable())
         return GoalSpec(
             original_query=stripped,
+            deliverables=deliverables,
             required_evidence=required_evidence,
             constraints=_explicit_context_title_constraints(stripped),
             success_criteria=_success_criteria(required_evidence=required_evidence),
@@ -246,16 +312,17 @@ class ObservationBuilder:
 
         output = result.output
         observation_only = bool(getattr(output, "observation_only", False))
-        evidence_refs = (
-            []
-            if observation_only
-            else _dedupe_evidence_refs(
+        if observation_only:
+            evidence_refs: list[EvidenceRef] = []
+        elif result.tool_name.startswith("agent_"):
+            evidence_refs = _delegated_evidence_refs_from_output(output)
+        else:
+            evidence_refs = _dedupe_evidence_refs(
                 [
                     *_evidence_refs_from_output(output),
                     *_search_evidence_refs_from_output(output),
                 ]
             )
-        )
         answer_text = None if observation_only else _answer_text(result.tool_name, output)
         answer = (
             AnswerCandidate(
@@ -368,14 +435,31 @@ class StateReducer:
 
         all_answers = [*state.get("answer_candidates", []), *answer_candidates]
         all_evidence_refs = [*state.get("evidence_refs", []), *evidence_refs]
+        all_computation_results = [
+            *state.get("computation_results", []),
+            *computation_results,
+        ]
         satisfied = _satisfied_requirements(
             goal,
             all_answers,
             all_evidence_refs,
             state.get("context_bindings", []),
+            all_computation_results,
         )
         previous_satisfied = set(state.get("satisfied_requirements", []))
-        progress_made = bool(set(satisfied) - previous_satisfied) or bool(new_observations)
+        previous_accepted_refs = {
+            ref.key
+            for ref in state.get("evidence_refs", [])
+            if isinstance(ref, EvidenceRef) and _is_traceable_evidence_ref(ref)
+        }
+        accepted_refs = {
+            ref.key
+            for ref in all_evidence_refs
+            if isinstance(ref, EvidenceRef) and _is_traceable_evidence_ref(ref)
+        }
+        progress_made = bool(set(satisfied) - previous_satisfied) or bool(
+            accepted_refs - previous_accepted_refs
+        )
         open_gaps = goal.open_gaps(satisfied)
         error_seen = any(observation.status == "error" for observation in new_observations)
 
@@ -419,7 +503,13 @@ class SatisfactionChecker:
 
         answers = list(state.get("answer_candidates", []))
         evidence_refs = list(state.get("evidence_refs", []))
-        satisfied = _satisfied_requirements(goal, answers, evidence_refs, bindings)
+        satisfied = _satisfied_requirements(
+            goal,
+            answers,
+            evidence_refs,
+            bindings,
+            state.get("computation_results", []),
+        )
         open_gaps = goal.open_gaps(satisfied)
         if not open_gaps and not conflicts:
             return SatisfactionReport(
@@ -559,6 +649,7 @@ def _satisfied_requirements(
     answer_candidates: Sequence[AnswerCandidate],
     evidence_refs: Sequence[EvidenceRef],
     context_bindings: Sequence[object] = (),
+    computation_results: Sequence[ComputationResult] = (),
 ) -> list[str]:
     satisfied: list[str] = []
     for constraint in goal.constraints:
@@ -569,15 +660,87 @@ def _satisfied_requirements(
             for binding in context_bindings
         ):
             satisfied.append(f"constraint:{constraint.constraint_id}")
-    if goal.required_outputs and any(candidate.text.strip() for candidate in answer_candidates):
-        satisfied.append("answer")
-    if goal.required_evidence and any(ref.key for ref in evidence_refs):
-        satisfied.append("evidence")
+    for deliverable in goal.deliverables:
+        if not deliverable.required:
+            continue
+        if _deliverable_is_satisfied(
+            deliverable,
+            answer_candidates=answer_candidates,
+            evidence_refs=evidence_refs,
+            computation_results=computation_results,
+        ):
+            satisfied.append(deliverable.deliverable_id)
     return satisfied
+
+
+def _deliverable_is_satisfied(
+    deliverable: GoalDeliverable,
+    *,
+    answer_candidates: Sequence[AnswerCandidate],
+    evidence_refs: Sequence[EvidenceRef],
+    computation_results: Sequence[ComputationResult],
+) -> bool:
+    if deliverable.acceptance_rule == "non_empty_answer":
+        return any(candidate.text.strip() for candidate in answer_candidates)
+    if deliverable.acceptance_rule == "traceable_evidence":
+        return any(_is_traceable_evidence_ref(ref) for ref in evidence_refs)
+    if deliverable.acceptance_rule == "reproducible_computation":
+        return any(_is_reproducible_computation(result) for result in computation_results)
+    return False
+
+
+def _is_traceable_evidence_ref(ref: EvidenceRef) -> bool:
+    if isinstance(ref.citation_id, str) and ref.citation_id.strip():
+        return True
+    if isinstance(ref.citation_anchor, str) and ref.citation_anchor.strip():
+        return True
+    return (
+        ref.source == "asset"
+        and isinstance(ref.evidence_id, str)
+        and ref.evidence_id.startswith("asset:")
+        and ref.evidence_id.removeprefix("asset:").isdigit()
+    )
+
+
+def _is_reproducible_computation(result: ComputationResult) -> bool:
+    return bool(
+        isinstance(result.expression, str)
+        and result.expression.strip()
+        and any(_is_traceable_evidence_ref(ref) for ref in result.evidence_refs)
+    )
+
+
+def _answer_deliverable() -> GoalDeliverable:
+    return GoalDeliverable(
+        deliverable_id="answer",
+        kind="answer",
+        acceptance_rule="non_empty_answer",
+    )
+
+
+def _evidence_deliverable() -> GoalDeliverable:
+    return GoalDeliverable(
+        deliverable_id="evidence",
+        kind="evidence",
+        acceptance_rule="traceable_evidence",
+    )
+
+
+def _computation_deliverable() -> GoalDeliverable:
+    return GoalDeliverable(
+        deliverable_id="computation",
+        kind="computation",
+        acceptance_rule="reproducible_computation",
+    )
 
 
 def _answer_text(tool_name: str, output: BaseModel | None) -> str | None:
     if output is None:
+        return None
+    if tool_name.startswith("agent_"):
+        conclusion = getattr(output, "conclusion", None)
+        if isinstance(conclusion, str) and conclusion.strip():
+            return conclusion.strip()
         return None
     if tool_name in {
         "vector_search",
@@ -639,6 +802,50 @@ def _evidence_refs_from_output(output: BaseModel | None) -> list[EvidenceRef]:
     asset_id = getattr(output, "asset_id", None)
     if isinstance(asset_id, int) and asset_id > 0:
         refs.append(EvidenceRef(evidence_id=f"asset:{asset_id}", source="asset"))
+    return _dedupe_evidence_refs(refs)
+
+
+def _delegated_evidence_refs_from_output(output: BaseModel | None) -> list[EvidenceRef]:
+    if output is None:
+        return []
+    refs: list[EvidenceRef] = []
+    for item in getattr(output, "evidence_refs", []) or []:
+        evidence_id = getattr(item, "evidence_id", None)
+        citation_id = getattr(item, "citation_id", None)
+        citation_anchor = getattr(item, "citation_anchor", None)
+        if not isinstance(evidence_id, str) or not evidence_id.strip():
+            continue
+        if not (
+            isinstance(citation_id, str) and citation_id.strip()
+        ) and not (
+            isinstance(citation_anchor, str) and citation_anchor.strip()
+        ):
+            continue
+        doc_id = getattr(item, "doc_id", None)
+        refs.append(
+            EvidenceRef(
+                evidence_id=evidence_id.strip(),
+                citation_id=citation_id.strip() if isinstance(citation_id, str) else None,
+                citation_anchor=(
+                    citation_anchor.strip() if isinstance(citation_anchor, str) else None
+                ),
+                doc_id=doc_id if isinstance(doc_id, int) else None,
+                source="delegated_agent",
+            )
+        )
+    for citation in getattr(output, "citations", []) or []:
+        citation_item = AnswerCitation.model_validate(citation)
+        if any(ref.evidence_id == citation_item.evidence_id for ref in refs):
+            continue
+        refs.append(
+            EvidenceRef(
+                evidence_id=citation_item.evidence_id,
+                citation_id=citation_item.citation_id,
+                citation_anchor=citation_item.citation_anchor,
+                doc_id=citation_item.doc_id,
+                source="delegated_agent",
+            )
+        )
     return _dedupe_evidence_refs(refs)
 
 
@@ -1035,6 +1242,7 @@ __all__ = [
     "EvidenceRef",
     "GoalConflict",
     "GoalConstraint",
+    "GoalDeliverable",
     "GoalGap",
     "GoalInitializer",
     "GoalSpec",

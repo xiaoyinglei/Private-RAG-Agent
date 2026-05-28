@@ -284,7 +284,7 @@ class TestAgentToolOutput:
 
     def test_from_run_result_extracts_fields(self) -> None:
         from rag.agent.service import AgentRunResult
-        from rag.schema.query import EvidenceItem
+        from rag.schema.query import AnswerCitation, EvidenceItem
 
         result = AgentRunResult(
             run_id="r1",
@@ -301,6 +301,15 @@ class TestAgentToolOutput:
                     record_type="text",
                 )
             ],
+            citations=[
+                AnswerCitation(
+                    citation_id="cit-1",
+                    evidence_id="ev-1",
+                    record_type="text",
+                    citation_anchor="p1",
+                    doc_id=1,
+                )
+            ],
             groundedness_flag=True,
         )
         out = AgentToolOutput.from_run_result(result, "research")
@@ -308,8 +317,76 @@ class TestAgentToolOutput:
         assert out.status == "done"
         assert out.agent_name == "research"
         assert out.confidence == 0.8
-        assert "ev-1" in out.evidence_refs
+        assert out.evidence_refs[0].evidence_id == "ev-1"
+        assert out.evidence_refs[0].citation_id == "cit-1"
+        assert out.evidence_refs[0].citation_anchor == "p1"
+        assert out.evidence_refs[0].doc_id == 1
+        assert out.citations == result.citations
         assert len(out.key_facts) >= 1
+
+    def test_from_run_result_bounds_delegated_evidence_and_citations(self) -> None:
+        from rag.agent.service import AgentRunResult
+        from rag.schema.query import AnswerCitation, EvidenceItem
+
+        result = AgentRunResult(
+            run_id="r-bounded",
+            thread_id="t-bounded",
+            status="done",
+            final_answer="Bounded conclusion",
+            evidence=[
+                EvidenceItem(
+                    evidence_id=f"ev-{index}",
+                    doc_id=index,
+                    text=f"Evidence item {index}",
+                    score=0.9,
+                    citation_anchor=f"p{index}",
+                    record_type="text",
+                )
+                for index in range(21)
+            ],
+            citations=[
+                AnswerCitation(
+                    citation_id=f"cit-{index}",
+                    evidence_id=f"ev-{index}",
+                    record_type="text",
+                    citation_anchor=f"p{index}",
+                    doc_id=index,
+                )
+                for index in range(21)
+            ],
+            groundedness_flag=True,
+        )
+
+        out = AgentToolOutput.from_run_result(result, "research")
+
+        assert len(out.evidence_refs) == 20
+        assert len(out.citations) == 20
+
+    def test_from_run_result_omits_evidence_without_traceable_locator(self) -> None:
+        from rag.agent.service import AgentRunResult
+        from rag.schema.query import EvidenceItem
+
+        result = AgentRunResult(
+            run_id="r-untraceable",
+            thread_id="t-untraceable",
+            status="done",
+            final_answer="Conclusion still returns",
+            evidence=[
+                EvidenceItem(
+                    evidence_id="ev-untraceable",
+                    doc_id=1,
+                    text="Unsupported observation.",
+                    score=0.5,
+                    citation_anchor="",
+                    record_type="text",
+                )
+            ],
+        )
+
+        out = AgentToolOutput.from_run_result(result, "research")
+
+        assert out.conclusion == "Conclusion still returns"
+        assert out.evidence_refs == []
 
 
 class TestAgentAsToolAdapter:

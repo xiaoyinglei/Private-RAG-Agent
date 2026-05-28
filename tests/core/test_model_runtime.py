@@ -331,6 +331,34 @@ def test_openai_compatible_generator_structured_fallback_parses_fenced_json() ->
     assert result == _StructuredPayload(answer="ok")
 
 
+def test_openai_compatible_generator_structured_fallback_includes_schema() -> None:
+    gen = _OpenAICompatibleChatGenerator(
+        model="test-model",
+        base_url="http://127.0.0.1:8080/v1",
+    )
+    mock_response = MagicMock()
+    mock_response.choices = [MagicMock()]
+    mock_response.choices[0].message.content = '说明文字\n{"answer": "ok"}'
+
+    original_create = gen._client.chat.completions.create
+
+    def fake_create(*, model, messages, **kwargs):  # noqa: ARG001
+        prompt = messages[-1]["content"]
+        assert "Return ONLY valid JSON matching this schema." in prompt
+        assert "JSON schema:" in prompt
+        assert '"answer"' in prompt
+        assert "User task:" in prompt
+        return mock_response
+
+    gen._client.chat.completions.create = fake_create
+    try:
+        result = gen.generate_structured(prompt="return json", schema=_StructuredPayload)
+    finally:
+        gen._client.chat.completions.create = original_create
+
+    assert result == _StructuredPayload(answer="ok")
+
+
 # ── 端到端集成测试：模拟数据跑完整 RAG 链路 ──
 
 

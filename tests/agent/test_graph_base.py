@@ -333,7 +333,7 @@ class TestBaseGraph:
         [tool_result] = result["tool_results"]
         assert tool_result.status == "ok"
         assert tool_result.output == EchoOutput(message="echo:hello")
-        assert result["groundedness_flag"] is True
+        assert result["groundedness_flag"] is False
 
     @pytest.mark.anyio
     async def test_unregistered_tool_records_failure_result(self) -> None:

@@ -98,7 +98,8 @@ async def test_agent_service_run_without_runner_fails_closed() -> None:
         )
     )
 
-    assert result.status == "done"
+    assert result.status == "failed"
+    assert result.stop_reason == "tool_error"
     assert result.insufficient_evidence_flag is True
     assert result.tool_results[0].status == "error"
     assert result.tool_results[0].error.code == "tool_not_implemented"

@@ -84,7 +84,7 @@ models:
     provider: mimo
     protocol: openai_compatible
     model: mimo-v2-flash
-    base_url: https://api.xiaomimimo.com/v1/chat/completions
+    base_url: https://api.xiaomimimo.com/v1
     api_key_env: MIMO_API_KEY
 
 

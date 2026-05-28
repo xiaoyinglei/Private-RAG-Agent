@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import inspect
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal, Self
 from uuid import uuid4
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from rag.agent.core.context import AgentRunConfig, derive_child_config
 from rag.agent.core.definition import AgentDefinition
@@ -21,7 +21,7 @@ from rag.agent.graphs.nodes.retrieval_hint import RetrievalHintProvider
 from rag.agent.state import AgentState
 from rag.agent.tools.registry import ToolRegistry
 from rag.agent.tools.spec import ToolError, ToolPermissions, ToolSpec
-from rag.schema.query import RetrievalSignals
+from rag.schema.query import AnswerCitation, RetrievalSignals
 
 if TYPE_CHECKING:
     from rag.agent.service import AgentRunResult
@@ -65,12 +65,49 @@ class AgentToolInput(BaseModel):
     constraints: list[str] = Field(default_factory=list, description="约束条件，如 'prefer_table', 'max_3_items'")
 
 
+MAX_DELEGATED_EVIDENCE_REFS = 20
+MAX_DELEGATED_CITATIONS = 20
+MAX_DELEGATED_KEY_FACTS = 10
+MAX_DELEGATED_FACT_CHARS = 200
+
+
+class DelegatedEvidenceRef(BaseModel):
+    """Compact, traceable child evidence reference returned to the parent loop."""
+
+    model_config = ConfigDict(frozen=True)
+
+    evidence_id: str = Field(min_length=1)
+    citation_id: str | None = None
+    citation_anchor: str | None = None
+    doc_id: int | None = None
+    source: Literal["delegated_agent"] = "delegated_agent"
+
+    @model_validator(mode="after")
+    def require_traceable_locator(self) -> Self:
+        if not self.citation_id and not self.citation_anchor:
+            raise ValueError("delegated evidence reference requires a citation id or anchor")
+        return self
+
+
 class AgentToolOutput(BaseModel):
     """Agent-as-tool 脱水结果。不暴露完整 AgentRunResult，只返回关键信息。"""
 
     conclusion: str = Field(default="", description="子 Agent 的核心结论")
-    key_facts: list[str] = Field(default_factory=list, description="关键事实列表")
-    evidence_refs: list[str] = Field(default_factory=list, description="证据引用（evidence_id 列表）")
+    key_facts: list[str] = Field(
+        default_factory=list,
+        max_length=MAX_DELEGATED_KEY_FACTS,
+        description="关键事实列表",
+    )
+    evidence_refs: list[DelegatedEvidenceRef] = Field(
+        default_factory=list,
+        max_length=MAX_DELEGATED_EVIDENCE_REFS,
+        description="可定位的子 Agent 证据引用",
+    )
+    citations: list[AnswerCitation] = Field(
+        default_factory=list,
+        max_length=MAX_DELEGATED_CITATIONS,
+        description="子 Agent 引用元数据",
+    )
     confidence: float = Field(default=0.0, ge=0.0, le=1.0, description="置信度 0-1")
     status: str = Field(default="unknown", description="子 Agent 最终状态")
     agent_name: str = Field(default="", description="执行的 Agent 类型")
@@ -81,7 +118,8 @@ class AgentToolOutput(BaseModel):
         return cls(
             conclusion=result.final_answer or "",
             key_facts=_extract_key_facts(result),
-            evidence_refs=[item.evidence_id for item in result.evidence if getattr(item, "evidence_id", None)],
+            evidence_refs=_extract_evidence_refs(result),
+            citations=list(result.citations[:MAX_DELEGATED_CITATIONS]),
             confidence=_derive_confidence(result),
             status=result.status,
             agent_name=agent_name,
@@ -102,8 +140,47 @@ def _extract_key_facts(result: DelegatedAgentResult) -> list[str]:
     for item in result.evidence:
         text = getattr(item, "text", None)
         if isinstance(text, str) and text.strip():
-            facts.append(text.strip()[:200])
-    return facts[:10]
+            facts.append(text.strip()[:MAX_DELEGATED_FACT_CHARS])
+        if len(facts) >= MAX_DELEGATED_KEY_FACTS:
+            break
+    return facts
+
+
+def _extract_evidence_refs(result: DelegatedAgentResult) -> list[DelegatedEvidenceRef]:
+    citations = list(result.citations[:MAX_DELEGATED_CITATIONS])
+    citations_by_evidence = {citation.evidence_id: citation for citation in citations}
+    refs: list[DelegatedEvidenceRef] = []
+    evidence_ids: set[str] = set()
+    for item in result.evidence:
+        if len(refs) >= MAX_DELEGATED_EVIDENCE_REFS:
+            break
+        citation = citations_by_evidence.get(item.evidence_id)
+        citation_anchor = item.citation_anchor.strip() if item.citation_anchor.strip() else None
+        if citation is None and citation_anchor is None:
+            continue
+        refs.append(
+            DelegatedEvidenceRef(
+                evidence_id=item.evidence_id,
+                citation_id=None if citation is None else citation.citation_id,
+                citation_anchor=citation_anchor,
+                doc_id=item.doc_id,
+            )
+        )
+        evidence_ids.add(item.evidence_id)
+    for citation in citations:
+        if len(refs) >= MAX_DELEGATED_EVIDENCE_REFS:
+            break
+        if citation.evidence_id in evidence_ids:
+            continue
+        refs.append(
+            DelegatedEvidenceRef(
+                evidence_id=citation.evidence_id,
+                citation_id=citation.citation_id,
+                citation_anchor=citation.citation_anchor,
+                doc_id=citation.doc_id,
+            )
+        )
+    return refs
 
 
 def _derive_confidence(result: DelegatedAgentResult) -> float:

@@ -103,7 +103,8 @@ async def test_llm_decide_passes_injected_context_to_tool_decision_provider() ->
         decision_provider=provider,
     )
 
-    assert result["status"] == "done"
+    assert result["status"] == "paused"
+    assert result["stop_reason"] == "premature_synthesis"
     assert result["context_budget"].evidence_tokens > 0
     assert provider.context is not None
     names = [section.name for section in provider.context.sections]
