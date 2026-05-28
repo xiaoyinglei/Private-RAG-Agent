@@ -50,3 +50,20 @@ def test_llm_decision_keeps_unique_tool_call_ids() -> None:
     )
 
     assert update["pending_tool_calls"] == [call]
+
+
+def test_authorized_synthesis_preserves_goal_satisfied_finalization_reason() -> None:
+    decision = ThinkOutput(
+        action="synthesize",
+        thought="goal report has authorized finalization",
+        stop_reason="model_considers_evidence_sufficient",
+    )
+
+    update = _apply_decision(
+        decision,
+        next_iteration=2,
+        finalization_authorized=True,
+    )
+
+    assert update["status"] == "done"
+    assert update["stop_reason"] == "goal_satisfied"

@@ -76,20 +76,29 @@ class AgentLoopController:
             "context_bindings": list(effective_bindings.values()),
         }
         report = self.checker.check(assessed_state)
+        progress_made = bool(
+            _gap_ids(state.get("open_gaps", [])) - _gap_ids(report.open_gaps)
+        )
+        if progress_made and report.is_stuck and not report.is_done:
+            report = report.model_copy(update={"is_stuck": False, "reason": "open_gaps"})
         update: dict[str, Any] = {
             "satisfaction_report": report,
             "open_gaps": report.open_gaps,
             "conflicts": report.conflicts,
             "context_bindings": assessed_bindings,
         }
+        if progress_made:
+            update["no_progress_count"] = 0
         if report.is_done:
             update.update(
                 {
-                    "status": "done",
+                    "status": "done" if report.reason == "goal_satisfied" else "failed",
                     "stop_reason": report.reason,
                     "controller_next": "finalize",
                 }
             )
+            if report.reason != "goal_satisfied":
+                update["insufficient_evidence_flag"] = True
             return update
 
         if report.is_stuck:
@@ -112,6 +121,18 @@ class AgentLoopController:
             }
         )
         return update
+
+
+def _gap_ids(gaps: Sequence[object]) -> set[str]:
+    ids: set[str] = set()
+    for gap in gaps:
+        if isinstance(gap, str):
+            ids.add(gap)
+            continue
+        gap_id = getattr(gap, "gap_id", None)
+        if isinstance(gap_id, str) and gap_id:
+            ids.add(gap_id)
+    return ids
 
 
 __all__ = ["AgentLoopController", "BindingAssessor", "GoalChecker"]

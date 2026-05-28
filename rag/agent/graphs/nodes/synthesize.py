@@ -40,7 +40,7 @@ async def synthesize_node(
             return {
                 "status": "done",
                 "final_answer": final_answer,
-                "groundedness_flag": True,
+                "groundedness_flag": _has_traceable_support(state),
                 "insufficient_evidence_flag": False,
             }
 
@@ -102,6 +102,27 @@ def _supporting_asset_units(state: AgentState, candidate: object) -> list[object
     ]
 
 
+def _has_traceable_support(state: AgentState) -> bool:
+    if state.get("evidence") or state.get("citations"):
+        return True
+    for ref in state.get("evidence_refs", []):
+        citation_id = getattr(ref, "citation_id", None)
+        citation_anchor = getattr(ref, "citation_anchor", None)
+        if isinstance(citation_id, str) and citation_id.strip():
+            return True
+        if isinstance(citation_anchor, str) and citation_anchor.strip():
+            return True
+        evidence_id = getattr(ref, "evidence_id", None)
+        if (
+            getattr(ref, "source", None) == "asset"
+            and isinstance(evidence_id, str)
+            and evidence_id.startswith("asset:")
+            and evidence_id.removeprefix("asset:").isdigit()
+        ):
+            return True
+    return False
+
+
 def _asset_source_line(unit: object) -> str:
     locator = getattr(unit, "locator", {})
     if not isinstance(locator, dict):
@@ -141,6 +162,7 @@ def _legacy_synthesize_node(state: AgentState) -> dict[str, Any]:
             state.get("insufficient_evidence_flag", False)
             or bool(error_results)
             or _has_insufficient_output(ok_results)
+            or status == "failed"
         ),
     }
 

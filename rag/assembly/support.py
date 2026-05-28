@@ -5,7 +5,7 @@ import os
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any, TypeVar
+from typing import Any, TypeVar, cast
 
 from rag.assembly.models import (
     AssemblyConfig,
@@ -156,8 +156,23 @@ class _OpenAICompatibleChatGenerator:
         system_prompt: str | None = None,
         **kwargs: object,
     ) -> T:
-        raw_output = self.generate_text(prompt=prompt, system_prompt=system_prompt, **kwargs)
-        candidate = _strip_json_code_fence(raw_output).strip()
+        schema_json = json.dumps(cast(Any, schema).model_json_schema(), ensure_ascii=False)
+        structured_prompt = f"""
+Return ONLY valid JSON matching this schema.
+Do not include markdown fences, explanations, or extra text.
+
+JSON schema:
+{schema_json}
+
+User task:
+{prompt}
+""".strip()
+        raw_output = self.generate_text(
+            prompt=structured_prompt,
+            system_prompt=system_prompt,
+            **kwargs,
+        )
+        candidate = _extract_json_object(_strip_json_code_fence(raw_output)).strip()
         try:
             payload = json.loads(candidate)
         except json.JSONDecodeError as exc:
@@ -174,6 +189,19 @@ class _OpenAICompatibleChatGenerator:
 def _strip_json_code_fence(text: str) -> str:
     match = _JSON_CODE_FENCE_RE.match(text)
     return match.group("body") if match else text
+
+
+def _extract_json_object(text: str) -> str:
+    stripped = text.strip()
+    if stripped.startswith("{") and stripped.endswith("}"):
+        return stripped
+
+    start = stripped.find("{")
+    end = stripped.rfind("}")
+    if start != -1 and end != -1 and start < end:
+        return stripped[start : end + 1]
+
+    return stripped
 
 
 def _backend_model_name(backend: object | None, capability: str) -> str | None:

@@ -3,18 +3,23 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import pytest
+from pydantic import ValidationError
 
 from rag.agent.binding_providers import AssetContextBindingProvider
 from rag.agent.builtin.research import RESEARCH_AGENT
+from rag.agent.core.agent_as_tool import AgentToolOutput, DelegatedEvidenceRef
 from rag.agent.core.context import AgentRunConfig, RuntimeRegistry
 from rag.agent.core.definition import AgentDefinition
 from rag.agent.goal_runtime import (
     AnswerCandidate,
+    ComputationResult,
     ContextBindingAssessor,
     ContextUnit,
     EvidenceRef,
+    GoalDeliverable,
     GoalGap,
     GoalInitializer,
+    GoalSpec,
     SatisfactionChecker,
     StateReducer,
 )
@@ -30,6 +35,7 @@ from rag.agent.tools.builtin_registry import create_builtin_tool_registry
 from rag.agent.tools.llm_tools import LLMTextOutput
 from rag.agent.tools.rag_tools import SearchOutput
 from rag.agent.tools.spec import ToolResult
+from rag.schema.query import AnswerCitation
 from rag.schema.runtime import AccessPolicy
 
 
@@ -89,6 +95,113 @@ async def test_runtime_finalizes_satisfied_goal_without_llm_decision() -> None:
     assert result.final_answer == "北方和东北日提货合计为 15.491928，出处为 table@p4。"
     assert result.stop_reason == "goal_satisfied"
     assert result.tool_results[0].tool_name == "llm_summarize"
+
+
+@pytest.mark.anyio
+async def test_answer_only_goal_does_not_gain_evidence_requirement_from_agent_definition() -> None:
+    call = ToolCallPlan.create(
+        "llm_summarize",
+        {
+            "task": "解释政策影响",
+            "context_sections": ["unsupported summary"],
+        },
+    )
+    service = AgentService(
+        definition=RESEARCH_AGENT,
+        tool_registry=create_builtin_tool_registry(
+            runners={"llm_summarize": lambda _payload: LLMTextOutput(text="政策影响总结。")}
+        ),
+    )
+
+    result = await service.run(
+        AgentRunRequest(
+            task="解释政策影响",
+            run_id="research-default-evidence",
+            thread_id="research-default-evidence",
+            pending_tool_calls=[call],
+        )
+    )
+
+    assert result.status == "done"
+    assert result.final_answer == "政策影响总结。"
+    assert result.groundedness_flag is False
+
+
+@pytest.mark.anyio
+async def test_explicit_evidence_goal_still_waits_for_evidence_with_same_agent_definition() -> None:
+    call = ToolCallPlan.create(
+        "llm_summarize",
+        {
+            "task": "解释政策影响并给出处",
+            "context_sections": ["unsupported summary"],
+        },
+    )
+    service = AgentService(
+        definition=RESEARCH_AGENT,
+        tool_registry=create_builtin_tool_registry(
+            runners={"llm_summarize": lambda _payload: LLMTextOutput(text="政策影响总结。")}
+        ),
+    )
+
+    result = await service.run(
+        AgentRunRequest(
+            task="解释政策影响并给出处",
+            run_id="explicit-evidence-goal",
+            thread_id="explicit-evidence-goal",
+            pending_tool_calls=[call],
+        )
+    )
+
+    assert result.status == "paused"
+    assert result.final_answer is None
+    assert result.needs_user_input == (
+        "No tool decision provider is available to close the remaining goal gaps."
+    )
+
+
+def test_goal_initializer_declares_deliverables_with_acceptance_rules() -> None:
+    answer_only = GoalInitializer().initialize("解释政策影响")
+    with_evidence = GoalInitializer().initialize("解释政策影响并给出处")
+
+    assert [
+        (item.deliverable_id, item.kind, item.acceptance_rule)
+        for item in answer_only.deliverables
+    ] == [("answer", "answer", "non_empty_answer")]
+    assert [
+        (item.deliverable_id, item.kind, item.acceptance_rule)
+        for item in with_evidence.deliverables
+    ] == [
+        ("answer", "answer", "non_empty_answer"),
+        ("evidence", "evidence", "traceable_evidence"),
+    ]
+
+
+def test_goal_deliverable_rejects_acceptance_rule_for_other_product_kind() -> None:
+    with pytest.raises(ValidationError, match="acceptance_rule"):
+        GoalDeliverable(
+            deliverable_id="evidence",
+            kind="evidence",
+            acceptance_rule="non_empty_answer",
+        )
+
+
+def test_goal_spec_rejects_duplicate_deliverable_ids() -> None:
+    with pytest.raises(ValidationError, match="duplicate deliverable_id"):
+        GoalSpec(
+            original_query="invalid duplicate goal",
+            deliverables=[
+                GoalDeliverable(
+                    deliverable_id="result",
+                    kind="answer",
+                    acceptance_rule="non_empty_answer",
+                ),
+                GoalDeliverable(
+                    deliverable_id="result",
+                    kind="evidence",
+                    acceptance_rule="traceable_evidence",
+                ),
+            ],
+        )
 
 
 def test_goal_initializer_requires_binding_for_explicit_source_scope() -> None:
@@ -267,6 +380,161 @@ def test_asset_analyze_observation_satisfies_answer_and_asset_evidence() -> None
     assert update["evidence_refs"][0].evidence_id == "asset:14"
 
 
+def test_delegated_agent_observation_promotes_conclusion_and_citation_evidence() -> None:
+    goal = GoalInitializer().initialize("总结政策影响并给出处")
+    citation = AnswerCitation(
+        citation_id="cit-child",
+        evidence_id="ev-child",
+        record_type="text",
+        citation_anchor="policy#child",
+        doc_id=7,
+    )
+    result = ToolResult(
+        tool_call_id="tc-child",
+        tool_name="agent_research",
+        status="ok",
+        output=AgentToolOutput(
+            conclusion="子 Agent 结论。",
+            evidence_refs=[
+                DelegatedEvidenceRef(
+                    evidence_id="ev-child",
+                    citation_id="cit-child",
+                    citation_anchor="policy#child",
+                    doc_id=7,
+                )
+            ],
+            citations=[citation],
+            status="done",
+            agent_name="research",
+        ),
+        latency_ms=0,
+    )
+    state = {
+        "task": goal.original_query,
+        "goal_spec": goal,
+        "tool_results": [result],
+        "structured_observations": [],
+        "answer_candidates": [],
+        "evidence_refs": [],
+        "satisfied_requirements": [],
+        "open_gaps": goal.open_gaps(),
+        "pending_tool_calls": [],
+        "conflicts": [],
+    }
+
+    state.update(StateReducer().reduce_tool_results(state))
+
+    assert state["answer_candidates"][0].text == "子 Agent 结论。"
+    assert state["evidence_refs"] == [
+        EvidenceRef(
+            evidence_id="ev-child",
+            citation_id="cit-child",
+            citation_anchor="policy#child",
+            doc_id=7,
+            source="delegated_agent",
+        )
+    ]
+    assert state["citations"] == [citation]
+    assert SatisfactionChecker().check(state).is_done is True
+
+
+def test_delegated_agent_anchored_ref_is_evidence_without_copying_child_body() -> None:
+    goal = GoalInitializer().initialize("总结政策影响并给出处")
+    result = ToolResult(
+        tool_call_id="tc-child-ref",
+        tool_name="agent_research",
+        status="ok",
+        output=AgentToolOutput(
+            conclusion="引用支撑的结论。",
+            evidence_refs=[
+                DelegatedEvidenceRef(
+                    evidence_id="ev-child-ref",
+                    citation_anchor="policy#ref",
+                    doc_id=8,
+                )
+            ],
+            status="done",
+            agent_name="research",
+        ),
+        latency_ms=0,
+    )
+    state = {
+        "task": goal.original_query,
+        "goal_spec": goal,
+        "tool_results": [result],
+        "structured_observations": [],
+        "answer_candidates": [],
+        "evidence_refs": [],
+        "satisfied_requirements": [],
+        "open_gaps": goal.open_gaps(),
+        "pending_tool_calls": [],
+        "conflicts": [],
+    }
+
+    update = StateReducer().reduce_tool_results(state)
+    state.update(update)
+
+    assert update["evidence_refs"] == [
+        EvidenceRef(
+            evidence_id="ev-child-ref",
+            citation_anchor="policy#ref",
+            doc_id=8,
+            source="delegated_agent",
+        )
+    ]
+    assert update["evidence"] == []
+    assert SatisfactionChecker().check(state).is_done is True
+
+
+def test_delegated_agent_citation_alone_is_parent_checkable_evidence() -> None:
+    goal = GoalInitializer().initialize("总结政策影响并给出处")
+    citation = AnswerCitation(
+        citation_id="cit-only",
+        evidence_id="ev-only",
+        record_type="text",
+        citation_anchor="policy#only",
+        doc_id=9,
+    )
+    result = ToolResult(
+        tool_call_id="tc-child-citation",
+        tool_name="agent_research",
+        status="ok",
+        output=AgentToolOutput(
+            conclusion="仅引用回传的结论。",
+            citations=[citation],
+            status="done",
+            agent_name="research",
+        ),
+        latency_ms=0,
+    )
+    state = {
+        "task": goal.original_query,
+        "goal_spec": goal,
+        "tool_results": [result],
+        "structured_observations": [],
+        "answer_candidates": [],
+        "evidence_refs": [],
+        "satisfied_requirements": [],
+        "open_gaps": goal.open_gaps(),
+        "pending_tool_calls": [],
+        "conflicts": [],
+    }
+
+    update = StateReducer().reduce_tool_results(state)
+    state.update(update)
+
+    assert update["evidence_refs"] == [
+        EvidenceRef(
+            evidence_id="ev-only",
+            citation_id="cit-only",
+            citation_anchor="policy#only",
+            doc_id=9,
+            source="delegated_agent",
+        )
+    ]
+    assert SatisfactionChecker().check(state).is_done is True
+
+
 def test_checker_keeps_explicit_source_gap_open_for_wrong_computed_asset() -> None:
     goal = GoalInitializer().initialize(
         "在分区域分品牌 石膏板-26年表中，北方和东北当日销售额合计是多少？请给出处"
@@ -370,6 +638,133 @@ def test_text_search_observation_creates_context_unit_without_answer_candidate()
     ]
 
 
+def test_checker_rejects_bare_evidence_id_for_traceable_evidence_deliverable() -> None:
+    goal = GoalInitializer().initialize("总结政策影响并给出处")
+    report = SatisfactionChecker().check(
+        {
+            "goal_spec": goal,
+            "pending_tool_calls": [],
+            "tool_results": [],
+            "answer_candidates": [AnswerCandidate(text="政策影响总结。")],
+            "evidence_refs": [EvidenceRef(evidence_id="ev-bare", source="tool_output")],
+            "context_bindings": [],
+            "conflicts": [],
+            "no_progress_count": 0,
+        }
+    )
+
+    assert report.is_done is False
+    assert [gap.gap_id for gap in report.open_gaps] == ["evidence"]
+
+
+def test_checker_accepts_reproducible_computation_deliverable_without_agent_type_rule() -> None:
+    goal = GoalSpec(
+        original_query="计算两项合计",
+        deliverables=[
+            GoalDeliverable(
+                deliverable_id="answer",
+                kind="answer",
+                acceptance_rule="non_empty_answer",
+            ),
+            GoalDeliverable(
+                deliverable_id="computation",
+                kind="computation",
+                acceptance_rule="reproducible_computation",
+            ),
+        ],
+    )
+    report = SatisfactionChecker().check(
+        {
+            "goal_spec": goal,
+            "pending_tool_calls": [],
+            "tool_results": [],
+            "answer_candidates": [AnswerCandidate(text="合计为 15.49。")],
+            "evidence_refs": [],
+            "computation_results": [
+                ComputationResult(
+                    source_tool_call_id="tc-sql",
+                    source_tool_name="asset_analyze",
+                    expression='SELECT SUM("value") FROM sheet',
+                    evidence_refs=[EvidenceRef(evidence_id="asset:14", source="asset")],
+                )
+            ],
+            "context_bindings": [],
+            "conflicts": [],
+            "no_progress_count": 0,
+        }
+    )
+
+    assert report.is_done is True
+
+
+def test_checker_keeps_computation_gap_open_without_traceable_source() -> None:
+    goal = GoalSpec(
+        original_query="计算两项合计",
+        deliverables=[
+            GoalDeliverable(
+                deliverable_id="answer",
+                kind="answer",
+                acceptance_rule="non_empty_answer",
+            ),
+            GoalDeliverable(
+                deliverable_id="computation",
+                kind="computation",
+                acceptance_rule="reproducible_computation",
+            ),
+        ],
+    )
+    report = SatisfactionChecker().check(
+        {
+            "goal_spec": goal,
+            "pending_tool_calls": [],
+            "tool_results": [],
+            "answer_candidates": [AnswerCandidate(text="合计为 15.49。")],
+            "evidence_refs": [],
+            "computation_results": [
+                ComputationResult(
+                    source_tool_call_id="tc-sql",
+                    source_tool_name="asset_analyze",
+                    expression='SELECT SUM("value") FROM sheet',
+                    evidence_refs=[EvidenceRef(evidence_id="asset:unknown")],
+                )
+            ],
+            "context_bindings": [],
+            "conflicts": [],
+            "no_progress_count": 0,
+        }
+    )
+
+    assert report.is_done is False
+    assert [gap.gap_id for gap in report.open_gaps] == ["computation"]
+
+
+def test_irrelevant_new_observation_increments_no_progress_count() -> None:
+    goal = GoalInitializer().initialize("总结政策影响并给出处")
+    result = ToolResult(
+        tool_call_id="tc-empty-assets",
+        tool_name="asset_list",
+        status="ok",
+        output=AssetListOutput(assets=[]),
+        latency_ms=0,
+    )
+    update = StateReducer().reduce_tool_results(
+        {
+            "task": goal.original_query,
+            "goal_spec": goal,
+            "tool_results": [result],
+            "structured_observations": [],
+            "answer_candidates": [],
+            "evidence_refs": [],
+            "computation_results": [],
+            "satisfied_requirements": [],
+            "open_gaps": goal.open_gaps(),
+            "no_progress_count": 1,
+        }
+    )
+
+    assert update["no_progress_count"] == 2
+
+
 def test_satisfaction_checker_reports_gaps_without_choosing_asset_action() -> None:
     goal = GoalInitializer().initialize("北方和东北日提货合计是多少？请给出处")
     state = {
@@ -442,6 +837,52 @@ def test_controller_defers_asset_action_to_model_decision() -> None:
     RuntimeRegistry.remove(config.run_id)
 
 
+def test_controller_counts_new_context_binding_as_progress_before_stuck_pause() -> None:
+    config = AgentRunConfig(
+        run_id="goal-runtime-binding-progress",
+        thread_id="goal-runtime-binding-progress",
+        budget_total=1000,
+        max_depth=2,
+        access_policy=AccessPolicy.default(),
+    )
+    RuntimeRegistry.remove(config.run_id)
+    RuntimeRegistry.get_or_create(config)
+    goal = GoalInitializer().initialize(
+        "在分区域分品牌 石膏板-26年表中，总结结果并给出处"
+    )
+    update = controller_node(
+        {
+            "run_config": config,
+            "status": "running",
+            "task": goal.original_query,
+            "goal_spec": goal,
+            "pending_tool_calls": [],
+            "tool_results": [],
+            "answer_candidates": [],
+            "evidence_refs": [],
+            "context_units": [
+                ContextUnit(
+                    unit_id="asset:15",
+                    unit_type="table_asset",
+                    locator={"asset_id": 15, "sheet_name": "分区域分品牌 石膏板-26年"},
+                )
+            ],
+            "context_bindings": [],
+            "satisfied_requirements": [],
+            "open_gaps": goal.open_gaps(),
+            "conflicts": [],
+            "no_progress_count": 3,
+        },  # type: ignore[arg-type]
+        definition=RESEARCH_AGENT,
+        has_tool_decision_provider=True,
+    )
+
+    assert update["controller_next"] == "llm_decide"
+    assert update["no_progress_count"] == 0
+    assert [gap.gap_id for gap in update["open_gaps"]] == ["answer", "evidence"]
+    RuntimeRegistry.remove(config.run_id)
+
+
 def test_controller_clears_replaced_source_binding_conflict_after_correct_result() -> None:
     config = AgentRunConfig(
         run_id="goal-runtime-binding-recovery",
@@ -468,9 +909,12 @@ def test_controller_clears_replaced_source_binding_conflict_after_correct_result
         {
             **base,
             "answer_candidates": [
-                AnswerCandidate(text="53.57", evidence_refs=[EvidenceRef(evidence_id="asset:13")])
+                AnswerCandidate(
+                    text="53.57",
+                    evidence_refs=[EvidenceRef(evidence_id="asset:13", source="asset")],
+                )
             ],
-            "evidence_refs": [EvidenceRef(evidence_id="asset:13")],
+            "evidence_refs": [EvidenceRef(evidence_id="asset:13", source="asset")],
             "context_units": [
                 ContextUnit(
                     unit_id="asset:13",
@@ -490,9 +934,12 @@ def test_controller_clears_replaced_source_binding_conflict_after_correct_result
         {
             **base,
             "answer_candidates": [
-                AnswerCandidate(text="131.18", evidence_refs=[EvidenceRef(evidence_id="asset:15")])
+                AnswerCandidate(
+                    text="131.18",
+                    evidence_refs=[EvidenceRef(evidence_id="asset:15", source="asset")],
+                )
             ],
-            "evidence_refs": [EvidenceRef(evidence_id="asset:15")],
+            "evidence_refs": [EvidenceRef(evidence_id="asset:15", source="asset")],
             "context_units": [
                 ContextUnit(
                     unit_id="asset:15",

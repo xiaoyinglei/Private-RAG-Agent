@@ -113,7 +113,7 @@ def test_compiler_constructs_only_model_driven_runtime_providers(
 
 
 @pytest.mark.anyio
-async def test_compiler_does_not_attach_default_llm_retrieval_hint_provider(
+async def test_model_cannot_finalize_while_required_goal_gaps_are_open(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     def fake_create_default_providers(
@@ -141,5 +141,6 @@ async def test_compiler_does_not_attach_default_llm_retrieval_hint_provider(
         )
     )
 
-    assert result.status == "done"
-    assert result.stop_reason == "synthesize"
+    assert result.status == "paused"
+    assert result.stop_reason == "premature_synthesis"
+    assert result.insufficient_evidence_flag is True

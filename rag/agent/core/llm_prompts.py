@@ -83,10 +83,10 @@ def build_tool_decision_prompt(
 
 规则：
 - action="execute" 时 tool_calls 必须非空，每个 tool_call_id 前缀为 tc_
-- 证据充分 → action="synthesize"，stop_reason 说明原因
+- 只有目标检查已经确认不存在 open_gaps 或 conflicts 时，才可用 action="synthesize"
 - 还需要检索 → action="execute"，给出具体 tool_calls
 - 需要用户决策 → action="pause"，needs_user_input 说明问题
-- 预算耗尽 → action="synthesize"，stop_reason="budget_exhausted"
+- 预算耗尽且目标尚未满足 → action="pause"，needs_user_input 说明无法继续补证据
 - 每一次 LLM 决策必须对应当前 open_gaps；如果没有 open_gaps，不要继续调用工具
 - 如果证据已包含 retrieval_channels 冲突标记，考虑是否需要用户选择
 - 对文件/结构化资产问题，先用检索工具找到 asset_id；拿到 asset_id 后优先调用
