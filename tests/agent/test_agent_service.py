@@ -23,11 +23,46 @@ class _ResearchUnderstandingService:
         return RetrievalSignals()
 
 
+class _NullToolDecisionProvider:
+    """Minimal provider: after PrimitiveOps tools run, call llm_generate to produce an answer."""
+
+    def __init__(self) -> None:
+        self._call_count = 0
+
+    def decide(self, state: object, **kwargs: object) -> dict[str, object]:
+        self._call_count += 1
+        if self._call_count <= 1:
+            # First call: execute llm_generate to produce an answer_candidate
+            from rag.agent.state import ToolCallPlan
+
+            call = ToolCallPlan.create(
+                "llm_summarize",
+                {"task": "Summarize the tool execution results", "evidence_ids": [], "citation_ids": []},
+            )
+            return {
+                "action": "execute",
+                "tool_calls": [call.model_dump()],
+                "thought": "Generating answer from tool results",
+                "confidence": 1.0,
+            }
+        # Second call: synthesize
+        return {"action": "synthesize", "tool_calls": [], "thought": "done", "confidence": 1.0}
+
+
 def _service_with_registry(runners: dict | None = None) -> AgentService:
+    extra = runners or {}
+    extra.setdefault(
+        "llm_summarize",
+        lambda payload: LLMTextOutput(
+            text=f"Summary: {payload.task}",
+            evidence_ids=payload.evidence_ids,
+            citation_ids=payload.citation_ids,
+        ),
+    )
     return AgentService(
         definition=RESEARCH_AGENT,
-        tool_registry=create_builtin_tool_registry(runners=runners),
-
+        tool_registry=create_builtin_tool_registry(runners=extra),
+        tool_decision_provider=_NullToolDecisionProvider(),
     )
 
 
@@ -87,7 +122,12 @@ async def test_agent_service_run_executes_explicit_tool_call_with_runner() -> No
 @pytest.mark.anyio
 async def test_agent_service_run_without_runner_fails_closed() -> None:
     call = ToolCallPlan.create("llm_summarize", {"task": "Explain policy"})
-    service = _service_with_registry()
+    # Service without llm_summarize runner — should fail closed
+    service = AgentService(
+        definition=RESEARCH_AGENT,
+        tool_registry=create_builtin_tool_registry(runners={}),
+        tool_decision_provider=_NullToolDecisionProvider(),
+    )
 
     result = await service.run(
         AgentRunRequest(
@@ -165,3 +205,64 @@ async def test_agent_service_run_creates_workspace_and_injects_primitive_ops() -
     # Verify list_files actually works through the registry
     result = await registry.run("list_files", {"path": ""})
     assert hasattr(result, "files")
+
+
+@pytest.mark.anyio
+async def test_agent_service_run_with_primitive_ops_through_agent_loop() -> None:
+    """Verify write_file and run_python work through the full agent loop."""
+    from rag.agent.graphs.nodes.synthesize import SynthesisRunner
+
+    class _SimpleSynthesisRunner:
+        def run_synthesis(self, *, parent_state: object) -> object:
+            from rag.agent.service import AgentRunResult
+
+            tool_results = getattr(parent_state, "get", lambda k, d=None: d)("tool_results", [])
+            summary = ", ".join(
+                f"{r.tool_name}:{r.status}" for r in tool_results if hasattr(r, "tool_name")
+            )
+            return AgentRunResult(
+                run_id="synth",
+                thread_id="synth",
+                status="done",
+                final_answer=f"Completed: {summary}",
+                tool_results=list(tool_results),
+            )
+
+    write_call = ToolCallPlan.create(
+        "write_file",
+        {
+            "path": "scratch/hello.py",
+            "content": "from pathlib import Path\nPath('artifacts/output.txt').write_text('hello from agent')\n",
+        },
+    )
+    run_call = ToolCallPlan.create(
+        "run_python",
+        {"script_path": "scratch/hello.py"},
+    )
+    service = _service_with_registry()
+    service._synthesis_runner = _SimpleSynthesisRunner()  # type: ignore[assignment]
+
+    result = await service.run(
+        AgentRunRequest(
+            task="Write and run a Python script",
+            run_id="prim-integ",
+            thread_id="prim-integ",
+            pending_tool_calls=[write_call, run_call],
+            approved_tool_call_ids=[write_call.tool_call_id, run_call.tool_call_id],
+        )
+    )
+
+    assert result.status == "done", (
+        f"status={result.status}, stop_reason={result.stop_reason}, "
+        f"needs_user_input={result.needs_user_input}, "
+        f"pending={result.pending_tool_calls_summary}, "
+        f"tool_results={[(r.tool_name, r.status, r.error.code if r.error else None) for r in result.tool_results]}"
+    )
+    assert result.workspace_path is not None
+    write_result = result.tool_results[0]
+    assert write_result.status == "ok"
+    assert write_result.output.path == "scratch/hello.py"
+    run_result = result.tool_results[1]
+    assert run_result.status == "ok"
+    assert run_result.output.ok is True
+    assert "artifacts/output.txt" in run_result.output.generated_files
