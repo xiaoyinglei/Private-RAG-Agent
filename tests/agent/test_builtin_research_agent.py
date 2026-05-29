@@ -8,6 +8,7 @@ from rag.agent.service import AgentRunRequest
 from rag.agent.state import ToolCallPlan
 from rag.agent.tools.asset_tools import ALL_ASSET_TOOLS
 from rag.agent.tools.llm_tools import ALL_LLM_TOOLS, LLMTextOutput
+from rag.agent.tools.primitive_tools import ALL_PRIMITIVE_TOOLS
 from rag.agent.tools.rag_answer_tools import ALL_RAG_ANSWER_TOOLS
 from rag.agent.tools.rag_tools import ALL_RAG_TOOLS
 from rag.agent.tools.registry import ToolRegistry
@@ -15,7 +16,7 @@ from rag.agent.tools.registry import ToolRegistry
 
 def _registry_with_builtin_tools() -> ToolRegistry:
     registry = ToolRegistry()
-    for tool in [*ALL_RAG_TOOLS, *ALL_ASSET_TOOLS, *ALL_LLM_TOOLS, *ALL_RAG_ANSWER_TOOLS]:
+    for tool in [*ALL_RAG_TOOLS, *ALL_ASSET_TOOLS, *ALL_LLM_TOOLS, *ALL_RAG_ANSWER_TOOLS, *ALL_PRIMITIVE_TOOLS]:
         registry.register(tool)
     return registry
 
@@ -33,6 +34,10 @@ def test_research_agent_uses_spec_tool_allowlist() -> None:
         "asset_analyze",
         "llm_summarize",
         "rag_search_answer",
+        "list_files",
+        "read_file",
+        "write_file",
+        "run_python",
     ]
 
 

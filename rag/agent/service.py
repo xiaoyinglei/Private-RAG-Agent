@@ -316,11 +316,40 @@ class AgentService:
         *,
         run_id: str,
         response: HumanInputResponse,
+        workspace_path: str | None = None,
     ) -> AgentRunResult:
-        """从中断点恢复。response 对应 HumanInputRequest 的用户响应。"""
+        """从中断点恢复。response 对应 HumanInputRequest 的用户响应。
+
+        如果原始 run 使用了 PrimitiveOps（write_file / run_python 等），
+        调用方必须传入 workspace_path 以恢复 request-scoped runners。
+        """
         from langgraph.types import Command
 
-        graph = cast(Any, self._compiler.compile(self._definition))
+        from rag.agent.primitive_ops import PrimitiveOps
+        from rag.agent.workspace import open_workspace
+
+        # 1. Restore PrimitiveOps runners if workspace_path provided
+        runtime_registry = self._base_tool_registry.clone()
+        if workspace_path:
+            workspace = open_workspace(workspace_path)
+            ops = PrimitiveOps(workspace=workspace)
+            for extra_name, extra_runner in ops.runners().items():
+                if runtime_registry.has_runner(extra_name):
+                    continue
+                try:
+                    runtime_registry.register_runner(extra_name, extra_runner)
+                except KeyError:
+                    pass
+
+        compiler = AgentGraphCompiler(
+            tool_registry=runtime_registry,
+            tool_decision_provider=self._tool_decision_provider,
+            retrieval_hint_provider=self._retrieval_hint_provider,
+            synthesis_runner=self._synthesis_runner,
+            model_registry=self._model_registry,
+            checkpointer=self._checkpointer,
+        )
+        graph = cast(Any, compiler.compile(self._definition))
         run_config = await self._restore_runtime_handles_from_checkpoint(
             graph,
             thread_id=run_id,
@@ -331,7 +360,7 @@ class AgentService:
         )
         if result_state.get("status") in {"done", "failed"}:
             RuntimeRegistry.remove(run_config.run_id)
-        return AgentRunResult.from_state(result_state)
+        return AgentRunResult.from_state(result_state, workspace_path=workspace_path)
 
     def pending_human_input_request(self, *, run_id: str) -> HumanInputRequest:
         graph = self._compiler.compile(self._definition)

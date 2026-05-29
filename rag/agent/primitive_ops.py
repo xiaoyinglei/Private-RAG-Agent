@@ -34,10 +34,13 @@ class ListFilesOutput(BaseModel):
     files: list[FileInfo]
 
 
+MAX_READ_BYTES = 10_000_000  # 10MB hard ceiling
+
+
 class ReadFileInput(BaseModel):
     path: str
     encoding: str = "utf-8"
-    max_bytes: int = 1_000_000
+    max_bytes: int = Field(default=1_000_000, ge=1, le=MAX_READ_BYTES)
 
 
 class ReadFileOutput(BaseModel):
@@ -61,10 +64,13 @@ class WriteFileOutput(BaseModel):
     size_bytes: int
 
 
+MAX_PYTHON_TIMEOUT = 120.0  # seconds, hard ceiling
+
+
 class RunPythonInput(BaseModel):
     script_path: str
     args: list[str] = Field(default_factory=list)
-    timeout_seconds: float = 30.0
+    timeout_seconds: float = Field(default=30.0, gt=0, le=MAX_PYTHON_TIMEOUT)
 
 
 class RunPythonOutput(BaseModel):
@@ -133,7 +139,9 @@ class PrimitiveOps:
             raise FileNotFoundError(f"File not found: {payload.path}")
 
         size = target.stat().st_size
-        raw = target.read_bytes()[: payload.max_bytes + 1]
+        # Bounded read: open and read max_bytes + 1 to detect truncation
+        with target.open("rb") as f:
+            raw = f.read(payload.max_bytes + 1)
         truncated = len(raw) > payload.max_bytes
         if truncated:
             raw = raw[: payload.max_bytes]
