@@ -13,11 +13,15 @@ htmlcov/
 .superpowers/
 docs/superpowers/plans/
 docs/superpowers/specs/
-data/runtime/
+data/
+logs/
 .rag*/
 *.db
 *.sqlite
 *.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+未命名文件夹/
 data/benchmarks/
 data/eval/answers/
 data/eval/diagnostics/
