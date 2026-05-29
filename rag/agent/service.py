@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
+from pathlib import Path
 from typing import Any, cast
 from uuid import uuid4
 
@@ -17,7 +19,7 @@ from rag.agent.graphs.nodes.llm_decide import ToolDecisionProvider
 from rag.agent.graphs.nodes.retrieval_hint import RetrievalHintProvider
 from rag.agent.graphs.nodes.synthesize import SynthesisRunner
 from rag.agent.state import AgentState, ToolCallPlan
-from rag.agent.tools.registry import ToolRegistry
+from rag.agent.tools.registry import ToolRegistry, ToolRunner
 from rag.agent.tools.spec import ToolResult
 from rag.schema.query import AnswerCitation, EvidenceItem, RetrievalSignals
 from rag.schema.runtime import AccessPolicy
@@ -35,6 +37,8 @@ class AgentRunRequest(BaseModel):
     approved_tool_call_ids: list[str] = Field(default_factory=list)
     denied_tool_call_ids: list[str] = Field(default_factory=list)
     messages: list[BaseMessage] = Field(default_factory=list)
+    input_files: list[str] = Field(default_factory=list)
+    workspace_path: str | None = None
 
     def to_run_config(self, definition: AgentDefinition) -> AgentRunConfig:
         run_id = self.run_id or f"run_{uuid4().hex[:12]}"
@@ -65,9 +69,10 @@ class AgentRunResult(BaseModel):
     needs_user_input: str | None = None
     human_input_request: object | None = None
     pending_tool_calls_summary: list[dict[str, object]] = Field(default_factory=list)
+    workspace_path: str | None = None
 
     @classmethod
-    def from_state(cls, state: AgentState) -> AgentRunResult:
+    def from_state(cls, state: AgentState, *, workspace_path: str | None = None) -> AgentRunResult:
         run_config = state["run_config"]
         human_request = state.get("human_input_request")
         pending = state.get("pending_tool_calls", [])
@@ -89,6 +94,7 @@ class AgentRunResult(BaseModel):
                 {"tool_call_id": tc.tool_call_id, "tool_name": tc.tool_name}
                 for tc in pending
             ],
+            workspace_path=workspace_path,
         )
 
 
@@ -199,6 +205,8 @@ class AgentService:
             approved_tool_call_ids=request.approved_tool_call_ids,
             denied_tool_call_ids=request.denied_tool_call_ids,
             messages=request.messages,
+            input_files=request.input_files,
+            workspace_path=request.workspace_path,
         )
 
     async def run_with_config(
@@ -210,9 +218,25 @@ class AgentService:
         approved_tool_call_ids: list[str] | None = None,
         denied_tool_call_ids: list[str] | None = None,
         messages: list[BaseMessage] | None = None,
+        input_files: list[str] | None = None,
+        workspace_path: str | None = None,
     ) -> AgentRunResult:
-        # 构造 request-scoped runtime_tool_registry，注入 AgentAsToolAdapter
-        runtime_registry = self._runtime_tool_registry(run_config)
+        from rag.agent.primitive_ops import PrimitiveOps
+        from rag.agent.workspace import create_temp_workspace, import_files, open_workspace
+
+        # 1. Create workspace
+        if workspace_path:
+            workspace = open_workspace(workspace_path, create=True)
+        else:
+            workspace = create_temp_workspace()
+
+        # 2. Import input files
+        if input_files:
+            import_files(workspace, [Path(f) for f in input_files])
+
+        # 3. Create PrimitiveOps and inject runners
+        ops = PrimitiveOps(workspace=workspace)
+        runtime_registry = self._runtime_tool_registry(run_config, runners=ops.runners())
         compiler = AgentGraphCompiler(
             tool_registry=runtime_registry,
             tool_decision_provider=self._tool_decision_provider,
@@ -240,9 +264,14 @@ class AgentService:
             raise
         if result_state.get("status") in {"done", "failed"}:
             RuntimeRegistry.remove(run_config.run_id)
-        return AgentRunResult.from_state(result_state)
+        return AgentRunResult.from_state(result_state, workspace_path=str(workspace.root))
 
-    def _runtime_tool_registry(self, run_config: AgentRunConfig) -> ToolRegistry:
+    def _runtime_tool_registry(
+        self,
+        run_config: AgentRunConfig,
+        *,
+        runners: Mapping[str, ToolRunner] | None = None,
+    ) -> ToolRegistry:
         """Clone base registry and inject AgentAsToolAdapter runners for this request.
 
         Agent-as-tool adapters are request-scoped — each run_config gets fresh adapters
@@ -251,6 +280,13 @@ class AgentService:
         runtime = self._base_tool_registry.clone()
 
         from rag.agent.core.agent_as_tool import AgentAsToolAdapter
+
+        # Inject runtime runners (e.g. PrimitiveOps)
+        if runners:
+            for name, runner in runners.items():
+                if runtime.has_runner(name):
+                    continue
+                runtime.register_runner(name, runner)
 
         if self._subagent_runner is None:
             return runtime

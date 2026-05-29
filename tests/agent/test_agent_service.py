@@ -142,3 +142,26 @@ async def test_agent_service_run_with_config_uses_supplied_runtime_contract() ->
     assert result.final_answer == "summary:Explain policy"
     with pytest.raises(KeyError):
         RuntimeRegistry.get("svc-child")
+
+
+@pytest.mark.anyio
+async def test_agent_service_run_creates_workspace_and_injects_primitive_ops() -> None:
+    """Verify AgentService.run() creates workspace and PrimitiveOps runners are available."""
+    from rag.agent.workspace import create_temp_workspace
+    from rag.agent.primitive_ops import PrimitiveOps
+    from rag.agent.tools.builtin_registry import create_builtin_tool_registry
+
+    # Create service with PrimitiveOps-capable registry
+    workspace = create_temp_workspace(prefix="test_integ_")
+    ops = PrimitiveOps(workspace=workspace)
+    registry = create_builtin_tool_registry(runners=ops.runners())
+
+    # Verify primitive tools have runners
+    assert registry.has_runner("list_files")
+    assert registry.has_runner("read_file")
+    assert registry.has_runner("write_file")
+    assert registry.has_runner("run_python")
+
+    # Verify list_files actually works through the registry
+    result = await registry.run("list_files", {"path": ""})
+    assert hasattr(result, "files")
