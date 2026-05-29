@@ -16,6 +16,9 @@ class ToolPermissions:
     external_network: bool = False
     kg_mutation: bool = False
     user_data: bool = False
+    read_fs: bool = False
+    write_fs: bool = False
+    execute_code: bool = False
 
 
 @dataclass(frozen=True)
