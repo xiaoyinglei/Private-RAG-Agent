@@ -750,6 +750,10 @@ def _answer_text(tool_name: str, output: BaseModel | None) -> str | None:
         "asset_list",
         "asset_inspect",
         "asset_read_slice",
+        "list_files",
+        "read_file",
+        "write_file",
+        "run_python",
     }:
         return None
     text = getattr(output, "text", None)

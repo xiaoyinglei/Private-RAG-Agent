@@ -35,7 +35,7 @@ class ApprovalPolicy:
     规则（优先级从高到低）：
     1. spec=None → DENY（未注册）
     2. tool_name 在 DENY_TOOLS 中 → DENY
-    3. permissions.write_db / kg_mutation / user_data → ASK
+    3. permissions.write_db / kg_mutation / user_data / write_fs / execute_code → ASK
     4. permissions.external_network → ASK
     5. 其余 → ALLOW
     """
@@ -64,8 +64,14 @@ class ApprovalPolicy:
                 risk_level="high",
             )
 
-        # Ask for write / mutation / user data
-        if permissions.write_db or permissions.kg_mutation or permissions.user_data:
+        # Ask for write / mutation / user data / filesystem / code execution
+        if (
+            permissions.write_db
+            or permissions.kg_mutation
+            or permissions.user_data
+            or permissions.write_fs
+            or permissions.execute_code
+        ):
             return self._ask_decision(
                 tool_name=tool_name,
                 arguments=arguments,

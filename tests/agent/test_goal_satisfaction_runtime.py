@@ -957,3 +957,34 @@ def test_controller_clears_replaced_source_binding_conflict_after_correct_result
     assert recovered_update["stop_reason"] == "goal_satisfied"
     assert recovered_update["conflicts"] == []
     RuntimeRegistry.remove(config.run_id)
+
+
+def test_primitive_ops_outputs_not_answer_candidates() -> None:
+    """list_files/read_file/write_file/run_python outputs must not become answer candidates."""
+    from rag.agent.goal_runtime import _answer_text
+    from rag.agent.primitive_ops import (
+        ListFilesOutput,
+        ReadFileOutput,
+        RunPythonOutput,
+        WriteFileOutput,
+    )
+
+    for tool_name, output in [
+        ("list_files", ListFilesOutput(files=[])),
+        ("read_file", ReadFileOutput(path="x", content="y", truncated=False, size_bytes=1)),
+        ("write_file", WriteFileOutput(path="x", size_bytes=1)),
+        (
+            "run_python",
+            RunPythonOutput(
+                ok=True,
+                exit_code=0,
+                stdout="x",
+                stderr="",
+                stdout_truncated=False,
+                stderr_truncated=False,
+                duration_ms=1.0,
+                generated_files=[],
+            ),
+        ),
+    ]:
+        assert _answer_text(tool_name, output) is None, f"{tool_name} should not produce answer text"

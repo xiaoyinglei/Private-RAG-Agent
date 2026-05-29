@@ -101,6 +101,39 @@ class TestApprovalPolicy:
         assert result.action == ApprovalAction.ASK
 
 
+def test_write_fs_requires_ask() -> None:
+    policy = ApprovalPolicy()
+    spec = _make_spec(name="write_file", write_fs=True)
+    result = policy.decide(
+        tool_name="write_file",
+        arguments={"path": "reports/a.md"},
+        spec=spec,
+    )
+    assert result.action == ApprovalAction.ASK
+
+
+def test_execute_code_requires_ask() -> None:
+    policy = ApprovalPolicy()
+    spec = _make_spec(name="run_python", execute_code=True)
+    result = policy.decide(
+        tool_name="run_python",
+        arguments={"script_path": "scratch/main.py"},
+        spec=spec,
+    )
+    assert result.action == ApprovalAction.ASK
+
+
+def test_read_fs_allows() -> None:
+    policy = ApprovalPolicy()
+    spec = _make_spec(name="list_files", read_fs=True)
+    result = policy.decide(
+        tool_name="list_files",
+        arguments={},
+        spec=spec,
+    )
+    assert result.action == ApprovalAction.ALLOW
+
+
 class TestMergeApprovalRequests:
     def test_merges_multiple_ask_decisions(self) -> None:
         policy = ApprovalPolicy()
