@@ -38,7 +38,7 @@ read_file_spec = ToolSpec(
 
 write_file_spec = ToolSpec(
     name="write_file",
-    description="Write content to a file in the workspace (scratch/, artifacts/, reports/, logs/ only). Cannot write to input_files/.",
+    description="Write content to a file in the workspace (scratch/, artifacts/, reports/, logs/ only).",
     input_model=WriteFileInput,
     output_model=WriteFileOutput,
     error_model=ToolError,
@@ -50,7 +50,7 @@ write_file_spec = ToolSpec(
 
 run_python_spec = ToolSpec(
     name="run_python",
-    description="Execute a Python script from scratch/. Returns exit code, stdout, stderr, and list of generated files.",
+    description="Execute a Python script from scratch/. Returns exit code, stdout, stderr, and generated files.",
     input_model=RunPythonInput,
     output_model=RunPythonOutput,
     error_model=ToolError,

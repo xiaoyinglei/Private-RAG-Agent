@@ -281,12 +281,15 @@ class AgentService:
 
         from rag.agent.core.agent_as_tool import AgentAsToolAdapter
 
-        # Inject runtime runners (e.g. PrimitiveOps)
+        # Inject runtime runners (e.g. PrimitiveOps) — only for tools that exist in the registry
         if runners:
-            for name, runner in runners.items():
-                if runtime.has_runner(name):
+            for extra_name, extra_runner in runners.items():
+                if runtime.has_runner(extra_name):
                     continue
-                runtime.register_runner(name, runner)
+                try:
+                    runtime.register_runner(extra_name, extra_runner)
+                except KeyError:
+                    pass
 
         if self._subagent_runner is None:
             return runtime
