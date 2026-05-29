@@ -21,6 +21,10 @@ def test_builtin_tool_registry_contains_rag_and_llm_specs() -> None:
     assert {
         "agent_research", "agent_compare", "agent_factcheck", "agent_synthesize",
     } <= names
+    # PrimitiveOps tools
+    assert {
+        "list_files", "read_file", "write_file", "run_python",
+    } <= names
 
 
 def test_builtin_tool_registry_satisfies_research_agent_allowlist() -> None:
