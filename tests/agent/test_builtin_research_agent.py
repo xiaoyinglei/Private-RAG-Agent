@@ -37,7 +37,6 @@ def test_research_agent_uses_spec_tool_allowlist() -> None:
         "list_files",
         "read_file",
         "write_file",
-        "run_python",
     ]
 
 

@@ -281,11 +281,9 @@ class AgentService:
 
         from rag.agent.core.agent_as_tool import AgentAsToolAdapter
 
-        # Inject runtime runners (e.g. PrimitiveOps) — only for tools that exist in the registry
+        # Inject runtime runners (e.g. PrimitiveOps) — override existing runners
         if runners:
             for extra_name, extra_runner in runners.items():
-                if runtime.has_runner(extra_name):
-                    continue
                 try:
                     runtime.register_runner(extra_name, extra_runner)
                 except KeyError:
@@ -334,8 +332,6 @@ class AgentService:
             workspace = open_workspace(workspace_path)
             ops = PrimitiveOps(workspace=workspace)
             for extra_name, extra_runner in ops.runners().items():
-                if runtime_registry.has_runner(extra_name):
-                    continue
                 try:
                     runtime_registry.register_runner(extra_name, extra_runner)
                 except KeyError:

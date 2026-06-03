@@ -187,9 +187,9 @@ async def test_agent_service_run_with_config_uses_supplied_runtime_contract() ->
 @pytest.mark.anyio
 async def test_agent_service_run_creates_workspace_and_injects_primitive_ops() -> None:
     """Verify AgentService.run() creates workspace and PrimitiveOps runners are available."""
-    from rag.agent.workspace import create_temp_workspace
     from rag.agent.primitive_ops import PrimitiveOps
     from rag.agent.tools.builtin_registry import create_builtin_tool_registry
+    from rag.agent.workspace import create_temp_workspace
 
     # Create service with PrimitiveOps-capable registry
     workspace = create_temp_workspace(prefix="test_integ_")
@@ -209,8 +209,7 @@ async def test_agent_service_run_creates_workspace_and_injects_primitive_ops() -
 
 @pytest.mark.anyio
 async def test_agent_service_run_with_primitive_ops_through_agent_loop() -> None:
-    """Verify write_file and run_python work through the full agent loop."""
-    from rag.agent.graphs.nodes.synthesize import SynthesisRunner
+    """Verify write_file works through the full agent loop with workspace_path returned."""
 
     class _SimpleSynthesisRunner:
         def run_synthesis(self, *, parent_state: object) -> object:
@@ -230,39 +229,26 @@ async def test_agent_service_run_with_primitive_ops_through_agent_loop() -> None
 
     write_call = ToolCallPlan.create(
         "write_file",
-        {
-            "path": "scratch/hello.py",
-            "content": "from pathlib import Path\nPath('artifacts/output.txt').write_text('hello from agent')\n",
-        },
-    )
-    run_call = ToolCallPlan.create(
-        "run_python",
-        {"script_path": "scratch/hello.py"},
+        {"path": "scratch/hello.py", "content": "print('hello')"},
     )
     service = _service_with_registry()
     service._synthesis_runner = _SimpleSynthesisRunner()  # type: ignore[assignment]
 
     result = await service.run(
         AgentRunRequest(
-            task="Write and run a Python script",
+            task="Write a Python script",
             run_id="prim-integ",
             thread_id="prim-integ",
-            pending_tool_calls=[write_call, run_call],
-            approved_tool_call_ids=[write_call.tool_call_id, run_call.tool_call_id],
+            pending_tool_calls=[write_call],
+            approved_tool_call_ids=[write_call.tool_call_id],
         )
     )
 
     assert result.status == "done", (
         f"status={result.status}, stop_reason={result.stop_reason}, "
-        f"needs_user_input={result.needs_user_input}, "
-        f"pending={result.pending_tool_calls_summary}, "
-        f"tool_results={[(r.tool_name, r.status, r.error.code if r.error else None) for r in result.tool_results]}"
+        f"needs_user_input={result.needs_user_input}"
     )
     assert result.workspace_path is not None
     write_result = result.tool_results[0]
     assert write_result.status == "ok"
     assert write_result.output.path == "scratch/hello.py"
-    run_result = result.tool_results[1]
-    assert run_result.status == "ok"
-    assert run_result.output.ok is True
-    assert "artifacts/output.txt" in run_result.output.generated_files

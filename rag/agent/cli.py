@@ -516,11 +516,14 @@ def agent_run(
                 print("   请使用 --checkpoint-db 启用 SQLite checkpoint 后重试。")
             else:
                 print("⏸  已保存 checkpoint，可跨进程恢复:")
-                print(
+                resume_cmd = (
                     f"   rag agent resume {effective_run_id} "
                     f"--agent {agent} "
                     f"--checkpoint-db {checkpoint_db}"
                 )
+                if result.workspace_path:
+                    resume_cmd += f" --workspace-path {result.workspace_path}"
+                print(resume_cmd)
 
             if result.needs_user_input:
                 print(f"\n   待处理: {result.needs_user_input}")
@@ -590,6 +593,10 @@ def agent_resume(
         str | None,
         typer.Option("--vector-collection-prefix", help="Milvus collection prefix used at ingest time."),
     ] = None,
+    workspace_path: Annotated[
+        str | None,
+        typer.Option("--workspace-path", help="Workspace 路径，恢复 PrimitiveOps runner 所需"),
+    ] = None,
 ) -> None:
     """从 SQLite checkpoint 恢复暂停的 Agent 运行。"""
     from rag import AssemblyRequest, CapabilityRequirements, RAGRuntime
@@ -633,7 +640,7 @@ def agent_resume(
         )
         request = asyncio.run(service.apending_human_input_request(run_id=run_id))
         response = _build_resume_response(request, decision)
-        result = asyncio.run(service.resume(run_id=run_id, response=response))
+        result = asyncio.run(service.resume(run_id=run_id, response=response, workspace_path=workspace_path))
         _display_result(result, verbose=verbose)
         if result.status == "failed":
             raise typer.Exit(code=1)

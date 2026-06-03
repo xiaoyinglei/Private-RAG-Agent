@@ -68,7 +68,6 @@ RESEARCH_AGENT = AgentDefinition(
         "list_files",
         "read_file",
         "write_file",
-        "run_python",
     ],
     # TODO: migrate estimated_token_budget / max_iterations / max_depth to runtime config
     estimated_token_budget=10000,

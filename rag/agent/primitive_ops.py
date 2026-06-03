@@ -17,9 +17,14 @@ from rag.agent.workspace import WorkspaceRuntime
 # I/O models
 # ---------------------------------------------------------------------------
 
+MAX_LIST_FILES = 200
+MAX_GENERATED_FILES = 200
+
+
 class ListFilesInput(BaseModel):
     path: str = ""
     pattern: str | None = None
+    limit: int = Field(default=MAX_LIST_FILES, ge=1, le=MAX_LIST_FILES)
 
 
 class FileInfo(BaseModel):
@@ -32,6 +37,7 @@ class FileInfo(BaseModel):
 
 class ListFilesOutput(BaseModel):
     files: list[FileInfo]
+    truncated: bool = False
 
 
 MAX_READ_BYTES = 10_000_000  # 10MB hard ceiling
@@ -113,9 +119,13 @@ class PrimitiveOps:
             return ListFilesOutput(files=[])
 
         entries: list[FileInfo] = []
+        truncated = False
         for entry in sorted(base.iterdir()):
             if payload.pattern and not entry.match(payload.pattern):
                 continue
+            if len(entries) >= payload.limit:
+                truncated = True
+                break
             stat = entry.stat()
             rel = self._workspace.relative_to_root(entry)
             entries.append(
@@ -127,7 +137,7 @@ class PrimitiveOps:
                     modified_at=stat.st_mtime,
                 )
             )
-        return ListFilesOutput(files=entries)
+        return ListFilesOutput(files=entries, truncated=truncated)
 
     # -- read_file ---------------------------------------------------------
 
@@ -205,6 +215,9 @@ class PrimitiveOps:
 
         after = _snapshot_files(self._workspace.root)
         generated = sorted(after - before)
+        generated_files = [
+            str(self._workspace.relative_to_root(Path(f))) for f in generated[:MAX_GENERATED_FILES]
+        ]
 
         return RunPythonOutput(
             ok=result.exit_code == 0,
@@ -214,9 +227,7 @@ class PrimitiveOps:
             stdout_truncated=len(result.stdout) >= 100_000,
             stderr_truncated=len(result.stderr) >= 50_000,
             duration_ms=result.duration_ms,
-            generated_files=[
-                str(self._workspace.relative_to_root(Path(f))) for f in generated
-            ],
+            generated_files=generated_files,
         )
 
     # -- runners registry --------------------------------------------------

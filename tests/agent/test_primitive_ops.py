@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import textwrap
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -11,18 +10,14 @@ import pytest
 from rag.agent.primitive_ops import (
     FileInfo,
     ListFilesInput,
-    ListFilesOutput,
     PrimitiveOps,
     ReadFileInput,
-    ReadFileOutput,
     RunPythonInput,
     RunPythonOutput,
     WriteFileInput,
-    WriteFileOutput,
 )
 from rag.agent.runner.python_runner import PythonRunResult
-from rag.agent.workspace import WorkspaceRuntime, WorkspacePathError
-
+from rag.agent.workspace import WorkspacePathError, WorkspaceRuntime
 
 # ---------------------------------------------------------------------------
 # Fixtures
