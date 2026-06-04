@@ -230,7 +230,7 @@ def _final_answer(
     answer_parts = [
         text
         for result in ok_results
-        if result.output is not None and (text := _output_text(result.output))
+        if result.output is not None and (text := _tool_result_text(result))
     ]
     if answer_parts:
         return "\n\n".join(answer_parts)
@@ -246,11 +246,171 @@ def _final_answer(
     return "No answer was generated because no tool results were available."
 
 
+def _tool_result_text(result: ToolResult) -> str | None:
+    if result.output is None:
+        return None
+    if result.tool_name == "structured_probe":
+        if summary := _structured_probe_output_text(result.output):
+            return summary
+    return _output_text(result.output)
+
+
 def _output_text(output: BaseModel) -> str:
     text = getattr(output, "text", None)
     if isinstance(text, str) and text.strip():
         return text.strip()
     return output.model_dump_json(exclude_none=True)
+
+
+def _structured_probe_output_text(output: BaseModel) -> str | None:
+    path = getattr(output, "path", None)
+    tables = getattr(output, "tables", None)
+    if not isinstance(path, str) or not isinstance(tables, list):
+        return None
+
+    lines = [f"表结构摘要：{path}"]
+    file_kind = getattr(output, "file_kind", None)
+    mime_type = getattr(output, "mime_type", None)
+    file_parts = [
+        str(part)
+        for part in (file_kind, mime_type)
+        if isinstance(part, str) and part.strip()
+    ]
+    if file_parts:
+        lines.append("文件类型：" + "；".join(file_parts))
+
+    if not tables:
+        lines.append("未发现可解析的结构化表格。")
+        return "\n".join(lines)
+
+    for table in tables[:3]:
+        lines.extend(_structured_table_summary_lines(table))
+
+    remaining = len(tables) - 3
+    if remaining > 0:
+        lines.append(f"还有 {remaining} 个表未展开。")
+
+    errors = getattr(output, "errors", None)
+    if isinstance(errors, list) and errors:
+        lines.append("探查警告：" + ", ".join(str(error) for error in errors[:3]))
+
+    return "\n".join(lines)
+
+
+def _structured_table_summary_lines(table: object) -> list[str]:
+    table_index = getattr(table, "table_index", None)
+    table_number = table_index + 1 if isinstance(table_index, int) else "?"
+    name = getattr(table, "name", None)
+    used_range = getattr(table, "used_range", None)
+    row_count = getattr(table, "row_count", None)
+    column_count = getattr(table, "column_count", None)
+
+    labels = [f"表 {table_number}"]
+    if isinstance(name, str) and name.strip():
+        labels.append(name.strip())
+    detail_parts = []
+    if isinstance(used_range, str) and used_range.strip():
+        detail_parts.append(f"范围 {used_range.strip()}")
+    if isinstance(row_count, int) and isinstance(column_count, int):
+        detail_parts.append(f"{row_count} 行 x {column_count} 列")
+
+    title = "：".join(labels)
+    if detail_parts:
+        title += "（" + "，".join(detail_parts) + "）"
+    lines = [title]
+
+    header = _best_header_candidate(table)
+    if header is not None:
+        row_index = getattr(header, "row_index", None)
+        confidence = getattr(header, "confidence", None)
+        if isinstance(row_index, int):
+            suffix = (
+                f"（置信度 {confidence:.2f}）"
+                if isinstance(confidence, int | float)
+                else ""
+            )
+            lines.append(f"候选表头行：第 {row_index} 行{suffix}")
+    else:
+        lines.append("候选表头行：未识别")
+
+    data_start_row = getattr(table, "data_start_row", None)
+    if isinstance(data_start_row, int):
+        lines.append(f"数据起始行：第 {data_start_row} 行")
+
+    columns = _structured_table_columns(table, header)
+    if columns:
+        lines.append("关键字段：" + ", ".join(columns[:12]))
+        if len(columns) > 12:
+            lines[-1] += f", ...(+{len(columns) - 12})"
+
+    if sample_judgement := _structured_table_sample_judgement(table, header):
+        lines.append(sample_judgement)
+
+    return lines
+
+
+def _best_header_candidate(table: object) -> object | None:
+    candidates = getattr(table, "candidate_header_rows", None)
+    if not isinstance(candidates, list) or not candidates:
+        return None
+    candidate: object = candidates[0]
+    return candidate
+
+
+def _structured_table_columns(table: object, header: object | None) -> list[str]:
+    rows = getattr(table, "sample_rows", None)
+    if not isinstance(rows, list) or not rows:
+        return []
+
+    row_index = getattr(header, "row_index", None) if header is not None else None
+    if isinstance(row_index, int) and 1 <= row_index <= len(rows):
+        return _row_values(rows[row_index - 1])
+
+    for row in rows:
+        values = _row_values(row)
+        if len(values) >= 2:
+            return values
+    return []
+
+
+def _row_values(row: object) -> list[str]:
+    if not isinstance(row, list):
+        return []
+    values: list[str] = []
+    for value in row:
+        text = _cell_text(value)
+        if text:
+            values.append(text)
+    return values
+
+
+def _cell_text(value: object) -> str:
+    if value is None:
+        return ""
+    text = " ".join(str(value).split())
+    if not text:
+        return ""
+    return text if len(text) <= 40 else text[:37] + "..."
+
+
+def _structured_table_sample_judgement(table: object, header: object | None) -> str | None:
+    rows = getattr(table, "sample_rows", None)
+    if not isinstance(rows, list) or not rows:
+        return None
+    row_count = len(rows)
+    row_index = getattr(header, "row_index", None) if header is not None else None
+    data_start_row = getattr(table, "data_start_row", None)
+
+    parts: list[str] = []
+    if isinstance(row_index, int):
+        if row_index > 1:
+            parts.append(f"第 1-{row_index - 1} 行更像标题或备注")
+        parts.append(f"第 {row_index} 行更像表头")
+    if isinstance(data_start_row, int):
+        parts.append(f"第 {data_start_row} 行开始出现数据样本")
+    if not parts:
+        parts.append(f"已返回前 {row_count} 行有界样本")
+    return "样本判断：" + "；".join(parts) + "。"
 
 
 def _has_insufficient_output(ok_results: list[ToolResult]) -> bool:

@@ -88,7 +88,24 @@ def build_tool_decision_prompt(
 - 需要用户决策 → action="pause"，needs_user_input 说明问题
 - 预算耗尽且目标尚未满足 → action="pause"，needs_user_input 说明无法继续补证据
 - 每一次 LLM 决策必须对应当前 open_gaps；如果没有 open_gaps，不要继续调用工具
+- 如果 open_gaps 仍包含 answer，但已有 read_file、write_file、run_python 或其他工具结果
+  足以回答，应调用 llm_summarize 生成 answer_candidate；不要直接 action="synthesize"。
 - 如果证据已包含 retrieval_channels 冲突标记，考虑是否需要用户选择
+- 对 workspace 文件任务，先用 list_files 获取精确 path 和文件能力字段，再根据
+  readable_as_text、is_binary、file_kind、mime_type、capabilities 选择工具。
+  read_file 只读取有界文本；如果文件不可作为文本读取，或 read_file 返回 is_binary=True，
+  不要重试 read_file。需要解析非文本、结构化或二进制内容时，先用 write_file 写入
+  scratch/*.py，再用 run_python 执行合适的解析代码。
+  如果可用工具包含 structured_probe，优先用它获取有界样本、候选表、候选表头行和数据起始行，
+  再决定是否需要写 Python 做进一步计算。
+  脚本中的文件路径必须逐字使用 list_files 返回的 path。
+  解析表格或结构化数据时，先检查标题、说明、空行和前几行样本，不要假设第一行就是表头；
+  输出结构时说明采用的表头行和数据起始行。
+  列出 workspace 根目录时用 path=""，不要用 path="/"。
+  run_python 成功后不要重复运行同一脚本；如 stdout、generated_files 或 reports/* 已足以回答，应调用
+  llm_summarize 汇总成最终答案候选。
+  run_python 失败时先阅读 stderr/stdout，定位脚本错误；不要重复运行同一个失败脚本。需要修复时调用
+  write_file 且 overwrite=True 覆盖 scratch/*.py，再重新 run_python。
 - 对文件/结构化资产问题，先用检索工具找到 asset_id；拿到 asset_id 后优先调用
   asset_inspect 理解资产结构和可用 analysis_capabilities。需要局部行列内容时用
   asset_read_slice 读取有边界的切片；需要读数、筛选、排序、聚合或校验时用
@@ -125,6 +142,23 @@ def _format_tool_contracts(allowed_tools: Sequence[str]) -> str:
         ),
         "llm_summarize": 'llm_summarize: {"task": str, "context_sections": list[str]}',
         "rag_search_answer": 'rag_search_answer: {"query": str, "top_k": int}',
+        "list_files": 'list_files: {"path": str, "pattern": str?, "limit": int?}',
+        "read_file": (
+            'read_file: {"path": str, "max_bytes": int?}; '
+            "只读取有界文本，二进制/非文本内容返回 is_binary=True 且不返回正文"
+        ),
+        "structured_probe": (
+            'structured_probe: {"path": str, "max_rows": int?, "max_columns": int?, '
+            '"max_tables": int?}; 返回有界样本、候选表头行和数据起始行'
+        ),
+        "write_file": (
+            'write_file: {"path": str, "content": str, "overwrite": bool?}; '
+            "只能写 scratch/artifacts/reports/logs"
+        ),
+        "run_python": (
+            'run_python: {"script_path": "scratch/...py", "args": list[str]?, '
+            '"timeout_seconds": float?}; run_python 只能执行 scratch/ 下的 .py 文件'
+        ),
     }
     names = list(allowed_tools)
     lines = [

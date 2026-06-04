@@ -89,6 +89,45 @@ def test_load_configs_models_preserves_api_key_env_for_cloud_models(tmp_path, mo
     assert provider_config.api_key == "sk-test"
 
 
+def test_from_env_loads_dotenv_before_resolving_model_config(tmp_path, monkeypatch) -> None:
+    config_path = tmp_path / "models.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "models": {
+                    "mimo_cloud": {
+                        "capability": "chat",
+                        "provider": "mimo",
+                        "protocol": "openai_compatible",
+                        "model": "mimo-v2-flash",
+                        "base_url": "https://api.xiaomimimo.com/v1",
+                        "api_key_env": "MIMO_API_KEY",
+                    }
+                },
+                "defaults": {"primary_model": "mimo_cloud"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    env_path = tmp_path / ".env"
+    env_path.write_text(
+        f"RAG_AGENT_MODELS_PATH={config_path}\n"
+        "MIMO_API_KEY=sk-dotenv\n",
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("RAG_AGENT_MODELS_PATH", raising=False)
+    monkeypatch.delenv("MIMO_API_KEY", raising=False)
+
+    registry = ModelRegistry.from_env(env_path=str(env_path))
+    spec = registry._config.models["mimo_cloud"]
+    provider_config = registry._spec_to_provider_config(spec)
+
+    assert registry.default_model == "mimo_cloud"
+    assert provider_config.api_key == "sk-dotenv"
+    monkeypatch.delenv("RAG_AGENT_MODELS_PATH", raising=False)
+    monkeypatch.delenv("MIMO_API_KEY", raising=False)
+
+
 class TestModelRegistryProperties:
     def test_default_model(self) -> None:
         reg = ModelRegistry(_make_config(default_model="main"))

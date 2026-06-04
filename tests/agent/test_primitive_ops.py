@@ -14,6 +14,7 @@ from rag.agent.primitive_ops import (
     ReadFileInput,
     RunPythonInput,
     RunPythonOutput,
+    StructuredProbeInput,
     WriteFileInput,
 )
 from rag.agent.runner.python_runner import PythonRunResult
@@ -106,9 +107,17 @@ class TestIOModels:
         )
         assert out.ok is True
 
+    def test_structured_probe_input_defaults(self) -> None:
+        inp = StructuredProbeInput(path="input_files/data.csv")
+        assert inp.max_rows == 20
+        assert inp.max_columns == 50
+        assert inp.max_tables == 5
+
     def test_file_info_model(self) -> None:
         fi = FileInfo(name="a", path="a", size=10, is_dir=False, modified_at=0.0)
         assert fi.is_dir is False
+        assert fi.file_kind == "unknown"
+        assert fi.capabilities == []
 
 
 # ===================================================================
@@ -129,6 +138,35 @@ class TestListFiles:
         out = ops.list_files(ListFilesInput(path="scratch"))
         names = [f.name for f in out.files]
         assert sorted(names) == ["a.txt", "b.txt"]
+
+    def test_file_metadata_advertises_text_and_binary_capabilities(
+        self,
+        ws: WorkspaceRuntime,
+        ops: PrimitiveOps,
+    ) -> None:
+        (ws.input_files / "note.txt").write_text("hello")
+        (ws.input_files / "report.xlsx").write_bytes(
+            b"PK\x03\x04\x00\x00\x00\x00\x00\x00binary\x00payload"
+        )
+
+        out = ops.list_files(ListFilesInput(path="input_files"))
+        by_name = {item.name: item for item in out.files}
+
+        text_file = by_name["note.txt"]
+        assert text_file.mime_type == "text/plain"
+        assert text_file.file_kind == "text"
+        assert text_file.is_binary is False
+        assert text_file.readable_as_text is True
+        assert text_file.capabilities == ["read_file", "structured_probe", "run_python"]
+
+        binary_file = by_name["report.xlsx"]
+        assert binary_file.mime_type == (
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+        assert binary_file.file_kind == "binary"
+        assert binary_file.is_binary is True
+        assert binary_file.readable_as_text is False
+        assert binary_file.capabilities == ["structured_probe", "run_python"]
 
     def test_empty_directory(self, ws: WorkspaceRuntime, ops: PrimitiveOps) -> None:
         out = ops.list_files(ListFilesInput(path="logs"))
@@ -181,9 +219,91 @@ class TestReadFile:
         assert out.truncated is True
         assert len(out.content) == 100
 
+    def test_binary_excel_file_is_not_decoded_as_text(
+        self,
+        ws: WorkspaceRuntime,
+        ops: PrimitiveOps,
+    ) -> None:
+        raw = b"PK\x03\x04\x00\x00\x00\x00\x00\x00binary\x00payload"
+        (ws.input_files / "report.xlsx").write_bytes(raw)
+
+        out = ops.read_file(ReadFileInput(path="input_files/report.xlsx"))
+
+        assert out.is_binary is True
+        assert out.content == ""
+        assert out.truncated is False
+        assert out.size_bytes == len(raw)
+
     def test_escapes_workspace_raises(self, ops: PrimitiveOps) -> None:
         with pytest.raises(WorkspacePathError):
             ops.read_file(ReadFileInput(path="../../etc/passwd"))
+
+
+# ===================================================================
+# structured_probe
+# ===================================================================
+
+
+class TestStructuredProbe:
+    def test_csv_detects_header_after_title_and_note(
+        self,
+        ws: WorkspaceRuntime,
+        ops: PrimitiveOps,
+    ) -> None:
+        (ws.input_files / "sales.csv").write_text(
+            "2026 sales report,,,\n"
+            "source: finance team,,,\n"
+            "region,city,amount,price\n"
+            "north,beijing,10,2.5\n"
+            "east,shanghai,12,3.0\n",
+            encoding="utf-8",
+        )
+
+        out = ops.structured_probe(StructuredProbeInput(path="input_files/sales.csv"))
+
+        assert out.path == "input_files/sales.csv"
+        assert out.mime_type == "text/csv"
+        assert len(out.tables) == 1
+        [table] = out.tables
+        assert table.name == "sales.csv"
+        assert table.row_count == 5
+        assert table.column_count == 4
+        assert table.sample_rows[0][0] == "2026 sales report"
+        assert table.candidate_header_rows
+        assert table.candidate_header_rows[0].row_index == 3
+        assert table.data_start_row == 4
+        assert table.used_range == "A1:D5"
+
+    def test_excel_detects_header_after_title_and_note(
+        self,
+        ws: WorkspaceRuntime,
+        ops: PrimitiveOps,
+    ) -> None:
+        openpyxl = pytest.importorskip("openpyxl")
+        workbook = openpyxl.Workbook()
+        sheet = workbook.active
+        sheet.title = "Sales"
+        sheet.append(["2026 sales report", None, None, None])
+        sheet.append(["source: finance team", None, None, None])
+        sheet.append(["region", "city", "amount", "price"])
+        sheet.append(["north", "beijing", 10, 2.5])
+        sheet.append(["east", "shanghai", 12, 3.0])
+        workbook.save(ws.input_files / "sales.xlsx")
+
+        out = ops.structured_probe(StructuredProbeInput(path="input_files/sales.xlsx"))
+
+        assert out.path == "input_files/sales.xlsx"
+        assert out.file_kind == "binary"
+        assert len(out.tables) == 1
+        [table] = out.tables
+        assert table.name == "Sales"
+        assert table.row_count == 5
+        assert table.column_count == 4
+        assert table.sample_rows[2] == ["region", "city", "amount", "price"]
+        assert table.candidate_header_rows
+        assert table.candidate_header_rows[0].row_index == 3
+        assert table.data_start_row == 4
+        assert table.used_range == "A1:D5"
 
 
 # ===================================================================
@@ -289,6 +409,55 @@ class TestRunPython:
         assert "scratch/output.txt" in out.generated_files
         assert (ws.scratch / "output.txt").read_text() == "created"
 
+    def test_script_tempfile_uses_scratch(
+        self, ws: WorkspaceRuntime, ops: PrimitiveOps
+    ) -> None:
+        script = ws.scratch / "tmpfile.py"
+        script.write_text(
+            "import tempfile\n"
+            "from pathlib import Path\n"
+            "with tempfile.NamedTemporaryFile('w', delete=False) as f:\n"
+            "    f.write('tmp')\n"
+            "    print(Path(f.name).relative_to(Path.cwd()))\n"
+        )
+
+        out = ops.run_python(RunPythonInput(script_path="scratch/tmpfile.py"))
+
+        assert out.ok is True
+        assert "scratch/" in out.stdout
+
+    def test_script_cannot_write_outside_workspace(
+        self, tmp_path: Path, ws: WorkspaceRuntime, ops: PrimitiveOps
+    ) -> None:
+        script = ws.scratch / "escape.py"
+        script.write_text(
+            "from pathlib import Path\n"
+            "Path('../outside.txt').write_text('bad')\n"
+        )
+
+        out = ops.run_python(RunPythonInput(script_path="scratch/escape.py"))
+
+        assert out.ok is False
+        assert out.exit_code != 0
+        assert not (tmp_path / "outside.txt").exists()
+        assert "Operation not permitted" in out.stderr
+
+    def test_script_cannot_write_input_files(
+        self, ws: WorkspaceRuntime, ops: PrimitiveOps
+    ) -> None:
+        script = ws.scratch / "write_input.py"
+        script.write_text(
+            "from pathlib import Path\n"
+            "Path('input_files/source.csv').write_text('mutated')\n"
+        )
+
+        out = ops.run_python(RunPythonInput(script_path="scratch/write_input.py"))
+
+        assert out.ok is False
+        assert out.exit_code != 0
+        assert not (ws.input_files / "source.csv").exists()
+        assert "Operation not permitted" in out.stderr
+
     def test_script_outside_scratch_denied(self, ws: WorkspaceRuntime, ops: PrimitiveOps) -> None:
         script = ws.artifacts / "evil.py"
         script.write_text("print('hi')")
@@ -331,13 +500,20 @@ class TestRunPython:
 
 
 class TestRunners:
-    def test_returns_all_four(self, ops: PrimitiveOps) -> None:
+    def test_returns_all_runners(self, ops: PrimitiveOps) -> None:
         r = ops.runners()
-        assert set(r.keys()) == {"list_files", "read_file", "write_file", "run_python"}
+        assert set(r.keys()) == {
+            "list_files",
+            "read_file",
+            "structured_probe",
+            "write_file",
+            "run_python",
+        }
 
     def test_runners_are_callable(self, ops: PrimitiveOps) -> None:
         r = ops.runners()
         assert callable(r["list_files"])
         assert callable(r["read_file"])
+        assert callable(r["structured_probe"])
         assert callable(r["write_file"])
         assert callable(r["run_python"])

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pytest
+from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 from pydantic import BaseModel
 
 from rag.agent.tools.spec import ToolError, ToolPermissions, ToolResult, ToolSpec
@@ -119,6 +120,21 @@ class TestToolResult:
                 error=ToolError(code="internal", message="x", retryable=True),
                 latency_ms=0,
             )
+
+    def test_msgpack_round_trip_preserves_output_model_type(self) -> None:
+        result = ToolResult(
+            tool_call_id="tc_007",
+            tool_name="search",
+            status="ok",
+            output=SearchOutput(items=["a", "b"]),
+            latency_ms=100.0,
+        )
+        serde = JsonPlusSerializer(allowed_msgpack_modules=[ToolResult])
+
+        restored = serde.loads_typed(serde.dumps_typed(result))
+
+        assert isinstance(restored, ToolResult)
+        assert restored.output == SearchOutput(items=["a", "b"])
 
 
 class TestToolError:

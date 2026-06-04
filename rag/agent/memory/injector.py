@@ -305,10 +305,16 @@ class ContextInjector:
                 for unit in context_units[: self._MAX_LOCATORS_PER_OBSERVATION]:
                     lines.append(
                         "    - "
-                        f"unit_id={self._one_line(str(getattr(unit, 'unit_id', '<unknown>')))} "
+                        f"unit_id={self._format_identifier(getattr(unit, 'unit_id', '<unknown>'))} "
                         f"unit_type={self._one_line(str(getattr(unit, 'unit_type', '<unknown>')))} "
                         f"{self._format_locator(getattr(unit, 'locator', {}))}"
                     )
+                    capabilities = getattr(unit, "capabilities", None)
+                    if isinstance(capabilities, list) and capabilities:
+                        lines.append(
+                            "      capabilities: "
+                            + self._format_list([str(item) for item in capabilities])
+                        )
                     preview = getattr(unit, "preview", None)
                     if preview:
                         lines.append(f"      preview: {self._one_line(str(preview))}")
@@ -334,16 +340,40 @@ class ContextInjector:
             "source_id",
             "section_id",
             "asset_type",
+            "table_index",
+            "table_name",
+            "used_range",
             "sheet_name",
             "page_no",
             "element_ref",
             "citation_anchor",
             "evidence_id",
+            "path",
+            "name",
+            "size_bytes",
+            "is_dir",
+            "mime_type",
+            "file_kind",
+            "truncated",
+            "is_binary",
+            "readable_as_text",
+            "encoding",
+            "source_tool",
+            "generated",
+            "generated_by",
+            "ok",
+            "exit_code",
+            "duration_ms",
+            "stdout_truncated",
+            "stderr_truncated",
+            "header_row_index",
+            "header_confidence",
+            "data_start_row",
             "row_count",
             "column_count",
         )
         parts = [
-            f"{field}={self._one_line(str(locator[field]))}"
+            f"{field}={self._format_locator_value(field, locator[field])}"
             for field in fields
             if locator.get(field) not in (None, "", [])
         ]
@@ -389,6 +419,20 @@ class ContextInjector:
         remaining = len(values) - effective_limit
         suffix = f", ...(+{remaining})" if remaining > 0 else ""
         return "[" + ", ".join(shown) + suffix + "]"
+
+    @staticmethod
+    def _format_identifier(value: object) -> str:
+        return ContextInjector._preserve_spaces_one_line(str(value))
+
+    @staticmethod
+    def _format_locator_value(field: str, value: object) -> str:
+        if field in {"path", "name", "sheet_name", "element_ref", "generated_by"}:
+            return ContextInjector._preserve_spaces_one_line(str(value))
+        return ContextInjector._one_line(str(value))
+
+    @staticmethod
+    def _preserve_spaces_one_line(text: str) -> str:
+        return text.replace("\r", " ").replace("\n", " ").replace("\t", " ").strip()
 
     def _format_tool_results(self, tool_results: Sequence[ToolResult]) -> str:
         if not tool_results:

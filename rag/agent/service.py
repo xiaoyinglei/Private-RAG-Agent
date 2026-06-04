@@ -9,6 +9,7 @@ from langchain_core.messages import BaseMessage
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from pydantic import BaseModel, ConfigDict, Field
 
+from rag.agent.core.checkpointing import create_agent_checkpointer
 from rag.agent.core.compiler import AgentGraphCompiler
 from rag.agent.core.context import AgentRunConfig, RuntimeRegistry
 from rag.agent.core.definition import AgentDefinition
@@ -74,7 +75,8 @@ class AgentRunResult(BaseModel):
     @classmethod
     def from_state(cls, state: AgentState, *, workspace_path: str | None = None) -> AgentRunResult:
         run_config = state["run_config"]
-        human_request = state.get("human_input_request")
+        is_terminal = state["status"] in {"done", "failed"}
+        human_request = None if is_terminal else state.get("human_input_request")
         pending = state.get("pending_tool_calls", [])
         return cls(
             run_id=run_config.run_id,
@@ -88,7 +90,7 @@ class AgentRunResult(BaseModel):
             iteration=state.get("iteration", 0),
             groundedness_flag=state.get("groundedness_flag", False),
             insufficient_evidence_flag=state.get("insufficient_evidence_flag", False),
-            needs_user_input=state.get("needs_user_input"),
+            needs_user_input=None if is_terminal else state.get("needs_user_input"),
             human_input_request=human_request,
             pending_tool_calls_summary=[
                 {"tool_call_id": tc.tool_call_id, "tool_name": tc.tool_name}
@@ -118,14 +120,14 @@ class AgentService:
         self._subagent_runner = subagent_runner
         self._synthesis_runner = synthesis_runner
         self._model_registry = model_registry
-        self._checkpointer = checkpointer
+        self._checkpointer = checkpointer or create_agent_checkpointer(None)
         self._compiler = AgentGraphCompiler(
             tool_registry=tool_registry,
             tool_decision_provider=tool_decision_provider,
             retrieval_hint_provider=retrieval_hint_provider,
             synthesis_runner=synthesis_runner,
             model_registry=model_registry,
-            checkpointer=checkpointer,
+            checkpointer=self._checkpointer,
         )
 
     def initial_state(self, request: AgentRunRequest) -> AgentState:
@@ -279,6 +281,8 @@ class AgentService:
         """
         runtime = self._base_tool_registry.clone()
 
+        self._inject_model_llm_tool_runners(runtime)
+
         from rag.agent.core.agent_as_tool import AgentAsToolAdapter
 
         # Inject runtime runners (e.g. PrimitiveOps) — override existing runners
@@ -308,6 +312,19 @@ class AgentService:
 
         return runtime
 
+    def _inject_model_llm_tool_runners(self, registry: ToolRegistry) -> None:
+        if self._model_registry is None:
+            return
+        from rag.agent.core.llm_tool_runners import create_model_llm_tool_runners
+
+        for tool_name, runner in create_model_llm_tool_runners(self._model_registry).items():
+            if registry.has_runner(tool_name):
+                continue
+            try:
+                registry.register_runner(tool_name, runner)
+            except KeyError:
+                pass
+
 
     async def resume(
         self,
@@ -328,6 +345,7 @@ class AgentService:
 
         # 1. Restore PrimitiveOps runners if workspace_path provided
         runtime_registry = self._base_tool_registry.clone()
+        self._inject_model_llm_tool_runners(runtime_registry)
         if workspace_path:
             workspace = open_workspace(workspace_path)
             ops = PrimitiveOps(workspace=workspace)

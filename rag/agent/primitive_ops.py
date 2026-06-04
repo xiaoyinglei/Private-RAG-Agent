@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
+import csv
+import mimetypes
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
 from rag.agent.runner.python_runner import (
-    LocalSubprocessPythonRunner,
     PythonRunner,
+    SeatbeltPythonRunner,
 )
 from rag.agent.workspace import WorkspaceRuntime
 
@@ -19,6 +21,12 @@ from rag.agent.workspace import WorkspaceRuntime
 
 MAX_LIST_FILES = 200
 MAX_GENERATED_FILES = 200
+FILE_SAMPLE_BYTES = 4096
+FileKind = Literal["directory", "text", "binary", "unknown"]
+CellValue = str | int | float | bool | None
+MAX_PROBE_ROWS = 200
+MAX_PROBE_COLUMNS = 200
+MAX_PROBE_TABLES = 20
 
 
 class ListFilesInput(BaseModel):
@@ -33,6 +41,11 @@ class FileInfo(BaseModel):
     size: int
     is_dir: bool
     modified_at: float
+    mime_type: str | None = None
+    file_kind: FileKind = "unknown"
+    is_binary: bool = False
+    readable_as_text: bool = False
+    capabilities: list[str] = Field(default_factory=list)
 
 
 class ListFilesOutput(BaseModel):
@@ -90,6 +103,40 @@ class RunPythonOutput(BaseModel):
     generated_files: list[str]
 
 
+class StructuredProbeInput(BaseModel):
+    path: str
+    encoding: str = "utf-8"
+    max_rows: int = Field(default=20, ge=1, le=MAX_PROBE_ROWS)
+    max_columns: int = Field(default=50, ge=1, le=MAX_PROBE_COLUMNS)
+    max_tables: int = Field(default=5, ge=1, le=MAX_PROBE_TABLES)
+
+
+class CandidateHeaderRow(BaseModel):
+    row_index: int = Field(ge=1)
+    confidence: float = Field(ge=0.0, le=1.0)
+    reason: str
+
+
+class StructuredTableProbe(BaseModel):
+    table_index: int = Field(ge=0)
+    name: str | None = None
+    used_range: str | None = None
+    row_count: int = Field(ge=0)
+    column_count: int = Field(ge=0)
+    sample_rows: list[list[CellValue]] = Field(default_factory=list)
+    candidate_header_rows: list[CandidateHeaderRow] = Field(default_factory=list)
+    data_start_row: int | None = Field(default=None, ge=1)
+
+
+class StructuredProbeOutput(BaseModel):
+    path: str
+    file_kind: FileKind = "unknown"
+    mime_type: str | None = None
+    tables: list[StructuredTableProbe] = Field(default_factory=list)
+    truncated: bool = False
+    errors: list[str] = Field(default_factory=list)
+
+
 # ---------------------------------------------------------------------------
 # PrimitiveOps
 # ---------------------------------------------------------------------------
@@ -103,7 +150,7 @@ class PrimitiveOps:
         python_runner: PythonRunner | None = None,
     ) -> None:
         self._workspace = workspace
-        self._python_runner = python_runner or LocalSubprocessPythonRunner()
+        self._python_runner = python_runner or SeatbeltPythonRunner()
 
     # -- list_files --------------------------------------------------------
 
@@ -129,11 +176,10 @@ class PrimitiveOps:
             stat = entry.stat()
             rel = self._workspace.relative_to_root(entry)
             entries.append(
-                FileInfo(
-                    name=entry.name,
-                    path=str(rel),
+                _file_info(
+                    entry,
+                    rel=rel,
                     size=stat.st_size,
-                    is_dir=entry.is_dir(),
                     modified_at=stat.st_mtime,
                 )
             )
@@ -155,7 +201,22 @@ class PrimitiveOps:
         truncated = len(raw) > payload.max_bytes
         if truncated:
             raw = raw[: payload.max_bytes]
-        content = raw.decode(payload.encoding, errors="replace")
+
+        if _is_binary_content(
+            raw,
+            encoding=payload.encoding,
+            mime_type=mimetypes.guess_type(target.name)[0],
+        ):
+            return ReadFileOutput(
+                path=payload.path,
+                content="",
+                truncated=truncated,
+                size_bytes=size,
+                is_binary=True,
+                encoding=payload.encoding,
+            )
+
+        content = raw.decode(payload.encoding)
 
         return ReadFileOutput(
             path=payload.path,
@@ -230,12 +291,62 @@ class PrimitiveOps:
             generated_files=generated_files,
         )
 
+    # -- structured_probe --------------------------------------------------
+
+    def structured_probe(self, payload: StructuredProbeInput) -> StructuredProbeOutput:
+        target = self._workspace.resolve_path(payload.path)
+        self._workspace.ensure_within_workspace(target)
+
+        if not target.is_file():
+            raise FileNotFoundError(f"File not found: {payload.path}")
+
+        stat = target.stat()
+        rel = self._workspace.relative_to_root(target)
+        info = _file_info(target, rel=rel, size=stat.st_size, modified_at=stat.st_mtime)
+        errors: list[str] = []
+        tables: list[StructuredTableProbe] = []
+        truncated = False
+
+        if _is_excel_file(target, info.mime_type):
+            try:
+                tables, truncated = _probe_excel_file(
+                    target,
+                    max_rows=payload.max_rows,
+                    max_columns=payload.max_columns,
+                    max_tables=payload.max_tables,
+                )
+            except Exception as exc:
+                errors.append(f"excel_probe_failed: {exc}")
+        elif _is_delimited_text_file(target, info.mime_type, readable_as_text=info.readable_as_text):
+            try:
+                table = _probe_delimited_file(
+                    target,
+                    encoding=payload.encoding,
+                    max_rows=payload.max_rows,
+                    max_columns=payload.max_columns,
+                )
+                tables = [table]
+            except Exception as exc:
+                errors.append(f"delimited_probe_failed: {exc}")
+        else:
+            errors.append("unsupported_structured_probe_type")
+
+        return StructuredProbeOutput(
+            path=payload.path,
+            file_kind=info.file_kind,
+            mime_type=info.mime_type,
+            tables=tables,
+            truncated=truncated,
+            errors=errors,
+        )
+
     # -- runners registry --------------------------------------------------
 
     def runners(self) -> dict[str, Any]:
         return {
             "list_files": self.list_files,
             "read_file": self.read_file,
+            "structured_probe": self.structured_probe,
             "write_file": self.write_file,
             "run_python": self.run_python,
         }
@@ -253,6 +364,299 @@ def _snapshot_files(root: Path) -> set[str]:
     return files
 
 
+def _file_info(path: Path, *, rel: Path, size: int, modified_at: float) -> FileInfo:
+    if path.is_dir():
+        return FileInfo(
+            name=path.name,
+            path=str(rel),
+            size=size,
+            is_dir=True,
+            modified_at=modified_at,
+            file_kind="directory",
+            capabilities=["list_files"],
+        )
+
+    mime_type = mimetypes.guess_type(path.name)[0]
+    sample = _read_file_sample(path)
+    is_binary = _is_binary_content(sample, encoding="utf-8", mime_type=mime_type)
+    readable_as_text = not is_binary
+    return FileInfo(
+        name=path.name,
+        path=str(rel),
+        size=size,
+        is_dir=False,
+        modified_at=modified_at,
+        mime_type=mime_type,
+        file_kind="binary" if is_binary else "text",
+        is_binary=is_binary,
+        readable_as_text=readable_as_text,
+        capabilities=(
+            ["read_file", "structured_probe", "run_python"]
+            if readable_as_text
+            else ["structured_probe", "run_python"]
+        ),
+    )
+
+
+def _read_file_sample(path: Path) -> bytes:
+    try:
+        with path.open("rb") as f:
+            return f.read(FILE_SAMPLE_BYTES)
+    except OSError:
+        return b""
+
+
+def _is_binary_content(
+    raw: bytes,
+    *,
+    encoding: str,
+    mime_type: str | None,
+) -> bool:
+    if mime_type is not None and _mime_type_is_binary(mime_type):
+        return True
+
+    if not raw:
+        return False
+
+    try:
+        decoded = raw.decode(encoding)
+    except UnicodeDecodeError:
+        return True
+
+    if "\x00" in decoded:
+        return True
+
+    control_chars = sum(
+        1
+        for ch in decoded
+        if ord(ch) < 32 and ch not in "\n\r\t\f\b"
+    )
+    return control_chars / max(len(decoded), 1) > 0.05
+
+
+def _mime_type_is_binary(mime_type: str) -> bool:
+    normalized = mime_type.lower()
+    if normalized.startswith("text/"):
+        return False
+    if normalized in {
+        "application/json",
+        "application/x-json",
+        "application/xml",
+        "application/x-yaml",
+        "application/yaml",
+        "application/toml",
+    }:
+        return False
+    if normalized.endswith("+json") or normalized.endswith("+xml"):
+        return False
+    return True
+
+
+def _is_excel_file(path: Path, mime_type: str | None) -> bool:
+    if path.suffix.lower() in {".xlsx", ".xlsm", ".xltx", ".xltm"}:
+        return True
+    return mime_type in {
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "application/vnd.ms-excel.sheet.macroenabled.12",
+    }
+
+
+def _is_delimited_text_file(
+    path: Path,
+    mime_type: str | None,
+    *,
+    readable_as_text: bool,
+) -> bool:
+    if path.suffix.lower() in {".csv", ".tsv"}:
+        return True
+    return readable_as_text and mime_type in {"text/csv", "text/tab-separated-values"}
+
+
+def _probe_delimited_file(
+    path: Path,
+    *,
+    encoding: str,
+    max_rows: int,
+    max_columns: int,
+) -> StructuredTableProbe:
+    dialect = _detect_csv_dialect(path, encoding=encoding)
+    sample_rows: list[list[CellValue]] = []
+    row_count = 0
+    column_count = 0
+    with path.open("r", encoding=encoding, newline="") as f:
+        reader = csv.reader(f, dialect=dialect)
+        for row in reader:
+            row_count += 1
+            column_count = max(column_count, len(row))
+            if len(sample_rows) < max_rows:
+                sample_rows.append([_cell_value(value) for value in row[:max_columns]])
+
+    candidates = _candidate_header_rows(sample_rows)
+    data_start_row = candidates[0].row_index + 1 if candidates else None
+    return StructuredTableProbe(
+        table_index=0,
+        name=path.name,
+        used_range=_used_range(row_count=row_count, column_count=column_count),
+        row_count=row_count,
+        column_count=column_count,
+        sample_rows=sample_rows,
+        candidate_header_rows=candidates,
+        data_start_row=data_start_row,
+    )
+
+
+def _detect_csv_dialect(path: Path, *, encoding: str) -> type[csv.Dialect] | csv.Dialect:
+    if path.suffix.lower() == ".tsv":
+        return csv.excel_tab
+    with path.open("r", encoding=encoding, newline="") as f:
+        sample = f.read(FILE_SAMPLE_BYTES)
+    try:
+        return csv.Sniffer().sniff(sample)
+    except csv.Error:
+        return csv.excel
+
+
+def _probe_excel_file(
+    path: Path,
+    *,
+    max_rows: int,
+    max_columns: int,
+    max_tables: int,
+) -> tuple[list[StructuredTableProbe], bool]:
+    try:
+        import openpyxl
+    except ImportError as exc:
+        raise RuntimeError("openpyxl is required to probe Excel workbooks") from exc
+
+    workbook = openpyxl.load_workbook(path, read_only=True, data_only=True)
+    tables: list[StructuredTableProbe] = []
+    for table_index, sheet_name in enumerate(workbook.sheetnames[:max_tables]):
+        sheet = workbook[sheet_name]
+        row_count = int(sheet.max_row or 0)
+        column_count = int(sheet.max_column or 0)
+        sample_rows: list[list[CellValue]] = []
+        for row in sheet.iter_rows(
+            min_row=1,
+            max_row=min(max_rows, row_count),
+            min_col=1,
+            max_col=min(max_columns, column_count),
+            values_only=True,
+        ):
+            sample_rows.append([_cell_value(value) for value in row])
+        candidates = _candidate_header_rows(sample_rows)
+        tables.append(
+            StructuredTableProbe(
+                table_index=table_index,
+                name=str(sheet_name),
+                used_range=sheet.calculate_dimension(),
+                row_count=row_count,
+                column_count=column_count,
+                sample_rows=sample_rows,
+                candidate_header_rows=candidates,
+                data_start_row=candidates[0].row_index + 1 if candidates else None,
+            )
+        )
+    workbook.close()
+    return tables, len(workbook.sheetnames) > max_tables
+
+
+def _candidate_header_rows(rows: list[list[CellValue]]) -> list[CandidateHeaderRow]:
+    candidates: list[CandidateHeaderRow] = []
+    for index, row in enumerate(rows):
+        non_empty = [_normalized_cell(cell) for cell in row if _normalized_cell(cell)]
+        if len(non_empty) < 2:
+            continue
+        label_like = [value for value in non_empty if _looks_like_label(value)]
+        label_ratio = len(label_like) / len(non_empty)
+        unique_ratio = len({value.lower() for value in label_like}) / max(len(label_like), 1)
+        following = rows[index + 1 : index + 4]
+        following_density = _following_density(following, expected=len(non_empty))
+        data_evidence = 1.0 if _following_rows_look_like_data(following) else 0.0
+        confidence = min(
+            1.0,
+            (0.45 * label_ratio)
+            + (0.20 * unique_ratio)
+            + (0.20 * following_density)
+            + (0.15 * data_evidence),
+        )
+        if confidence < 0.55:
+            continue
+        candidates.append(
+            CandidateHeaderRow(
+                row_index=index + 1,
+                confidence=round(confidence, 3),
+                reason="label-like row followed by similarly shaped data rows",
+            )
+        )
+    return sorted(candidates, key=lambda item: item.confidence, reverse=True)[:3]
+
+
+def _following_density(rows: list[list[CellValue]], *, expected: int) -> float:
+    if not rows or expected <= 0:
+        return 0.0
+    densities: list[float] = []
+    for row in rows:
+        non_empty = sum(1 for cell in row if _normalized_cell(cell))
+        densities.append(min(1.0, non_empty / expected))
+    return sum(densities) / len(densities)
+
+
+def _following_rows_look_like_data(rows: list[list[CellValue]]) -> bool:
+    for row in rows:
+        non_empty = [cell for cell in row if _normalized_cell(cell)]
+        if not non_empty:
+            continue
+        if any(isinstance(cell, int | float) and not isinstance(cell, bool) for cell in non_empty):
+            return True
+        if any(not _looks_like_label(_normalized_cell(cell)) for cell in non_empty):
+            return True
+    return False
+
+
+def _looks_like_label(value: str) -> bool:
+    stripped = value.strip()
+    if not stripped or len(stripped) > 80:
+        return False
+    try:
+        float(stripped.replace(",", ""))
+    except ValueError:
+        return True
+    return False
+
+
+def _normalized_cell(value: CellValue) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return str(value)
+    if isinstance(value, int | float):
+        return str(value)
+    return str(value).strip()
+
+
+def _cell_value(value: object) -> CellValue:
+    if value is None or isinstance(value, str | int | float | bool):
+        return value
+    isoformat = getattr(value, "isoformat", None)
+    if callable(isoformat):
+        return str(isoformat())
+    return str(value)
+
+
+def _used_range(*, row_count: int, column_count: int) -> str | None:
+    if row_count <= 0 or column_count <= 0:
+        return None
+    return f"A1:{_column_letter(column_count)}{row_count}"
+
+
+def _column_letter(index: int) -> str:
+    letters = ""
+    while index > 0:
+        index, remainder = divmod(index - 1, 26)
+        letters = chr(65 + remainder) + letters
+    return letters
+
+
 __all__ = [
     "FileInfo",
     "ListFilesInput",
@@ -262,6 +666,10 @@ __all__ = [
     "ReadFileOutput",
     "RunPythonInput",
     "RunPythonOutput",
+    "CandidateHeaderRow",
+    "StructuredProbeInput",
+    "StructuredProbeOutput",
+    "StructuredTableProbe",
     "WriteFileInput",
     "WriteFileOutput",
 ]

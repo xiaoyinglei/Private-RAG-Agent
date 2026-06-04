@@ -340,7 +340,7 @@ class ObservationBuilder:
         if evidence_refs:
             resolved_gaps.append("evidence")
 
-        locators = _locators_from_output(output)
+        locators = _locators_from_output(output, tool_name=result.tool_name)
         return StructuredObservation(
             tool_call_id=result.tool_call_id,
             tool_name=result.tool_name,
@@ -459,6 +459,15 @@ class StateReducer:
         }
         progress_made = bool(set(satisfied) - previous_satisfied) or bool(
             accepted_refs - previous_accepted_refs
+        )
+        previous_context_unit_ids = {
+            unit.unit_id
+            for unit in state.get("context_units", [])
+            if isinstance(unit, ContextUnit)
+        }
+        new_context_unit_ids = {unit.unit_id for unit in context_units}
+        progress_made = progress_made or bool(
+            new_context_unit_ids - previous_context_unit_ids
         )
         open_gaps = goal.open_gaps(satisfied)
         error_seen = any(observation.status == "error" for observation in new_observations)
@@ -913,7 +922,142 @@ def _context_units_from_output(
                 and isinstance(locator.get("asset_type"), str)
             )
         return units
+    if result.tool_name == "list_files":
+        return _list_files_context_units(output)
+    if result.tool_name == "read_file":
+        unit = _read_file_context_unit(output, tool_call_id=result.tool_call_id)
+        return [] if unit is None else [unit]
+    if result.tool_name == "write_file":
+        unit = _write_file_context_unit(output, tool_call_id=result.tool_call_id)
+        return [] if unit is None else [unit]
+    if result.tool_name == "run_python":
+        return _run_python_context_units(output, tool_call_id=result.tool_call_id)
+    if result.tool_name == "structured_probe":
+        return _structured_probe_context_units(output)
     return []
+
+
+def _list_files_context_units(output: BaseModel) -> list[ContextUnit]:
+    units: list[ContextUnit] = []
+    for file_info in getattr(output, "files", []) or []:
+        locator = _workspace_file_locator(file_info, source_tool="list_files")
+        path = locator.get("path")
+        if not isinstance(path, str) or not path.strip():
+            continue
+        is_dir = bool(locator.get("is_dir", False))
+        capabilities = _workspace_file_capabilities(file_info, is_dir=is_dir)
+        units.append(
+            ContextUnit(
+                unit_id=f"workspace_dir:{path}" if is_dir else f"workspace_file:{path}",
+                unit_type="workspace_dir" if is_dir else "workspace_file",
+                locator=locator,
+                preview=f"{path} ({locator.get('size_bytes', 0)} bytes)",
+                content_ref=path,
+                capabilities=capabilities,
+                metadata={"source_tool": "list_files"},
+            )
+        )
+    return units
+
+
+def _read_file_context_unit(
+    output: BaseModel,
+    *,
+    tool_call_id: str,
+) -> ContextUnit | None:
+    path = getattr(output, "path", None)
+    if not isinstance(path, str) or not path.strip():
+        return None
+    content = getattr(output, "content", None)
+    preview = content[:1000] if isinstance(content, str) and content else None
+    return ContextUnit(
+        unit_id=f"workspace_file:{path}",
+        unit_type="workspace_file_content",
+        locator=_read_file_locator(output),
+        preview=preview,
+        content_ref=tool_call_id,
+        capabilities=["read_file"],
+        metadata={"source_tool": "read_file"},
+    )
+
+
+def _write_file_context_unit(
+    output: BaseModel,
+    *,
+    tool_call_id: str,
+) -> ContextUnit | None:
+    path = getattr(output, "path", None)
+    if not isinstance(path, str) or not path.strip():
+        return None
+    locator = _write_file_locator(output)
+    return ContextUnit(
+        unit_id=f"workspace_file:{path}",
+        unit_type="workspace_file",
+        locator=locator,
+        preview=f"wrote {path} ({locator.get('size_bytes', 0)} bytes)",
+        content_ref=tool_call_id,
+        capabilities=["read_file"],
+        metadata={"source_tool": "write_file"},
+    )
+
+
+def _run_python_context_units(
+    output: BaseModel,
+    *,
+    tool_call_id: str,
+) -> list[ContextUnit]:
+    units = [
+        ContextUnit(
+            unit_id=f"python_run:{tool_call_id}",
+            unit_type="python_execution",
+            locator=_run_python_locator(output),
+            preview=_run_python_preview(output),
+            content_ref=tool_call_id,
+            capabilities=["run_python"],
+            metadata={"source_tool": "run_python"},
+        )
+    ]
+    for path in getattr(output, "generated_files", []) or []:
+        if not isinstance(path, str) or not path.strip():
+            continue
+        units.append(
+            ContextUnit(
+                unit_id=f"workspace_file:{path}",
+                unit_type="workspace_file",
+                locator={
+                    "path": path,
+                    "source_tool": "run_python",
+                    "generated_by": tool_call_id,
+                },
+                preview=f"generated {path}",
+                content_ref=path,
+                capabilities=["read_file"],
+                metadata={"source_tool": "run_python"},
+            )
+        )
+    return units
+
+
+def _structured_probe_context_units(output: BaseModel) -> list[ContextUnit]:
+    path = getattr(output, "path", None)
+    if not isinstance(path, str) or not path.strip():
+        return []
+    units: list[ContextUnit] = []
+    for table in getattr(output, "tables", []) or []:
+        table_index = getattr(table, "table_index", len(units))
+        locator = _structured_table_locator(path, table)
+        units.append(
+            ContextUnit(
+                unit_id=f"structured_table:{path}:{table_index}",
+                unit_type="structured_table",
+                locator=locator,
+                preview=_structured_table_preview(table),
+                content_ref=path,
+                capabilities=["structured_probe", "run_python"],
+                metadata={"source_tool": "structured_probe"},
+            )
+        )
+    return units
 
 
 def _retrieval_context_units(
@@ -1031,9 +1175,16 @@ def _dedupe_context_units(units: Sequence[ContextUnit]) -> list[ContextUnit]:
     return list(merged.values())
 
 
-def _locators_from_output(output: BaseModel | None) -> list[dict[str, object]]:
+def _locators_from_output(
+    output: BaseModel | None,
+    *,
+    tool_name: str | None = None,
+) -> list[dict[str, object]]:
     if output is None:
         return []
+    primitive_locators = _primitive_locators_from_output(tool_name, output)
+    if primitive_locators:
+        return primitive_locators
     items = getattr(output, "items", None)
     if isinstance(items, list):
         return _search_asset_locators(items)
@@ -1073,6 +1224,171 @@ def _locators_from_output(output: BaseModel | None) -> list[dict[str, object]]:
             continue
         locators.append(_asset_locator_from_descriptor(asset))
     return locators
+
+
+def _primitive_locators_from_output(
+    tool_name: str | None,
+    output: BaseModel,
+) -> list[dict[str, object]]:
+    if tool_name == "list_files":
+        return [
+            _workspace_file_locator(file_info, source_tool="list_files")
+            for file_info in getattr(output, "files", []) or []
+        ]
+    if tool_name == "read_file":
+        return [_read_file_locator(output)]
+    if tool_name == "write_file":
+        return [_write_file_locator(output)]
+    if tool_name == "run_python":
+        locators = [_run_python_locator(output)]
+        locators.extend(
+            {
+                "path": path,
+                "source_tool": "run_python",
+                "generated": True,
+            }
+            for path in getattr(output, "generated_files", []) or []
+            if isinstance(path, str) and path.strip()
+        )
+        return locators
+    if tool_name == "structured_probe":
+        path = getattr(output, "path", None)
+        if not isinstance(path, str) or not path.strip():
+            return []
+        return [
+            _structured_table_locator(path, table)
+            for table in getattr(output, "tables", []) or []
+        ]
+    return []
+
+
+def _workspace_file_locator(file_info: object, *, source_tool: str) -> dict[str, object]:
+    values: dict[str, object] = {"source_tool": source_tool}
+    path = getattr(file_info, "path", None)
+    if isinstance(path, str) and path.strip():
+        values["path"] = path
+    name = getattr(file_info, "name", None)
+    if isinstance(name, str) and name.strip():
+        values["name"] = name
+    size = getattr(file_info, "size", None)
+    if isinstance(size, int):
+        values["size_bytes"] = size
+    is_dir = getattr(file_info, "is_dir", None)
+    if isinstance(is_dir, bool):
+        values["is_dir"] = is_dir
+
+    mime_type = getattr(file_info, "mime_type", None)
+    if isinstance(mime_type, str) and mime_type.strip():
+        values["mime_type"] = mime_type
+    file_kind = getattr(file_info, "file_kind", None)
+    has_file_kind = isinstance(file_kind, str) and file_kind not in {"", "unknown"}
+    if has_file_kind:
+        values["file_kind"] = file_kind
+    if has_file_kind:
+        is_binary = getattr(file_info, "is_binary", None)
+        if isinstance(is_binary, bool):
+            values["is_binary"] = is_binary
+        readable_as_text = getattr(file_info, "readable_as_text", None)
+        if isinstance(readable_as_text, bool):
+            values["readable_as_text"] = readable_as_text
+    return values
+
+
+def _workspace_file_capabilities(file_info: object, *, is_dir: bool) -> list[str]:
+    raw = getattr(file_info, "capabilities", None)
+    if isinstance(raw, list) and raw:
+        return [str(item) for item in raw if str(item)]
+    return ["list_files"] if is_dir else ["read_file"]
+
+
+def _read_file_locator(output: BaseModel) -> dict[str, object]:
+    values: dict[str, object] = {"source_tool": "read_file"}
+    for output_field, locator_field in (
+        ("path", "path"),
+        ("size_bytes", "size_bytes"),
+        ("truncated", "truncated"),
+        ("is_binary", "is_binary"),
+        ("encoding", "encoding"),
+    ):
+        value = getattr(output, output_field, None)
+        if value not in (None, "", []):
+            values[locator_field] = value
+    return values
+
+
+def _write_file_locator(output: BaseModel) -> dict[str, object]:
+    values: dict[str, object] = {"source_tool": "write_file"}
+    for field in ("path", "size_bytes"):
+        value = getattr(output, field, None)
+        if value not in (None, "", []):
+            values[field] = value
+    return values
+
+
+def _run_python_locator(output: BaseModel) -> dict[str, object]:
+    values: dict[str, object] = {"source_tool": "run_python"}
+    for field in (
+        "ok",
+        "exit_code",
+        "duration_ms",
+        "stdout_truncated",
+        "stderr_truncated",
+        "generated_files",
+    ):
+        value = getattr(output, field, None)
+        if value not in (None, "", []):
+            values[field] = value
+    return values
+
+
+def _run_python_preview(output: BaseModel) -> str | None:
+    lines: list[str] = []
+    stdout = getattr(output, "stdout", None)
+    if isinstance(stdout, str) and stdout.strip():
+        lines.append("stdout: " + stdout.strip()[:500])
+    stderr = getattr(output, "stderr", None)
+    if isinstance(stderr, str) and stderr.strip():
+        lines.append("stderr: " + stderr.strip()[:500])
+    generated = getattr(output, "generated_files", None)
+    if isinstance(generated, list) and generated:
+        lines.append("generated_files: " + ", ".join(str(path) for path in generated[:20]))
+    return "\n".join(lines) if lines else None
+
+
+def _structured_table_locator(path: str, table: object) -> dict[str, object]:
+    values: dict[str, object] = {
+        "path": path,
+        "source_tool": "structured_probe",
+    }
+    for output_field, locator_field in (
+        ("table_index", "table_index"),
+        ("name", "table_name"),
+        ("used_range", "used_range"),
+        ("row_count", "row_count"),
+        ("column_count", "column_count"),
+        ("data_start_row", "data_start_row"),
+    ):
+        value = getattr(table, output_field, None)
+        if value not in (None, "", []):
+            values[locator_field] = value
+    candidates = getattr(table, "candidate_header_rows", None)
+    if isinstance(candidates, list) and candidates:
+        best = candidates[0]
+        row_index = getattr(best, "row_index", None)
+        confidence = getattr(best, "confidence", None)
+        if isinstance(row_index, int):
+            values["header_row_index"] = row_index
+        if isinstance(confidence, int | float):
+            values["header_confidence"] = float(confidence)
+    return values
+
+
+def _structured_table_preview(table: object) -> str | None:
+    rows = getattr(table, "sample_rows", None)
+    if not isinstance(rows, list) or not rows:
+        return None
+    shown = rows[:5]
+    return "sample_rows: " + repr(shown)[:1000]
 
 
 def _asset_locator_from_descriptor(asset: object) -> dict[str, object]:

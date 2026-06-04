@@ -15,6 +15,11 @@ from rag.agent.goal_runtime import (
     StructuredObservation,
 )
 from rag.agent.graphs.nodes.synthesize import synthesize_node
+from rag.agent.primitive_ops import (
+    CandidateHeaderRow,
+    StructuredProbeOutput,
+    StructuredTableProbe,
+)
 from rag.agent.state import AgentState
 from rag.agent.tools.builtin_registry import create_builtin_tool_registry
 from rag.agent.tools.llm_tools import LLMGenerateInput, LLMTextOutput
@@ -324,4 +329,61 @@ async def test_goal_satisfied_asset_analysis_finalizes_without_llm_rewrite() -> 
     assert "SELECT SUM" in update["final_answer"]
     assert "RAW_RESULT_MUST_NOT_ENTER_FINAL_ANSWER" not in update["final_answer"]
     assert called is False
+    RuntimeRegistry.remove("synthesis-parent")
+
+
+@pytest.mark.anyio
+async def test_legacy_synthesis_summarizes_structured_probe_without_raw_json() -> None:
+    state = _state()
+    state["evidence"] = []
+    state["citations"] = []
+    state["tool_results"] = [
+        ToolResult(
+            tool_call_id="tc-probe",
+            tool_name="structured_probe",
+            status="ok",
+            output=StructuredProbeOutput(
+                path="input_files/report.xlsx",
+                file_kind="binary",
+                mime_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                tables=[
+                    StructuredTableProbe(
+                        table_index=0,
+                        name="Sales",
+                        used_range="A1:D5",
+                        row_count=5,
+                        column_count=4,
+                        sample_rows=[
+                            ["2026 sales report", None, None, None],
+                            ["source: finance team", None, None, None],
+                            ["region", "city", "amount\n（万㎡）", "price"],
+                            ["north", "beijing", 10, 2.5],
+                        ],
+                        candidate_header_rows=[
+                            CandidateHeaderRow(
+                                row_index=3,
+                                confidence=0.9,
+                                reason="label-like row followed by data rows",
+                            )
+                        ],
+                        data_start_row=4,
+                    )
+                ],
+            ),
+            latency_ms=10.0,
+        )
+    ]
+
+    update = await synthesize_node(state, synthesis_runner=None)
+
+    assert update["status"] == "done"
+    assert update["final_answer"] is not None
+    assert "表结构摘要" in update["final_answer"]
+    assert "input_files/report.xlsx" in update["final_answer"]
+    assert "Sales" in update["final_answer"]
+    assert "A1:D5" in update["final_answer"]
+    assert "候选表头行：第 3 行" in update["final_answer"]
+    assert "数据起始行：第 4 行" in update["final_answer"]
+    assert "关键字段：region, city, amount （万㎡）, price" in update["final_answer"]
+    assert "{\"path\"" not in update["final_answer"]
     RuntimeRegistry.remove("synthesis-parent")

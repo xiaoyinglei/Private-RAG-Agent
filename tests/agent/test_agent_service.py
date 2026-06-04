@@ -4,12 +4,41 @@ import pytest
 
 from rag.agent.builtin.research import RESEARCH_AGENT
 from rag.agent.core.context import AgentRunConfig, RuntimeRegistry
-from rag.agent.service import AgentRunRequest, AgentService
+from rag.agent.core.definition import AgentDefinition
+from rag.agent.service import AgentRunRequest, AgentRunResult, AgentService
 from rag.agent.state import ToolCallPlan
 from rag.agent.tools.builtin_registry import create_builtin_tool_registry
 from rag.agent.tools.llm_tools import LLMTextOutput
 from rag.schema.query import RetrievalSignals
 from rag.schema.runtime import AccessPolicy
+
+
+class _TextGenerator:
+    def __init__(self) -> None:
+        self.prompts: list[str] = []
+
+    def generate_text(self, *, prompt: str, **kwargs: object) -> str:
+        del kwargs
+        self.prompts.append(prompt)
+        return "model-backed summary"
+
+
+class _ResolvedFakeModel:
+    def __init__(self, generator: _TextGenerator) -> None:
+        self.generator = generator
+        self.kwargs: dict[str, object] = {}
+
+
+class _FakeModelRegistry:
+    default_model = "fake"
+    fallback_model = "fake"
+
+    def __init__(self, generator: _TextGenerator) -> None:
+        self.generator = generator
+
+    def resolve_for_node(self, *, node_model: str | None, node_name: str) -> _ResolvedFakeModel:
+        del node_model, node_name
+        return _ResolvedFakeModel(self.generator)
 
 
 class _ResearchUnderstandingService:
@@ -82,6 +111,23 @@ def test_agent_service_initial_state_creates_runtime_handles() -> None:
     RuntimeRegistry.remove("svc-state")
 
 
+def test_agent_run_result_clears_stale_human_input_when_done() -> None:
+    service = _service_with_registry()
+    state = service.initial_state(
+        AgentRunRequest(task="Explain policy", run_id="svc-clear", thread_id="svc-clear")
+    )
+    state["status"] = "done"
+    state["needs_user_input"] = "stale approval"
+    state["human_input_request"] = object()
+
+    result = AgentRunResult.from_state(state)
+
+    assert result.status == "done"
+    assert result.needs_user_input is None
+    assert result.human_input_request is None
+    RuntimeRegistry.remove("svc-clear")
+
+
 @pytest.mark.anyio
 async def test_agent_service_run_executes_explicit_tool_call_with_runner() -> None:
     call = ToolCallPlan.create(
@@ -143,6 +189,44 @@ async def test_agent_service_run_without_runner_fails_closed() -> None:
     assert result.insufficient_evidence_flag is True
     assert result.tool_results[0].status == "error"
     assert result.tool_results[0].error.code == "tool_not_implemented"
+
+
+@pytest.mark.anyio
+async def test_agent_service_injects_model_backed_llm_tool_runners() -> None:
+    generator = _TextGenerator()
+    call = ToolCallPlan.create(
+        "llm_summarize",
+        {
+            "task": "Explain policy",
+            "context_sections": ["tool result context"],
+            "evidence_ids": ["ev1"],
+            "citation_ids": ["cit1"],
+        },
+    )
+    service = AgentService(
+        definition=RESEARCH_AGENT,
+        tool_registry=create_builtin_tool_registry(runners={}),
+        model_registry=_FakeModelRegistry(generator),  # type: ignore[arg-type]
+    )
+
+    result = await service.run(
+        AgentRunRequest(
+            task="Explain policy",
+            run_id="svc-model-llm-tools",
+            thread_id="svc-model-llm-tools",
+            pending_tool_calls=[call],
+        )
+    )
+
+    assert result.status == "done"
+    assert result.final_answer == "model-backed summary"
+    assert result.tool_results[0].status == "ok"
+    assert result.tool_results[0].output == LLMTextOutput(
+        text="model-backed summary",
+        evidence_ids=["ev1"],
+        citation_ids=["cit1"],
+    )
+    assert "tool result context" in generator.prompts[0]
 
 
 @pytest.mark.anyio
@@ -252,3 +336,40 @@ async def test_agent_service_run_with_primitive_ops_through_agent_loop() -> None
     write_result = result.tool_results[0]
     assert write_result.status == "ok"
     assert write_result.output.path == "scratch/hello.py"
+
+
+@pytest.mark.anyio
+async def test_agent_service_run_python_nonzero_exit_is_tool_error(tmp_path) -> None:
+    """A script process failure must be visible as ToolResult.status='error'."""
+    workspace = tmp_path / "workspace"
+    for name in ("scratch", "artifacts", "reports", "logs", "input_files"):
+        (workspace / name).mkdir(parents=True)
+    (workspace / "scratch" / "fail.py").write_text("import sys\nsys.exit(7)\n")
+    call = ToolCallPlan.create("run_python", {"script_path": "scratch/fail.py"})
+    service = AgentService(
+        definition=AgentDefinition(
+            agent_type="python_test",
+            description="Python test",
+            system_prompt="Run Python.",
+            allowed_tools=["run_python"],
+            max_iterations=3,
+        ),
+        tool_registry=create_builtin_tool_registry(),
+    )
+
+    result = await service.run(
+        AgentRunRequest(
+            task="run failing script",
+            run_id="python-nonzero-error",
+            thread_id="python-nonzero-error",
+            workspace_path=str(workspace),
+            pending_tool_calls=[call],
+            approved_tool_call_ids=[call.tool_call_id],
+        )
+    )
+
+    [tool_result] = result.tool_results
+    assert tool_result.status == "error"
+    assert tool_result.error is not None
+    assert tool_result.error.code == "tool_failed"
+    assert tool_result.error.detail["exit_code"] == 7

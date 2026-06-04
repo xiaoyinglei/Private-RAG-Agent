@@ -4,7 +4,7 @@ from langchain_core.messages import HumanMessage
 
 from rag.agent.core.context import AgentRunConfig
 from rag.agent.core.definition import AgentDefinition
-from rag.agent.goal_runtime import AnswerCandidate, EvidenceRef, GoalSpec, StructuredObservation
+from rag.agent.goal_runtime import AnswerCandidate, ContextUnit, EvidenceRef, GoalSpec, StructuredObservation
 from rag.agent.memory.injector import ContextInjector
 from rag.agent.memory.models import ExtractedFact, WorkingSummary
 from rag.agent.state import AgentState
@@ -249,4 +249,81 @@ def test_context_formats_asset_locators_compactly() -> None:
     assert "日_日提货" in tool_context
     assert "asset_id=18" in tool_context
     assert "SAMPLE_ROW_SHOULD_NOT_ENTER_CONTEXT" not in tool_context
+
+
+def test_context_formats_workspace_file_observations() -> None:
+    state = _state()
+    state["tool_results"] = []
+    state["structured_observations"] = [
+        StructuredObservation(
+            tool_call_id="tc-list",
+            tool_name="list_files",
+            status="ok",
+            context_units=[
+                ContextUnit(
+                    unit_id="workspace_file:input_files/sales.csv",
+                    unit_type="workspace_file",
+                    locator={
+                        "path": "input_files/sales.csv",
+                        "name": "sales.csv",
+                        "size_bytes": 24,
+                        "is_dir": False,
+                        "source_tool": "list_files",
+                    },
+                    preview="input_files/sales.csv (24 bytes)",
+                    capabilities=["read_file"],
+                )
+            ],
+            raw_result_ref="tc-list",
+        )
+    ]
+
+    context = ContextInjector(max_context_tokens=1000).assemble(
+        definition=_definition(),
+        state=state,
+    )
+
+    tool_context = context.section("tool_results").content
+    assert "workspace_file:input_files/sales.csv" in tool_context
+    assert "path=input_files/sales.csv" in tool_context
+    assert "preview: input_files/sales.csv (24 bytes)" in tool_context
     assert "sample_rows" not in tool_context
+
+
+def test_context_preserves_workspace_path_spacing() -> None:
+    state = _state()
+    state["tool_results"] = []
+    path = "input_files/2026年石膏板分城市销售情况对标  区域双周会.xlsx"
+    state["structured_observations"] = [
+        StructuredObservation(
+            tool_call_id="tc-list",
+            tool_name="list_files",
+            status="ok",
+            context_units=[
+                ContextUnit(
+                    unit_id=f"workspace_file:{path}",
+                    unit_type="workspace_file",
+                    locator={
+                        "path": path,
+                        "name": "2026年石膏板分城市销售情况对标  区域双周会.xlsx",
+                        "size_bytes": 202943,
+                        "is_dir": False,
+                        "source_tool": "list_files",
+                    },
+                    preview=f"{path} (202943 bytes)",
+                    capabilities=["read_file"],
+                )
+            ],
+            raw_result_ref="tc-list",
+        )
+    ]
+
+    context = ContextInjector(max_context_tokens=1000).assemble(
+        definition=_definition(),
+        state=state,
+    )
+
+    tool_context = context.section("tool_results").content
+    assert f"unit_id=workspace_file:{path}" in tool_context
+    assert f"path={path}" in tool_context
+    assert "对标  区域双周会" in tool_context

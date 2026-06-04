@@ -360,6 +360,18 @@ async def _execute_one_tool(
             call.tool_call_id,
             budget_cost,
         )
+    failure = _structured_output_failure(output)
+    if failure is not None:
+        return _error_result(
+            call,
+            code="tool_failed",
+            message=failure["message"],
+            retryable=False,
+            started_at=started_at,
+            detail=failure["detail"],
+            token_used=budget_cost,
+            retry_count=attempt,
+        )
     return ToolResult(
         tool_call_id=call.tool_call_id,
         tool_name=call.tool_name,
@@ -369,6 +381,29 @@ async def _execute_one_tool(
         token_used=budget_cost,
         retry_count=attempt,
     )
+
+
+def _structured_output_failure(output: object) -> dict[str, Any] | None:
+    ok = getattr(output, "ok", None)
+    if ok is not False:
+        return None
+    detail: dict[str, Any] = {}
+    if hasattr(output, "model_dump"):
+        raw_detail = output.model_dump(mode="json")
+        if isinstance(raw_detail, dict):
+            detail = raw_detail
+    stderr = detail.get("stderr")
+    stdout = detail.get("stdout")
+    exit_code = detail.get("exit_code")
+    if isinstance(stderr, str) and stderr.strip():
+        message = stderr.strip().splitlines()[0]
+    elif isinstance(stdout, str) and stdout.strip():
+        message = stdout.strip().splitlines()[0]
+    elif isinstance(exit_code, int):
+        message = f"Tool returned ok=False with exit_code={exit_code}"
+    else:
+        message = "Tool returned ok=False"
+    return {"message": message, "detail": detail}
 
 
 def _error_result(

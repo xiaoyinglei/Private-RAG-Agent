@@ -5,9 +5,15 @@ from rag.agent.tools.spec import ToolError
 
 
 class TestPrimitiveToolSpecs:
-    def test_all_four_specs_present(self) -> None:
+    def test_all_primitive_specs_present(self) -> None:
         names = {spec.name for spec in ALL_PRIMITIVE_TOOLS}
-        assert names == {"list_files", "read_file", "write_file", "run_python"}
+        assert names == {
+            "list_files",
+            "read_file",
+            "structured_probe",
+            "write_file",
+            "run_python",
+        }
 
     def test_list_files_permissions(self) -> None:
         spec = next(s for s in ALL_PRIMITIVE_TOOLS if s.name == "list_files")
@@ -19,6 +25,12 @@ class TestPrimitiveToolSpecs:
         spec = next(s for s in ALL_PRIMITIVE_TOOLS if s.name == "read_file")
         assert spec.permissions.read_fs is True
         assert spec.permissions.write_fs is False
+
+    def test_structured_probe_permissions(self) -> None:
+        spec = next(s for s in ALL_PRIMITIVE_TOOLS if s.name == "structured_probe")
+        assert spec.permissions.read_fs is True
+        assert spec.permissions.write_fs is False
+        assert spec.permissions.execute_code is False
 
     def test_write_file_permissions(self) -> None:
         spec = next(s for s in ALL_PRIMITIVE_TOOLS if s.name == "write_file")

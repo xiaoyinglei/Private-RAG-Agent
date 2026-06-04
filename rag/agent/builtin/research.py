@@ -67,14 +67,16 @@ RESEARCH_AGENT = AgentDefinition(
         "rag_search_answer",
         "list_files",
         "read_file",
+        "structured_probe",
         "write_file",
+        "run_python",
     ],
     # TODO: migrate estimated_token_budget / max_iterations / max_depth to runtime config
     estimated_token_budget=10000,
     model_selection=ModelSelectionPolicy(
         thinking=True,
         retrieval_hint_max_tokens=256,
-        tool_decision_max_tokens=768,
+        tool_decision_max_tokens=2048,
     ),
     max_iterations=10,
     max_depth=2,

@@ -36,7 +36,9 @@ def test_research_agent_uses_spec_tool_allowlist() -> None:
         "rag_search_answer",
         "list_files",
         "read_file",
+        "structured_probe",
         "write_file",
+        "run_python",
     ]
 
 
@@ -48,6 +50,11 @@ def test_research_agent_prompt_requires_grounded_citations() -> None:
     assert "insufficient evidence" in prompt
     assert "Do not choose one plausible asset arbitrarily" in prompt
     assert "ask for clarification" in prompt
+
+
+def test_research_agent_tool_decision_budget_can_emit_script_tool_calls() -> None:
+    assert RESEARCH_AGENT.model_selection.tool_decision_max_tokens is not None
+    assert RESEARCH_AGENT.model_selection.tool_decision_max_tokens >= 2048
 
 
 def test_research_agent_compiles_when_builtin_tools_registered() -> None:

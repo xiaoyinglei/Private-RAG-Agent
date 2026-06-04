@@ -5,11 +5,13 @@ from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.checkpoint.memory import MemorySaver
 from pydantic import BaseModel
 
+from rag.agent.builtin.research import RESEARCH_AGENT
 from rag.agent.core.context import RuntimeRegistry
 from rag.agent.core.definition import AgentDefinition
 from rag.agent.core.human_input import HumanInputResponse
 from rag.agent.service import AgentRunRequest, AgentService
 from rag.agent.state import ToolCallPlan
+from rag.agent.tools.builtin_registry import create_builtin_tool_registry
 from rag.agent.tools.registry import ToolRegistry
 from rag.agent.tools.spec import ToolError, ToolPermissions, ToolSpec
 
@@ -20,6 +22,24 @@ class _WriteInput(BaseModel):
 
 class _WriteOutput(BaseModel):
     result: str
+
+
+class _TextGenerator:
+    def generate_text(self, *, prompt: str, **kwargs: object) -> str:
+        del prompt, kwargs
+        return "resume summary"
+
+
+class _ResolvedFakeModel:
+    def __init__(self) -> None:
+        self.generator = _TextGenerator()
+        self.kwargs: dict[str, object] = {}
+
+
+class _FakeModelRegistry:
+    def resolve_for_node(self, *, node_model: str | None, node_name: str) -> _ResolvedFakeModel:
+        del node_model, node_name
+        return _ResolvedFakeModel()
 
 
 def _write_spec() -> ToolSpec:
@@ -57,6 +77,51 @@ def _service(*, checkpointer: BaseCheckpointSaver, calls: list[str]) -> AgentSer
         tool_registry=registry,
         checkpointer=checkpointer,
     )
+
+
+def _service_with_default_checkpointer(*, calls: list[str]) -> AgentService:
+    registry = ToolRegistry()
+
+    def runner(payload: _WriteInput) -> _WriteOutput:
+        calls.append(payload.data)
+        return _WriteOutput(result=f"wrote:{payload.data}")
+
+    registry.register(_write_spec(), runner=runner)
+    return AgentService(
+        definition=_definition(),
+        tool_registry=registry,
+    )
+
+
+@pytest.mark.anyio
+async def test_default_checkpointer_supports_resume_on_same_service() -> None:
+    calls: list[str] = []
+    service = _service_with_default_checkpointer(calls=calls)
+    call = ToolCallPlan.create("write_tool", {"data": "default"})
+
+    paused = await service.run(
+        AgentRunRequest(
+            task="run write tool",
+            run_id="resume-default-checkpointer",
+            thread_id="resume-default-checkpointer",
+            pending_tool_calls=[call],
+        )
+    )
+
+    assert paused.status == "paused"
+    assert paused.human_input_request is not None
+
+    resumed = await service.resume(
+        run_id="resume-default-checkpointer",
+        response=HumanInputResponse(
+            request_id=paused.human_input_request.request_id,
+            decision="allow_once",
+            approved_tool_call_ids=[call.tool_call_id],
+        ),
+    )
+
+    assert resumed.status == "done"
+    assert calls == ["default"]
 
 
 @pytest.mark.anyio
@@ -97,6 +162,51 @@ async def test_resume_restores_runtime_handles_from_checkpoint_after_process_bou
     assert tool_result.output == _WriteOutput(result="wrote:persisted")
     with pytest.raises(KeyError):
         RuntimeRegistry.get("resume-cross-process")
+
+
+@pytest.mark.anyio
+async def test_resume_preserves_model_backed_llm_tool_runners() -> None:
+    service = AgentService(
+        definition=RESEARCH_AGENT,
+        tool_registry=create_builtin_tool_registry(runners={}),
+        model_registry=_FakeModelRegistry(),  # type: ignore[arg-type]
+    )
+    write_call = ToolCallPlan.create(
+        "write_file",
+        {"path": "scratch/note.txt", "content": "ok", "overwrite": True},
+    )
+    summarize_call = ToolCallPlan.create(
+        "llm_summarize",
+        {"task": "Summarize note", "context_sections": ["note written"]},
+    )
+
+    paused = await service.run(
+        AgentRunRequest(
+            task="write and summarize",
+            run_id="resume-model-llm-tools",
+            thread_id="resume-model-llm-tools",
+            pending_tool_calls=[write_call, summarize_call],
+        )
+    )
+
+    assert paused.status == "paused"
+    assert paused.human_input_request is not None
+    resumed = await service.resume(
+        run_id="resume-model-llm-tools",
+        workspace_path=paused.workspace_path,
+        response=HumanInputResponse(
+            request_id=paused.human_input_request.request_id,
+            decision="allow_once",
+            approved_tool_call_ids=[write_call.tool_call_id],
+        ),
+    )
+
+    assert resumed.status == "done"
+    assert resumed.final_answer == "resume summary"
+    assert [result.tool_name for result in resumed.tool_results] == [
+        "write_file",
+        "llm_summarize",
+    ]
 
 
 @pytest.mark.anyio

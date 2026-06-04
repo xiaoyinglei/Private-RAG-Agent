@@ -7,7 +7,9 @@ from rag.agent.core.context import AgentRunConfig, RuntimeRegistry
 from rag.agent.core.definition import AgentDefinition
 from rag.agent.graphs.nodes.llm_decide import llm_decide_node
 from rag.agent.memory.models import InjectedContext, WorkingSummary
+from rag.agent.primitive_ops import RunPythonOutput
 from rag.agent.state import AgentState, ThinkOutput
+from rag.agent.tools.spec import ToolResult
 from rag.schema.query import AnswerCitation, EvidenceItem
 from rag.schema.runtime import AccessPolicy
 
@@ -111,3 +113,46 @@ async def test_llm_decide_passes_injected_context_to_tool_decision_provider() ->
     assert names.index("evidence") < names.index("working_memory")
     assert "ev1" in provider.context.section("evidence").content
     RuntimeRegistry.remove("eval-context")
+
+
+@pytest.mark.anyio
+async def test_llm_decide_redirects_premature_synthesis_to_llm_summarize() -> None:
+    provider = _ContextAwareDecisionProvider()
+    state = _state("eval-premature-summary")
+    state["tool_results"] = [
+        ToolResult(
+            tool_call_id="tc-run",
+            tool_name="run_python",
+            status="ok",
+            output=RunPythonOutput(
+                ok=True,
+                exit_code=0,
+                stdout="Total amount: 40.0\n",
+                stderr="",
+                stdout_truncated=False,
+                stderr_truncated=False,
+                duration_ms=10.0,
+                generated_files=["reports/summary.txt"],
+            ),
+            latency_ms=0,
+        )
+    ]
+    result = await llm_decide_node(
+        state,
+        definition=AgentDefinition(
+            agent_type="research",
+            description="Research agent",
+            system_prompt="Use evidence.",
+            allowed_tools=["llm_summarize"],
+            estimated_token_budget=1000,
+        ),
+        decision_provider=provider,
+    )
+
+    assert result["status"] == "running"
+    assert result["controller_next"] == "execute"
+    [call] = result["pending_tool_calls"]
+    assert call.tool_name == "llm_summarize"
+    assert call.arguments["task"] == "Explain policy"
+    assert "Total amount: 40.0" in "\n".join(call.arguments["context_sections"])
+    RuntimeRegistry.remove("eval-premature-summary")

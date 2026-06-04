@@ -47,7 +47,7 @@ class ModelRegistry:
 
     @classmethod
     def from_env(cls, env_path: str = ".env", *, default_model: str | None = None) -> ModelRegistry:
-        del env_path
+        _load_env_file(Path(env_path))
         config = cls._load_config()
         if default_model is not None:
             if default_model not in config.models:
@@ -212,3 +212,23 @@ def _api_key_from_env(name: str | None) -> str | None:
         return None
     value = os.environ.get(name)
     return value.strip() if isinstance(value, str) and value.strip() else None
+
+
+def _load_env_file(path: Path) -> None:
+    if not path.is_file():
+        return
+    for line in path.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        key, raw_value = stripped.split("=", maxsplit=1)
+        key = key.strip()
+        if not key or key in os.environ:
+            continue
+        os.environ[key] = _parse_env_value(raw_value.strip())
+
+
+def _parse_env_value(value: str) -> str:
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+        return value[1:-1]
+    return value

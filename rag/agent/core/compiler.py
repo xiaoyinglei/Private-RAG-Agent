@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 from langgraph.checkpoint.base import BaseCheckpointSaver
-from langgraph.checkpoint.memory import MemorySaver
 
+from rag.agent.core.checkpointing import create_agent_checkpointer
 from rag.agent.core.definition import AgentDefinition
 from rag.agent.core.llm_providers import create_default_providers
 from rag.agent.core.llm_registry import ModelRegistry
@@ -31,7 +31,7 @@ class AgentGraphCompiler:
         self._retrieval_hint_provider = retrieval_hint_provider
         self._synthesis_runner = synthesis_runner
         self._model_registry = model_registry
-        self._checkpointer = checkpointer or MemorySaver()
+        self._checkpointer = checkpointer or create_agent_checkpointer(None)
 
     def compile(self, definition: AgentDefinition) -> object:
         missing_tools = self._missing_allowed_tools(definition)

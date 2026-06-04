@@ -64,11 +64,19 @@ async def llm_decide_node(
         budget_remaining=budget_remaining,
         context=context,
     )
+    finalization_authorized = _finalization_authorized(state)
+    decision = _redirect_premature_synthesis_to_summarize(
+        decision,
+        state=state,
+        definition=definition,
+        context=context,
+        finalization_authorized=finalization_authorized,
+    )
     update = _apply_decision(
         decision,
         next_iteration=state.get("iteration", 0),
         used_tool_call_ids=_used_tool_call_ids(state),
-        finalization_authorized=_finalization_authorized(state),
+        finalization_authorized=finalization_authorized,
     )
     update["context_budget"] = context.context_budget
     return update
@@ -160,6 +168,98 @@ def _apply_decision(
             "controller_next": "finalize",
         }
     return {"status": "running", "iteration": next_iteration, "controller_next": "finalize"}
+
+
+def _redirect_premature_synthesis_to_summarize(
+    decision: ThinkOutput,
+    *,
+    state: AgentState,
+    definition: AgentDefinition,
+    context: InjectedContext,
+    finalization_authorized: bool,
+) -> ThinkOutput:
+    if decision.action != "synthesize" or finalization_authorized:
+        return decision
+    if "llm_summarize" not in definition.allowed_tools:
+        return decision
+    if _has_attempted_summarize(state) or not _has_summarizable_context(state):
+        return decision
+
+    return ThinkOutput(
+        action="execute",
+        tool_calls=[
+            ToolCallPlan.create(
+                "llm_summarize",
+                {
+                    "task": state.get("task", ""),
+                    "context_sections": _summarization_context_sections(context),
+                    "evidence_ids": _tool_output_values(state, "evidence_ids"),
+                    "citation_ids": _tool_output_values(state, "citation_ids"),
+                },
+            )
+        ],
+        thought=(
+            "Model requested finalization before goal authorization; "
+            "redirecting to llm_summarize to produce an answer candidate."
+        ),
+        confidence=decision.confidence,
+    )
+
+
+def _has_attempted_summarize(state: AgentState) -> bool:
+    return any(
+        getattr(result, "tool_name", None) == "llm_summarize"
+        for result in state.get("tool_results", [])
+    )
+
+
+def _has_summarizable_context(state: AgentState) -> bool:
+    if state.get("evidence"):
+        return True
+    summarizable_tools = {
+        "vector_search",
+        "keyword_search",
+        "grounding",
+        "rerank",
+        "asset_read_slice",
+        "asset_analyze",
+        "rag_search_answer",
+        "read_file",
+        "run_python",
+    }
+    return any(
+        getattr(result, "status", None) == "ok"
+        and (
+            getattr(result, "tool_name", None) in summarizable_tools
+            or str(getattr(result, "tool_name", "")).startswith("agent_")
+        )
+        for result in state.get("tool_results", [])
+    )
+
+
+def _summarization_context_sections(context: InjectedContext) -> list[str]:
+    sections: list[str] = []
+    for name in ("tool_results", "evidence", "working_memory", "message_tail"):
+        try:
+            section = context.section(name)
+        except KeyError:
+            continue
+        if section.content.strip():
+            sections.append(f"[{section.name}]\n{section.content}")
+    return sections
+
+
+def _tool_output_values(state: AgentState, field: str) -> list[str]:
+    values: list[str] = []
+    seen: set[str] = set()
+    for result in state.get("tool_results", []):
+        output = getattr(result, "output", None)
+        for item in getattr(output, field, []) or []:
+            text = str(item)
+            if text and text not in seen:
+                values.append(text)
+                seen.add(text)
+    return values
 
 
 def _finalization_authorized(state: AgentState) -> bool:

@@ -24,6 +24,13 @@ from rag.agent.goal_runtime import (
     StateReducer,
 )
 from rag.agent.graphs.nodes.goal_runtime import controller_node
+from rag.agent.primitive_ops import (
+    CandidateHeaderRow,
+    FileInfo,
+    ListFilesOutput,
+    StructuredProbeOutput,
+    StructuredTableProbe,
+)
 from rag.agent.service import AgentRunRequest, AgentService
 from rag.agent.state import AgentState, ThinkOutput, ToolCallPlan
 from rag.agent.tools.asset_tools import (
@@ -636,6 +643,211 @@ def test_text_search_observation_creates_context_unit_without_answer_candidate()
     assert update["open_gaps"] == [
         GoalGap(gap_id="answer", gap_type="answer", description="Produce an answer."),
     ]
+
+
+def test_list_files_observation_creates_workspace_context_without_answer_candidate() -> None:
+    goal = GoalInitializer().initialize("分析 input_files/sales.csv")
+    result = ToolResult(
+        tool_call_id="tc-list",
+        tool_name="list_files",
+        status="ok",
+        output=ListFilesOutput(
+            files=[
+                FileInfo(
+                    name="sales.csv",
+                    path="input_files/sales.csv",
+                    size=24,
+                    is_dir=False,
+                    modified_at=1.0,
+                )
+            ]
+        ),
+        latency_ms=0,
+    )
+    state = {
+        "task": goal.original_query,
+        "goal_spec": goal,
+        "tool_results": [result],
+        "structured_observations": [],
+        "context_units": [],
+        "answer_candidates": [],
+        "evidence_refs": [],
+        "satisfied_requirements": [],
+        "open_gaps": goal.open_gaps(),
+        "no_progress_count": 2,
+    }
+
+    update = StateReducer().reduce_tool_results(state)
+
+    assert update["answer_candidates"] == []
+    assert update["no_progress_count"] == 0
+    [unit] = update["context_units"]
+    assert unit.unit_id == "workspace_file:input_files/sales.csv"
+    assert unit.unit_type == "workspace_file"
+    assert unit.locator["path"] == "input_files/sales.csv"
+    assert unit.capabilities == ["read_file"]
+    [observation] = update["structured_observations"]
+    assert observation.locators == [
+        {
+            "path": "input_files/sales.csv",
+            "name": "sales.csv",
+            "size_bytes": 24,
+            "is_dir": False,
+            "source_tool": "list_files",
+        }
+    ]
+
+
+def test_binary_workspace_file_observation_advertises_python_capability() -> None:
+    goal = GoalInitializer().initialize("分析 input_files/report.xlsx")
+    result = ToolResult(
+        tool_call_id="tc-list-binary",
+        tool_name="list_files",
+        status="ok",
+        output=ListFilesOutput(
+            files=[
+                FileInfo(
+                    name="report.xlsx",
+                    path="input_files/report.xlsx",
+                    size=24,
+                    is_dir=False,
+                    modified_at=1.0,
+                    mime_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    file_kind="binary",
+                    is_binary=True,
+                    readable_as_text=False,
+                    capabilities=["run_python"],
+                )
+            ]
+        ),
+        latency_ms=0,
+    )
+    state = {
+        "task": goal.original_query,
+        "goal_spec": goal,
+        "tool_results": [result],
+        "structured_observations": [],
+        "context_units": [],
+        "answer_candidates": [],
+        "evidence_refs": [],
+        "satisfied_requirements": [],
+        "open_gaps": goal.open_gaps(),
+        "no_progress_count": 2,
+    }
+
+    update = StateReducer().reduce_tool_results(state)
+
+    [unit] = update["context_units"]
+    assert unit.capabilities == ["run_python"]
+    assert unit.locator["is_binary"] is True
+    assert unit.locator["readable_as_text"] is False
+    assert unit.locator["mime_type"] == (
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
+
+
+def test_structured_probe_observation_creates_table_context_unit() -> None:
+    goal = GoalInitializer().initialize("分析 input_files/report.xlsx")
+    result = ToolResult(
+        tool_call_id="tc-probe",
+        tool_name="structured_probe",
+        status="ok",
+        output=StructuredProbeOutput(
+            path="input_files/report.xlsx",
+            file_kind="binary",
+            mime_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            tables=[
+                StructuredTableProbe(
+                    table_index=0,
+                    name="Sales",
+                    used_range="A1:D5",
+                    row_count=5,
+                    column_count=4,
+                    sample_rows=[
+                        ["2026 sales report", None, None, None],
+                        ["source: finance team", None, None, None],
+                        ["region", "city", "amount", "price"],
+                        ["north", "beijing", 10, 2.5],
+                    ],
+                    candidate_header_rows=[
+                        CandidateHeaderRow(
+                            row_index=3,
+                            confidence=0.9,
+                            reason="label-like row followed by data rows",
+                        )
+                    ],
+                    data_start_row=4,
+                )
+            ],
+        ),
+        latency_ms=0,
+    )
+    state = {
+        "task": goal.original_query,
+        "goal_spec": goal,
+        "tool_results": [result],
+        "structured_observations": [],
+        "context_units": [],
+        "answer_candidates": [],
+        "evidence_refs": [],
+        "satisfied_requirements": [],
+        "open_gaps": goal.open_gaps(),
+        "no_progress_count": 2,
+    }
+
+    update = StateReducer().reduce_tool_results(state)
+
+    [unit] = update["context_units"]
+    assert unit.unit_id == "structured_table:input_files/report.xlsx:0"
+    assert unit.unit_type == "structured_table"
+    assert unit.locator["path"] == "input_files/report.xlsx"
+    assert unit.locator["table_name"] == "Sales"
+    assert unit.locator["header_row_index"] == 3
+    assert unit.locator["data_start_row"] == 4
+    assert unit.capabilities == ["structured_probe", "run_python"]
+    assert "region" in (unit.preview or "")
+
+
+def test_duplicate_workspace_context_does_not_count_as_progress() -> None:
+    goal = GoalInitializer().initialize("分析 input_files/sales.csv")
+    result = ToolResult(
+        tool_call_id="tc-list-again",
+        tool_name="list_files",
+        status="ok",
+        output=ListFilesOutput(
+            files=[
+                FileInfo(
+                    name="sales.csv",
+                    path="input_files/sales.csv",
+                    size=24,
+                    is_dir=False,
+                    modified_at=1.0,
+                )
+            ]
+        ),
+        latency_ms=0,
+    )
+    existing = ContextUnit(
+        unit_id="workspace_file:input_files/sales.csv",
+        unit_type="workspace_file",
+        locator={"path": "input_files/sales.csv"},
+    )
+    state = {
+        "task": goal.original_query,
+        "goal_spec": goal,
+        "tool_results": [result],
+        "structured_observations": [],
+        "context_units": [existing],
+        "answer_candidates": [],
+        "evidence_refs": [],
+        "satisfied_requirements": [],
+        "open_gaps": goal.open_gaps(),
+        "no_progress_count": 2,
+    }
+
+    update = StateReducer().reduce_tool_results(state)
+
+    assert update["no_progress_count"] == 3
 
 
 def test_checker_rejects_bare_evidence_id_for_traceable_evidence_deliverable() -> None:

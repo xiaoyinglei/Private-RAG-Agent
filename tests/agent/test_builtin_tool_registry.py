@@ -23,7 +23,7 @@ def test_builtin_tool_registry_contains_rag_and_llm_specs() -> None:
     } <= names
     # PrimitiveOps tools
     assert {
-        "list_files", "read_file", "write_file", "run_python",
+        "list_files", "read_file", "structured_probe", "write_file", "run_python",
     } <= names
 
 

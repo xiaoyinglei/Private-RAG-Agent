@@ -1,9 +1,17 @@
 from __future__ import annotations
 
+import importlib
 from dataclasses import dataclass
 from typing import Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import (
+    BaseModel,
+    Field,
+    SerializationInfo,
+    field_serializer,
+    field_validator,
+    model_validator,
+)
 
 
 @dataclass(frozen=True)
@@ -53,6 +61,38 @@ class ToolResult(BaseModel):
     latency_ms: float
     token_used: int = 0
     retry_count: int = 0
+
+    @field_validator("output", mode="before")
+    @classmethod
+    def _restore_typed_output(cls, value: object) -> object:
+        if not isinstance(value, dict) or value.get("__rag_model_payload__") is not True:
+            return value
+        module = value.get("module")
+        name = value.get("name")
+        data = value.get("data")
+        if not isinstance(module, str) or not isinstance(name, str):
+            raise ValueError("typed tool output payload is missing module/name")
+        model_cls = getattr(importlib.import_module(module), name)
+        if not isinstance(model_cls, type) or not issubclass(model_cls, BaseModel):
+            raise ValueError(f"typed tool output is not a Pydantic model: {module}.{name}")
+        return model_cls.model_validate(data)
+
+    @field_serializer("output")
+    def _serialize_typed_output(
+        self,
+        output: BaseModel | None,
+        info: SerializationInfo,
+    ) -> object:
+        if output is None:
+            return None
+        if info.mode == "json":
+            return output.model_dump(mode="json")
+        return {
+            "__rag_model_payload__": True,
+            "module": output.__class__.__module__,
+            "name": output.__class__.__name__,
+            "data": output.model_dump(mode="json"),
+        }
 
     @model_validator(mode="after")
     def _check_exclusivity(self) -> ToolResult:
