@@ -3,6 +3,7 @@ from __future__ import annotations
 from inspect import isawaitable
 from typing import Any
 
+from rag.agent.core.context import RuntimeRegistry
 from rag.agent.core.definition import AgentDefinition
 from rag.agent.goal_runtime import (
     GoalInitializer,
@@ -10,6 +11,8 @@ from rag.agent.goal_runtime import (
 )
 from rag.agent.graphs.nodes.retrieval_hint import RetrievalHintProvider, retrieval_hint_node
 from rag.agent.loop.controller import AgentLoopController
+from rag.agent.memory.compactor import RunMemoryCompactor
+from rag.agent.planning import PlanController
 from rag.agent.state import AgentState
 
 
@@ -30,6 +33,22 @@ async def initialize_goal_node(
                 "decision_reason": state.get("decision_reason") or "goal_initialized",
             }
         )
+    if state.get("agent_plan") is None:
+        open_gaps = update.get("open_gaps") or state.get("open_gaps", []) or goal.open_gaps()
+        plan, events = PlanController().initialize(
+            task=state.get("task", ""),
+            open_gaps=open_gaps,
+        )
+        pending_calls = state.get("pending_tool_calls", [])
+        if pending_calls:
+            plan, progress_events = PlanController().record_decision_progress(
+                plan,
+                tool_call_ids=[call.tool_call_id for call in pending_calls],
+                tool_names=[call.tool_name for call in pending_calls],
+            )
+            events = [*events, *progress_events]
+        update["agent_plan"] = plan
+        update["plan_events"] = events
 
     hint_update = await _retrieval_hint(
         state,
@@ -51,8 +70,27 @@ def controller_node(
     ).advance(state)
 
 
-def reduce_observations_node(state: AgentState) -> dict[str, Any]:
-    return StateReducer().reduce_tool_results(dict(state))
+def extract_obs_legacy(state: AgentState) -> dict[str, Any]:
+    update = StateReducer().reduce_tool_results(dict(state))
+    if not update:
+        return update
+    plan, events = PlanController().record_observation_progress(
+        state.get("agent_plan"),
+        observations=update.get("structured_observations", []),
+        satisfied_requirement_ids=update.get("satisfied_requirements", []),
+    )
+    if plan is not None:
+        update["agent_plan"] = plan
+    if events:
+        update["plan_events"] = events
+    try:
+        memory_store = RuntimeRegistry.get(state["run_config"].run_id).memory_store
+    except KeyError:
+        memory_store = None
+    return RunMemoryCompactor(
+        policy=state["run_config"].memory_policy,
+        store=memory_store,
+    ).compact_update(dict(state), update)
 
 
 def route_after_controller(state: AgentState) -> str:
@@ -88,8 +126,11 @@ def _retrieval_hint_update(hint_update: dict[str, Any]) -> dict[str, Any]:
     return update
 
 
+reduce_observations_node = extract_obs_legacy
+
 __all__ = [
     "controller_node",
+    "extract_obs_legacy",
     "initialize_goal_node",
     "reduce_observations_node",
     "route_after_controller",

@@ -320,6 +320,7 @@ class TestExecuteNodeSignalInjection:
         assert isinstance(passed_signals, RetrievalSignals)
         assert passed_signals.special_targets == ["table"]
         assert passed_signals.allow_graph_expansion is True
+        assert "retrieval_signals" not in call.arguments
 
     @pytest.mark.anyio
     async def test_does_not_inject_for_non_rag_tools(self) -> None:

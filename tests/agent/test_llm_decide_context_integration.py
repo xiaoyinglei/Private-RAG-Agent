@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 from langchain_core.messages import HumanMessage
 
@@ -96,6 +98,11 @@ class _ContextAwareDecisionProvider:
         return ThinkOutput(action="synthesize", thought="enough", stop_reason="evidence_sufficient")
 
 
+class _FailIfCalledDecisionProvider:
+    def decide(self, *args: object, **kwargs: object) -> ThinkOutput:
+        raise AssertionError("decision provider should not be called when context overflows")
+
+
 @pytest.mark.anyio
 async def test_llm_decide_passes_injected_context_to_tool_decision_provider() -> None:
     provider = _ContextAwareDecisionProvider()
@@ -156,3 +163,28 @@ async def test_llm_decide_redirects_premature_synthesis_to_llm_summarize() -> No
     assert call.arguments["task"] == "Explain policy"
     assert "Total amount: 40.0" in "\n".join(call.arguments["context_sections"])
     RuntimeRegistry.remove("eval-premature-summary")
+
+
+@pytest.mark.anyio
+async def test_llm_decide_pauses_without_calling_provider_on_context_overflow() -> None:
+    state = _state("eval-context-overflow")
+    state["run_config"] = replace(state["run_config"], max_context_tokens=1)
+    state["task"] = "TASK_RAW " * 200
+
+    result = await llm_decide_node(
+        state,
+        definition=AgentDefinition(
+            agent_type="research",
+            description="Research agent",
+            system_prompt="SYSTEM_RAW " * 200,
+            allowed_tools=["search"],
+            estimated_token_budget=1000,
+        ),
+        decision_provider=_FailIfCalledDecisionProvider(),
+    )
+
+    assert result["status"] == "paused"
+    assert result["decision_reason"] == "context_overflow"
+    assert result["context_budget"].overflow is True
+    assert "context_overflow" in result["context_budget"].warnings
+    RuntimeRegistry.remove("eval-context-overflow")

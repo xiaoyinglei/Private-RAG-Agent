@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import re
 from collections.abc import Sequence
-from typing import Any, Literal, Protocol, Self, TypedDict
+from typing import Any, Literal, Protocol, Self, TypedDict, cast
 
 from pydantic import BaseModel, Field, model_validator
 
+from rag.agent.memory.models import MemoryRef
 from rag.agent.state import ToolCallPlan
 from rag.agent.tools.spec import ToolResult
 from rag.schema.query import AnswerCitation, EvidenceItem
@@ -250,6 +251,10 @@ class StructuredObservation(BaseModel):
     warnings: list[str] = Field(default_factory=list)
     error: str | None = None
     raw_result_ref: str
+    raw_memory_ref: MemoryRef | None = None
+    related_gap_ids: list[str] = Field(default_factory=list)
+    related_step_ids: list[str] = Field(default_factory=list)
+    metadata: dict[str, object] = Field(default_factory=dict)
     resolved_gaps: list[str] = Field(default_factory=list)
     produced_gaps: list[str] = Field(default_factory=list)
 
@@ -763,6 +768,7 @@ def _answer_text(tool_name: str, output: BaseModel | None) -> str | None:
         "read_file",
         "write_file",
         "run_python",
+        "structured_probe",
     }:
         return None
     text = getattr(output, "text", None)
@@ -1385,10 +1391,51 @@ def _structured_table_locator(path: str, table: object) -> dict[str, object]:
 
 def _structured_table_preview(table: object) -> str | None:
     rows = getattr(table, "sample_rows", None)
+    row_count = getattr(table, "row_count", None)
+    column_count = getattr(table, "column_count", None)
+    used_range = getattr(table, "used_range", None)
+    parts = [
+        f"rows={row_count}" if isinstance(row_count, int) else "",
+        f"columns={column_count}" if isinstance(column_count, int) else "",
+        f"used_range={used_range}" if isinstance(used_range, str) and used_range else "",
+    ]
+    header_row = _header_sample_row(table, rows)
+    if header_row is not None:
+        parts.append(f"header_row={_bounded_row_preview(header_row)}")
+    elif isinstance(rows, list) and rows:
+        parts.append(f"first_row={_bounded_row_preview(rows[0])}")
+    preview = " ".join(part for part in parts if part)
+    return preview or None
+
+
+def _header_sample_row(table: object, rows: object) -> object | None:
     if not isinstance(rows, list) or not rows:
         return None
-    shown = rows[:5]
-    return "sample_rows: " + repr(shown)[:1000]
+    candidates = getattr(table, "candidate_header_rows", None)
+    if not isinstance(candidates, list) or not candidates:
+        return None
+    row_index = getattr(candidates[0], "row_index", None)
+    if not isinstance(row_index, int):
+        return None
+    sample_index = row_index - 1
+    if sample_index < 0 or sample_index >= len(rows):
+        return None
+    return cast(object, rows[sample_index])
+
+
+def _bounded_row_preview(row: object) -> str:
+    if not isinstance(row, list):
+        return _bounded_cell_preview(row)
+    cells = [_bounded_cell_preview(cell) for cell in row[:8]]
+    suffix = f", ...(+{len(row) - 8})" if len(row) > 8 else ""
+    return "[" + ", ".join(cells) + suffix + "]"
+
+
+def _bounded_cell_preview(cell: object) -> str:
+    text = str(cell)
+    if len(text) > 40:
+        text = text[:40].rstrip() + "..."
+    return repr(text)
 
 
 def _asset_locator_from_descriptor(asset: object) -> dict[str, object]:

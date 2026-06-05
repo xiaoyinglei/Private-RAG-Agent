@@ -30,7 +30,7 @@ class SynthesisRunner(Protocol):
     ) -> SynthesisRunResult | Awaitable[SynthesisRunResult]: ...
 
 
-async def synthesize_node(
+async def build_answer(
     state: AgentState,
     *,
     synthesis_runner: SynthesisRunner | None = None,
@@ -419,3 +419,13 @@ def _has_insufficient_output(ok_results: list[ToolResult]) -> bool:
         for result in ok_results
         if result.output is not None
     )
+
+
+synthesize_node = build_answer
+
+__all__ = [
+    "SynthesisRunner",
+    "SynthesisRunResult",
+    "build_answer",
+    "synthesize_node",
+]

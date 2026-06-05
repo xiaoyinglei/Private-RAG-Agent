@@ -131,6 +131,26 @@ class TestListFiles:
         out = ops.list_files(ListFilesInput())
         names = [f.name for f in out.files]
         assert "scratch" in names
+        assert ".agent_memory" not in names
+
+    def test_agent_memory_directory_is_hidden_from_root_listing(
+        self,
+        ws: WorkspaceRuntime,
+        ops: PrimitiveOps,
+    ) -> None:
+        (ws.root / ".agent_memory" / "records").mkdir(parents=True)
+        (ws.root / ".agent_memory" / "records" / "mem_1.json").write_text("{}")
+
+        out = ops.list_files(ListFilesInput())
+
+        assert ".agent_memory" not in {item.name for item in out.files}
+
+    def test_agent_memory_directory_cannot_be_listed_directly(
+        self,
+        ops: PrimitiveOps,
+    ) -> None:
+        with pytest.raises(PermissionError, match="agent memory"):
+            ops.list_files(ListFilesInput(path=".agent_memory"))
 
     def test_subdirectory(self, ws: WorkspaceRuntime, ops: PrimitiveOps) -> None:
         (ws.scratch / "a.txt").write_text("a")
@@ -237,6 +257,18 @@ class TestReadFile:
     def test_escapes_workspace_raises(self, ops: PrimitiveOps) -> None:
         with pytest.raises(WorkspacePathError):
             ops.read_file(ReadFileInput(path="../../etc/passwd"))
+
+    def test_agent_memory_file_read_is_denied(
+        self,
+        ws: WorkspaceRuntime,
+        ops: PrimitiveOps,
+    ) -> None:
+        record = ws.agent_memory / "records" / "mem_1.json"
+        record.parent.mkdir(parents=True, exist_ok=True)
+        record.write_text("{}")
+
+        with pytest.raises(PermissionError, match="agent memory"):
+            ops.read_file(ReadFileInput(path=".agent_memory/records/mem_1.json"))
 
 
 # ===================================================================

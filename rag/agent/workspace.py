@@ -40,9 +40,20 @@ class WorkspaceRuntime:
     def logs(self) -> Path:
         return self.root / "logs"
 
+    @property
+    def agent_memory(self) -> Path:
+        return self.root / ".agent_memory"
+
     def initialize(self) -> None:
         """Create the standard workspace subdirectories."""
-        for subdir in (self.input_files, self.scratch, self.artifacts, self.reports, self.logs):
+        for subdir in (
+            self.input_files,
+            self.scratch,
+            self.artifacts,
+            self.reports,
+            self.logs,
+            self.agent_memory,
+        ):
             subdir.mkdir(parents=True, exist_ok=True)
 
     def resolve_path(self, relative: str | Path) -> Path:

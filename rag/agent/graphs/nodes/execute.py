@@ -9,7 +9,10 @@ from pydantic import ValidationError
 from rag.agent.core.agent_as_tool import AgentAsToolExecutionError
 from rag.agent.core.approval_policy import ApprovalDecision, ApprovalPolicy, merge_approval_requests
 from rag.agent.core.context import AgentRunConfig, RuntimeRegistry
-from rag.agent.state import AgentState, ToolCallPlan
+from rag.agent.goal_runtime import StateReducer
+from rag.agent.memory.compactor import RunMemoryCompactor
+from rag.agent.planning import PlanController
+from rag.agent.state import AgentState, ToolCallPlan, _merge_tool_results
 from rag.agent.tools.rag_tools import RAG_SIGNAL_AWARE_TOOLS
 from rag.agent.tools.registry import (
     ToolInputValidationError,
@@ -20,7 +23,7 @@ from rag.agent.tools.registry import (
 from rag.agent.tools.spec import ToolError, ToolResult, ToolSpec
 
 
-async def execute_node(
+async def run_tools_raw(
     state: AgentState,
     *,
     tool_registry: ToolRegistry,
@@ -151,18 +154,15 @@ async def execute_node(
         }
 
     # 全部允许 / 已批准 → 执行
-    batch = executables[: tool_policy.max_parallel_calls]
-    excess = executables[tool_policy.max_parallel_calls :]
-
-    # 对 RAG_SIGNAL_AWARE_TOOLS 注入 retrieval_signals
     signals = state.get("retrieval_signals")
-    for call in batch:
-        if call.tool_name in RAG_SIGNAL_AWARE_TOOLS:
-            if "retrieval_signals" not in call.arguments:
-                call.arguments["retrieval_signals"] = (
-                    signals.model_dump(mode="json") if signals is not None
-                    else {}
-                )
+    batch = [
+        _execution_call(call, retrieval_signals=signals)
+        for call in executables[: tool_policy.max_parallel_calls]
+    ]
+    excess = [
+        call.model_copy(deep=True)
+        for call in executables[tool_policy.max_parallel_calls :]
+    ]
 
     gathered = await asyncio.gather(
         *[
@@ -188,6 +188,79 @@ async def execute_node(
     return {"tool_results": results, "pending_tool_calls": excess}
 
 
+async def run_tools_guarded(
+    state: AgentState,
+    *,
+    tool_registry: ToolRegistry,
+    allowed_tools: frozenset[str],
+) -> dict[str, Any]:
+    """Execute pending tools and return only observation-reduced, compacted state.
+
+    LangGraph checkpoints node outputs. This wrapper keeps raw tool outputs local
+    to the node so observation extraction can use them before large payloads are
+    externalized.
+    """
+
+    raw_update = await run_tools_raw(
+        state,
+        tool_registry=tool_registry,
+        allowed_tools=allowed_tools,
+    )
+    if not raw_update:
+        return raw_update
+
+    # Approval pauses do not execute tools, so there is no raw tool output to
+    # externalize on this path. Preserve existing interrupt/resume semantics.
+    if raw_update.get("status") == "paused":
+        return raw_update
+
+    update = dict(raw_update)
+    transient_state = dict(state)
+    raw_tool_results = list(raw_update.get("tool_results", []))
+    if raw_tool_results:
+        transient_state["tool_results"] = _merge_tool_results(
+            list(state.get("tool_results", [])),
+            raw_tool_results,
+        )
+
+    observation_update = StateReducer().reduce_tool_results(transient_state)
+    if observation_update:
+        plan, events = PlanController().record_observation_progress(
+            state.get("agent_plan"),
+            observations=observation_update.get("structured_observations", []),
+            satisfied_requirement_ids=observation_update.get("satisfied_requirements", []),
+        )
+        update.update(observation_update)
+        if plan is not None:
+            update["agent_plan"] = plan
+        if events:
+            update["plan_events"] = events
+
+    try:
+        memory_store = RuntimeRegistry.get(state["run_config"].run_id).memory_store
+    except KeyError:
+        memory_store = None
+    return RunMemoryCompactor(
+        policy=state["run_config"].memory_policy,
+        store=memory_store,
+    ).compact_update(dict(state), update)
+
+
+def _execution_call(
+    call: ToolCallPlan,
+    *,
+    retrieval_signals: object,
+) -> ToolCallPlan:
+    arguments = dict(call.arguments)
+    if call.tool_name in RAG_SIGNAL_AWARE_TOOLS and "retrieval_signals" not in arguments:
+        arguments["retrieval_signals"] = (
+            retrieval_signals.model_dump(mode="json")
+            if hasattr(retrieval_signals, "model_dump")
+            else {}
+        )
+    return call.model_copy(deep=True, update={"arguments": arguments})
+
+
 async def _execute_one_tool(
     call: ToolCallPlan,
     *,
@@ -206,8 +279,9 @@ async def _execute_one_tool(
             started_at=started_at,
         )
 
+    arguments = dict(call.arguments)
     try:
-        spec.input_model.model_validate(call.arguments)
+        spec.input_model.model_validate(arguments)
     except ValidationError as exc:
         return _error_result(
             call,
@@ -255,7 +329,7 @@ async def _execute_one_tool(
     while True:
         try:
             output = await asyncio.wait_for(
-                tool_registry.run(call.tool_name, call.arguments),
+                tool_registry.run(call.tool_name, arguments),
                 timeout=spec.timeout_seconds,
             )
             break
@@ -426,3 +500,14 @@ def _error_result(
         token_used=token_used,
         retry_count=retry_count,
     )
+
+
+execute_node = run_tools_raw
+execute_observe_compact_node = run_tools_guarded
+
+__all__ = [
+    "execute_node",
+    "execute_observe_compact_node",
+    "run_tools_guarded",
+    "run_tools_raw",
+]

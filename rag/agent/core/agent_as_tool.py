@@ -253,6 +253,11 @@ class AgentAsToolAdapter:
             "no_progress_count": 0,
             "satisfaction_report": None,
             "controller_next": None,
+            "agent_plan": None,
+            "plan_events": [],
+            "memory_refs": [],
+            "memory_budget": None,
+            "memory_warnings": [],
         }
 
         prompt = _build_delegation_prompt(request)

@@ -19,6 +19,9 @@ from rag.agent.core.llm_registry import ModelRegistry
 from rag.agent.graphs.nodes.llm_decide import ToolDecisionProvider
 from rag.agent.graphs.nodes.retrieval_hint import RetrievalHintProvider
 from rag.agent.graphs.nodes.synthesize import SynthesisRunner
+from rag.agent.memory.compactor import RunMessageCompactor
+from rag.agent.memory.models import MemoryPolicy
+from rag.agent.memory.store import WorkspaceMemoryStore
 from rag.agent.state import AgentState, ToolCallPlan
 from rag.agent.tools.registry import ToolRegistry, ToolRunner
 from rag.agent.tools.spec import ToolResult
@@ -33,6 +36,7 @@ class AgentRunRequest(BaseModel):
     run_id: str | None = None
     thread_id: str | None = None
     budget_total: int | None = Field(default=None, gt=0)
+    max_context_tokens: int | None = Field(default=None, gt=0)
     max_depth: int | None = Field(default=None, ge=0)
     pending_tool_calls: list[ToolCallPlan] = Field(default_factory=list)
     approved_tool_call_ids: list[str] = Field(default_factory=list)
@@ -40,6 +44,7 @@ class AgentRunRequest(BaseModel):
     messages: list[BaseMessage] = Field(default_factory=list)
     input_files: list[str] = Field(default_factory=list)
     workspace_path: str | None = None
+    memory_policy: MemoryPolicy | None = None
 
     def to_run_config(self, definition: AgentDefinition) -> AgentRunConfig:
         run_id = self.run_id or f"run_{uuid4().hex[:12]}"
@@ -47,9 +52,11 @@ class AgentRunRequest(BaseModel):
             run_id=run_id,
             thread_id=self.thread_id or run_id,
             budget_total=self.budget_total or definition.estimated_token_budget,
+            max_context_tokens=self.max_context_tokens,
             max_depth=definition.max_depth if self.max_depth is None else self.max_depth,
             access_policy=definition.access_policy or AccessPolicy.default(),
             tool_policy=definition.tool_policy,
+            memory_policy=self.memory_policy or MemoryPolicy(),
         )
 
 
@@ -150,10 +157,13 @@ class AgentService:
         approved_tool_call_ids: list[str] | None = None,
         denied_tool_call_ids: list[str] | None = None,
         messages: list[BaseMessage] | None = None,
+        memory_store: WorkspaceMemoryStore | None = None,
     ) -> AgentState:
         RuntimeRegistry.remove(run_config.run_id)
-        RuntimeRegistry.get_or_create(run_config)
-        return {
+        handles = RuntimeRegistry.get_or_create(run_config)
+        if memory_store is not None:
+            handles.memory_store = memory_store
+        state: AgentState = {
             "messages": list(messages or []),
             "evidence": [],
             "citations": [],
@@ -196,7 +206,19 @@ class AgentService:
             "no_progress_count": 0,
             "satisfaction_report": None,
             "controller_next": None,
+            "agent_plan": None,
+            "plan_events": [],
+            "memory_refs": [],
+            "memory_budget": None,
+            "memory_warnings": [],
         }
+        return cast(
+            AgentState,
+            RunMessageCompactor(
+                policy=run_config.memory_policy,
+                store=memory_store,
+            ).compact_initial_state(dict(state)),
+        )
 
     async def run(self, request: AgentRunRequest) -> AgentRunResult:
         run_config = request.to_run_config(self._definition)
@@ -238,6 +260,10 @@ class AgentService:
 
         # 3. Create PrimitiveOps and inject runners
         ops = PrimitiveOps(workspace=workspace)
+        memory_store = WorkspaceMemoryStore(
+            workspace=workspace,
+            policy=run_config.memory_policy,
+        )
         runtime_registry = self._runtime_tool_registry(run_config, runners=ops.runners())
         compiler = AgentGraphCompiler(
             tool_registry=runtime_registry,
@@ -255,6 +281,7 @@ class AgentService:
             approved_tool_call_ids=approved_tool_call_ids,
             denied_tool_call_ids=denied_tool_call_ids,
             messages=messages,
+            memory_store=memory_store,
         )
         try:
             result_state = await graph.ainvoke(
@@ -346,9 +373,11 @@ class AgentService:
         # 1. Restore PrimitiveOps runners if workspace_path provided
         runtime_registry = self._base_tool_registry.clone()
         self._inject_model_llm_tool_runners(runtime_registry)
+        memory_store: WorkspaceMemoryStore | None = None
         if workspace_path:
             workspace = open_workspace(workspace_path)
             ops = PrimitiveOps(workspace=workspace)
+            memory_store = WorkspaceMemoryStore(workspace=workspace)
             for extra_name, extra_runner in ops.runners().items():
                 try:
                     runtime_registry.register_runner(extra_name, extra_runner)
@@ -368,6 +397,11 @@ class AgentService:
             graph,
             thread_id=run_id,
         )
+        if memory_store is not None:
+            RuntimeRegistry.get(run_config.run_id).memory_store = WorkspaceMemoryStore(
+                workspace=workspace,
+                policy=run_config.memory_policy,
+            )
         result_state = await graph.ainvoke(
             Command(resume=response.model_dump(mode="json")),
             config={"configurable": {"thread_id": run_config.thread_id}},

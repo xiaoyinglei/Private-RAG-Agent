@@ -2,10 +2,15 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 from uuid import uuid4
 
 from rag.agent.core.definition import AgentDefinition, ToolPolicy
+from rag.agent.memory.models import MemoryPolicy
 from rag.schema.runtime import AccessPolicy
+
+if TYPE_CHECKING:
+    from rag.agent.memory.store import WorkspaceMemoryStore
 
 
 @dataclass(frozen=True)
@@ -15,6 +20,7 @@ class AgentRunConfig:
     budget_total: int
     max_depth: int
     access_policy: AccessPolicy
+    max_context_tokens: int | None = None
     parent_run_id: str | None = None
     source_scope: tuple[str, ...] = ()
     deadline_iso: str | None = None
@@ -22,6 +28,7 @@ class AgentRunConfig:
     budget_committed: int = 0
     budget_reserved: dict[str, int] = field(default_factory=dict)
     tool_policy: ToolPolicy = field(default_factory=ToolPolicy)
+    memory_policy: MemoryPolicy = field(default_factory=MemoryPolicy)
 
 
 def derive_child_config(parent: AgentRunConfig, child_def: AgentDefinition) -> AgentRunConfig:
@@ -36,7 +43,9 @@ def derive_child_config(parent: AgentRunConfig, child_def: AgentDefinition) -> A
         source_scope=parent.source_scope,
         max_depth=parent.max_depth - 1,
         budget_total=child_def.estimated_token_budget,
+        max_context_tokens=parent.max_context_tokens,
         tool_policy=child_def.tool_policy,
+        memory_policy=parent.memory_policy,
     )
 
 
@@ -75,6 +84,7 @@ class BudgetLedger:
 class AgentRuntimeHandles:
     budget_ledger: BudgetLedger
     cancellation: asyncio.Event
+    memory_store: WorkspaceMemoryStore | None = None
 
 
 class RuntimeRegistry:

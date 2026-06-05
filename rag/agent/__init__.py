@@ -8,6 +8,8 @@ from rag.agent.core.definition import AgentDefinition, ModelSelectionPolicy, Too
 from rag.agent.core.delegation import AgentDelegationRequest, DelegatedAgentRunner
 from rag.agent.core.registry import AgentRegistry
 from rag.agent.core.subagent_runner import BuiltinSubAgentRunner, BuiltinSynthesisRunner
+from rag.agent.memory.models import MemoryPolicy
+from rag.agent.planning import AgentPlan, PlanEvent, PlanStep, PlanStepPatch, PlanUpdate
 from rag.agent.service import AgentRunRequest, AgentRunResult, AgentService
 from rag.agent.state import (
     AgentState,
@@ -30,6 +32,7 @@ __all__ = [
     "AgentServiceFactory",
     "AgentService",
     "AgentState",
+    "AgentPlan",
     "AgentAsToolRunner",
     "AgentDelegationRequest",
     "AgentToolSpec",
@@ -38,7 +41,12 @@ __all__ = [
     "BudgetLedger",
     "ContextBudgetSnapshot",
     "ExtractedFact",
+    "MemoryPolicy",
     "ModelSelectionPolicy",
+    "PlanEvent",
+    "PlanStep",
+    "PlanStepPatch",
+    "PlanUpdate",
     "RuntimeRegistry",
     "DelegatedAgentRunner",
     "ThinkOutput",

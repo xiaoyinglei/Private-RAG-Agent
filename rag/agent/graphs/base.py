@@ -7,17 +7,16 @@ from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
 
 from rag.agent.core.definition import AgentDefinition
-from rag.agent.graphs.nodes.execute import execute_node
+from rag.agent.graphs.nodes.execute import run_tools_guarded
 from rag.agent.graphs.nodes.goal_runtime import (
     controller_node,
     initialize_goal_node,
-    reduce_observations_node,
     route_after_controller,
 )
-from rag.agent.graphs.nodes.llm_decide import ToolDecisionProvider, llm_decide_node
+from rag.agent.graphs.nodes.llm_decide import ToolDecisionProvider, decide_next
 from rag.agent.graphs.nodes.pause import pause_node
 from rag.agent.graphs.nodes.retrieval_hint import RetrievalHintProvider
-from rag.agent.graphs.nodes.synthesize import SynthesisRunner, synthesize_node
+from rag.agent.graphs.nodes.synthesize import SynthesisRunner, build_answer
 from rag.agent.state import AgentState
 from rag.agent.tools.registry import ToolRegistry
 
@@ -52,17 +51,21 @@ def build_agent_graph(
         )
 
     async def bound_execute_node(state: AgentState) -> dict[str, Any]:
-        return await execute_node(state, tool_registry=tool_registry, allowed_tools=allowed_tools)
+        return await run_tools_guarded(
+            state,
+            tool_registry=tool_registry,
+            allowed_tools=allowed_tools,
+        )
 
     async def bound_llm_decide_node(state: AgentState) -> dict[str, Any]:
-        return await llm_decide_node(
+        return await decide_next(
             state,
             definition=definition,
             decision_provider=tool_decision_provider,
         )
 
     async def bound_synthesize_node(state: AgentState) -> dict[str, Any]:
-        return await synthesize_node(
+        return await build_answer(
             state,
             synthesis_runner=effective_synthesis_runner,
         )
@@ -70,7 +73,6 @@ def build_agent_graph(
     graph.add_node("initialize_goal", bound_initialize_goal_node)
     graph.add_node("controller", bound_controller_node)
     graph.add_node("execute", bound_execute_node)
-    graph.add_node("reduce_observations", reduce_observations_node)
     graph.add_node("llm_decide", bound_llm_decide_node)
     graph.add_node("pause", pause_node)
     graph.add_node("finalize", bound_synthesize_node)
@@ -91,12 +93,11 @@ def build_agent_graph(
         "execute",
         route_after_execute,
         {
-            "reduce_observations": "reduce_observations",
+            "controller": "controller",
             "pause": "pause",
             "finalize": "finalize",
         },
     )
-    graph.add_edge("reduce_observations", "controller")
     graph.add_edge("llm_decide", "controller")
     graph.add_conditional_edges(
         "pause",
@@ -117,7 +118,7 @@ def route_after_execute(state: AgentState) -> str:
         return "pause"
     if state.get("status") == "failed":
         return "finalize"
-    return "reduce_observations"
+    return "controller"
 
 
 def route_after_pause(state: AgentState) -> str:

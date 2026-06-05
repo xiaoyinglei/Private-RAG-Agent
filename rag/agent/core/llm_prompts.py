@@ -78,7 +78,27 @@ def build_tool_decision_prompt(
     "thought": "推理过程",
     "confidence": 0.0~1.0,
     "stop_reason": "证据充分时说明原因",
-    "needs_user_input": "需要用户决策时说明问题"
+    "needs_user_input": "需要用户决策时说明问题",
+    "plan_update": {{
+        "mode": "replace" | "patch",
+        "objective": "当前目标摘要，可省略",
+        "status": "active" | "complete" | "blocked" | "needs_replan",
+        "active_step_id": "step_xxx",
+        "steps": [
+            {{
+                "step_id": "step_xxx",
+                "title": "有界步骤说明",
+                "status": "pending" | "in_progress" | "completed" | "blocked" | "skipped",
+                "related_gap_ids": ["answer"],
+                "expected_tool_names": ["list_files"],
+                "notes": "短说明"
+            }}
+        ],
+        "step_updates": [
+            {{"step_id": "step_xxx", "status": "in_progress", "notes": "短说明"}}
+        ],
+        "summary": "计划状态摘要"
+    }}
 }}
 
 规则：
@@ -88,6 +108,12 @@ def build_tool_decision_prompt(
 - 需要用户决策 → action="pause"，needs_user_input 说明问题
 - 预算耗尽且目标尚未满足 → action="pause"，needs_user_input 说明无法继续补证据
 - 每一次 LLM 决策必须对应当前 open_gaps；如果没有 open_gaps，不要继续调用工具
+- 维护 plan_update，让主循环拥有可恢复 todo/replan 状态；计划不是权限，不能替代 tool_calls，
+  也不能绕过工具白名单、审批、workspace 或 Python 沙箱。
+- plan_update 最多保留 12 个步骤；每个步骤只写短标题、相关 open_gaps、预期工具名和短 notes。
+  不要把完整表格、完整日志、完整工具输出、长 scratchpad 或大段推理写进计划。
+- 如果当前计划方向不再匹配 open_gaps，用 mode="replace" 给出新的有界步骤；否则用 mode="patch"
+  更新 active_step_id、步骤状态和短 notes。
 - 如果 open_gaps 仍包含 answer，但已有 read_file、write_file、run_python 或其他工具结果
   足以回答，应调用 llm_summarize 生成 answer_candidate；不要直接 action="synthesize"。
 - 如果证据已包含 retrieval_channels 冲突标记，考虑是否需要用户选择
