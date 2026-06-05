@@ -13,7 +13,7 @@ from rag.agent.graphs.nodes.synthesize import SynthesisRunner
 from rag.agent.tools.registry import ToolRegistry
 
 
-class AgentGraphCompiler:
+class GraphCompiler:
     """Compile an AgentDefinition into a LangGraph runnable."""
 
     def __init__(
@@ -81,3 +81,8 @@ class AgentGraphCompiler:
             missing.append(tool_name)
             seen.add(tool_name)
         return missing
+
+
+AgentGraphCompiler = GraphCompiler
+
+__all__ = ["AgentGraphCompiler", "GraphCompiler"]

@@ -7,7 +7,7 @@ from langgraph.checkpoint.memory import MemorySaver
 from pydantic import BaseModel
 
 from rag.agent.core.checkpointing import agent_checkpoint_serde
-from rag.agent.core.context import AgentRunConfig, RuntimeRegistry
+from rag.agent.core.context import AgentRunConfig, RunRegistry
 from rag.agent.core.definition import AgentDefinition, ToolPolicy
 from rag.agent.graphs.base import build_agent_graph
 from rag.agent.memory.models import ExternalizedToolOutput, MemoryPolicy
@@ -113,8 +113,8 @@ def _definition(allowed_tools: list[str]) -> AgentDefinition:
 async def test_graph_execute_checkpoint_externalizes_large_ok_output(tmp_path: Path) -> None:
     workspace = _workspace(tmp_path)
     run_config = _config("guard-ok")
-    RuntimeRegistry.remove(run_config.run_id)
-    handles = RuntimeRegistry.get_or_create(run_config)
+    RunRegistry.remove(run_config.run_id)
+    handles = RunRegistry.get_or_create(run_config)
     handles.memory_store = WorkspaceMemoryStore(workspace=workspace)
     registry = ToolRegistry()
     spec = ToolSpec(
@@ -167,7 +167,7 @@ async def test_graph_execute_checkpoint_externalizes_large_ok_output(tmp_path: P
     assert "Sheet1" in result["structured_observations"][0].locators[0]["table_name"]
     resolved = handles.memory_store.resolve(tool_result.output.ref)
     assert RAW_SENTINEL in resolved.payload.model_dump_json()
-    RuntimeRegistry.remove(run_config.run_id)
+    RunRegistry.remove(run_config.run_id)
 
 
 class _FailInput(BaseModel):
@@ -178,8 +178,8 @@ class _FailInput(BaseModel):
 async def test_graph_execute_checkpoint_externalizes_large_error_detail(tmp_path: Path) -> None:
     workspace = _workspace(tmp_path)
     run_config = _config("guard-error")
-    RuntimeRegistry.remove(run_config.run_id)
-    handles = RuntimeRegistry.get_or_create(run_config)
+    RunRegistry.remove(run_config.run_id)
+    handles = RunRegistry.get_or_create(run_config)
     handles.memory_store = WorkspaceMemoryStore(workspace=workspace)
     registry = ToolRegistry()
     spec = ToolSpec(
@@ -229,4 +229,4 @@ async def test_graph_execute_checkpoint_externalizes_large_error_detail(tmp_path
     ref = next(ref for ref in result["memory_refs"] if ref.ref_id == tool_result.error.detail["externalized_ref"])
     resolved = handles.memory_store.resolve(ref)
     assert RAW_SENTINEL in resolved.payload.model_dump_json()
-    RuntimeRegistry.remove(run_config.run_id)
+    RunRegistry.remove(run_config.run_id)

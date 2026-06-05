@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 from rag.agent.builtin.research import RESEARCH_AGENT
-from rag.agent.core.context import AgentRunConfig, RuntimeRegistry
+from rag.agent.core.context import AgentRunConfig, RunRegistry
 from rag.agent.core.definition import AgentDefinition
 from rag.agent.service import AgentRunRequest, AgentRunResult, AgentService
 from rag.agent.state import ToolCallPlan
@@ -107,8 +107,8 @@ def test_agent_service_initial_state_creates_runtime_handles() -> None:
     assert "tool_action_proposals" not in state
     assert "plan" not in state
     assert "subtask_results" not in state
-    assert RuntimeRegistry.get("svc-state") is not None
-    RuntimeRegistry.remove("svc-state")
+    assert RunRegistry.get("svc-state") is not None
+    RunRegistry.remove("svc-state")
 
 
 def test_agent_run_result_clears_stale_human_input_when_done() -> None:
@@ -125,7 +125,7 @@ def test_agent_run_result_clears_stale_human_input_when_done() -> None:
     assert result.status == "done"
     assert result.needs_user_input is None
     assert result.human_input_request is None
-    RuntimeRegistry.remove("svc-clear")
+    RunRegistry.remove("svc-clear")
 
 
 @pytest.mark.anyio
@@ -162,7 +162,7 @@ async def test_agent_service_run_executes_explicit_tool_call_with_runner() -> No
         citation_ids=["cit1"],
     )
     with pytest.raises(KeyError):
-        RuntimeRegistry.get("svc-ok")
+        RunRegistry.get("svc-ok")
 
 
 @pytest.mark.anyio
@@ -265,7 +265,7 @@ async def test_agent_service_run_with_config_uses_supplied_runtime_contract() ->
     assert result.status == "done"
     assert result.final_answer == "summary:Explain policy"
     with pytest.raises(KeyError):
-        RuntimeRegistry.get("svc-child")
+        RunRegistry.get("svc-child")
 
 
 @pytest.mark.anyio

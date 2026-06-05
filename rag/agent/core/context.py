@@ -87,7 +87,7 @@ class AgentRuntimeHandles:
     memory_store: WorkspaceMemoryStore | None = None
 
 
-class RuntimeRegistry:
+class RunRegistry:
     _handles: dict[str, AgentRuntimeHandles] = {}
 
     @classmethod
@@ -106,3 +106,15 @@ class RuntimeRegistry:
     @classmethod
     def remove(cls, run_id: str) -> None:
         cls._handles.pop(run_id, None)
+
+
+RuntimeRegistry = RunRegistry
+
+__all__ = [
+    "AgentRunConfig",
+    "AgentRuntimeHandles",
+    "BudgetLedger",
+    "RunRegistry",
+    "RuntimeRegistry",
+    "derive_child_config",
+]

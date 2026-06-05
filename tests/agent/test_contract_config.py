@@ -8,7 +8,7 @@ from rag.agent.core.context import (
     AgentRunConfig,
     AgentRuntimeHandles,
     BudgetLedger,
-    RuntimeRegistry,
+    RunRegistry,
     derive_child_config,
 )
 from rag.agent.core.definition import AgentDefinition, ModelSelectionPolicy, ToolPolicy
@@ -163,7 +163,7 @@ class TestDeriveChildConfig:
             derive_child_config(parent, child_def)
 
 
-class TestRuntimeRegistry:
+class TestRunRegistry:
     def test_get_or_create_initializes_handles(self) -> None:
         cfg = AgentRunConfig(
             run_id="reg-test",
@@ -172,8 +172,8 @@ class TestRuntimeRegistry:
             max_depth=2,
             access_policy=AccessPolicy.default(),
         )
-        RuntimeRegistry.remove(cfg.run_id)
-        handles = RuntimeRegistry.get_or_create(cfg)
+        RunRegistry.remove(cfg.run_id)
+        handles = RunRegistry.get_or_create(cfg)
         assert isinstance(handles, AgentRuntimeHandles)
         assert isinstance(handles.budget_ledger, BudgetLedger)
         assert isinstance(handles.cancellation, asyncio.Event)
@@ -186,9 +186,9 @@ class TestRuntimeRegistry:
             max_depth=2,
             access_policy=AccessPolicy.default(),
         )
-        RuntimeRegistry.remove(cfg.run_id)
-        h1 = RuntimeRegistry.get_or_create(cfg)
-        h2 = RuntimeRegistry.get_or_create(cfg)
+        RunRegistry.remove(cfg.run_id)
+        h1 = RunRegistry.get_or_create(cfg)
+        h2 = RunRegistry.get_or_create(cfg)
         assert h1 is h2
 
     def test_remove_cleans_up(self) -> None:
@@ -199,10 +199,10 @@ class TestRuntimeRegistry:
             max_depth=2,
             access_policy=AccessPolicy.default(),
         )
-        RuntimeRegistry.remove(cfg.run_id)
-        RuntimeRegistry.get_or_create(cfg)
-        RuntimeRegistry.remove("reg-test-3")
-        h_new = RuntimeRegistry.get_or_create(cfg)
+        RunRegistry.remove(cfg.run_id)
+        RunRegistry.get_or_create(cfg)
+        RunRegistry.remove("reg-test-3")
+        h_new = RunRegistry.get_or_create(cfg)
         assert h_new is not None
 
 

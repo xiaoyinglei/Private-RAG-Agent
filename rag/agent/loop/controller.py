@@ -4,7 +4,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
-from rag.agent.core.context import RuntimeRegistry
+from rag.agent.core.context import RunRegistry
 from rag.agent.core.definition import AgentDefinition
 from rag.agent.goal_runtime import (
     ContextBinding,
@@ -13,7 +13,7 @@ from rag.agent.goal_runtime import (
     SatisfactionChecker,
     SatisfactionReport,
 )
-from rag.agent.planning import PlanController
+from rag.agent.planning import PlanTracker
 from rag.agent.state import AgentState
 
 
@@ -31,7 +31,7 @@ class GoalChecker(Protocol):
 
 
 @dataclass(slots=True)
-class AgentLoopController:
+class TurnController:
     """Advance the goal-driven agent loop by one control decision."""
 
     definition: AgentDefinition
@@ -41,7 +41,7 @@ class AgentLoopController:
 
     def advance(self, state: AgentState) -> dict[str, Any]:
         try:
-            RuntimeRegistry.get(state["run_config"].run_id)
+            RunRegistry.get(state["run_config"].run_id)
         except KeyError:
             return {
                 "status": "failed",
@@ -99,7 +99,7 @@ class AgentLoopController:
             )
             if report.reason != "goal_satisfied":
                 update["insufficient_evidence_flag"] = True
-            plan, events = PlanController().record_completion(
+            plan, events = PlanTracker().record_completion(
                 state.get("agent_plan"),
                 blocked=report.reason != "goal_satisfied",
             )
@@ -140,7 +140,7 @@ class AgentLoopController:
                     "controller_next": "pause",
                 }
             )
-            plan, events = PlanController().record_completion(
+            plan, events = PlanTracker().record_completion(
                 state.get("agent_plan"),
                 blocked=True,
             )
@@ -174,4 +174,6 @@ def _gap_ids(gaps: Sequence[object]) -> set[str]:
     return ids
 
 
-__all__ = ["AgentLoopController", "BindingAssessor", "GoalChecker"]
+AgentLoopController = TurnController
+
+__all__ = ["AgentLoopController", "BindingAssessor", "GoalChecker", "TurnController"]

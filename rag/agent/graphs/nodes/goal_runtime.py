@@ -3,20 +3,20 @@ from __future__ import annotations
 from inspect import isawaitable
 from typing import Any
 
-from rag.agent.core.context import RuntimeRegistry
+from rag.agent.core.context import RunRegistry
 from rag.agent.core.definition import AgentDefinition
 from rag.agent.goal_runtime import (
-    GoalInitializer,
-    StateReducer,
+    GoalBuilder,
+    ObservationExtractor,
 )
 from rag.agent.graphs.nodes.retrieval_hint import RetrievalHintProvider, retrieval_hint_node
-from rag.agent.loop.controller import AgentLoopController
-from rag.agent.memory.compactor import RunMemoryCompactor
-from rag.agent.planning import PlanController
+from rag.agent.loop.controller import TurnController
+from rag.agent.memory.compactor import MemoryCompactor
+from rag.agent.planning import PlanTracker
 from rag.agent.state import AgentState
 
 
-async def initialize_goal_node(
+async def init_goal(
     state: AgentState,
     *,
     retrieval_hint_provider: RetrievalHintProvider | None = None,
@@ -24,7 +24,7 @@ async def initialize_goal_node(
     goal = state.get("goal_spec")
     update: dict[str, Any] = {}
     if goal is None:
-        goal = GoalInitializer().initialize(state.get("task", ""))
+        goal = GoalBuilder().initialize(state.get("task", ""))
         update.update(
             {
                 "goal_spec": goal,
@@ -35,13 +35,13 @@ async def initialize_goal_node(
         )
     if state.get("agent_plan") is None:
         open_gaps = update.get("open_gaps") or state.get("open_gaps", []) or goal.open_gaps()
-        plan, events = PlanController().initialize(
+        plan, events = PlanTracker().initialize(
             task=state.get("task", ""),
             open_gaps=open_gaps,
         )
         pending_calls = state.get("pending_tool_calls", [])
         if pending_calls:
-            plan, progress_events = PlanController().record_decision_progress(
+            plan, progress_events = PlanTracker().record_decision_progress(
                 plan,
                 tool_call_ids=[call.tool_call_id for call in pending_calls],
                 tool_names=[call.tool_name for call in pending_calls],
@@ -58,23 +58,23 @@ async def initialize_goal_node(
     return update
 
 
-def controller_node(
+def control_turn(
     state: AgentState,
     *,
     definition: AgentDefinition,
     has_tool_decision_provider: bool,
 ) -> dict[str, Any]:
-    return AgentLoopController(
+    return TurnController(
         definition=definition,
         has_tool_decision_provider=has_tool_decision_provider,
     ).advance(state)
 
 
 def extract_obs_legacy(state: AgentState) -> dict[str, Any]:
-    update = StateReducer().reduce_tool_results(dict(state))
+    update = ObservationExtractor().reduce_tool_results(dict(state))
     if not update:
         return update
-    plan, events = PlanController().record_observation_progress(
+    plan, events = PlanTracker().record_observation_progress(
         state.get("agent_plan"),
         observations=update.get("structured_observations", []),
         satisfied_requirement_ids=update.get("satisfied_requirements", []),
@@ -84,16 +84,16 @@ def extract_obs_legacy(state: AgentState) -> dict[str, Any]:
     if events:
         update["plan_events"] = events
     try:
-        memory_store = RuntimeRegistry.get(state["run_config"].run_id).memory_store
+        memory_store = RunRegistry.get(state["run_config"].run_id).memory_store
     except KeyError:
         memory_store = None
-    return RunMemoryCompactor(
+    return MemoryCompactor(
         policy=state["run_config"].memory_policy,
         store=memory_store,
     ).compact_update(dict(state), update)
 
 
-def route_after_controller(state: AgentState) -> str:
+def route_after_control(state: AgentState) -> str:
     next_node = state.get("controller_next")
     if next_node in {
         "execute",
@@ -126,12 +126,23 @@ def _retrieval_hint_update(hint_update: dict[str, Any]) -> dict[str, Any]:
     return update
 
 
+initialize_goal_node = init_goal
+controller_node = control_turn
 reduce_observations_node = extract_obs_legacy
+route_after_controller = route_after_control
+AgentLoopController = TurnController
 
 __all__ = [
+    "AgentLoopController",
+    "GoalBuilder",
+    "ObservationExtractor",
+    "TurnController",
+    "control_turn",
     "controller_node",
     "extract_obs_legacy",
+    "init_goal",
     "initialize_goal_node",
     "reduce_observations_node",
+    "route_after_control",
     "route_after_controller",
 ]

@@ -8,7 +8,7 @@ from pydantic import ValidationError
 from rag.agent.binding_providers import AssetContextBindingProvider
 from rag.agent.builtin.research import RESEARCH_AGENT
 from rag.agent.core.agent_as_tool import AgentToolOutput, DelegatedEvidenceRef
-from rag.agent.core.context import AgentRunConfig, RuntimeRegistry
+from rag.agent.core.context import AgentRunConfig, RunRegistry
 from rag.agent.core.definition import AgentDefinition
 from rag.agent.goal_runtime import (
     AnswerCandidate,
@@ -16,12 +16,12 @@ from rag.agent.goal_runtime import (
     ContextBindingAssessor,
     ContextUnit,
     EvidenceRef,
+    GoalBuilder,
     GoalDeliverable,
     GoalGap,
-    GoalInitializer,
     GoalSpec,
+    ObservationExtractor,
     SatisfactionChecker,
-    StateReducer,
 )
 from rag.agent.graphs.nodes.goal_runtime import controller_node
 from rag.agent.primitive_ops import (
@@ -167,8 +167,8 @@ async def test_explicit_evidence_goal_still_waits_for_evidence_with_same_agent_d
 
 
 def test_goal_initializer_declares_deliverables_with_acceptance_rules() -> None:
-    answer_only = GoalInitializer().initialize("解释政策影响")
-    with_evidence = GoalInitializer().initialize("解释政策影响并给出处")
+    answer_only = GoalBuilder().initialize("解释政策影响")
+    with_evidence = GoalBuilder().initialize("解释政策影响并给出处")
 
     assert [
         (item.deliverable_id, item.kind, item.acceptance_rule)
@@ -212,7 +212,7 @@ def test_goal_spec_rejects_duplicate_deliverable_ids() -> None:
 
 
 def test_goal_initializer_requires_binding_for_explicit_source_scope() -> None:
-    goal = GoalInitializer().initialize(
+    goal = GoalBuilder().initialize(
         "在分区域分品牌 石膏板-26年表中，北方和东北当日销售额合计是多少？请给出处"
     )
 
@@ -227,7 +227,7 @@ def test_goal_initializer_requires_binding_for_explicit_source_scope() -> None:
 
 
 def test_context_binding_assessor_selects_explicitly_matching_table_candidate() -> None:
-    goal = GoalInitializer().initialize(
+    goal = GoalBuilder().initialize(
         "在分区域分品牌 石膏板-26年表中，北方和东北当日销售额合计是多少？请给出处"
     )
     asset_list_result = ToolResult(
@@ -268,7 +268,7 @@ def test_context_binding_assessor_selects_explicitly_matching_table_candidate() 
         "no_progress_count": 0,
         "pending_tool_calls": [],
     }
-    state.update(StateReducer().reduce_tool_results(state))
+    state.update(ObservationExtractor().reduce_tool_results(state))
 
     assessor = ContextBindingAssessor(providers=[AssetContextBindingProvider()])
     [binding] = assessor.assess_bindings(state)
@@ -313,7 +313,7 @@ def test_asset_list_observation_keeps_compact_asset_locators_and_context_unit() 
         "evidence_refs": [],
     }
 
-    update = StateReducer().reduce_tool_results(state)
+    update = ObservationExtractor().reduce_tool_results(state)
     observation = update["structured_observations"][0]
 
     assert observation.locators == [
@@ -351,7 +351,7 @@ def test_asset_list_observation_keeps_compact_asset_locators_and_context_unit() 
 
 
 def test_asset_analyze_observation_satisfies_answer_and_asset_evidence() -> None:
-    goal = GoalInitializer().initialize("北方和东北日提货合计是多少？请给出处")
+    goal = GoalBuilder().initialize("北方和东北日提货合计是多少？请给出处")
     analyze_result = ToolResult(
         tool_call_id="tc-analyze",
         tool_name="asset_analyze",
@@ -380,7 +380,7 @@ def test_asset_analyze_observation_satisfies_answer_and_asset_evidence() -> None
         "open_gaps": goal.requirement_ids,
     }
 
-    update = StateReducer().reduce_tool_results(state)
+    update = ObservationExtractor().reduce_tool_results(state)
 
     assert update["satisfied_requirements"] == ["answer", "evidence"]
     assert update["open_gaps"] == []
@@ -388,7 +388,7 @@ def test_asset_analyze_observation_satisfies_answer_and_asset_evidence() -> None
 
 
 def test_delegated_agent_observation_promotes_conclusion_and_citation_evidence() -> None:
-    goal = GoalInitializer().initialize("总结政策影响并给出处")
+    goal = GoalBuilder().initialize("总结政策影响并给出处")
     citation = AnswerCitation(
         citation_id="cit-child",
         evidence_id="ev-child",
@@ -429,7 +429,7 @@ def test_delegated_agent_observation_promotes_conclusion_and_citation_evidence()
         "conflicts": [],
     }
 
-    state.update(StateReducer().reduce_tool_results(state))
+    state.update(ObservationExtractor().reduce_tool_results(state))
 
     assert state["answer_candidates"][0].text == "子 Agent 结论。"
     assert state["evidence_refs"] == [
@@ -446,7 +446,7 @@ def test_delegated_agent_observation_promotes_conclusion_and_citation_evidence()
 
 
 def test_delegated_agent_anchored_ref_is_evidence_without_copying_child_body() -> None:
-    goal = GoalInitializer().initialize("总结政策影响并给出处")
+    goal = GoalBuilder().initialize("总结政策影响并给出处")
     result = ToolResult(
         tool_call_id="tc-child-ref",
         tool_name="agent_research",
@@ -478,7 +478,7 @@ def test_delegated_agent_anchored_ref_is_evidence_without_copying_child_body() -
         "conflicts": [],
     }
 
-    update = StateReducer().reduce_tool_results(state)
+    update = ObservationExtractor().reduce_tool_results(state)
     state.update(update)
 
     assert update["evidence_refs"] == [
@@ -494,7 +494,7 @@ def test_delegated_agent_anchored_ref_is_evidence_without_copying_child_body() -
 
 
 def test_delegated_agent_citation_alone_is_parent_checkable_evidence() -> None:
-    goal = GoalInitializer().initialize("总结政策影响并给出处")
+    goal = GoalBuilder().initialize("总结政策影响并给出处")
     citation = AnswerCitation(
         citation_id="cit-only",
         evidence_id="ev-only",
@@ -527,7 +527,7 @@ def test_delegated_agent_citation_alone_is_parent_checkable_evidence() -> None:
         "conflicts": [],
     }
 
-    update = StateReducer().reduce_tool_results(state)
+    update = ObservationExtractor().reduce_tool_results(state)
     state.update(update)
 
     assert update["evidence_refs"] == [
@@ -543,7 +543,7 @@ def test_delegated_agent_citation_alone_is_parent_checkable_evidence() -> None:
 
 
 def test_checker_keeps_explicit_source_gap_open_for_wrong_computed_asset() -> None:
-    goal = GoalInitializer().initialize(
+    goal = GoalBuilder().initialize(
         "在分区域分品牌 石膏板-26年表中，北方和东北当日销售额合计是多少？请给出处"
     )
     wrong_unit = ContextUnit(
@@ -589,7 +589,7 @@ def test_checker_keeps_explicit_source_gap_open_for_wrong_computed_asset() -> No
         "no_progress_count": 0,
         "pending_tool_calls": [],
     }
-    state.update(StateReducer().reduce_tool_results(state))
+    state.update(ObservationExtractor().reduce_tool_results(state))
     assessor = ContextBindingAssessor(providers=[AssetContextBindingProvider()])
     state["context_bindings"] = assessor.assess_bindings(state)
 
@@ -601,7 +601,7 @@ def test_checker_keeps_explicit_source_gap_open_for_wrong_computed_asset() -> No
 
 
 def test_text_search_observation_creates_context_unit_without_answer_candidate() -> None:
-    goal = GoalInitializer().initialize("总结政策影响并给出处")
+    goal = GoalBuilder().initialize("总结政策影响并给出处")
     result = ToolResult(
         tool_call_id="tc-text",
         tool_name="vector_search",
@@ -633,7 +633,7 @@ def test_text_search_observation_creates_context_unit_without_answer_candidate()
         "open_gaps": goal.open_gaps(),
     }
 
-    update = StateReducer().reduce_tool_results(state)
+    update = ObservationExtractor().reduce_tool_results(state)
 
     [unit] = update["context_units"]
     assert unit.unit_type == "retrieved_chunk"
@@ -646,7 +646,7 @@ def test_text_search_observation_creates_context_unit_without_answer_candidate()
 
 
 def test_list_files_observation_creates_workspace_context_without_answer_candidate() -> None:
-    goal = GoalInitializer().initialize("分析 input_files/sales.csv")
+    goal = GoalBuilder().initialize("分析 input_files/sales.csv")
     result = ToolResult(
         tool_call_id="tc-list",
         tool_name="list_files",
@@ -677,7 +677,7 @@ def test_list_files_observation_creates_workspace_context_without_answer_candida
         "no_progress_count": 2,
     }
 
-    update = StateReducer().reduce_tool_results(state)
+    update = ObservationExtractor().reduce_tool_results(state)
 
     assert update["answer_candidates"] == []
     assert update["no_progress_count"] == 0
@@ -699,7 +699,7 @@ def test_list_files_observation_creates_workspace_context_without_answer_candida
 
 
 def test_binary_workspace_file_observation_advertises_python_capability() -> None:
-    goal = GoalInitializer().initialize("分析 input_files/report.xlsx")
+    goal = GoalBuilder().initialize("分析 input_files/report.xlsx")
     result = ToolResult(
         tool_call_id="tc-list-binary",
         tool_name="list_files",
@@ -735,7 +735,7 @@ def test_binary_workspace_file_observation_advertises_python_capability() -> Non
         "no_progress_count": 2,
     }
 
-    update = StateReducer().reduce_tool_results(state)
+    update = ObservationExtractor().reduce_tool_results(state)
 
     [unit] = update["context_units"]
     assert unit.capabilities == ["run_python"]
@@ -747,7 +747,7 @@ def test_binary_workspace_file_observation_advertises_python_capability() -> Non
 
 
 def test_structured_probe_observation_creates_table_context_unit() -> None:
-    goal = GoalInitializer().initialize("分析 input_files/report.xlsx")
+    goal = GoalBuilder().initialize("分析 input_files/report.xlsx")
     result = ToolResult(
         tool_call_id="tc-probe",
         tool_name="structured_probe",
@@ -795,7 +795,7 @@ def test_structured_probe_observation_creates_table_context_unit() -> None:
         "no_progress_count": 2,
     }
 
-    update = StateReducer().reduce_tool_results(state)
+    update = ObservationExtractor().reduce_tool_results(state)
 
     [unit] = update["context_units"]
     assert unit.unit_id == "structured_table:input_files/report.xlsx:0"
@@ -809,7 +809,7 @@ def test_structured_probe_observation_creates_table_context_unit() -> None:
 
 
 def test_duplicate_workspace_context_does_not_count_as_progress() -> None:
-    goal = GoalInitializer().initialize("分析 input_files/sales.csv")
+    goal = GoalBuilder().initialize("分析 input_files/sales.csv")
     result = ToolResult(
         tool_call_id="tc-list-again",
         tool_name="list_files",
@@ -845,13 +845,13 @@ def test_duplicate_workspace_context_does_not_count_as_progress() -> None:
         "no_progress_count": 2,
     }
 
-    update = StateReducer().reduce_tool_results(state)
+    update = ObservationExtractor().reduce_tool_results(state)
 
     assert update["no_progress_count"] == 3
 
 
 def test_checker_rejects_bare_evidence_id_for_traceable_evidence_deliverable() -> None:
-    goal = GoalInitializer().initialize("总结政策影响并给出处")
+    goal = GoalBuilder().initialize("总结政策影响并给出处")
     report = SatisfactionChecker().check(
         {
             "goal_spec": goal,
@@ -951,7 +951,7 @@ def test_checker_keeps_computation_gap_open_without_traceable_source() -> None:
 
 
 def test_irrelevant_new_observation_increments_no_progress_count() -> None:
-    goal = GoalInitializer().initialize("总结政策影响并给出处")
+    goal = GoalBuilder().initialize("总结政策影响并给出处")
     result = ToolResult(
         tool_call_id="tc-empty-assets",
         tool_name="asset_list",
@@ -959,7 +959,7 @@ def test_irrelevant_new_observation_increments_no_progress_count() -> None:
         output=AssetListOutput(assets=[]),
         latency_ms=0,
     )
-    update = StateReducer().reduce_tool_results(
+    update = ObservationExtractor().reduce_tool_results(
         {
             "task": goal.original_query,
             "goal_spec": goal,
@@ -978,7 +978,7 @@ def test_irrelevant_new_observation_increments_no_progress_count() -> None:
 
 
 def test_satisfaction_checker_reports_gaps_without_choosing_asset_action() -> None:
-    goal = GoalInitializer().initialize("北方和东北日提货合计是多少？请给出处")
+    goal = GoalBuilder().initialize("北方和东北日提货合计是多少？请给出处")
     state = {
         "task": goal.original_query,
         "goal_spec": goal,
@@ -1012,9 +1012,9 @@ def test_controller_defers_asset_action_to_model_decision() -> None:
         max_depth=2,
         access_policy=AccessPolicy.default(),
     )
-    RuntimeRegistry.remove(config.run_id)
-    RuntimeRegistry.get_or_create(config)
-    goal = GoalInitializer().initialize("定位表格并给出处")
+    RunRegistry.remove(config.run_id)
+    RunRegistry.get_or_create(config)
+    goal = GoalBuilder().initialize("定位表格并给出处")
     state = {
         "run_config": config,
         "status": "running",
@@ -1046,7 +1046,7 @@ def test_controller_defers_asset_action_to_model_decision() -> None:
     assert update["controller_next"] == "llm_decide"
     assert "tool_action_proposals" not in update
     assert "pending_tool_calls" not in update
-    RuntimeRegistry.remove(config.run_id)
+    RunRegistry.remove(config.run_id)
 
 
 def test_controller_counts_new_context_binding_as_progress_before_stuck_pause() -> None:
@@ -1057,9 +1057,9 @@ def test_controller_counts_new_context_binding_as_progress_before_stuck_pause() 
         max_depth=2,
         access_policy=AccessPolicy.default(),
     )
-    RuntimeRegistry.remove(config.run_id)
-    RuntimeRegistry.get_or_create(config)
-    goal = GoalInitializer().initialize(
+    RunRegistry.remove(config.run_id)
+    RunRegistry.get_or_create(config)
+    goal = GoalBuilder().initialize(
         "在分区域分品牌 石膏板-26年表中，总结结果并给出处"
     )
     update = controller_node(
@@ -1092,7 +1092,7 @@ def test_controller_counts_new_context_binding_as_progress_before_stuck_pause() 
     assert update["controller_next"] == "llm_decide"
     assert update["no_progress_count"] == 0
     assert [gap.gap_id for gap in update["open_gaps"]] == ["answer", "evidence"]
-    RuntimeRegistry.remove(config.run_id)
+    RunRegistry.remove(config.run_id)
 
 
 def test_controller_clears_replaced_source_binding_conflict_after_correct_result() -> None:
@@ -1103,9 +1103,9 @@ def test_controller_clears_replaced_source_binding_conflict_after_correct_result
         max_depth=2,
         access_policy=AccessPolicy.default(),
     )
-    RuntimeRegistry.remove(config.run_id)
-    RuntimeRegistry.get_or_create(config)
-    goal = GoalInitializer().initialize(
+    RunRegistry.remove(config.run_id)
+    RunRegistry.get_or_create(config)
+    goal = GoalBuilder().initialize(
         "在分区域分品牌 石膏板-26年表中，北方和东北当日销售额合计是多少？请给出处"
     )
     base = {
@@ -1168,7 +1168,7 @@ def test_controller_clears_replaced_source_binding_conflict_after_correct_result
 
     assert recovered_update["stop_reason"] == "goal_satisfied"
     assert recovered_update["conflicts"] == []
-    RuntimeRegistry.remove(config.run_id)
+    RunRegistry.remove(config.run_id)
 
 
 def test_primitive_ops_outputs_not_answer_candidates() -> None:

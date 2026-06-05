@@ -5,7 +5,7 @@ from langchain_core.messages import HumanMessage
 from rag.agent.core.context import AgentRunConfig
 from rag.agent.core.definition import AgentDefinition
 from rag.agent.goal_runtime import AnswerCandidate, ContextUnit, EvidenceRef, GoalSpec, StructuredObservation
-from rag.agent.memory.injector import ContextInjector
+from rag.agent.memory.injector import ContextBuilder
 from rag.agent.memory.models import ExternalizedToolOutput, ExtractedFact, MemoryRef, WorkingSummary
 from rag.agent.planning import AgentPlan, PlanStep
 from rag.agent.state import AgentState
@@ -105,7 +105,7 @@ def _state() -> AgentState:
 
 
 def test_context_sections_follow_spec_order() -> None:
-    context = ContextInjector(max_context_tokens=1000).assemble(
+    context = ContextBuilder(max_context_tokens=1000).assemble(
         definition=_definition(),
         state=_state(),
     )
@@ -118,7 +118,7 @@ def test_context_sections_follow_spec_order() -> None:
 
 
 def test_historical_hints_are_marked_non_authoritative() -> None:
-    context = ContextInjector(max_context_tokens=1000).assemble(
+    context = ContextBuilder(max_context_tokens=1000).assemble(
         definition=_definition(),
         state=_state(),
         recalled_memories=["Old project preference"],
@@ -133,7 +133,7 @@ def test_budget_keeps_evidence_before_tail() -> None:
     state = _state()
     state["messages"] = [HumanMessage(content="tail " * 200, id="h-tail")]
 
-    context = ContextInjector(max_context_tokens=18).assemble(
+    context = ContextBuilder(max_context_tokens=18).assemble(
         definition=_definition(),
         state=state,
     )
@@ -163,7 +163,7 @@ def test_budget_priority_keeps_open_decisions_before_evidence_refs_and_tail() ->
             for index in range(8)
         ]
 
-    context = ContextInjector(max_context_tokens=350).assemble(
+    context = ContextBuilder(max_context_tokens=350).assemble(
         definition=_definition(),
         state=state,
     )
@@ -205,7 +205,7 @@ def test_context_injects_memory_summaries_and_refs_not_raw_payload() -> None:
     ]
     state["memory_refs"] = [state["tool_results"][0].output.ref]  # type: ignore[union-attr]
 
-    context = ContextInjector(max_context_tokens=1000).assemble(
+    context = ContextBuilder(max_context_tokens=1000).assemble(
         definition=_definition(),
         state=state,
     )
@@ -221,7 +221,7 @@ def test_context_injects_memory_summaries_and_refs_not_raw_payload() -> None:
 
 
 def test_context_budget_snapshot_counts_sections() -> None:
-    context = ContextInjector(max_context_tokens=1000).assemble(
+    context = ContextBuilder(max_context_tokens=1000).assemble(
         definition=_definition(),
         state=_state(),
     )
@@ -246,7 +246,7 @@ def test_context_hard_budget_compacts_required_sections_without_overrun() -> Non
         allowed_tools=["search"],
     )
 
-    context = ContextInjector(max_context_tokens=40, max_section_chars=10_000).assemble(
+    context = ContextBuilder(max_context_tokens=40, max_section_chars=10_000).assemble(
         definition=definition,
         state=state,
     )
@@ -268,7 +268,7 @@ def test_context_overflow_marks_budget_when_minimal_snapshot_cannot_fit() -> Non
         allowed_tools=["search"],
     )
 
-    context = ContextInjector(max_context_tokens=1, max_section_chars=10_000).assemble(
+    context = ContextBuilder(max_context_tokens=1, max_section_chars=10_000).assemble(
         definition=definition,
         state=state,
     )
@@ -310,7 +310,7 @@ def test_context_uses_structured_observations_instead_of_large_raw_tool_outputs(
         )
     ]
 
-    context = ContextInjector(max_context_tokens=1000).assemble(
+    context = ContextBuilder(max_context_tokens=1000).assemble(
         definition=_definition(),
         state=state,
     )
@@ -341,7 +341,7 @@ def test_context_includes_bounded_agent_plan_without_raw_scratchpad() -> None:
         summary="Need structure before computation.",
     )
 
-    context = ContextInjector(max_context_tokens=1000).assemble(
+    context = ContextBuilder(max_context_tokens=1000).assemble(
         definition=_definition(),
         state=state,
     )
@@ -388,7 +388,7 @@ def test_context_formats_asset_locators_compactly() -> None:
         )
     ]
 
-    context = ContextInjector(max_context_tokens=1000).assemble(
+    context = ContextBuilder(max_context_tokens=1000).assemble(
         definition=_definition(),
         state=state,
     )
@@ -428,7 +428,7 @@ def test_context_formats_workspace_file_observations() -> None:
         )
     ]
 
-    context = ContextInjector(max_context_tokens=1000).assemble(
+    context = ContextBuilder(max_context_tokens=1000).assemble(
         definition=_definition(),
         state=state,
     )
@@ -468,7 +468,7 @@ def test_context_preserves_workspace_path_spacing() -> None:
         )
     ]
 
-    context = ContextInjector(max_context_tokens=1000).assemble(
+    context = ContextBuilder(max_context_tokens=1000).assemble(
         definition=_definition(),
         state=state,
     )

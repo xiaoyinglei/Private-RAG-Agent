@@ -4,7 +4,7 @@ from pathlib import Path
 
 from langchain_core.messages import HumanMessage
 
-from rag.agent.core.context import AgentRunConfig, RuntimeRegistry
+from rag.agent.core.context import AgentRunConfig, RunRegistry
 from rag.agent.core.definition import AgentDefinition
 from rag.agent.goal_runtime import (
     AnswerCandidate,
@@ -14,7 +14,7 @@ from rag.agent.goal_runtime import (
     StructuredObservation,
 )
 from rag.agent.graphs.nodes.goal_runtime import reduce_observations_node
-from rag.agent.memory.compactor import RunMemoryCompactor
+from rag.agent.memory.compactor import MemoryCompactor
 from rag.agent.memory.models import (
     ExternalizedToolOutput,
     MemoryPolicy,
@@ -163,7 +163,7 @@ def test_initial_state_compacts_messages_to_summary_and_memory_ref(tmp_path: Pat
     assert isinstance(resolved.payload, MessageBatchPayload)
     assert [message.id for message in resolved.payload.messages] == ["msg-0", "msg-1", "msg-2", "msg-3"]
     assert "old message 0" not in "".join(message.content for message in state["messages"])
-    RuntimeRegistry.remove("message-compact")
+    RunRegistry.remove("message-compact")
 
 
 def test_initial_state_compacts_messages_without_explicit_ids(tmp_path: Path) -> None:
@@ -200,7 +200,7 @@ def test_initial_state_compacts_messages_without_explicit_ids(tmp_path: Path) ->
         "history 2",
         "history 3",
     ]
-    RuntimeRegistry.remove("message-compact-no-id")
+    RunRegistry.remove("message-compact-no-id")
 
 
 def test_message_compaction_failure_keeps_tail_without_large_history() -> None:
@@ -232,15 +232,15 @@ def test_message_compaction_failure_keeps_tail_without_large_history() -> None:
     assert "message_compaction_failed" in state["memory_warnings"]
     assert "msg-0" in state["working_summary"].covered_message_ids
     assert "OLD_RAW_HISTORY" not in "".join(message.content for message in state["messages"])
-    RuntimeRegistry.remove("message-compact-failure")
+    RunRegistry.remove("message-compact-failure")
 
 
 def test_compaction_runs_after_structured_observation_extraction(tmp_path: Path) -> None:
     workspace = _workspace(tmp_path)
     policy = MemoryPolicy(max_tool_output_chars=200)
     run_config = _config("memory-post-reducer", policy)
-    RuntimeRegistry.remove(run_config.run_id)
-    handles = RuntimeRegistry.get_or_create(run_config)
+    RunRegistry.remove(run_config.run_id)
+    handles = RunRegistry.get_or_create(run_config)
     handles.memory_store = WorkspaceMemoryStore(workspace=workspace)
     output = StructuredProbeOutput(
         path="input_files/book.xlsx",
@@ -286,11 +286,11 @@ def test_compaction_runs_after_structured_observation_extraction(tmp_path: Path)
     assert "Sheet1" in compacted_result.output.summary
     resolved = handles.memory_store.resolve(compacted_result.output.ref)
     assert resolved.payload == output
-    RuntimeRegistry.remove(run_config.run_id)
+    RunRegistry.remove(run_config.run_id)
 
 
 def test_per_tool_summaries_preserve_key_fields() -> None:
-    compactor = RunMemoryCompactor(policy=MemoryPolicy())
+    compactor = MemoryCompactor(policy=MemoryPolicy())
     cases = [
         (
             ToolResult(
@@ -406,7 +406,7 @@ def test_state_channel_caps_preserve_active_plan_gaps_conflicts_and_traceable_re
         max_context_units=2,
         max_answer_candidates=2,
     )
-    compactor = RunMemoryCompactor(policy=policy)
+    compactor = MemoryCompactor(policy=policy)
     plan = AgentPlan(
         objective="answer",
         active_step_id="active",
@@ -469,7 +469,7 @@ def test_state_retention_pins_active_step_items_and_audits_evictions() -> None:
         max_context_units=2,
         max_plan_events=2,
     )
-    compactor = RunMemoryCompactor(policy=policy)
+    compactor = MemoryCompactor(policy=policy)
     plan = AgentPlan(
         objective="answer",
         active_step_id="step_active",
@@ -558,8 +558,8 @@ def test_state_retention_pins_active_step_items_and_audits_evictions() -> None:
 def test_compaction_failure_externalizes_unavailable_without_raw_state_growth() -> None:
     policy = MemoryPolicy(max_tool_output_chars=100)
     run_config = _config("memory-failure", policy)
-    RuntimeRegistry.remove(run_config.run_id)
-    handles = RuntimeRegistry.get_or_create(run_config)
+    RunRegistry.remove(run_config.run_id)
+    handles = RunRegistry.get_or_create(run_config)
     handles.memory_store = FailingMemoryStore()
     output = RunPythonOutput(
         ok=True,
@@ -589,12 +589,12 @@ def test_compaction_failure_externalizes_unavailable_without_raw_state_growth() 
     assert "memory_compaction_failed" in compacted_result.output.warnings
     assert "raw stdout raw stdout" not in compacted_result.model_dump_json()
     assert "memory_compaction_failed" in update["memory_warnings"]
-    RuntimeRegistry.remove(run_config.run_id)
+    RunRegistry.remove(run_config.run_id)
 
 
 def test_checkpoint_guard_sanitizes_large_state_payloads_outside_tool_results() -> None:
     raw = "RAW_STATE_PAYLOAD_SHOULD_NOT_REACH_CHECKPOINT " * 80
-    compactor = RunMemoryCompactor(policy=MemoryPolicy(max_tool_output_chars=120))
+    compactor = MemoryCompactor(policy=MemoryPolicy(max_tool_output_chars=120))
 
     compacted = compactor.compact_update(
         {},

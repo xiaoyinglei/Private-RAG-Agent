@@ -5,7 +5,7 @@ import asyncio
 import pytest
 from pydantic import BaseModel
 
-from rag.agent.core.context import AgentRunConfig, RuntimeRegistry
+from rag.agent.core.context import AgentRunConfig, RunRegistry
 from rag.agent.graphs.nodes.execute import execute_node
 from rag.agent.state import AgentState, ToolCallPlan
 from rag.agent.tools.registry import ToolRegistry
@@ -42,8 +42,8 @@ def _state(*, call: ToolCallPlan, run_id: str) -> AgentState:
         max_depth=2,
         access_policy=AccessPolicy.default(),
     )
-    RuntimeRegistry.remove(run_id)
-    RuntimeRegistry.get_or_create(config)
+    RunRegistry.remove(run_id)
+    RunRegistry.get_or_create(config)
     return {
         "messages": [],
         "evidence": [],
@@ -94,7 +94,7 @@ async def test_execute_node_retries_retryable_runner_failure_before_success() ->
     assert result.output == RuntimeOutput(value="ok")
     assert result.retry_count == 1
     assert attempts == ["ok", "ok"]
-    RuntimeRegistry.remove("tool-retry")
+    RunRegistry.remove("tool-retry")
 
 
 @pytest.mark.anyio
@@ -119,4 +119,4 @@ async def test_execute_node_times_out_async_runner() -> None:
     assert result.error.code == "timeout"
     assert result.error.retryable is True
     assert result.retry_count == 0
-    RuntimeRegistry.remove("tool-timeout")
+    RunRegistry.remove("tool-timeout")

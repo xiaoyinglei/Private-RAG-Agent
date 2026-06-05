@@ -6,7 +6,7 @@ from langgraph.checkpoint.memory import MemorySaver
 from pydantic import BaseModel
 
 from rag.agent.builtin.research import RESEARCH_AGENT
-from rag.agent.core.context import RuntimeRegistry
+from rag.agent.core.context import RunRegistry
 from rag.agent.core.definition import AgentDefinition
 from rag.agent.core.human_input import HumanInputResponse
 from rag.agent.service import AgentRunRequest, AgentService
@@ -142,7 +142,7 @@ async def test_resume_restores_runtime_handles_from_checkpoint_after_process_bou
 
     assert paused.status == "paused"
     assert paused.human_input_request is not None
-    RuntimeRegistry.remove("resume-cross-process")
+    RunRegistry.remove("resume-cross-process")
 
     resumed_service = _service(checkpointer=checkpointer, calls=calls)
     request = resumed_service.pending_human_input_request(run_id="resume-cross-process")
@@ -161,7 +161,7 @@ async def test_resume_restores_runtime_handles_from_checkpoint_after_process_bou
     assert tool_result.status == "ok"
     assert tool_result.output == _WriteOutput(result="wrote:persisted")
     with pytest.raises(KeyError):
-        RuntimeRegistry.get("resume-cross-process")
+        RunRegistry.get("resume-cross-process")
 
 
 @pytest.mark.anyio
@@ -235,7 +235,7 @@ async def test_sqlite_checkpointer_persists_paused_run_between_service_instances
     )
 
     assert paused.status == "paused"
-    RuntimeRegistry.remove("resume-sqlite")
+    RunRegistry.remove("resume-sqlite")
 
     await aclose_agent_checkpointer(checkpointer)
     resumed_checkpointer = create_agent_checkpointer(checkpoint_db)

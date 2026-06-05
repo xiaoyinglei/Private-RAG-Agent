@@ -4,9 +4,9 @@ from rag.agent.goal_runtime import GoalGap, StructuredObservation
 from rag.agent.graphs.nodes.llm_decide import _apply_decision
 from rag.agent.planning import (
     AgentPlan,
-    PlanController,
     PlanStep,
     PlanStepPatch,
+    PlanTracker,
     PlanUpdate,
 )
 from rag.agent.state import ThinkOutput, ToolCallPlan
@@ -15,7 +15,7 @@ from rag.agent.state import ThinkOutput, ToolCallPlan
 def test_initialize_plan_tracks_open_gaps_without_tool_routing() -> None:
     gap = GoalGap(gap_id="answer", gap_type="answer", description="Produce an answer.")
 
-    plan, events = PlanController().initialize(
+    plan, events = PlanTracker().initialize(
         task="Summarize the workspace files.",
         open_gaps=[gap],
     )
@@ -35,7 +35,7 @@ def test_initialize_plan_tracks_open_gaps_without_tool_routing() -> None:
 
 
 def test_initialize_plan_preserves_string_gap_ids_from_restored_state() -> None:
-    plan, _ = PlanController().initialize(
+    plan, _ = PlanTracker().initialize(
         task="Continue restored run.",
         open_gaps=["evidence"],
     )
@@ -67,7 +67,7 @@ def test_plan_update_bounds_steps_and_records_unsupported_tool_names() -> None:
         active_step_id="step_discover",
     )
 
-    updated, events = PlanController(max_steps=2).apply_llm_update(
+    updated, events = PlanTracker(max_steps=2).apply_llm_update(
         plan,
         update,
         allowed_tool_names=frozenset({"list_files", "structured_probe"}),
@@ -135,7 +135,7 @@ def test_observation_without_explicit_binding_does_not_complete_step() -> None:
         steps=[PlanStep(step_id="step_unbound", title="Unbound step", status="in_progress")],
     )
 
-    updated, events = PlanController().record_observation_progress(
+    updated, events = PlanTracker().record_observation_progress(
         plan,
         observations=[
             StructuredObservation(
@@ -171,7 +171,7 @@ def test_observation_tool_call_binding_completes_only_matching_step() -> None:
         ],
     )
 
-    updated, events = PlanController().record_observation_progress(
+    updated, events = PlanTracker().record_observation_progress(
         plan,
         observations=[
             StructuredObservation(

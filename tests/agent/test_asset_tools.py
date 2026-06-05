@@ -7,7 +7,7 @@ import pandas as pd
 import pytest
 
 from rag.agent.builtin.research import RESEARCH_AGENT
-from rag.agent.core.context import AgentRunConfig, RuntimeRegistry
+from rag.agent.core.context import AgentRunConfig, RunRegistry
 from rag.agent.graphs.nodes.execute import execute_node
 from rag.agent.state import AgentState, ToolCallPlan
 from rag.agent.tools.asset_tools import (
@@ -294,8 +294,8 @@ async def test_execute_node_runs_generic_asset_analysis_tool() -> None:
         max_depth=2,
         access_policy=AccessPolicy.default(),
     )
-    RuntimeRegistry.remove(run_config.run_id)
-    RuntimeRegistry.get_or_create(run_config)
+    RunRegistry.remove(run_config.run_id)
+    RunRegistry.get_or_create(run_config)
     state: AgentState = {
         "messages": [],
         "evidence": [],
@@ -350,7 +350,7 @@ async def test_execute_node_runs_generic_asset_analysis_tool() -> None:
     output = tool_result.output
     assert isinstance(output, AssetAnalyzeOutput)
     assert output.rows == [["25.532808"]]
-    RuntimeRegistry.remove(run_config.run_id)
+    RunRegistry.remove(run_config.run_id)
 
 
 @pytest.mark.anyio
@@ -373,8 +373,8 @@ async def test_execute_node_runs_generic_asset_read_slice_tool() -> None:
         max_depth=2,
         access_policy=AccessPolicy.default(),
     )
-    RuntimeRegistry.remove(run_config.run_id)
-    RuntimeRegistry.get_or_create(run_config)
+    RunRegistry.remove(run_config.run_id)
+    RunRegistry.get_or_create(run_config)
     state: AgentState = {
         "messages": [],
         "evidence": [],
@@ -427,4 +427,4 @@ async def test_execute_node_runs_generic_asset_read_slice_tool() -> None:
     output = tool_result.output
     assert isinstance(output, AssetReadSliceOutput)
     assert output.rows == [{"区域公司": "北方"}]
-    RuntimeRegistry.remove(run_config.run_id)
+    RunRegistry.remove(run_config.run_id)

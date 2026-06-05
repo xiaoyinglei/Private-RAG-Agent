@@ -236,10 +236,13 @@ class InjectedContext(BaseModel):
         )
 
 
-class WorkingMemoryDehydration(BaseModel):
+class WorkingMemoryDraft(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     working_summary: WorkingSummary | None
     extracted_facts: list[ExtractedFact] = Field(default_factory=list)
     tail_messages: list[BaseMessage] = Field(default_factory=list)
     context_budget: ContextBudgetSnapshot | None = None
+
+
+WorkingMemoryDehydration = WorkingMemoryDraft

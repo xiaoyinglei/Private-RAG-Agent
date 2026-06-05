@@ -8,10 +8,10 @@ from pydantic import ValidationError
 
 from rag.agent.core.agent_as_tool import AgentAsToolExecutionError
 from rag.agent.core.approval_policy import ApprovalDecision, ApprovalPolicy, merge_approval_requests
-from rag.agent.core.context import AgentRunConfig, RuntimeRegistry
-from rag.agent.goal_runtime import StateReducer
-from rag.agent.memory.compactor import RunMemoryCompactor
-from rag.agent.planning import PlanController
+from rag.agent.core.context import AgentRunConfig, RunRegistry
+from rag.agent.goal_runtime import ObservationExtractor
+from rag.agent.memory.compactor import MemoryCompactor
+from rag.agent.planning import PlanTracker
 from rag.agent.state import AgentState, ToolCallPlan, _merge_tool_results
 from rag.agent.tools.rag_tools import RAG_SIGNAL_AWARE_TOOLS
 from rag.agent.tools.registry import (
@@ -223,9 +223,9 @@ async def run_tools_guarded(
             raw_tool_results,
         )
 
-    observation_update = StateReducer().reduce_tool_results(transient_state)
+    observation_update = ObservationExtractor().reduce_tool_results(transient_state)
     if observation_update:
-        plan, events = PlanController().record_observation_progress(
+        plan, events = PlanTracker().record_observation_progress(
             state.get("agent_plan"),
             observations=observation_update.get("structured_observations", []),
             satisfied_requirement_ids=observation_update.get("satisfied_requirements", []),
@@ -237,10 +237,10 @@ async def run_tools_guarded(
             update["plan_events"] = events
 
     try:
-        memory_store = RuntimeRegistry.get(state["run_config"].run_id).memory_store
+        memory_store = RunRegistry.get(state["run_config"].run_id).memory_store
     except KeyError:
         memory_store = None
-    return RunMemoryCompactor(
+    return MemoryCompactor(
         policy=state["run_config"].memory_policy,
         store=memory_store,
     ).compact_update(dict(state), update)
@@ -305,7 +305,7 @@ async def _execute_one_tool(
     reserved_budget = False
     if budget_cost > 0:
         try:
-            handles = RuntimeRegistry.get(run_config.run_id)
+            handles = RunRegistry.get(run_config.run_id)
         except KeyError:
             return _error_result(
                 call,
@@ -335,7 +335,7 @@ async def _execute_one_tool(
             break
         except ToolInputValidationError as exc:
             if reserved_budget:
-                await RuntimeRegistry.get(run_config.run_id).budget_ledger.refund(call.tool_call_id)
+                await RunRegistry.get(run_config.run_id).budget_ledger.refund(call.tool_call_id)
             return _error_result(
                 call,
                 code="invalid_arguments",
@@ -347,7 +347,7 @@ async def _execute_one_tool(
             )
         except ToolRunnerMissingError:
             if reserved_budget:
-                await RuntimeRegistry.get(run_config.run_id).budget_ledger.refund(call.tool_call_id)
+                await RunRegistry.get(run_config.run_id).budget_ledger.refund(call.tool_call_id)
             return _error_result(
                 call,
                 code="tool_not_implemented",
@@ -358,7 +358,7 @@ async def _execute_one_tool(
             )
         except ToolOutputValidationError as exc:
             if reserved_budget:
-                await RuntimeRegistry.get(run_config.run_id).budget_ledger.commit(
+                await RunRegistry.get(run_config.run_id).budget_ledger.commit(
                     call.tool_call_id,
                     budget_cost,
                 )
@@ -377,7 +377,7 @@ async def _execute_one_tool(
                 attempt += 1
                 continue
             if reserved_budget:
-                await RuntimeRegistry.get(run_config.run_id).budget_ledger.commit(
+                await RunRegistry.get(run_config.run_id).budget_ledger.commit(
                     call.tool_call_id,
                     budget_cost,
                 )
@@ -392,7 +392,7 @@ async def _execute_one_tool(
             )
         except AgentAsToolExecutionError as exc:
             if reserved_budget:
-                await RuntimeRegistry.get(run_config.run_id).budget_ledger.commit(
+                await RunRegistry.get(run_config.run_id).budget_ledger.commit(
                     call.tool_call_id,
                     budget_cost,
                 )
@@ -415,7 +415,7 @@ async def _execute_one_tool(
                 attempt += 1
                 continue
             if reserved_budget:
-                await RuntimeRegistry.get(run_config.run_id).budget_ledger.commit(
+                await RunRegistry.get(run_config.run_id).budget_ledger.commit(
                     call.tool_call_id,
                     budget_cost,
                 )
@@ -430,7 +430,7 @@ async def _execute_one_tool(
             )
 
     if reserved_budget:
-        await RuntimeRegistry.get(run_config.run_id).budget_ledger.commit(
+        await RunRegistry.get(run_config.run_id).budget_ledger.commit(
             call.tool_call_id,
             budget_cost,
         )

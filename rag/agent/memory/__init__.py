@@ -1,6 +1,13 @@
 """Working-memory compaction and context assembly for agent runs."""
 
-from rag.agent.memory.compactor import RunMessageCompactor, WorkingMemoryDehydrator
+from rag.agent.memory.compactor import (
+    MemoryCompactor,
+    MessageCompactor,
+    RunMemoryCompactor,
+    RunMessageCompactor,
+    WorkingMemoryCompactor,
+    WorkingMemoryDehydrator,
+)
 from rag.agent.memory.injector import ContextBuilder, ContextInjector
 from rag.agent.memory.models import (
     ContextBudgetSnapshot,
@@ -17,6 +24,7 @@ from rag.agent.memory.models import (
     StateChannelReplacement,
     ToolErrorDetailPayload,
     WorkingMemoryDehydration,
+    WorkingMemoryDraft,
     WorkingSummary,
 )
 from rag.agent.memory.store import MemoryRefError, WorkspaceMemoryStore
@@ -36,11 +44,16 @@ __all__ = [
     "MemoryRecord",
     "MemoryRef",
     "MemoryRefError",
+    "MemoryCompactor",
+    "MessageCompactor",
+    "RunMemoryCompactor",
     "RunMessageCompactor",
     "StateChannelReplacement",
     "ToolErrorDetailPayload",
     "WorkspaceMemoryStore",
     "WorkingMemoryDehydration",
     "WorkingMemoryDehydrator",
+    "WorkingMemoryCompactor",
+    "WorkingMemoryDraft",
     "WorkingSummary",
 ]

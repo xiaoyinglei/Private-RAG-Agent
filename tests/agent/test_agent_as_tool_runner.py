@@ -17,7 +17,7 @@ from rag.agent.core.agent_as_tool import (
     build_agent_tool_spec,
 )
 from rag.agent.core.agent_service_factory import AgentServiceFactory
-from rag.agent.core.context import AgentRunConfig, RuntimeRegistry
+from rag.agent.core.context import AgentRunConfig, RunRegistry
 from rag.agent.core.definition import AgentDefinition
 from rag.agent.core.delegation import AgentDelegationRequest
 from rag.agent.core.registry import AgentRegistry
@@ -90,8 +90,8 @@ def _parent_state(run_id: str = "parent-run", *, max_depth: int = 2) -> AgentSta
         source_scope=("doc-1",),
         access_policy=AccessPolicy.default(),
     )
-    RuntimeRegistry.remove(run_id)
-    RuntimeRegistry.get_or_create(config)
+    RunRegistry.remove(run_id)
+    RunRegistry.get_or_create(config)
     return {
         "messages": [],
         "evidence": [],
@@ -163,7 +163,7 @@ async def test_agent_as_tool_runner_executes_registered_child_with_derived_confi
     assert first_child_config.max_depth == 1
     assert first_child_config.budget_total == 2400
     with pytest.raises(KeyError):
-        RuntimeRegistry.get(result.run_id)
+        RunRegistry.get(result.run_id)
 
 
 @pytest.mark.anyio
@@ -487,8 +487,8 @@ class TestAgentAsToolAdapter:
             max_depth=2,
             access_policy=AccessPolicy.default(),
         )
-        RuntimeRegistry.remove(run_config.run_id)
-        RuntimeRegistry.get_or_create(run_config)
+        RunRegistry.remove(run_config.run_id)
+        RunRegistry.get_or_create(run_config)
         registry = create_builtin_tool_registry()
         registry.register_runner(
             "agent_research",
@@ -514,7 +514,7 @@ class TestAgentAsToolAdapter:
         assert result.status == "error"
         assert result.error is not None
         assert result.error.code == "subagent_failed"
-        RuntimeRegistry.remove(run_config.run_id)
+        RunRegistry.remove(run_config.run_id)
 
     def test_depth_exhaust_returns_error_not_exception(self) -> None:
         """depth=0 时不抛异常，返回结构化错误结果（通过 run_config 的 depth 控制）"""

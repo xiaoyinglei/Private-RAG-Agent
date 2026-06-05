@@ -2,16 +2,16 @@ from __future__ import annotations
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
-from rag.agent.memory.compactor import WorkingMemoryDehydrator
+from rag.agent.memory.compactor import WorkingMemoryCompactor
 
 
-def test_dehydrates_old_messages_into_bounded_summary_and_tail() -> None:
+def test_compacts_old_messages_into_bounded_summary_and_tail() -> None:
     messages = [
         HumanMessage(content=f"message {index}", id=f"h{index}")
         for index in range(5)
     ]
 
-    result = WorkingMemoryDehydrator(tail_message_count=2).dehydrate(
+    result = WorkingMemoryCompactor(tail_message_count=2).compact(
         messages,
         now_iso="2026-05-08T00:00:00Z",
     )
@@ -34,7 +34,7 @@ def test_tail_expands_to_preserve_tool_call_result_pair() -> None:
         ToolMessage(content="policy result", id="tool1", tool_call_id="tc1"),
     ]
 
-    result = WorkingMemoryDehydrator(tail_message_count=1).dehydrate(messages)
+    result = WorkingMemoryCompactor(tail_message_count=1).compact(messages)
 
     assert result.working_summary is not None
     assert result.working_summary.covered_message_ids == ["h1"]
@@ -60,7 +60,7 @@ def test_extracts_only_explicit_working_memory_facts_from_covered_messages() -> 
         HumanMessage(content="tail", id="h2"),
     ]
 
-    result = WorkingMemoryDehydrator(tail_message_count=1).dehydrate(messages)
+    result = WorkingMemoryCompactor(tail_message_count=1).compact(messages)
 
     assert len(result.extracted_facts) == 1
     fact = result.extracted_facts[0]
@@ -76,18 +76,18 @@ def test_plain_text_does_not_create_facts() -> None:
         HumanMessage(content="tail", id="h2"),
     ]
 
-    result = WorkingMemoryDehydrator(tail_message_count=1).dehydrate(messages)
+    result = WorkingMemoryCompactor(tail_message_count=1).compact(messages)
 
     assert result.extracted_facts == []
 
 
-def test_dehydration_result_is_json_serializable() -> None:
+def test_working_memory_draft_is_json_serializable() -> None:
     messages = [
         HumanMessage(content="old", id="h1"),
         HumanMessage(content="tail", id="h2"),
     ]
 
-    result = WorkingMemoryDehydrator(tail_message_count=1).dehydrate(messages)
+    result = WorkingMemoryCompactor(tail_message_count=1).compact(messages)
 
     dumped = result.model_dump(mode="json")
     assert dumped["working_summary"]["covered_message_ids"] == ["h1"]

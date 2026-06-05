@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from rag.agent.core.context import AgentRunConfig, RuntimeRegistry
+from rag.agent.core.context import AgentRunConfig, RunRegistry
 from rag.agent.core.definition import AgentDefinition
 from rag.agent.graphs.base import build_agent_graph
 from rag.agent.graphs.nodes.execute import execute_node
@@ -68,8 +68,8 @@ def _state() -> AgentState:
         max_depth=2,
         access_policy=AccessPolicy.default(),
     )
-    RuntimeRegistry.remove(run_config.run_id)
-    RuntimeRegistry.get_or_create(run_config)
+    RunRegistry.remove(run_config.run_id)
+    RunRegistry.get_or_create(run_config)
     return {
         "messages": [],
         "evidence": [],
@@ -161,7 +161,7 @@ async def test_model_decision_can_select_rag_search_answer_from_retrieval_hint()
     assert calls[0].retrieval_signals is not None
     assert calls[0].retrieval_signals.quoted_terms == ["policy"]
     assert provider.calls == 1
-    RuntimeRegistry.remove("rag-answer-test")
+    RunRegistry.remove("rag-answer-test")
 
 
 @pytest.mark.anyio
@@ -180,7 +180,7 @@ async def test_execute_node_does_not_create_tool_call_from_legacy_execution_mode
 
     assert update == {}
     assert calls == []
-    RuntimeRegistry.remove("rag-answer-test")
+    RunRegistry.remove("rag-answer-test")
 
 
 @pytest.mark.anyio

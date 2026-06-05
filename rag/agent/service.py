@@ -10,8 +10,8 @@ from langgraph.checkpoint.base import BaseCheckpointSaver
 from pydantic import BaseModel, ConfigDict, Field
 
 from rag.agent.core.checkpointing import create_agent_checkpointer
-from rag.agent.core.compiler import AgentGraphCompiler
-from rag.agent.core.context import AgentRunConfig, RuntimeRegistry
+from rag.agent.core.compiler import GraphCompiler
+from rag.agent.core.context import AgentRunConfig, RunRegistry
 from rag.agent.core.definition import AgentDefinition
 from rag.agent.core.delegation import DelegatedAgentRunner
 from rag.agent.core.human_input import HumanInputRequest, HumanInputResponse
@@ -19,7 +19,7 @@ from rag.agent.core.llm_registry import ModelRegistry
 from rag.agent.graphs.nodes.llm_decide import ToolDecisionProvider
 from rag.agent.graphs.nodes.retrieval_hint import RetrievalHintProvider
 from rag.agent.graphs.nodes.synthesize import SynthesisRunner
-from rag.agent.memory.compactor import RunMessageCompactor
+from rag.agent.memory.compactor import MessageCompactor
 from rag.agent.memory.models import MemoryPolicy
 from rag.agent.memory.store import WorkspaceMemoryStore
 from rag.agent.state import AgentState, ToolCallPlan
@@ -128,7 +128,7 @@ class AgentService:
         self._synthesis_runner = synthesis_runner
         self._model_registry = model_registry
         self._checkpointer = checkpointer or create_agent_checkpointer(None)
-        self._compiler = AgentGraphCompiler(
+        self._compiler = GraphCompiler(
             tool_registry=tool_registry,
             tool_decision_provider=tool_decision_provider,
             retrieval_hint_provider=retrieval_hint_provider,
@@ -159,8 +159,8 @@ class AgentService:
         messages: list[BaseMessage] | None = None,
         memory_store: WorkspaceMemoryStore | None = None,
     ) -> AgentState:
-        RuntimeRegistry.remove(run_config.run_id)
-        handles = RuntimeRegistry.get_or_create(run_config)
+        RunRegistry.remove(run_config.run_id)
+        handles = RunRegistry.get_or_create(run_config)
         if memory_store is not None:
             handles.memory_store = memory_store
         state: AgentState = {
@@ -214,7 +214,7 @@ class AgentService:
         }
         return cast(
             AgentState,
-            RunMessageCompactor(
+            MessageCompactor(
                 policy=run_config.memory_policy,
                 store=memory_store,
             ).compact_initial_state(dict(state)),
@@ -265,7 +265,7 @@ class AgentService:
             policy=run_config.memory_policy,
         )
         runtime_registry = self._runtime_tool_registry(run_config, runners=ops.runners())
-        compiler = AgentGraphCompiler(
+        compiler = GraphCompiler(
             tool_registry=runtime_registry,
             tool_decision_provider=self._tool_decision_provider,
             retrieval_hint_provider=self._retrieval_hint_provider,
@@ -289,10 +289,10 @@ class AgentService:
                 config={"configurable": {"thread_id": run_config.thread_id}},
             )
         except Exception:
-            RuntimeRegistry.remove(run_config.run_id)
+            RunRegistry.remove(run_config.run_id)
             raise
         if result_state.get("status") in {"done", "failed"}:
-            RuntimeRegistry.remove(run_config.run_id)
+            RunRegistry.remove(run_config.run_id)
         return AgentRunResult.from_state(result_state, workspace_path=str(workspace.root))
 
     def _runtime_tool_registry(
@@ -384,7 +384,7 @@ class AgentService:
                 except KeyError:
                     pass
 
-        compiler = AgentGraphCompiler(
+        compiler = GraphCompiler(
             tool_registry=runtime_registry,
             tool_decision_provider=self._tool_decision_provider,
             retrieval_hint_provider=self._retrieval_hint_provider,
@@ -398,7 +398,7 @@ class AgentService:
             thread_id=run_id,
         )
         if memory_store is not None:
-            RuntimeRegistry.get(run_config.run_id).memory_store = WorkspaceMemoryStore(
+            RunRegistry.get(run_config.run_id).memory_store = WorkspaceMemoryStore(
                 workspace=workspace,
                 policy=run_config.memory_policy,
             )
@@ -407,7 +407,7 @@ class AgentService:
             config={"configurable": {"thread_id": run_config.thread_id}},
         )
         if result_state.get("status") in {"done", "failed"}:
-            RuntimeRegistry.remove(run_config.run_id)
+            RunRegistry.remove(run_config.run_id)
         return AgentRunResult.from_state(result_state, workspace_path=workspace_path)
 
     def pending_human_input_request(self, *, run_id: str) -> HumanInputRequest:
@@ -435,10 +435,10 @@ class AgentService:
         state = await self._acheckpoint_state(graph, thread_id=thread_id)
         run_config = state["run_config"]
         try:
-            RuntimeRegistry.get(run_config.run_id)
+            RunRegistry.get(run_config.run_id)
             return run_config
         except KeyError:
-            handles = RuntimeRegistry.get_or_create(run_config)
+            handles = RunRegistry.get_or_create(run_config)
 
         committed = sum(
             max(0, getattr(result, "token_used", 0))

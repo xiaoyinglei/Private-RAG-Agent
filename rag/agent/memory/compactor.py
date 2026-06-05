@@ -21,7 +21,7 @@ from rag.agent.memory.models import (
     MessageBatchPayload,
     StateChannelReplacement,
     ToolErrorDetailPayload,
-    WorkingMemoryDehydration,
+    WorkingMemoryDraft,
     WorkingSummary,
 )
 from rag.agent.tools.spec import ToolResult
@@ -48,7 +48,7 @@ class _ExternalizationMetadata:
     warnings: list[str] = field(default_factory=list)
 
 
-class WorkingMemoryDehydrator:
+class WorkingMemoryCompactor:
     """Deterministically compact old messages into bounded working memory.
 
     This component does not infer semantic facts from free text. It only carries
@@ -70,12 +70,12 @@ class WorkingMemoryDehydrator:
         self._max_summary_chars = max_summary_chars
         self._max_context_tokens = max_context_tokens
 
-    def dehydrate(
+    def compact(
         self,
         messages: Sequence[BaseMessage],
         *,
         now_iso: str | None = None,
-    ) -> WorkingMemoryDehydration:
+    ) -> WorkingMemoryDraft:
         indexed_messages = list(messages)
         tail_start = self._tail_start_index(indexed_messages)
         covered = indexed_messages[:tail_start]
@@ -87,12 +87,20 @@ class WorkingMemoryDehydrator:
             working_memory_tokens=0 if working_summary is None else working_summary.token_count,
             message_tail_tokens=sum(text_unit_count(self._message_text(message)) for message in tail),
         )
-        return WorkingMemoryDehydration(
+        return WorkingMemoryDraft(
             working_summary=working_summary,
             extracted_facts=facts,
             tail_messages=tail,
             context_budget=context_budget,
         )
+
+    def dehydrate(
+        self,
+        messages: Sequence[BaseMessage],
+        *,
+        now_iso: str | None = None,
+    ) -> WorkingMemoryDraft:
+        return self.compact(messages, now_iso=now_iso)
 
     def _tail_start_index(self, messages: list[BaseMessage]) -> int:
         if not messages:
@@ -200,7 +208,7 @@ class WorkingMemoryDehydrator:
         return str(content)
 
 
-class RunMessageCompactor:
+class MessageCompactor:
     """Externalize old messages and keep a bounded deterministic message tail."""
 
     def __init__(
@@ -219,14 +227,14 @@ class RunMessageCompactor:
         if len(messages) < self._policy.message_compaction_min_count:
             return state
 
-        dehydration = WorkingMemoryDehydrator(
+        draft = WorkingMemoryCompactor(
             tail_message_count=self._policy.max_message_tail_count,
             max_summary_chars=self._policy.max_working_summary_chars,
             max_context_tokens=0,
-        ).dehydrate(messages)
+        ).compact(messages)
         covered_ids = (
-            set(dehydration.working_summary.covered_message_ids)
-            if dehydration.working_summary is not None
+            set(draft.working_summary.covered_message_ids)
+            if draft.working_summary is not None
             else set()
         )
         covered_messages = [
@@ -236,10 +244,10 @@ class RunMessageCompactor:
             return state
 
         update: dict[str, Any] = {
-            "messages": list(dehydration.tail_messages),
+            "messages": list(draft.tail_messages),
             "working_summary": self._merge_summary(
                 state.get("working_summary"),
-                dehydration.working_summary,
+                draft.working_summary,
             ),
             "extracted_facts": self._bounded_facts(
                 [
@@ -248,7 +256,7 @@ class RunMessageCompactor:
                         for fact in state.get("extracted_facts", [])
                         if isinstance(fact, ExtractedFact)
                     ],
-                    *dehydration.extracted_facts,
+                    *draft.extracted_facts,
                 ]
             ),
         }
@@ -369,7 +377,7 @@ class RunMessageCompactor:
         return str(content)
 
 
-class RunMemoryCompactor:
+class MemoryCompactor:
     """Deterministically externalize large tool outputs and cap long state channels."""
 
     _CAPPED_CHANNELS: dict[str, str] = {
@@ -1137,14 +1145,14 @@ class RunMemoryCompactor:
         for key, value in values.items():
             if value in (None, "", []):
                 continue
-            parts.append(f"{key}={RunMemoryCompactor._one_line(str(value))}")
+            parts.append(f"{key}={MemoryCompactor._one_line(str(value))}")
         return " ".join(parts)
 
     @staticmethod
     def _list_preview(values: object, *, limit: int = 6) -> str:
         if not isinstance(values, list):
             return ""
-        shown = [RunMemoryCompactor._one_line(str(value)) for value in values[:limit]]
+        shown = [MemoryCompactor._one_line(str(value)) for value in values[:limit]]
         remaining = len(values) - limit
         suffix = f", ...(+{remaining})" if remaining > 0 else ""
         return "[" + ", ".join(shown) + suffix + "]"
@@ -1252,3 +1260,18 @@ def _observation_matches_active_gap(observation: Any, active_gap_ids: set[str]) 
 
 def _model_path(model: BaseModel) -> str:
     return f"{model.__class__.__module__}.{model.__class__.__name__}"
+
+
+RunMessageCompactor = MessageCompactor
+RunMemoryCompactor = MemoryCompactor
+WorkingMemoryDehydrator = WorkingMemoryCompactor
+
+__all__ = [
+    "MemoryCompactor",
+    "MessageCompactor",
+    "RunMemoryCompactor",
+    "RunMessageCompactor",
+    "ToolOutputMemoryStore",
+    "WorkingMemoryCompactor",
+    "WorkingMemoryDehydrator",
+]

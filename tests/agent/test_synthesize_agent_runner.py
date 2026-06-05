@@ -4,7 +4,7 @@ import pytest
 
 from rag.agent.builtin.synthesize import SYNTHESIZE_AGENT
 from rag.agent.core.agent_service_factory import AgentServiceFactory
-from rag.agent.core.context import AgentRunConfig, RuntimeRegistry
+from rag.agent.core.context import AgentRunConfig, RunRegistry
 from rag.agent.core.registry import AgentRegistry
 from rag.agent.core.subagent_runner import BuiltinSynthesisRunner
 from rag.agent.goal_runtime import (
@@ -14,7 +14,7 @@ from rag.agent.goal_runtime import (
     EvidenceRef,
     StructuredObservation,
 )
-from rag.agent.graphs.nodes.synthesize import synthesize_node
+from rag.agent.graphs.nodes.synthesize import build_answer
 from rag.agent.primitive_ops import (
     CandidateHeaderRow,
     StructuredProbeOutput,
@@ -50,8 +50,8 @@ def _state() -> AgentState:
         max_depth=2,
         access_policy=AccessPolicy.default(),
     )
-    RuntimeRegistry.remove(run_config.run_id)
-    RuntimeRegistry.get_or_create(run_config)
+    RunRegistry.remove(run_config.run_id)
+    RunRegistry.get_or_create(run_config)
     return {
         "messages": [],
         "evidence": [evidence],
@@ -98,7 +98,7 @@ def _state() -> AgentState:
 
 
 @pytest.mark.anyio
-async def test_synthesize_node_delegates_to_builtin_synthesize_agent() -> None:
+async def test_build_answer_delegates_to_builtin_synthesize_agent() -> None:
     seen_payloads: list[LLMGenerateInput] = []
 
     def llm_generate(payload: LLMGenerateInput) -> LLMTextOutput:
@@ -121,7 +121,7 @@ async def test_synthesize_node_delegates_to_builtin_synthesize_agent() -> None:
     )
     service_factory.bind_synthesis_runner(synthesis_runner)
 
-    update = await synthesize_node(_state(), synthesis_runner=synthesis_runner)
+    update = await build_answer(_state(), synthesis_runner=synthesis_runner)
 
     assert update["status"] == "done"
     assert update["final_answer"] == "synthesized answer"
@@ -132,11 +132,11 @@ async def test_synthesize_node_delegates_to_builtin_synthesize_agent() -> None:
     assert payload.evidence_ids == ["ev-child"]
     assert payload.citation_ids == ["cit-child"]
     assert any("Grounded child evidence" in section for section in payload.context_sections)
-    RuntimeRegistry.remove("synthesis-parent")
+    RunRegistry.remove("synthesis-parent")
 
 
 @pytest.mark.anyio
-async def test_synthesize_node_preserves_grounded_rag_search_answer() -> None:
+async def test_build_answer_preserves_grounded_rag_search_answer() -> None:
     called = False
 
     def llm_generate(payload: LLMGenerateInput) -> LLMTextOutput:
@@ -173,14 +173,14 @@ async def test_synthesize_node_preserves_grounded_rag_search_answer() -> None:
     )
     service_factory.bind_synthesis_runner(synthesis_runner)
 
-    update = await synthesize_node(state, synthesis_runner=synthesis_runner)
+    update = await build_answer(state, synthesis_runner=synthesis_runner)
 
     assert update["status"] == "done"
     assert update["final_answer"] == "日提货总量是131.074462。 [1]"
     assert update["groundedness_flag"] is True
     assert update["insufficient_evidence_flag"] is False
     assert called is False
-    RuntimeRegistry.remove("synthesis-parent")
+    RunRegistry.remove("synthesis-parent")
 
 
 @pytest.mark.anyio
@@ -236,7 +236,7 @@ async def test_synthesis_runner_uses_structured_observations_instead_of_raw_tool
     )
     service_factory.bind_synthesis_runner(synthesis_runner)
 
-    update = await synthesize_node(state, synthesis_runner=synthesis_runner)
+    update = await build_answer(state, synthesis_runner=synthesis_runner)
 
     assert update["status"] == "done"
     assert update["final_answer"] == "final from structured observation"
@@ -247,7 +247,7 @@ async def test_synthesis_runner_uses_structured_observations_instead_of_raw_tool
     assert "RAW_RESULT" not in context_text
     assert payload.evidence_ids == ["compute_result:14"]
     assert payload.citation_ids == ["table@p4"]
-    RuntimeRegistry.remove("synthesis-parent")
+    RunRegistry.remove("synthesis-parent")
 
 
 @pytest.mark.anyio
@@ -320,7 +320,7 @@ async def test_goal_satisfied_asset_analysis_finalizes_without_llm_rewrite() -> 
         service_factory=service_factory,
     )
 
-    update = await synthesize_node(state, synthesis_runner=synthesis_runner)
+    update = await build_answer(state, synthesis_runner=synthesis_runner)
 
     assert update["status"] == "done"
     assert "15.491928000000001" in update["final_answer"]
@@ -329,7 +329,7 @@ async def test_goal_satisfied_asset_analysis_finalizes_without_llm_rewrite() -> 
     assert "SELECT SUM" in update["final_answer"]
     assert "RAW_RESULT_MUST_NOT_ENTER_FINAL_ANSWER" not in update["final_answer"]
     assert called is False
-    RuntimeRegistry.remove("synthesis-parent")
+    RunRegistry.remove("synthesis-parent")
 
 
 @pytest.mark.anyio
@@ -374,7 +374,7 @@ async def test_legacy_synthesis_summarizes_structured_probe_without_raw_json() -
         )
     ]
 
-    update = await synthesize_node(state, synthesis_runner=None)
+    update = await build_answer(state, synthesis_runner=None)
 
     assert update["status"] == "done"
     assert update["final_answer"] is not None
@@ -386,4 +386,4 @@ async def test_legacy_synthesis_summarizes_structured_probe_without_raw_json() -
     assert "数据起始行：第 4 行" in update["final_answer"]
     assert "关键字段：region, city, amount （万㎡）, price" in update["final_answer"]
     assert "{\"path\"" not in update["final_answer"]
-    RuntimeRegistry.remove("synthesis-parent")
+    RunRegistry.remove("synthesis-parent")

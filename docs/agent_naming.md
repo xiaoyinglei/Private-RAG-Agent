@@ -66,14 +66,23 @@ execute_observe_compact_checkpoint_safe_node(...)
 Preferred short names:
 
 - `init_goal`
+- `GoalBuilder`
 - `control_turn`
 - `run_tools_raw`
 - `run_tools_guarded`
 - `extract_obs`
 - `extract_obs_legacy`
+- `ObservationExtractor`
 - `decide_next`
 - `build_context`
 - `build_answer`
+- `MessageCompactor`
+- `MemoryCompactor`
+- `WorkingMemoryCompactor`
+- `WorkingMemoryDraft`
+- `RunRegistry`
+- `GraphCompiler`
+- `PlanTracker`
 
 Legacy aliases may stay during migration when removing them would break tests,
 imports, or checkpoint tooling.

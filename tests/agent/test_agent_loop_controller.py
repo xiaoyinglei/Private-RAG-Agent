@@ -3,10 +3,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from rag.agent.builtin.research import RESEARCH_AGENT
-from rag.agent.core.context import AgentRunConfig, RuntimeRegistry
+from rag.agent.core.context import AgentRunConfig, RunRegistry
 from rag.agent.goal_runtime import GoalGap, GoalSpec, SatisfactionReport
 from rag.agent.graphs.nodes import goal_runtime as graph_goal_runtime
-from rag.agent.loop.controller import AgentLoopController
+from rag.agent.loop.controller import TurnController
 from rag.agent.state import AgentState
 from rag.schema.query import RetrievalSignals
 from rag.schema.runtime import AccessPolicy
@@ -39,8 +39,8 @@ def _state(run_id: str) -> AgentState:
         max_depth=2,
         access_policy=AccessPolicy.default(),
     )
-    RuntimeRegistry.remove(run_id)
-    RuntimeRegistry.get_or_create(config)
+    RunRegistry.remove(run_id)
+    RunRegistry.get_or_create(config)
     return {
         "run_config": config,
         "status": "running",
@@ -59,9 +59,9 @@ def _state(run_id: str) -> AgentState:
 
 def test_agent_loop_controller_routes_open_gap_to_model_decision_without_auto_proposal() -> None:
     assessor = _BindingAssessor()
-    state = _state("agent-loop-controller")
+    state = _state("turn-controller")
 
-    update = AgentLoopController(
+    update = TurnController(
         definition=RESEARCH_AGENT,
         has_tool_decision_provider=True,
         binding_assessor=assessor,
@@ -72,11 +72,11 @@ def test_agent_loop_controller_routes_open_gap_to_model_decision_without_auto_pr
     assert "tool_action_proposals" not in update
     assert "pending_tool_calls" not in update
     assert assessor.assessed is True
-    RuntimeRegistry.remove("agent-loop-controller")
+    RunRegistry.remove("turn-controller")
 
 
 def test_default_binding_assessor_does_not_expose_action_proposal_api() -> None:
-    controller = AgentLoopController(
+    controller = TurnController(
         definition=RESEARCH_AGENT,
         has_tool_decision_provider=True,
     )
@@ -89,7 +89,7 @@ def test_agent_loop_controller_does_not_route_legacy_task_dag_state() -> None:
     state = _state("loop-ignores-task-dag")
     state["plan"] = {"legacy": "task_dag"}  # type: ignore[typeddict-unknown-key]
 
-    update = AgentLoopController(
+    update = TurnController(
         definition=RESEARCH_AGENT,
         has_tool_decision_provider=True,
         binding_assessor=assessor,
@@ -98,7 +98,7 @@ def test_agent_loop_controller_does_not_route_legacy_task_dag_state() -> None:
 
     assert update["controller_next"] == "llm_decide"
     assert "pending_tool_calls" not in update
-    RuntimeRegistry.remove("loop-ignores-task-dag")
+    RunRegistry.remove("loop-ignores-task-dag")
 
 
 def test_agent_loop_controller_does_not_route_legacy_decomposition_hint() -> None:
@@ -107,7 +107,7 @@ def test_agent_loop_controller_does_not_route_legacy_decomposition_hint() -> Non
     state["retrieval_signals"] = RetrievalSignals(allow_graph_expansion=True)
     state["route_plan_hint"] = True  # type: ignore[typeddict-unknown-key]
 
-    update = AgentLoopController(
+    update = TurnController(
         definition=RESEARCH_AGENT,
         has_tool_decision_provider=True,
         binding_assessor=assessor,
@@ -116,7 +116,7 @@ def test_agent_loop_controller_does_not_route_legacy_decomposition_hint() -> Non
 
     assert update["controller_next"] == "llm_decide"
     assert "pending_tool_calls" not in update
-    RuntimeRegistry.remove("loop-ignores-decomposition")
+    RunRegistry.remove("loop-ignores-decomposition")
 
 
 def test_graph_controller_adapter_does_not_route_legacy_task_dag_state() -> None:
@@ -131,7 +131,7 @@ def test_graph_controller_adapter_does_not_route_legacy_task_dag_state() -> None
 
     assert update["controller_next"] == "llm_decide"
     assert "pending_tool_calls" not in update
-    RuntimeRegistry.remove("graph-preserves-task-dag")
+    RunRegistry.remove("graph-preserves-task-dag")
 
 
 def test_graph_controller_node_delegates_to_extracted_controller(monkeypatch: object) -> None:
@@ -145,8 +145,8 @@ def test_graph_controller_node_delegates_to_extracted_controller(monkeypatch: ob
             calls.append(state)
             return {"controller_next": "pause"}
 
-    monkeypatch.setattr(graph_goal_runtime, "AgentLoopController", _StubController)  # type: ignore[attr-defined]
-    state = _state("graph-controller-adapter")
+    monkeypatch.setattr(graph_goal_runtime, "TurnController", _StubController)  # type: ignore[attr-defined]
+    state = _state("graph-turn-adapter")
 
     update = graph_goal_runtime.controller_node(
         state,
@@ -156,4 +156,4 @@ def test_graph_controller_node_delegates_to_extracted_controller(monkeypatch: ob
 
     assert update == {"controller_next": "pause"}
     assert calls == [state]
-    RuntimeRegistry.remove("graph-controller-adapter")
+    RunRegistry.remove("graph-turn-adapter")

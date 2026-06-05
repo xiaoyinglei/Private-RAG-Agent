@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 from pydantic import BaseModel
 
-from rag.agent.core.compiler import AgentGraphCompiler
+from rag.agent.core.compiler import GraphCompiler
 from rag.agent.core.definition import AgentDefinition
 from rag.agent.service import AgentRunRequest, AgentService
 from rag.agent.state import AgentState, ThinkOutput
@@ -45,7 +45,7 @@ def _definition(*, allowed_tools: list[str]) -> AgentDefinition:
 
 
 def test_compiler_builds_graph_for_registered_agent_tools() -> None:
-    compiler = AgentGraphCompiler(tool_registry=_registry())
+    compiler = GraphCompiler(tool_registry=_registry())
 
     graph = compiler.compile(_definition(allowed_tools=["vector_search"]))
 
@@ -53,7 +53,7 @@ def test_compiler_builds_graph_for_registered_agent_tools() -> None:
 
 
 def test_compiler_rejects_unregistered_agent_tools() -> None:
-    compiler = AgentGraphCompiler(tool_registry=_registry())
+    compiler = GraphCompiler(tool_registry=_registry())
 
     with pytest.raises(ValueError, match="unregistered tools: missing_tool"):
         compiler.compile(_definition(allowed_tools=["vector_search", "missing_tool"]))
@@ -102,7 +102,7 @@ def test_compiler_constructs_only_model_driven_runtime_providers(
         "rag.agent.core.compiler.create_default_providers",
         fake_create_default_providers,
     )
-    compiler = AgentGraphCompiler(
+    compiler = GraphCompiler(
         tool_registry=_registry(),
         model_registry=object(),  # type: ignore[arg-type]
     )

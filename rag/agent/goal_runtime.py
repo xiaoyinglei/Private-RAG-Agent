@@ -285,7 +285,7 @@ class SatisfactionReport(BaseModel):
     reason: str
 
 
-class GoalInitializer:
+class GoalBuilder:
     def initialize(self, query: str) -> GoalSpec:
         stripped = query.strip()
         required_evidence: list[str] = []
@@ -365,7 +365,7 @@ class ObservationBuilder:
         )
 
 
-class StateReducer:
+class ObservationExtractor:
     def __init__(self, observation_builder: ObservationBuilder | None = None) -> None:
         self._observation_builder = observation_builder or ObservationBuilder()
 
@@ -561,7 +561,7 @@ def _goal_from_state(state: dict[str, Any]) -> GoalSpec:
     goal = state.get("goal_spec")
     if isinstance(goal, GoalSpec):
         return goal
-    return GoalInitializer().initialize(str(state.get("task", "")))
+    return GoalBuilder().initialize(str(state.get("task", "")))
 
 
 def _gaps_from_state(state: dict[str, Any], *, goal: GoalSpec) -> list[GoalGap]:
@@ -1599,6 +1599,9 @@ def _citations_from_outputs(
     return citations
 
 
+GoalInitializer = GoalBuilder
+StateReducer = ObservationExtractor
+
 __all__ = [
     "AnswerCandidate",
     "ComputationResult",
@@ -1610,9 +1613,11 @@ __all__ = [
     "GoalConflict",
     "GoalConstraint",
     "GoalDeliverable",
+    "GoalBuilder",
     "GoalGap",
     "GoalInitializer",
     "GoalSpec",
+    "ObservationExtractor",
     "ObservationBuilder",
     "RuntimeState",
     "SatisfactionChecker",

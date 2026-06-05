@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 from pydantic import BaseModel
 
-from rag.agent.core.context import AgentRunConfig, RuntimeRegistry
+from rag.agent.core.context import AgentRunConfig, RunRegistry
 from rag.agent.core.definition import AgentDefinition, ToolPolicy
 from rag.agent.graphs.base import build_agent_graph
 from rag.agent.memory.models import InjectedContext
@@ -147,8 +147,8 @@ def _initial_state(
         "groundedness_flag": False,
         "insufficient_evidence_flag": False,
     }
-    RuntimeRegistry.remove(state["run_config"].run_id)
-    RuntimeRegistry.get_or_create(state["run_config"])
+    RunRegistry.remove(state["run_config"].run_id)
+    RunRegistry.get_or_create(state["run_config"])
     return state
 
 
@@ -158,7 +158,7 @@ def _initial_state_without_runtime_handles(
     config: AgentRunConfig | None = None,
 ) -> AgentState:
     state = _initial_state(pending_tool_calls=pending_tool_calls, config=config)
-    RuntimeRegistry.remove(state["run_config"].run_id)
+    RunRegistry.remove(state["run_config"].run_id)
     return state
 
 
@@ -436,7 +436,7 @@ class TestBaseGraph:
         assert tool_result.status == "ok"
         assert tool_result.token_used == 50
         assert runner_calls == ["hello"]
-        remaining = await RuntimeRegistry.get("budget-commit").budget_ledger.remaining()
+        remaining = await RunRegistry.get("budget-commit").budget_ledger.remaining()
         assert remaining == 50
 
     @pytest.mark.anyio

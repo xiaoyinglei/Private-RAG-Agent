@@ -157,7 +157,7 @@ class PlanEvent(BaseModel):
 
 
 @dataclass(slots=True)
-class PlanController:
+class PlanTracker:
     max_steps: int = MAX_PLAN_STEPS
 
     def initialize(self, *, task: str, open_gaps: Sequence[object]) -> tuple[AgentPlan, list[PlanEvent]]:
@@ -601,6 +601,8 @@ def _dedupe_texts(values: Sequence[str], *, limit: int) -> list[str]:
     return deduped
 
 
+PlanController = PlanTracker
+
 __all__ = [
     "AgentPlan",
     "MAX_PLAN_EVENTS",
@@ -611,5 +613,6 @@ __all__ = [
     "PlanStepPatch",
     "PlanStatus",
     "PlanStepStatus",
+    "PlanTracker",
     "PlanUpdate",
 ]

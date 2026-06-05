@@ -6,11 +6,11 @@ from typing import Any, Protocol
 
 from pydantic import ValidationError
 
-from rag.agent.core.context import RuntimeRegistry
+from rag.agent.core.context import RunRegistry
 from rag.agent.core.definition import AgentDefinition
 from rag.agent.memory.injector import ContextBuilder
 from rag.agent.memory.models import InjectedContext
-from rag.agent.planning import AgentPlan, PlanController, PlanEvent
+from rag.agent.planning import AgentPlan, PlanEvent, PlanTracker
 from rag.agent.state import AgentState, ThinkOutput, ToolCallPlan
 
 
@@ -39,7 +39,7 @@ async def decide_next(
         }
 
     try:
-        handles = RuntimeRegistry.get(state["run_config"].run_id)
+        handles = RunRegistry.get(state["run_config"].run_id)
     except KeyError:
         return {
             "status": "failed",
@@ -143,7 +143,7 @@ def _apply_decision(
     working_plan = current_plan
     plan_events: list[PlanEvent] = []
     if working_plan is not None and decision.plan_update is not None:
-        working_plan, plan_update_events = PlanController().apply_llm_update(
+        working_plan, plan_update_events = PlanTracker().apply_llm_update(
             working_plan,
             decision.plan_update,
             allowed_tool_names=allowed_tool_names,
@@ -164,7 +164,7 @@ def _apply_decision(
                 "controller_next": "finalize",
             }
         if working_plan is not None:
-            working_plan, progress_events = PlanController().record_decision_progress(
+            working_plan, progress_events = PlanTracker().record_decision_progress(
                 working_plan,
                 tool_call_ids=[call.tool_call_id for call in tool_calls],
                 tool_names=[call.tool_name for call in tool_calls],
@@ -211,7 +211,7 @@ def _apply_decision(
                 **planning_update,
             }
         if working_plan is not None:
-            working_plan, completion_events = PlanController().record_completion(working_plan)
+            working_plan, completion_events = PlanTracker().record_completion(working_plan)
             plan_events.extend(completion_events)
             planning_update["agent_plan"] = working_plan
         if plan_events:

@@ -18,7 +18,7 @@ class ToolCallSummary(BaseModel):
 class HumanInputRequest(BaseModel):
     """Agent 暂停时向用户发送的输入请求。
 
-    由 execute_node（经 ApprovalPolicy）或 llm_decide_node（经 LLM）生成，
+    由 run_tools_raw（经 ApprovalPolicy）或 decide_next（经 LLM）生成，
     存入 state.human_input_request。pause_node 读取后调用 interrupt()。
     """
 
