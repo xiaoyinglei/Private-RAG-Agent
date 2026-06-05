@@ -23,7 +23,7 @@ from rag.agent.goal_runtime import (
     ObservationExtractor,
     SatisfactionChecker,
 )
-from rag.agent.graphs.nodes.goal_runtime import controller_node
+from rag.agent.graphs.nodes.goal_runtime import control_turn
 from rag.agent.primitive_ops import (
     CandidateHeaderRow,
     FileInfo,
@@ -1037,7 +1037,7 @@ def test_controller_defers_asset_action_to_model_decision() -> None:
         "no_progress_count": 0,
     }
 
-    update = controller_node(
+    update = control_turn(
         state,  # type: ignore[arg-type]
         definition=RESEARCH_AGENT,
         has_tool_decision_provider=True,
@@ -1062,7 +1062,7 @@ def test_controller_counts_new_context_binding_as_progress_before_stuck_pause() 
     goal = GoalBuilder().initialize(
         "在分区域分品牌 石膏板-26年表中，总结结果并给出处"
     )
-    update = controller_node(
+    update = control_turn(
         {
             "run_config": config,
             "status": "running",
@@ -1117,7 +1117,7 @@ def test_controller_clears_replaced_source_binding_conflict_after_correct_result
         "tool_results": [],
         "no_progress_count": 0,
     }
-    wrong_update = controller_node(
+    wrong_update = control_turn(
         {
             **base,
             "answer_candidates": [
@@ -1142,7 +1142,7 @@ def test_controller_clears_replaced_source_binding_conflict_after_correct_result
     )
     assert wrong_update["conflicts"]
 
-    recovered_update = controller_node(
+    recovered_update = control_turn(
         {
             **base,
             "answer_candidates": [

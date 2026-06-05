@@ -13,7 +13,7 @@ from rag.agent.goal_runtime import (
     GoalGap,
     StructuredObservation,
 )
-from rag.agent.graphs.nodes.goal_runtime import reduce_observations_node
+from rag.agent.graphs.nodes.goal_runtime import extract_obs_legacy
 from rag.agent.memory.compactor import MemoryCompactor
 from rag.agent.memory.models import (
     ExternalizedToolOutput,
@@ -272,7 +272,7 @@ def test_compaction_runs_after_structured_observation_extraction(tmp_path: Path)
         latency_ms=0,
     )
 
-    update = reduce_observations_node(_state(run_config, result))
+    update = extract_obs_legacy(_state(run_config, result))
 
     [observation] = update["structured_observations"]
     [tool_replacement] = update["tool_results"]
@@ -579,7 +579,7 @@ def test_compaction_failure_externalizes_unavailable_without_raw_state_growth() 
         latency_ms=0,
     )
 
-    update = reduce_observations_node(_state(run_config, result))
+    update = extract_obs_legacy(_state(run_config, result))
 
     [tool_replacement] = update["tool_results"]
     assert isinstance(tool_replacement, StateChannelReplacement)

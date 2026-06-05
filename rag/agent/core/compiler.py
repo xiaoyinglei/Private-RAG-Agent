@@ -83,6 +83,4 @@ class GraphCompiler:
         return missing
 
 
-AgentGraphCompiler = GraphCompiler
-
-__all__ = ["AgentGraphCompiler", "GraphCompiler"]
+__all__ = ["GraphCompiler"]

@@ -7,7 +7,7 @@ import pytest
 from rag.agent.core.context import AgentRunConfig, RunRegistry
 from rag.agent.core.definition import AgentDefinition
 from rag.agent.graphs.base import build_agent_graph
-from rag.agent.graphs.nodes.execute import execute_node
+from rag.agent.graphs.nodes.execute import run_tools_raw
 from rag.agent.state import AgentState, ThinkOutput, ToolCallPlan
 from rag.agent.tools.builtin_registry import create_builtin_tool_registry
 from rag.agent.tools.rag_answer_tools import (
@@ -165,12 +165,12 @@ async def test_model_decision_can_select_rag_search_answer_from_retrieval_hint()
 
 
 @pytest.mark.anyio
-async def test_execute_node_does_not_create_tool_call_from_legacy_execution_mode() -> None:
+async def test_run_tools_raw_does_not_create_tool_call_from_legacy_execution_mode() -> None:
     calls: list[object] = []
     state = _state()
     state["execution_mode"] = "fast_path"  # type: ignore[typeddict-unknown-key]
 
-    update = await execute_node(
+    update = await run_tools_raw(
         state,
         tool_registry=create_builtin_tool_registry(
             runners={"vector_search": lambda payload: calls.append(payload)}

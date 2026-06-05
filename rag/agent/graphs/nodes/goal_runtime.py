@@ -126,23 +126,12 @@ def _retrieval_hint_update(hint_update: dict[str, Any]) -> dict[str, Any]:
     return update
 
 
-initialize_goal_node = init_goal
-controller_node = control_turn
-reduce_observations_node = extract_obs_legacy
-route_after_controller = route_after_control
-AgentLoopController = TurnController
-
 __all__ = [
-    "AgentLoopController",
     "GoalBuilder",
     "ObservationExtractor",
     "TurnController",
     "control_turn",
-    "controller_node",
     "extract_obs_legacy",
     "init_goal",
-    "initialize_goal_node",
-    "reduce_observations_node",
     "route_after_control",
-    "route_after_controller",
 ]

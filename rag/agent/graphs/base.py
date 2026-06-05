@@ -129,6 +129,3 @@ def route_after_pause(state: AgentState) -> str:
         return "end"
     # deny, continue, and other responses return to the parent controller.
     return "controller"
-
-
-route_after_execute = route_after_tools

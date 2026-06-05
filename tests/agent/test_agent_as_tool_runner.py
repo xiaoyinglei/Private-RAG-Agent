@@ -22,7 +22,7 @@ from rag.agent.core.definition import AgentDefinition
 from rag.agent.core.delegation import AgentDelegationRequest
 from rag.agent.core.registry import AgentRegistry
 from rag.agent.core.subagent_runner import BuiltinSubAgentRunner
-from rag.agent.graphs.nodes.execute import execute_node
+from rag.agent.graphs.nodes.execute import run_tools_raw
 from rag.agent.service import AgentRunRequest, AgentRunResult
 from rag.agent.state import AgentState, ThinkOutput, ToolCallPlan
 from rag.agent.tools.builtin_registry import create_builtin_tool_registry
@@ -414,7 +414,7 @@ class TestAgentAsToolAdapter:
 
     @pytest.mark.anyio
     async def test_adapter_raises_on_unregistered_agent_type(self) -> None:
-        """adapter 失败时抛错，由 execute_node 转成 ToolResult(error)。"""
+        """adapter 失败时抛错，由 run_tools_raw 转成 ToolResult(error)。"""
         from rag.agent.core.agent_as_tool import AgentAsToolRunner
 
         runner = AgentAsToolRunner(
@@ -500,7 +500,7 @@ class TestAgentAsToolAdapter:
         )
         call = ToolCallPlan.create("agent_research", {"task": "delegate research"})
 
-        update = await execute_node(
+        update = await run_tools_raw(
             {
                 **_parent_state("agent-tool-failure", max_depth=2),
                 "run_config": run_config,

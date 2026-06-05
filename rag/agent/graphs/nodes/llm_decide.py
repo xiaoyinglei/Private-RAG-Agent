@@ -374,7 +374,4 @@ def _normalize_tool_call_ids(
         normalized.append(replacement)
     return normalized
 
-
-llm_decide_node = decide_next
-
-__all__ = ["ToolDecisionProvider", "decide_next", "llm_decide_node"]
+__all__ = ["ToolDecisionProvider", "decide_next"]

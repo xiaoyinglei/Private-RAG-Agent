@@ -6,7 +6,7 @@ import pytest
 from pydantic import BaseModel
 
 from rag.agent.core.context import AgentRunConfig, RunRegistry
-from rag.agent.graphs.nodes.execute import execute_node
+from rag.agent.graphs.nodes.execute import run_tools_raw
 from rag.agent.state import AgentState, ToolCallPlan
 from rag.agent.tools.registry import ToolRegistry
 from rag.agent.tools.spec import ToolError, ToolPermissions, ToolSpec
@@ -70,7 +70,7 @@ def _state(*, call: ToolCallPlan, run_id: str) -> AgentState:
 
 
 @pytest.mark.anyio
-async def test_execute_node_retries_retryable_runner_failure_before_success() -> None:
+async def test_run_tools_raw_retries_retryable_runner_failure_before_success() -> None:
     attempts: list[str] = []
 
     def runner(payload: RuntimeInput) -> RuntimeOutput:
@@ -83,7 +83,7 @@ async def test_execute_node_retries_retryable_runner_failure_before_success() ->
     registry.register(_runtime_spec(max_retries=1), runner=runner)
     call = ToolCallPlan.create("runtime_tool", {"value": "ok"})
 
-    update = await execute_node(
+    update = await run_tools_raw(
         _state(call=call, run_id="tool-retry"),
         tool_registry=registry,
         allowed_tools=frozenset({"runtime_tool"}),
@@ -98,7 +98,7 @@ async def test_execute_node_retries_retryable_runner_failure_before_success() ->
 
 
 @pytest.mark.anyio
-async def test_execute_node_times_out_async_runner() -> None:
+async def test_run_tools_raw_times_out_async_runner() -> None:
     async def runner(payload: RuntimeInput) -> RuntimeOutput:
         await asyncio.sleep(0.05)
         return RuntimeOutput(value=payload.value)
@@ -107,7 +107,7 @@ async def test_execute_node_times_out_async_runner() -> None:
     registry.register(_runtime_spec(timeout_seconds=0.01), runner=runner)
     call = ToolCallPlan.create("runtime_tool", {"value": "late"})
 
-    update = await execute_node(
+    update = await run_tools_raw(
         _state(call=call, run_id="tool-timeout"),
         tool_registry=registry,
         allowed_tools=frozenset({"runtime_tool"}),

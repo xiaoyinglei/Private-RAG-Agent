@@ -108,13 +108,10 @@ class RunRegistry:
         cls._handles.pop(run_id, None)
 
 
-RuntimeRegistry = RunRegistry
-
 __all__ = [
     "AgentRunConfig",
     "AgentRuntimeHandles",
     "BudgetLedger",
     "RunRegistry",
-    "RuntimeRegistry",
     "derive_child_config",
 ]

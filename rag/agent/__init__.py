@@ -2,12 +2,11 @@
 
 from rag.agent.core.agent_as_tool import AgentAsToolRunner, AgentToolSpec
 from rag.agent.core.agent_service_factory import AgentServiceFactory
-from rag.agent.core.compiler import AgentGraphCompiler, GraphCompiler
+from rag.agent.core.compiler import GraphCompiler
 from rag.agent.core.context import (
     AgentRunConfig,
     BudgetLedger,
     RunRegistry,
-    RuntimeRegistry,
     derive_child_config,
 )
 from rag.agent.core.definition import AgentDefinition, ModelSelectionPolicy, ToolPolicy
@@ -17,7 +16,6 @@ from rag.agent.core.subagent_runner import BuiltinSubAgentRunner, BuiltinSynthes
 from rag.agent.memory.models import MemoryPolicy
 from rag.agent.planning import (
     AgentPlan,
-    PlanController,
     PlanEvent,
     PlanStep,
     PlanStepPatch,
@@ -38,7 +36,6 @@ from rag.agent.tools.spec import ToolError, ToolPermissions, ToolResult, ToolSpe
 
 __all__ = [
     "AgentDefinition",
-    "AgentGraphCompiler",
     "GraphCompiler",
     "AgentRegistry",
     "AgentRunConfig",
@@ -61,11 +58,9 @@ __all__ = [
     "PlanEvent",
     "PlanStep",
     "PlanStepPatch",
-    "PlanController",
     "PlanTracker",
     "PlanUpdate",
     "RunRegistry",
-    "RuntimeRegistry",
     "DelegatedAgentRunner",
     "ThinkOutput",
     "ToolCallPlan",

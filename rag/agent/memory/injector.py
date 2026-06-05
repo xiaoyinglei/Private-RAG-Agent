@@ -846,7 +846,4 @@ class ContextBuilder:
         truncated = content[: self._max_section_chars].rstrip()
         return f"{truncated}\n[truncated]"
 
-
-ContextInjector = ContextBuilder
-
-__all__ = ["ContextBuilder", "ContextInjector"]
+__all__ = ["ContextBuilder"]

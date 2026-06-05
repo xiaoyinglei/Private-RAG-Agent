@@ -502,12 +502,4 @@ def _error_result(
     )
 
 
-execute_node = run_tools_raw
-execute_observe_compact_node = run_tools_guarded
-
-__all__ = [
-    "execute_node",
-    "execute_observe_compact_node",
-    "run_tools_guarded",
-    "run_tools_raw",
-]
+__all__ = ["run_tools_guarded", "run_tools_raw"]

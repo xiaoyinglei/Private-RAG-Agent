@@ -3,12 +3,9 @@
 from rag.agent.memory.compactor import (
     MemoryCompactor,
     MessageCompactor,
-    RunMemoryCompactor,
-    RunMessageCompactor,
     WorkingMemoryCompactor,
-    WorkingMemoryDehydrator,
 )
-from rag.agent.memory.injector import ContextBuilder, ContextInjector
+from rag.agent.memory.injector import ContextBuilder
 from rag.agent.memory.models import (
     ContextBudgetSnapshot,
     ContextSection,
@@ -23,7 +20,6 @@ from rag.agent.memory.models import (
     MessageBatchPayload,
     StateChannelReplacement,
     ToolErrorDetailPayload,
-    WorkingMemoryDehydration,
     WorkingMemoryDraft,
     WorkingSummary,
 )
@@ -32,7 +28,6 @@ from rag.agent.memory.store import MemoryRefError, WorkspaceMemoryStore
 __all__ = [
     "ContextBudgetSnapshot",
     "ContextBuilder",
-    "ContextInjector",
     "ContextSection",
     "EvictedStateItem",
     "ExtractedFact",
@@ -44,15 +39,11 @@ __all__ = [
     "MemoryRecord",
     "MemoryRef",
     "MemoryRefError",
-    "MemoryCompactor",
     "MessageCompactor",
-    "RunMemoryCompactor",
-    "RunMessageCompactor",
+    "MemoryCompactor",
     "StateChannelReplacement",
     "ToolErrorDetailPayload",
     "WorkspaceMemoryStore",
-    "WorkingMemoryDehydration",
-    "WorkingMemoryDehydrator",
     "WorkingMemoryCompactor",
     "WorkingMemoryDraft",
     "WorkingSummary",

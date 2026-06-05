@@ -1599,9 +1599,6 @@ def _citations_from_outputs(
     return citations
 
 
-GoalInitializer = GoalBuilder
-StateReducer = ObservationExtractor
-
 __all__ = [
     "AnswerCandidate",
     "ComputationResult",
@@ -1613,15 +1610,13 @@ __all__ = [
     "GoalConflict",
     "GoalConstraint",
     "GoalDeliverable",
-    "GoalBuilder",
     "GoalGap",
-    "GoalInitializer",
+    "GoalBuilder",
     "GoalSpec",
-    "ObservationExtractor",
     "ObservationBuilder",
     "RuntimeState",
     "SatisfactionChecker",
     "SatisfactionReport",
-    "StateReducer",
+    "ObservationExtractor",
     "StructuredObservation",
 ]

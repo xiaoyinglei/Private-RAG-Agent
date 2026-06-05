@@ -243,6 +243,3 @@ class WorkingMemoryDraft(BaseModel):
     extracted_facts: list[ExtractedFact] = Field(default_factory=list)
     tail_messages: list[BaseMessage] = Field(default_factory=list)
     context_budget: ContextBudgetSnapshot | None = None
-
-
-WorkingMemoryDehydration = WorkingMemoryDraft

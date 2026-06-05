@@ -601,18 +601,15 @@ def _dedupe_texts(values: Sequence[str], *, limit: int) -> list[str]:
     return deduped
 
 
-PlanController = PlanTracker
-
 __all__ = [
     "AgentPlan",
     "MAX_PLAN_EVENTS",
     "MAX_PLAN_STEPS",
-    "PlanController",
+    "PlanTracker",
     "PlanEvent",
     "PlanStep",
     "PlanStepPatch",
     "PlanStatus",
     "PlanStepStatus",
-    "PlanTracker",
     "PlanUpdate",
 ]

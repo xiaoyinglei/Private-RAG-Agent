@@ -1262,16 +1262,9 @@ def _model_path(model: BaseModel) -> str:
     return f"{model.__class__.__module__}.{model.__class__.__name__}"
 
 
-RunMessageCompactor = MessageCompactor
-RunMemoryCompactor = MemoryCompactor
-WorkingMemoryDehydrator = WorkingMemoryCompactor
-
 __all__ = [
     "MemoryCompactor",
     "MessageCompactor",
-    "RunMemoryCompactor",
-    "RunMessageCompactor",
     "ToolOutputMemoryStore",
     "WorkingMemoryCompactor",
-    "WorkingMemoryDehydrator",
 ]

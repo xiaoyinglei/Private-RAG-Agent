@@ -173,7 +173,4 @@ def _gap_ids(gaps: Sequence[object]) -> set[str]:
             ids.add(gap_id)
     return ids
 
-
-AgentLoopController = TurnController
-
-__all__ = ["AgentLoopController", "BindingAssessor", "GoalChecker", "TurnController"]
+__all__ = ["BindingAssessor", "GoalChecker", "TurnController"]

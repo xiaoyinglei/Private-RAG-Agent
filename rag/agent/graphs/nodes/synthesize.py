@@ -49,7 +49,7 @@ async def build_answer(
             raw_result = synthesis_runner.run_synthesis(parent_state=state)
             result = await raw_result if isawaitable(raw_result) else raw_result
         except Exception as exc:
-            fallback = _legacy_synthesize_node(state)
+            fallback = _build_answer_fallback(state)
             return {
                 **fallback,
                 "stop_reason": f"synthesis_agent_failed: {exc}",
@@ -57,7 +57,7 @@ async def build_answer(
             }
         return _synthesis_agent_update(state, result)
 
-    return _legacy_synthesize_node(state)
+    return _build_answer_fallback(state)
 
 
 def _structured_goal_final_answer(state: AgentState) -> str | None:
@@ -143,7 +143,7 @@ def _asset_source_line(unit: object) -> str:
     )
 
 
-def _legacy_synthesize_node(state: AgentState) -> dict[str, Any]:
+def _build_answer_fallback(state: AgentState) -> dict[str, Any]:
     tool_results = state.get("tool_results", [])
     ok_results = [result for result in tool_results if result.status == "ok"]
     error_results = [result for result in tool_results if result.status == "error"]
@@ -193,7 +193,7 @@ def _has_grounded_answer_tool_result(tool_results: list[ToolResult]) -> bool:
 
 
 def _synthesis_agent_update(state: AgentState, result: SynthesisRunResult) -> dict[str, Any]:
-    fallback = _legacy_synthesize_node(state)
+    fallback = _build_answer_fallback(state)
     if result.status != "done" or not result.final_answer:
         return {
             **fallback,
@@ -421,11 +421,8 @@ def _has_insufficient_output(ok_results: list[ToolResult]) -> bool:
     )
 
 
-synthesize_node = build_answer
-
 __all__ = [
     "SynthesisRunner",
     "SynthesisRunResult",
     "build_answer",
-    "synthesize_node",
 ]

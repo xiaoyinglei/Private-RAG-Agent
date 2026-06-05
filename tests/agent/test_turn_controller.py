@@ -57,7 +57,7 @@ def _state(run_id: str) -> AgentState:
     }  # type: ignore[typeddict-item]
 
 
-def test_agent_loop_controller_routes_open_gap_to_model_decision_without_auto_proposal() -> None:
+def test_turn_controller_routes_open_gap_to_model_decision_without_auto_proposal() -> None:
     assessor = _BindingAssessor()
     state = _state("turn-controller")
 
@@ -84,7 +84,7 @@ def test_default_binding_assessor_does_not_expose_action_proposal_api() -> None:
     assert not hasattr(controller.binding_assessor, "propose")
 
 
-def test_agent_loop_controller_does_not_route_legacy_task_dag_state() -> None:
+def test_turn_controller_does_not_route_legacy_task_dag_state() -> None:
     assessor = _BindingAssessor()
     state = _state("loop-ignores-task-dag")
     state["plan"] = {"legacy": "task_dag"}  # type: ignore[typeddict-unknown-key]
@@ -101,7 +101,7 @@ def test_agent_loop_controller_does_not_route_legacy_task_dag_state() -> None:
     RunRegistry.remove("loop-ignores-task-dag")
 
 
-def test_agent_loop_controller_does_not_route_legacy_decomposition_hint() -> None:
+def test_turn_controller_does_not_route_legacy_decomposition_hint() -> None:
     assessor = _BindingAssessor()
     state = _state("loop-ignores-decomposition")
     state["retrieval_signals"] = RetrievalSignals(allow_graph_expansion=True)
@@ -123,7 +123,7 @@ def test_graph_controller_adapter_does_not_route_legacy_task_dag_state() -> None
     state = _state("graph-preserves-task-dag")
     state["plan"] = {"legacy": "task_dag"}  # type: ignore[typeddict-unknown-key]
 
-    update = graph_goal_runtime.controller_node(
+    update = graph_goal_runtime.control_turn(
         state,
         definition=RESEARCH_AGENT,
         has_tool_decision_provider=True,
@@ -134,7 +134,7 @@ def test_graph_controller_adapter_does_not_route_legacy_task_dag_state() -> None
     RunRegistry.remove("graph-preserves-task-dag")
 
 
-def test_graph_controller_node_delegates_to_extracted_controller(monkeypatch: object) -> None:
+def test_graph_control_turn_delegates_to_extracted_controller(monkeypatch: object) -> None:
     calls: list[AgentState] = []
 
     class _StubController:
@@ -148,7 +148,7 @@ def test_graph_controller_node_delegates_to_extracted_controller(monkeypatch: ob
     monkeypatch.setattr(graph_goal_runtime, "TurnController", _StubController)  # type: ignore[attr-defined]
     state = _state("graph-turn-adapter")
 
-    update = graph_goal_runtime.controller_node(
+    update = graph_goal_runtime.control_turn(
         state,
         definition=RESEARCH_AGENT,
         has_tool_decision_provider=False,
