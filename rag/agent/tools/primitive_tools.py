@@ -26,7 +26,7 @@ list_files_spec = ToolSpec(
     permissions=ToolPermissions(read_fs=True),
     timeout_seconds=5.0,
     max_retries=1,
-    token_budget_cost=200,
+    work_budget_cost=200,
 )
 
 read_file_spec = ToolSpec(
@@ -41,7 +41,7 @@ read_file_spec = ToolSpec(
     permissions=ToolPermissions(read_fs=True),
     timeout_seconds=10.0,
     max_retries=1,
-    token_budget_cost=500,
+    work_budget_cost=500,
 )
 
 structured_probe_spec = ToolSpec(
@@ -57,7 +57,7 @@ structured_probe_spec = ToolSpec(
     permissions=ToolPermissions(read_fs=True),
     timeout_seconds=20.0,
     max_retries=0,
-    token_budget_cost=700,
+    work_budget_cost=700,
 )
 
 write_file_spec = ToolSpec(
@@ -69,7 +69,7 @@ write_file_spec = ToolSpec(
     permissions=ToolPermissions(write_fs=True),
     timeout_seconds=5.0,
     max_retries=0,
-    token_budget_cost=200,
+    work_budget_cost=200,
 )
 
 run_python_spec = ToolSpec(
@@ -81,7 +81,7 @@ run_python_spec = ToolSpec(
     permissions=ToolPermissions(read_fs=True, write_fs=True, execute_code=True),
     timeout_seconds=60.0,
     max_retries=0,
-    token_budget_cost=1000,
+    work_budget_cost=1000,
 )
 
 ALL_PRIMITIVE_TOOLS = [

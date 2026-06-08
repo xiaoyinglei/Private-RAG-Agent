@@ -128,6 +128,74 @@ def test_llm_decision_applies_plan_update_and_tracks_active_step_tool_call() -> 
     assert update["plan_events"][-1].event_type == "decision_progress"
 
 
+def test_llm_patch_cannot_complete_plan_or_existing_step() -> None:
+    plan = AgentPlan(
+        objective="Verify evidence before completion.",
+        status="active",
+        active_step_id="step_verify",
+        steps=[
+            PlanStep(
+                step_id="step_verify",
+                title="Verify evidence",
+                status="in_progress",
+            )
+        ],
+    )
+
+    updated, events = PlanTracker().apply_llm_update(
+        plan,
+        PlanUpdate(
+            mode="patch",
+            status="complete",
+            step_updates=[
+                PlanStepPatch(
+                    step_id="step_verify",
+                    status="completed",
+                    notes="The model considers this finished.",
+                )
+            ],
+        ),
+        allowed_tool_names=frozenset(),
+        open_gap_ids=frozenset({"answer"}),
+    )
+
+    assert updated.status == "active"
+    assert updated.steps[0].status == "in_progress"
+    assert updated.steps[0].notes == "The model considers this finished."
+    assert "llm_completion_ignored" in events[0].warnings
+
+
+def test_llm_replace_cannot_insert_completed_steps() -> None:
+    plan = AgentPlan(
+        objective="Continue the task.",
+        active_step_id="step_existing",
+        steps=[PlanStep(step_id="step_existing", title="Existing step")],
+    )
+
+    updated, events = PlanTracker().apply_llm_update(
+        plan,
+        PlanUpdate(
+            mode="replace",
+            status="complete",
+            steps=[
+                PlanStep(
+                    step_id="step_claimed_complete",
+                    title="Claimed complete by model",
+                    status="completed",
+                )
+            ],
+            active_step_id="step_claimed_complete",
+        ),
+        allowed_tool_names=frozenset(),
+        open_gap_ids=frozenset({"answer"}),
+    )
+
+    assert updated.status == "active"
+    assert updated.steps[0].status == "pending"
+    assert updated.active_step_id == "step_claimed_complete"
+    assert "llm_completion_ignored" in events[0].warnings
+
+
 def test_observation_without_explicit_binding_does_not_complete_step() -> None:
     plan = AgentPlan(
         objective="Answer carefully.",

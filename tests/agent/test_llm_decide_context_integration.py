@@ -7,11 +7,13 @@ from langchain_core.messages import HumanMessage
 
 from rag.agent.core.context import AgentRunConfig, RunRegistry
 from rag.agent.core.definition import AgentDefinition
+from rag.agent.core.llm_context import AgentLLMContextOverflowError
 from rag.agent.graphs.nodes.llm_decide import decide_next
-from rag.agent.memory.models import InjectedContext, WorkingSummary
+from rag.agent.memory.models import ContextBudgetSnapshot, InjectedContext, WorkingSummary
 from rag.agent.primitive_ops import RunPythonOutput
 from rag.agent.state import AgentState, ThinkOutput
 from rag.agent.tools.spec import ToolResult
+from rag.schema.llm import LLMCallStage
 from rag.schema.query import AnswerCitation, EvidenceItem
 from rag.schema.runtime import AccessPolicy
 
@@ -103,6 +105,23 @@ class _FailIfCalledDecisionProvider:
         raise AssertionError("decision provider should not be called when context overflows")
 
 
+class _AssemblerOverflowDecisionProvider:
+    manages_llm_context = True
+
+    def decide(self, *args: object, **kwargs: object) -> ThinkOutput:
+        del args, kwargs
+        raise AgentLLMContextOverflowError(
+            stage=LLMCallStage.TOOL_DECISION,
+            context_budget=ContextBudgetSnapshot(
+                max_context_tokens=10,
+                overflow=True,
+                degraded=True,
+                required_truncated=["system"],
+                warnings=["context_overflow"],
+            ),
+        )
+
+
 @pytest.mark.anyio
 async def test_llm_decide_passes_injected_context_to_tool_decision_provider() -> None:
     provider = _ContextAwareDecisionProvider()
@@ -188,3 +207,19 @@ async def test_llm_decide_pauses_without_calling_provider_on_context_overflow() 
     assert result["context_budget"].overflow is True
     assert "context_overflow" in result["context_budget"].warnings
     RunRegistry.remove("eval-context-overflow")
+
+
+@pytest.mark.anyio
+async def test_llm_decide_pauses_on_model_assembler_required_overflow() -> None:
+    state = _state("eval-assembler-overflow")
+
+    result = await decide_next(
+        state,
+        definition=_definition(),
+        decision_provider=_AssemblerOverflowDecisionProvider(),
+    )
+
+    assert result["status"] == "paused"
+    assert result["decision_reason"] == "context_overflow"
+    assert result["context_budget"].required_truncated == ["system"]
+    RunRegistry.remove("eval-assembler-overflow")

@@ -15,6 +15,8 @@ from rag.agent.tools.rag_answer_tools import (
     RAGSearchAnswerOutput,
     RAGSearchAnswerRunner,
 )
+from rag.agent.tools.registry import ToolExecutionContext
+from rag.providers.llm_gateway import current_llm_budget_ledger
 from rag.schema.query import AnswerCitation, EvidenceItem, GroundedAnswer, RetrievalSignals
 from rag.schema.runtime import AccessPolicy
 
@@ -203,9 +205,11 @@ async def test_rag_search_answer_runner_uses_fast_runtime_query_and_preserves_co
     class _Runtime:
         def __init__(self) -> None:
             self.calls: list[tuple[str, object]] = []
+            self.active_ledgers: list[object | None] = []
 
         def query_public(self, query: str, *, options: object) -> object:
             self.calls.append((query, options))
+            self.active_ledgers.append(current_llm_budget_ledger())
             return SimpleNamespace(
                 answer=GroundedAnswer(
                     answer_text="Runtime fast answer",
@@ -218,6 +222,7 @@ async def test_rag_search_answer_runner_uses_fast_runtime_query_and_preserves_co
 
     runtime = _Runtime()
     runner = RAGSearchAnswerRunner(runtime=runtime)
+    state = _state()
 
     output = await runner.answer(
         RAGSearchAnswerInput(
@@ -227,7 +232,8 @@ async def test_rag_search_answer_runner_uses_fast_runtime_query_and_preserves_co
                 special_targets=["table"],
                 quoted_terms=["runtime"],
             ),
-        )
+        ),
+        ToolExecutionContext(run_config=state["run_config"]),
     )
 
     assert output.text == "Runtime fast answer"
@@ -244,3 +250,7 @@ async def test_rag_search_answer_runner_uses_fast_runtime_query_and_preserves_co
     assert options.retrieval_signals.quoted_terms == ["runtime"]
     assert options.retrieval_signals_debug["special_targets"] == ["table"]
     assert options.retrieval_signals_debug["answer_path_special_targets_skipped"] == ["table"]
+    assert runtime.active_ledgers == [
+        RunRegistry.get("rag-answer-test").budget_ledger
+    ]
+    RunRegistry.remove("rag-answer-test")

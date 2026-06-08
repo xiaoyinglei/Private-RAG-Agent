@@ -18,7 +18,8 @@ ORCHESTRATOR_AGENT = AgentDefinition(
     system_prompt=ORCHESTRATOR_AGENT_SYSTEM_PROMPT,
     allowed_tools=["agent_research", "agent_factcheck"],
     # TODO: migrate estimated_token_budget / max_iterations / max_depth to runtime config
-    estimated_token_budget=20000,
+    estimated_token_budget=256_000,
+    estimated_work_budget=20_000,
     model_selection=ModelSelectionPolicy(thinking=True),
     max_iterations=6,
     max_depth=2,

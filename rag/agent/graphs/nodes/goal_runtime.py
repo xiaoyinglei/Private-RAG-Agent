@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+from collections.abc import Awaitable
+from dataclasses import replace
 from inspect import isawaitable
-from typing import Any
+from typing import Any, Protocol
 
 from rag.agent.core.context import RunRegistry
 from rag.agent.core.definition import AgentDefinition
+from rag.agent.core.llm_context import AgentLLMContextOverflowError
 from rag.agent.goal_runtime import (
     GoalBuilder,
+    GoalContractHint,
     ObservationExtractor,
 )
 from rag.agent.graphs.nodes.retrieval_hint import RetrievalHintProvider, retrieval_hint_node
@@ -16,15 +20,53 @@ from rag.agent.planning import PlanTracker
 from rag.agent.state import AgentState
 
 
+class GoalContractProvider(Protocol):
+    def infer(
+        self,
+        state: AgentState,
+    ) -> GoalContractHint | Awaitable[GoalContractHint]: ...
+
+
 async def init_goal(
     state: AgentState,
     *,
+    goal_contract_provider: GoalContractProvider | None = None,
     retrieval_hint_provider: RetrievalHintProvider | None = None,
 ) -> dict[str, Any]:
     goal = state.get("goal_spec")
     update: dict[str, Any] = {}
     if goal is None:
-        goal = GoalBuilder().initialize(state.get("task", ""))
+        contract_hint: GoalContractHint | None = None
+        if goal_contract_provider is not None:
+            try:
+                inferred = goal_contract_provider.infer(state)
+                if isawaitable(inferred):
+                    inferred = await inferred
+                contract_hint = GoalContractHint.model_validate(inferred)
+                update["goal_contract_hint"] = contract_hint
+                update["goal_contract_debug"] = {
+                    "source": "structured_model",
+                    "reason": contract_hint.reason,
+                }
+            except AgentLLMContextOverflowError as exc:
+                return {
+                    "status": "paused",
+                    "needs_user_input": (
+                        "Required context does not fit the goal-contract model budget."
+                    ),
+                    "decision_reason": "context_overflow",
+                    "controller_next": "pause",
+                    "context_budget": exc.context_budget,
+                }
+            except Exception as exc:
+                update["goal_contract_debug"] = {
+                    "source": "deterministic_default",
+                    "error": str(exc),
+                }
+        goal = GoalBuilder().initialize(
+            state.get("task", ""),
+            contract_hint=contract_hint,
+        )
         update.update(
             {
                 "goal_spec": goal,
@@ -55,6 +97,17 @@ async def init_goal(
         retrieval_hint_provider=retrieval_hint_provider,
     )
     update.update(_retrieval_hint_update(hint_update))
+    try:
+        committed = await RunRegistry.get(
+            state["run_config"].run_id
+        ).budget_ledger.committed()
+    except KeyError:
+        pass
+    else:
+        update["run_config"] = replace(
+            state["run_config"],
+            budget_committed=committed,
+        )
     return update
 
 
@@ -111,16 +164,35 @@ async def _retrieval_hint(
     retrieval_hint_provider: RetrievalHintProvider | None,
 ) -> dict[str, Any]:
     if retrieval_hint_provider is not None:
-        result = retrieval_hint_provider.hint(state)
-        if isawaitable(result):
-            result = await result
-        return dict(result)
+        try:
+            result = retrieval_hint_provider.hint(state)
+            if isawaitable(result):
+                result = await result
+            return dict(result)
+        except AgentLLMContextOverflowError as exc:
+            return {
+                "status": "paused",
+                "needs_user_input": (
+                    "Required context does not fit the retrieval-hint model budget."
+                ),
+                "decision_reason": "context_overflow",
+                "controller_next": "pause",
+                "context_budget": exc.context_budget,
+            }
     return retrieval_hint_node(state)
 
 
 def _retrieval_hint_update(hint_update: dict[str, Any]) -> dict[str, Any]:
     update: dict[str, Any] = {}
-    for key in ("retrieval_signals", "retrieval_signals_debug", "decision_reason"):
+    for key in (
+        "retrieval_signals",
+        "retrieval_signals_debug",
+        "decision_reason",
+        "status",
+        "needs_user_input",
+        "controller_next",
+        "context_budget",
+    ):
         if key in hint_update:
             update[key] = hint_update[key]
     return update
@@ -128,6 +200,7 @@ def _retrieval_hint_update(hint_update: dict[str, Any]) -> dict[str, Any]:
 
 __all__ = [
     "GoalBuilder",
+    "GoalContractProvider",
     "ObservationExtractor",
     "TurnController",
     "control_turn",

@@ -45,6 +45,7 @@ def resolve_runtime_config(
         reranker_model=reranker_model,
         generation=catalog.generation,
         tokenizer=catalog.tokenizer,
+        llm_stage_budgets=catalog.llm_stage_budgets,
     )
 
 

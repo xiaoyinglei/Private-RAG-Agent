@@ -7,7 +7,14 @@ from rag.ingest.retrievalsummarizer import (
     RetrievalSummaryConfig,
 )
 from rag.ingest.table_sampler import TABLE_POLICY_COMPUTE_ONLY, profile_markdown_table, profile_table_data
+from rag.providers.llm_gateway import LLMGateway
 from rag.schema.core import ParsedSection
+from rag.schema.llm import (
+    LLMCallStage,
+    LLMProviderResult,
+    LLMStageBudget,
+    LLMUsage,
+)
 
 
 class _WordTokenAccounting:
@@ -48,6 +55,31 @@ class _RecordingGenerator:
     def generate_text(self, *, prompt: str) -> str:
         self.prompts.append(prompt)
         return self.output
+
+
+class _UsageRecordingGenerator:
+    provider_name = "test-provider"
+    model_name = "test-model"
+
+    def __init__(self, output: str) -> None:
+        self.output = output
+        self.calls: list[dict[str, object]] = []
+
+    def generate_text_with_usage(
+        self,
+        *,
+        prompt: str,
+        **kwargs: object,
+    ) -> LLMProviderResult[str]:
+        self.calls.append({"prompt": prompt, **kwargs})
+        return LLMProviderResult(
+            value=self.output,
+            usage=LLMUsage(
+                input_tokens=20,
+                output_tokens=4,
+                source="provider",
+            ),
+        )
 
 
 class _FailingGenerator:
@@ -103,6 +135,45 @@ def test_retrieval_summarizer_samples_and_limits_by_tokens() -> None:
     assert "token0 token1" in prompt
     assert "token8 token9" in prompt
     assert result.text == "summary0 summary1 summary2 summary3"
+
+
+def test_retrieval_summarizer_uses_retrieval_summary_gateway_budget() -> None:
+    generator = _UsageRecordingGenerator(_STRUCTURED_SUMMARY)
+    gateway = LLMGateway(
+        generator=generator,
+        token_accounting=_WordTokenAccounting(),  # type: ignore[arg-type]
+        model_context_tokens=10_000,
+        stage_budgets={
+            LLMCallStage.RETRIEVAL_SUMMARY: LLMStageBudget(
+                max_input_tokens=6_000,
+                max_output_tokens=1_024,
+                safety_margin_tokens=512,
+            )
+        },
+    )
+    summarizer = RetrievalSummarizer(
+        generator,
+        gateway=gateway,
+        token_accounting=_WordTokenAccounting(),  # type: ignore[arg-type]
+        config=RetrievalSummaryConfig(
+            direct_return_token_threshold=1,
+            max_output_tokens=4_096,
+        ),
+    )
+    section = ParsedSection(
+        toc_path=("Policy",),
+        heading_level=1,
+        page_range=(1, 1),
+        order_index=0,
+        text="finance approval policy source text",
+        char_range_start=0,
+        char_range_end=35,
+    )
+
+    result = summarizer.summarize_section_with_metadata(section, "Policy")
+
+    assert result.text == _STRUCTURED_SUMMARY
+    assert generator.calls[0]["max_tokens"] == 1_024
 
 
 def test_section_summary_prompt_requires_three_part_contract_and_preserves_it() -> None:

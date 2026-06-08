@@ -17,6 +17,8 @@ from rag.agent.goal_runtime import (
     ContextUnit,
     EvidenceRef,
     GoalBuilder,
+    GoalContractConstraintHint,
+    GoalContractHint,
     GoalDeliverable,
     GoalGap,
     GoalSpec,
@@ -57,6 +59,31 @@ class _SummarizeRunner:
             evidence_ids=["compute_result:14"],
             citation_ids=["table@p4"],
         )
+
+
+def _goal_with_evidence(
+    query: str,
+    *,
+    context_title: str | None = None,
+) -> GoalSpec:
+    constraints = (
+        [
+            GoalContractConstraintHint(
+                constraint_type="context_title",
+                expected_value=context_title,
+            )
+        ]
+        if context_title is not None
+        else []
+    )
+    return GoalBuilder().initialize(
+        query,
+        contract_hint=GoalContractHint(
+            deliverable_kinds=["answer", "evidence"],
+            constraints=constraints,
+            reason="Test contract requires traceable evidence.",
+        ),
+    )
 
 
 class _FailingDecisionProvider:
@@ -156,6 +183,7 @@ async def test_explicit_evidence_goal_still_waits_for_evidence_with_same_agent_d
             run_id="explicit-evidence-goal",
             thread_id="explicit-evidence-goal",
             pending_tool_calls=[call],
+            goal_spec=_goal_with_evidence("解释政策影响并给出处"),
         )
     )
 
@@ -168,12 +196,24 @@ async def test_explicit_evidence_goal_still_waits_for_evidence_with_same_agent_d
 
 def test_goal_initializer_declares_deliverables_with_acceptance_rules() -> None:
     answer_only = GoalBuilder().initialize("解释政策影响")
-    with_evidence = GoalBuilder().initialize("解释政策影响并给出处")
+    keyword_only = GoalBuilder().initialize("解释政策影响并给出处")
+    with_evidence = GoalBuilder().initialize(
+        "解释政策影响并给出处",
+        contract_hint=GoalContractHint(
+            deliverable_kinds=["answer", "evidence"],
+            reason="The user explicitly requires traceable sources.",
+        ),
+    )
 
     assert [
         (item.deliverable_id, item.kind, item.acceptance_rule)
         for item in answer_only.deliverables
     ] == [("answer", "answer", "non_empty_answer")]
+    assert [
+        (item.deliverable_id, item.kind, item.acceptance_rule)
+        for item in keyword_only.deliverables
+    ] == [("answer", "answer", "non_empty_answer")]
+    assert keyword_only.initialization_hints.evidence_requested is True
     assert [
         (item.deliverable_id, item.kind, item.acceptance_rule)
         for item in with_evidence.deliverables
@@ -213,7 +253,17 @@ def test_goal_spec_rejects_duplicate_deliverable_ids() -> None:
 
 def test_goal_initializer_requires_binding_for_explicit_source_scope() -> None:
     goal = GoalBuilder().initialize(
-        "在分区域分品牌 石膏板-26年表中，北方和东北当日销售额合计是多少？请给出处"
+        "在分区域分品牌 石膏板-26年表中，北方和东北当日销售额合计是多少？请给出处",
+        contract_hint=GoalContractHint(
+            deliverable_kinds=["answer", "evidence"],
+            constraints=[
+                GoalContractConstraintHint(
+                    constraint_type="context_title",
+                    expected_value="分区域分品牌 石膏板-26年",
+                )
+            ],
+            reason="The requested answer is scoped to a named table.",
+        ),
     )
 
     assert goal.constraints[0].constraint_type == "context_title"
@@ -226,9 +276,23 @@ def test_goal_initializer_requires_binding_for_explicit_source_scope() -> None:
     ]
 
 
-def test_context_binding_assessor_selects_explicitly_matching_table_candidate() -> None:
+def test_goal_keywords_only_produce_non_authoritative_diagnostic_hints() -> None:
     goal = GoalBuilder().initialize(
         "在分区域分品牌 石膏板-26年表中，北方和东北当日销售额合计是多少？请给出处"
+    )
+
+    assert goal.requirement_ids == ["answer"]
+    assert goal.constraints == []
+    assert goal.initialization_hints.evidence_requested is True
+    assert goal.initialization_hints.context_titles == [
+        "分区域分品牌 石膏板-26年"
+    ]
+
+
+def test_context_binding_assessor_selects_explicitly_matching_table_candidate() -> None:
+    goal = _goal_with_evidence(
+        "在分区域分品牌 石膏板-26年表中，北方和东北当日销售额合计是多少？请给出处",
+        context_title="分区域分品牌 石膏板-26年",
     )
     asset_list_result = ToolResult(
         tool_call_id="tc-assets",
@@ -351,7 +415,7 @@ def test_asset_list_observation_keeps_compact_asset_locators_and_context_unit() 
 
 
 def test_asset_analyze_observation_satisfies_answer_and_asset_evidence() -> None:
-    goal = GoalBuilder().initialize("北方和东北日提货合计是多少？请给出处")
+    goal = _goal_with_evidence("北方和东北日提货合计是多少？请给出处")
     analyze_result = ToolResult(
         tool_call_id="tc-analyze",
         tool_name="asset_analyze",
@@ -543,8 +607,9 @@ def test_delegated_agent_citation_alone_is_parent_checkable_evidence() -> None:
 
 
 def test_checker_keeps_explicit_source_gap_open_for_wrong_computed_asset() -> None:
-    goal = GoalBuilder().initialize(
-        "在分区域分品牌 石膏板-26年表中，北方和东北当日销售额合计是多少？请给出处"
+    goal = _goal_with_evidence(
+        "在分区域分品牌 石膏板-26年表中，北方和东北当日销售额合计是多少？请给出处",
+        context_title="分区域分品牌 石膏板-26年",
     )
     wrong_unit = ContextUnit(
         unit_id="asset:13",
@@ -597,7 +662,9 @@ def test_checker_keeps_explicit_source_gap_open_for_wrong_computed_asset() -> No
 
     assert report.is_done is False
     assert any(gap.gap_type == "context_binding" for gap in report.open_gaps)
-    assert report.conflicts[0].conflict_id == "constraint:context-title-1:asset:13"
+    assert report.conflicts[0].conflict_id == (
+        f"constraint:{goal.constraints[0].constraint_id}:asset:13"
+    )
 
 
 def test_text_search_observation_creates_context_unit_without_answer_candidate() -> None:
@@ -851,7 +918,7 @@ def test_duplicate_workspace_context_does_not_count_as_progress() -> None:
 
 
 def test_checker_rejects_bare_evidence_id_for_traceable_evidence_deliverable() -> None:
-    goal = GoalBuilder().initialize("总结政策影响并给出处")
+    goal = _goal_with_evidence("总结政策影响并给出处")
     report = SatisfactionChecker().check(
         {
             "goal_spec": goal,
@@ -978,7 +1045,7 @@ def test_irrelevant_new_observation_increments_no_progress_count() -> None:
 
 
 def test_satisfaction_checker_reports_gaps_without_choosing_asset_action() -> None:
-    goal = GoalBuilder().initialize("北方和东北日提货合计是多少？请给出处")
+    goal = _goal_with_evidence("北方和东北日提货合计是多少？请给出处")
     state = {
         "task": goal.original_query,
         "goal_spec": goal,
@@ -1059,8 +1126,9 @@ def test_controller_counts_new_context_binding_as_progress_before_stuck_pause() 
     )
     RunRegistry.remove(config.run_id)
     RunRegistry.get_or_create(config)
-    goal = GoalBuilder().initialize(
-        "在分区域分品牌 石膏板-26年表中，总结结果并给出处"
+    goal = _goal_with_evidence(
+        "在分区域分品牌 石膏板-26年表中，总结结果并给出处",
+        context_title="分区域分品牌 石膏板-26年",
     )
     update = control_turn(
         {
@@ -1105,8 +1173,9 @@ def test_controller_clears_replaced_source_binding_conflict_after_correct_result
     )
     RunRegistry.remove(config.run_id)
     RunRegistry.get_or_create(config)
-    goal = GoalBuilder().initialize(
-        "在分区域分品牌 石膏板-26年表中，北方和东北当日销售额合计是多少？请给出处"
+    goal = _goal_with_evidence(
+        "在分区域分品牌 石膏板-26年表中，北方和东北当日销售额合计是多少？请给出处",
+        context_title="分区域分品牌 石膏板-26年",
     )
     base = {
         "run_config": config,

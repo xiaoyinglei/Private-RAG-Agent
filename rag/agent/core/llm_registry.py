@@ -9,6 +9,9 @@ from typing import Any
 from rag.agent.core.llm_config import AgentModelsConfig, ModelProvider, ModelSpec
 from rag.assembly.models import ProviderConfig
 from rag.assembly.support import build_provider
+from rag.assembly.tokenizer import TokenAccountingService, TokenizerContract
+from rag.providers.llm_gateway import LLMGateway
+from rag.schema.llm import parse_llm_stage_budgets
 
 
 class UnknownModelAliasError(KeyError):
@@ -23,6 +26,9 @@ class ModelNotAvailableError(RuntimeError):
 class ResolvedModel:
     generator: object
     kwargs: dict[str, Any]
+    context_window_tokens: int = 32_768
+    gateway: LLMGateway | None = None
+    token_accounting: TokenAccountingService | None = None
 
 
 class ModelRegistry:
@@ -104,6 +110,7 @@ class ModelRegistry:
                 "max_tokens": entry.get("max_tokens", 2048),
                 "base_url": entry.get("base_url"),
                 "api_key_env": entry.get("api_key_env"),
+                "context_window_tokens": entry.get("context_window_tokens", 32_768),
             }
 
         default_model = defaults.get("primary_model", "")
@@ -115,6 +122,7 @@ class ModelRegistry:
             "models": agent_models,
             "default_model": default_model,
             "fallback_model": data.get("fallback_model", default_model),
+            "llm_stage_budgets": parse_llm_stage_budgets(data.get("llm_budgets")),
         })
 
     def resolve(self, alias: str) -> ResolvedModel:
@@ -137,7 +145,29 @@ class ModelRegistry:
             raise ModelNotAvailableError(f"Provider for {alias!r} does not support chat generation")
 
         kwargs: dict[str, Any] = {"max_tokens": spec.max_tokens, **spec.defaults}
-        resolved = ResolvedModel(generator=generator, kwargs=kwargs)
+        token_accounting = TokenAccountingService(
+            TokenizerContract(
+                embedding_model_name=spec.model,
+                tokenizer_model_name=spec.model,
+                chunking_tokenizer_model_name=spec.model,
+                tokenizer_backend="auto",
+                max_context_tokens=spec.context_window_tokens,
+                prompt_reserved_tokens=512,
+                local_files_only=True,
+            )
+        )
+        resolved = ResolvedModel(
+            generator=generator,
+            kwargs=kwargs,
+            context_window_tokens=spec.context_window_tokens,
+            gateway=LLMGateway(
+                generator=generator,
+                token_accounting=token_accounting,
+                model_context_tokens=spec.context_window_tokens,
+                stage_budgets=self._config.llm_stage_budgets,
+            ),
+            token_accounting=token_accounting,
+        )
         self._cache[alias] = resolved
         return resolved
 

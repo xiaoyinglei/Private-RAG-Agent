@@ -13,6 +13,8 @@ from rag.models.catalog import ModelCatalog
 from rag.models.config import GenerationTaskConfig, ModelCapability, ModelRuntimeConfig
 from rag.models.guard import EmbeddingSpaceMismatchError, assert_embedding_space_compatible
 from rag.models.runtime import RuntimeOverrides, resolve_runtime_config
+from rag.runtime import _generator_bindings_from_chat_bindings
+from rag.schema.llm import LLMCallStage
 
 
 class _StructuredPayload(BaseModel):
@@ -25,6 +27,7 @@ models:
     provider: openai_compatible
     model: mlx-community/Qwen3-14B-4bit
     base_url: http://127.0.0.1:8080/v1
+    context_window_tokens: 32768
 
   deepseek:
     capability: chat
@@ -48,6 +51,12 @@ defaults:
   primary_model: qwen_local
   embedding_model: qwen_embedding_mlx
   reranker_model: qwen3_reranker
+
+llm_budgets:
+  tool_decision:
+    max_input_tokens: 12000
+    max_output_tokens: 2048
+    safety_margin_tokens: 512
 """
 
 
@@ -71,6 +80,14 @@ def test_catalog_loads_models(catalog: ModelCatalog) -> None:
     assert catalog.get_model("deepseek").capability == ModelCapability.CHAT
     assert catalog.get_model("qwen_embedding_mlx").capability == ModelCapability.EMBEDDING
     assert catalog.get_model("qwen3_reranker").capability == ModelCapability.RERANKER
+    assert catalog.get_model("qwen_local").context_window_tokens == 32768
+
+
+def test_catalog_loads_llm_stage_budgets(catalog: ModelCatalog) -> None:
+    budget = catalog.llm_stage_budgets[LLMCallStage.TOOL_DECISION]
+    assert budget.max_input_tokens == 12000
+    assert budget.max_output_tokens == 2048
+    assert budget.safety_margin_tokens == 512
 
 
 def test_catalog_defaults(catalog: ModelCatalog) -> None:
@@ -96,6 +113,34 @@ def test_catalog_unknown_model_raises(catalog: ModelCatalog) -> None:
 def test_runtime_default_primary_model(catalog: ModelCatalog) -> None:
     config = resolve_runtime_config(RuntimeOverrides(), catalog=catalog)
     assert config.primary_model.alias == "qwen_local"
+    assert config.llm_stage_budgets[LLMCallStage.TOOL_DECISION].max_input_tokens == 12000
+
+
+def test_runtime_generator_bindings_attach_budget_gateway(catalog: ModelCatalog) -> None:
+    class _Tokens:
+        def count(self, text: str) -> int:
+            return len(text.split())
+
+    binding = type(
+        "ChatBinding",
+        (),
+        {
+            "backend": object(),
+            "provider_name": "test",
+            "model_name": "test-model",
+            "location": "local",
+            "chat": lambda self, prompt, **kwargs: "answer",
+        },
+    )()
+
+    [generator_binding] = _generator_bindings_from_chat_bindings(
+        [binding],
+        token_accounting=_Tokens(),
+        model_context_tokens=32_768,
+        stage_budgets=catalog.llm_stage_budgets,
+    )
+
+    assert generator_binding.gateway is not None
 
 
 def test_runtime_override_primary_model(catalog: ModelCatalog) -> None:

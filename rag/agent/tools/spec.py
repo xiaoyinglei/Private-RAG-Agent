@@ -40,7 +40,7 @@ class ToolSpec:
     timeout_seconds: float
     max_retries: int = 0
     idempotent: bool = False
-    token_budget_cost: int = 0
+    work_budget_cost: int = 0
     requires_confirmation: bool = False
     audit_log: bool = False
 
@@ -59,6 +59,8 @@ class ToolResult(BaseModel):
     output: BaseModel | None = None
     error: ToolError | None = None
     latency_ms: float
+    work_units_used: int = 0
+    # Legacy checkpoint field. New tool execution records work_units_used instead.
     token_used: int = 0
     retry_count: int = 0
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Sequence
+from dataclasses import replace
 from inspect import isawaitable
 from typing import Any, Protocol
 
@@ -8,10 +9,14 @@ from pydantic import ValidationError
 
 from rag.agent.core.context import RunRegistry
 from rag.agent.core.definition import AgentDefinition
+from rag.agent.core.llm_context import AgentLLMContextOverflowError
 from rag.agent.memory.injector import ContextBuilder
-from rag.agent.memory.models import InjectedContext
+from rag.agent.memory.models import ContextBudgetSnapshot, InjectedContext
 from rag.agent.planning import AgentPlan, PlanEvent, PlanTracker
 from rag.agent.state import AgentState, ThinkOutput, ToolCallPlan
+from rag.schema.llm import DEFAULT_LLM_STAGE_BUDGETS, LLMCallStage
+
+_DECISION_PROMPT_OVERHEAD_TOKENS = 2_048
 
 
 class ToolDecisionProvider(Protocol):
@@ -55,25 +60,48 @@ async def decide_next(
             "controller_next": "finalize",
         }
 
-    context = ContextBuilder(
-        max_context_tokens=state["run_config"].max_context_tokens
-        or state["run_config"].budget_total,
-    ).assemble(definition=definition, state=state)
-    if context.context_budget.overflow:
+    if bool(getattr(decision_provider, "manages_llm_context", False)):
+        context = InjectedContext(
+            sections=[],
+            context_budget=ContextBudgetSnapshot(max_context_tokens=0),
+        )
+    else:
+        decision_input_budget = DEFAULT_LLM_STAGE_BUDGETS[
+            LLMCallStage.TOOL_DECISION
+        ].max_input_tokens
+        context = ContextBuilder(
+            max_context_tokens=min(
+                state["run_config"].max_context_tokens
+                or decision_input_budget - _DECISION_PROMPT_OVERHEAD_TOKENS,
+                decision_input_budget - _DECISION_PROMPT_OVERHEAD_TOKENS,
+            ),
+        ).assemble(definition=definition, state=state)
+        if context.context_budget.overflow:
+            return {
+                "status": "paused",
+                "needs_user_input": "Context budget overflow; cannot safely call the decision model.",
+                "decision_reason": "context_overflow",
+                "controller_next": "pause",
+                "context_budget": context.context_budget,
+            }
+    try:
+        decision = await _call_decision_provider(
+            decision_provider,
+            state,
+            definition=definition,
+            budget_remaining=budget_remaining,
+            context=context,
+        )
+    except AgentLLMContextOverflowError as exc:
         return {
             "status": "paused",
-            "needs_user_input": "Context budget overflow; cannot safely call the decision model.",
+            "needs_user_input": (
+                "Required context does not fit the tool-decision model budget."
+            ),
             "decision_reason": "context_overflow",
             "controller_next": "pause",
-            "context_budget": context.context_budget,
+            "context_budget": exc.context_budget,
         }
-    decision = await _call_decision_provider(
-        decision_provider,
-        state,
-        definition=definition,
-        budget_remaining=budget_remaining,
-        context=context,
-    )
     finalization_authorized = _finalization_authorized(state)
     decision = _redirect_premature_synthesis_to_summarize(
         decision,
@@ -92,6 +120,10 @@ async def decide_next(
         open_gap_ids=_open_gap_ids(state),
     )
     update["context_budget"] = context.context_budget
+    update["run_config"] = replace(
+        state["run_config"],
+        budget_committed=await handles.budget_ledger.committed(),
+    )
     return update
 
 
@@ -120,6 +152,8 @@ async def _call_decision_provider(
             needs_user_input="LLM decision provider failed to produce a valid decision",
             confidence=0.0,
         )
+    except AgentLLMContextOverflowError:
+        raise
     except Exception as exc:
         return ThinkOutput(
             action="pause",

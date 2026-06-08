@@ -42,6 +42,8 @@ def test_research_agent_allows_grounded_rag_answer_tool() -> None:
 
 
 def test_builtin_agent_budget_defaults_match_orchestration_budget_policy() -> None:
-    assert ORCHESTRATOR_AGENT.estimated_token_budget == 20000
-    for agent_type in {"research", "compare", "factcheck", "synthesize"}:
-        assert BUILTIN_AGENT_DEFINITIONS[agent_type].estimated_token_budget == 10000
+    assert ORCHESTRATOR_AGENT.estimated_token_budget == 256_000
+    assert BUILTIN_AGENT_DEFINITIONS["research"].estimated_token_budget == 96_000
+    assert BUILTIN_AGENT_DEFINITIONS["compare"].estimated_token_budget == 96_000
+    assert BUILTIN_AGENT_DEFINITIONS["factcheck"].estimated_token_budget == 64_000
+    assert BUILTIN_AGENT_DEFINITIONS["synthesize"].estimated_token_budget == 32_000

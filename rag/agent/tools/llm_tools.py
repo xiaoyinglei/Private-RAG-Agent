@@ -43,7 +43,7 @@ llm_generate = ToolSpec(
     permissions=ToolPermissions(generate=True),
     timeout_seconds=30.0,
     max_retries=1,
-    token_budget_cost=2000,
+    work_budget_cost=200,
 )
 
 llm_summarize = ToolSpec(
@@ -55,7 +55,7 @@ llm_summarize = ToolSpec(
     permissions=ToolPermissions(generate=True),
     timeout_seconds=30.0,
     max_retries=1,
-    token_budget_cost=1800,
+    work_budget_cost=200,
 )
 
 llm_compare = ToolSpec(
@@ -67,7 +67,7 @@ llm_compare = ToolSpec(
     permissions=ToolPermissions(generate=True),
     timeout_seconds=30.0,
     max_retries=1,
-    token_budget_cost=2200,
+    work_budget_cost=250,
 )
 
 ALL_LLM_TOOLS = [llm_generate, llm_summarize, llm_compare]

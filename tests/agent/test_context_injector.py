@@ -15,6 +15,23 @@ from rag.schema.query import AnswerCitation, EvidenceItem
 from rag.schema.runtime import AccessPolicy
 
 
+class _CharacterTokenAccounting:
+    def count(self, text: str) -> int:
+        return len(text)
+
+    def clip(
+        self,
+        text: str,
+        token_budget: int,
+        *,
+        add_ellipsis: bool = False,
+    ) -> str:
+        clipped = text[: max(token_budget, 0)]
+        if add_ellipsis and len(clipped) < len(text) and token_budget >= 4:
+            return clipped[: token_budget - 4].rstrip() + " ..."
+        return clipped
+
+
 def _definition() -> AgentDefinition:
     return AgentDefinition(
         agent_type="research",
@@ -141,9 +158,10 @@ def test_budget_keeps_evidence_before_tail() -> None:
     names = [section.name for section in context.sections]
     assert "system" in names
     assert "task" in names
-    assert "evidence" in names
+    assert "evidence" not in names
     assert "message_tail" not in names
-    assert context.context_budget.evidence_tokens > 0
+    assert context.context_budget.overflow is True
+    assert "evidence" in context.context_budget.required_truncated
     assert "message_tail" in context.context_budget.dropped_sections
 
 
@@ -173,7 +191,8 @@ def test_budget_priority_keeps_open_decisions_before_evidence_refs_and_tail() ->
     assert "memory" in names
     if "message_tail" in names:
         assert "message_tail" in context.context_budget.summarized_sections
-        assert "tail tail tail" not in context.section("message_tail").content
+        assert "tail tail tail" in context.section("message_tail").content
+        assert "sha256=" not in context.section("message_tail").content
     else:
         assert "message_tail" in context.context_budget.dropped_sections
     assert names.index("open_decisions") < names.index("memory")
@@ -233,6 +252,86 @@ def test_context_budget_snapshot_counts_sections() -> None:
     assert budget.working_memory_tokens > 0
     assert budget.message_tail_tokens > 0
     assert budget.tool_result_tokens > 0
+
+
+def test_context_builder_uses_injected_model_token_accounting() -> None:
+    accounting = _CharacterTokenAccounting()
+    state = _state()
+    state["evidence"] = []
+    state["citations"] = []
+    state["tool_results"] = []
+    state["messages"] = []
+
+    context = ContextBuilder(
+        max_context_tokens=500,
+        token_accounting=accounting,
+    ).assemble(
+        definition=_definition(),
+        state=state,
+    )
+
+    assert context.context_budget.used_context_tokens == accounting.count(
+        context.as_text()
+    )
+    assert context.section("system").token_count == accounting.count(
+        "[system]\nSystem prompt"
+    )
+
+
+def test_required_section_overflow_never_replaces_real_content_with_hash() -> None:
+    state = _state()
+    state["evidence"] = []
+    state["citations"] = []
+    state["tool_results"] = []
+    state["messages"] = []
+    definition = AgentDefinition(
+        agent_type="research",
+        description="Research agent",
+        system_prompt="SYSTEM_REAL_CONTENT",
+        allowed_tools=[],
+    )
+
+    context = ContextBuilder(
+        max_context_tokens=20,
+        token_accounting=_CharacterTokenAccounting(),
+        max_section_chars=10_000,
+    ).assemble(
+        definition=definition,
+        state=state,
+    )
+
+    assert context.context_budget.overflow is True
+    assert "system" in context.context_budget.required_truncated
+    assert all("sha256=" not in section.content for section in context.sections)
+    assert all("system: compact" not in section.content for section in context.sections)
+    if "system" in [section.name for section in context.sections]:
+        assert context.section("system").content == "SYSTEM_REAL_CONTENT"
+
+
+def test_optional_section_is_real_text_clipped_or_dropped() -> None:
+    state = _state()
+    state["evidence"] = []
+    state["citations"] = []
+    state["tool_results"] = []
+    state["messages"] = [HumanMessage(content="OPTIONAL_REAL_TEXT " * 30, id="tail")]
+
+    context = ContextBuilder(
+        max_context_tokens=120,
+        token_accounting=_CharacterTokenAccounting(),
+        max_section_chars=10_000,
+    ).assemble(
+        definition=_definition(),
+        state=state,
+    )
+
+    names = [section.name for section in context.sections]
+    if "message_tail" in names:
+        content = context.section("message_tail").content
+        assert "OPTIONAL_REAL_TEXT" in content
+        assert "sha256=" not in content
+        assert "message_tail: compact" not in content
+    else:
+        assert "message_tail" in context.context_budget.dropped_sections
 
 
 def test_context_hard_budget_compacts_required_sections_without_overrun() -> None:

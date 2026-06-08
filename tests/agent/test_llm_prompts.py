@@ -92,6 +92,10 @@ def test_tool_decision_prompt_includes_bounded_plan_update_contract() -> None:
     assert "计划不是权限" in prompt
     assert "最多保留" in prompt
     assert "不要把完整表格" in prompt
+    assert "不得把 plan status 设为 complete" in prompt
+    assert "不得把 step status 设为 completed" in prompt
+    assert "structured observation" in prompt
+    assert "goal checker" in prompt
 
 
 def test_tool_decision_prompt_tells_model_how_to_finish_workspace_results() -> None:

@@ -8,6 +8,7 @@ from rag.agent.core.llm_registry import (
     ModelRegistry,
     UnknownModelAliasError,
 )
+from rag.schema.llm import LLMCallStage
 
 
 def _ollama_spec(model: str = "test-model") -> ModelSpec:
@@ -15,6 +16,7 @@ def _ollama_spec(model: str = "test-model") -> ModelSpec:
         provider=ModelProvider.OLLAMA,
         model=model,
         base_url="http://localhost:11434",
+        context_window_tokens=32768,
     )
 
 
@@ -45,9 +47,17 @@ def test_load_configs_models_maps_openai_compatible_protocol(tmp_path) -> None:
                         "protocol": "openai_compatible",
                         "model": "Qwen/Qwen3-8B-MLX-4bit",
                         "base_url": "http://127.0.0.1:8080/v1",
+                        "context_window_tokens": 32768,
                     }
                 },
                 "defaults": {"primary_model": "qwen3_8b_mlx_4bit"},
+                "llm_budgets": {
+                    "tool_decision": {
+                        "max_input_tokens": 12000,
+                        "max_output_tokens": 2048,
+                        "safety_margin_tokens": 512,
+                    }
+                },
             }
         ),
         encoding="utf-8",
@@ -58,6 +68,8 @@ def test_load_configs_models_maps_openai_compatible_protocol(tmp_path) -> None:
     assert config.default_model == "qwen3_8b_mlx_4bit"
     assert config.models["qwen3_8b_mlx_4bit"].provider is ModelProvider.OPENAI_COMPATIBLE
     assert config.models["qwen3_8b_mlx_4bit"].base_url == "http://127.0.0.1:8080/v1"
+    assert config.models["qwen3_8b_mlx_4bit"].context_window_tokens == 32768
+    assert config.llm_stage_budgets[LLMCallStage.TOOL_DECISION].max_input_tokens == 12000
 
 
 def test_load_configs_models_preserves_api_key_env_for_cloud_models(tmp_path, monkeypatch) -> None:
@@ -124,8 +136,13 @@ def test_from_env_loads_dotenv_before_resolving_model_config(tmp_path, monkeypat
 
     assert registry.default_model == "mimo_cloud"
     assert provider_config.api_key == "sk-dotenv"
-    monkeypatch.delenv("RAG_AGENT_MODELS_PATH", raising=False)
-    monkeypatch.delenv("MIMO_API_KEY", raising=False)
+    # _load_env_file writes directly to os.environ, so release monkeypatch's
+    # original snapshots before removing those dynamically-created values.
+    monkeypatch.undo()
+    import os
+
+    os.environ.pop("RAG_AGENT_MODELS_PATH", None)
+    os.environ.pop("MIMO_API_KEY", None)
 
 
 class TestModelRegistryProperties:
@@ -153,6 +170,9 @@ class TestModelRegistryResolve:
         resolved = reg.resolve("main")
         assert resolved.generator is not None
         assert resolved.kwargs["max_tokens"] == 2048
+        assert resolved.context_window_tokens == 32768
+        assert resolved.gateway is not None
+        assert resolved.token_accounting is resolved.gateway.token_accounting
 
     def test_caches_same_alias(self) -> None:
         reg = ModelRegistry(_make_config())

@@ -16,6 +16,13 @@ from rag.agent.core.definition import AgentDefinition
 from rag.agent.core.delegation import DelegatedAgentRunner
 from rag.agent.core.human_input import HumanInputRequest, HumanInputResponse
 from rag.agent.core.llm_registry import ModelRegistry
+from rag.agent.core.output_finalizer import StructuredOutputFinalizer
+from rag.agent.core.output_models import (
+    ValidatedFinalOutput,
+    output_model_path,
+)
+from rag.agent.goal_runtime import GoalSpec
+from rag.agent.graphs.nodes.goal_runtime import GoalContractProvider
 from rag.agent.graphs.nodes.llm_decide import ToolDecisionProvider
 from rag.agent.graphs.nodes.retrieval_hint import RetrievalHintProvider
 from rag.agent.graphs.nodes.synthesize import SynthesisRunner
@@ -45,6 +52,7 @@ class AgentRunRequest(BaseModel):
     input_files: list[str] = Field(default_factory=list)
     workspace_path: str | None = None
     memory_policy: MemoryPolicy | None = None
+    goal_spec: GoalSpec | None = None
 
     def to_run_config(self, definition: AgentDefinition) -> AgentRunConfig:
         run_id = self.run_id or f"run_{uuid4().hex[:12]}"
@@ -52,6 +60,8 @@ class AgentRunRequest(BaseModel):
             run_id=run_id,
             thread_id=self.thread_id or run_id,
             budget_total=self.budget_total or definition.estimated_token_budget,
+            work_budget_total=definition.estimated_work_budget,
+            agent_type=definition.agent_type,
             max_context_tokens=self.max_context_tokens,
             max_depth=definition.max_depth if self.max_depth is None else self.max_depth,
             access_policy=definition.access_policy or AccessPolicy.default(),
@@ -67,6 +77,10 @@ class AgentRunResult(BaseModel):
     thread_id: str
     status: str
     final_answer: str | None = None
+    final_output: BaseModel | None = None
+    output_validation_errors: list[dict[str, object]] = Field(
+        default_factory=list
+    )
     stop_reason: str | None = None
     tool_results: list[ToolResult] = Field(default_factory=list)
     evidence: list[EvidenceItem] = Field(default_factory=list)
@@ -80,7 +94,13 @@ class AgentRunResult(BaseModel):
     workspace_path: str | None = None
 
     @classmethod
-    def from_state(cls, state: AgentState, *, workspace_path: str | None = None) -> AgentRunResult:
+    def from_state(
+        cls,
+        state: AgentState,
+        *,
+        definition: AgentDefinition | None = None,
+        workspace_path: str | None = None,
+    ) -> AgentRunResult:
         run_config = state["run_config"]
         is_terminal = state["status"] in {"done", "failed"}
         human_request = None if is_terminal else state.get("human_input_request")
@@ -90,6 +110,13 @@ class AgentRunResult(BaseModel):
             thread_id=run_config.thread_id,
             status=state["status"],
             final_answer=state.get("final_answer"),
+            final_output=_restore_final_output(
+                state.get("final_output"),
+                definition=definition,
+            ),
+            output_validation_errors=list(
+                state.get("output_validation_errors", [])
+            ),
             stop_reason=state.get("stop_reason"),
             tool_results=list(state.get("tool_results", [])),
             evidence=list(state.get("evidence", [])),
@@ -114,25 +141,31 @@ class AgentService:
         definition: AgentDefinition,
         tool_registry: ToolRegistry,
         tool_decision_provider: ToolDecisionProvider | None = None,
+        goal_contract_provider: GoalContractProvider | None = None,
         retrieval_hint_provider: RetrievalHintProvider | None = None,
         subagent_runner: DelegatedAgentRunner | None = None,
         synthesis_runner: SynthesisRunner | None = None,
+        output_finalizer: StructuredOutputFinalizer | None = None,
         model_registry: ModelRegistry | None = None,
         checkpointer: BaseCheckpointSaver[str] | None = None,
     ) -> None:
         self._definition = definition
         self._base_tool_registry = tool_registry
         self._tool_decision_provider = tool_decision_provider
+        self._goal_contract_provider = goal_contract_provider
         self._retrieval_hint_provider = retrieval_hint_provider
         self._subagent_runner = subagent_runner
         self._synthesis_runner = synthesis_runner
+        self._output_finalizer = output_finalizer
         self._model_registry = model_registry
         self._checkpointer = checkpointer or create_agent_checkpointer(None)
         self._compiler = GraphCompiler(
             tool_registry=tool_registry,
             tool_decision_provider=tool_decision_provider,
+            goal_contract_provider=goal_contract_provider,
             retrieval_hint_provider=retrieval_hint_provider,
             synthesis_runner=synthesis_runner,
+            output_finalizer=output_finalizer,
             model_registry=model_registry,
             checkpointer=self._checkpointer,
         )
@@ -146,6 +179,7 @@ class AgentService:
             approved_tool_call_ids=request.approved_tool_call_ids,
             denied_tool_call_ids=request.denied_tool_call_ids,
             messages=request.messages,
+            goal_spec=request.goal_spec,
         )
 
     def initial_state_from_config(
@@ -157,6 +191,7 @@ class AgentService:
         approved_tool_call_ids: list[str] | None = None,
         denied_tool_call_ids: list[str] | None = None,
         messages: list[BaseMessage] | None = None,
+        goal_spec: GoalSpec | None = None,
         memory_store: WorkspaceMemoryStore | None = None,
     ) -> AgentState:
         RunRegistry.remove(run_config.run_id)
@@ -188,9 +223,13 @@ class AgentService:
             "extracted_facts": [],
             "context_budget": None,
             "final_answer": None,
+            "final_output": None,
+            "output_validation_errors": [],
             "groundedness_flag": False,
             "insufficient_evidence_flag": False,
-            "goal_spec": None,
+            "goal_spec": goal_spec,
+            "goal_contract_hint": None,
+            "goal_contract_debug": None,
             "goal_requirements": [],
             "satisfied_requirements": [],
             "open_gaps": [],
@@ -229,6 +268,7 @@ class AgentService:
             approved_tool_call_ids=request.approved_tool_call_ids,
             denied_tool_call_ids=request.denied_tool_call_ids,
             messages=request.messages,
+            goal_spec=request.goal_spec,
             input_files=request.input_files,
             workspace_path=request.workspace_path,
         )
@@ -242,6 +282,7 @@ class AgentService:
         approved_tool_call_ids: list[str] | None = None,
         denied_tool_call_ids: list[str] | None = None,
         messages: list[BaseMessage] | None = None,
+        goal_spec: GoalSpec | None = None,
         input_files: list[str] | None = None,
         workspace_path: str | None = None,
     ) -> AgentRunResult:
@@ -268,8 +309,10 @@ class AgentService:
         compiler = GraphCompiler(
             tool_registry=runtime_registry,
             tool_decision_provider=self._tool_decision_provider,
+            goal_contract_provider=self._goal_contract_provider,
             retrieval_hint_provider=self._retrieval_hint_provider,
             synthesis_runner=self._synthesis_runner,
+            output_finalizer=self._output_finalizer,
             model_registry=self._model_registry,
             checkpointer=self._checkpointer,
         )
@@ -281,6 +324,7 @@ class AgentService:
             approved_tool_call_ids=approved_tool_call_ids,
             denied_tool_call_ids=denied_tool_call_ids,
             messages=messages,
+            goal_spec=goal_spec,
             memory_store=memory_store,
         )
         try:
@@ -293,7 +337,11 @@ class AgentService:
             raise
         if result_state.get("status") in {"done", "failed"}:
             RunRegistry.remove(run_config.run_id)
-        return AgentRunResult.from_state(result_state, workspace_path=str(workspace.root))
+        return AgentRunResult.from_state(
+            result_state,
+            definition=self._definition,
+            workspace_path=str(workspace.root),
+        )
 
     def _runtime_tool_registry(
         self,
@@ -348,7 +396,7 @@ class AgentService:
             if registry.has_runner(tool_name):
                 continue
             try:
-                registry.register_runner(tool_name, runner)
+                registry.register_contextual_runner(tool_name, runner)
             except KeyError:
                 pass
 
@@ -387,8 +435,10 @@ class AgentService:
         compiler = GraphCompiler(
             tool_registry=runtime_registry,
             tool_decision_provider=self._tool_decision_provider,
+            goal_contract_provider=self._goal_contract_provider,
             retrieval_hint_provider=self._retrieval_hint_provider,
             synthesis_runner=self._synthesis_runner,
+            output_finalizer=self._output_finalizer,
             model_registry=self._model_registry,
             checkpointer=self._checkpointer,
         )
@@ -408,7 +458,11 @@ class AgentService:
         )
         if result_state.get("status") in {"done", "failed"}:
             RunRegistry.remove(run_config.run_id)
-        return AgentRunResult.from_state(result_state, workspace_path=workspace_path)
+        return AgentRunResult.from_state(
+            result_state,
+            definition=self._definition,
+            workspace_path=workspace_path,
+        )
 
     def pending_human_input_request(self, *, run_id: str) -> HumanInputRequest:
         graph = self._compiler.compile(self._definition)
@@ -440,10 +494,7 @@ class AgentService:
         except KeyError:
             handles = RunRegistry.get_or_create(run_config)
 
-        committed = sum(
-            max(0, getattr(result, "token_used", 0))
-            for result in state.get("tool_results", [])
-        )
+        committed = max(0, run_config.budget_committed)
         if committed > 0:
             lease_id = f"checkpoint_restore:{run_config.run_id}"
             reserved = await handles.budget_ledger.reserve(
@@ -471,6 +522,22 @@ class AgentService:
         if not snapshot.values:
             raise KeyError(f"No checkpoint found for run_id={thread_id}")
         return cast(AgentState, snapshot.values)
+
+
+def _restore_final_output(
+    raw_output: ValidatedFinalOutput | dict[str, object] | None,
+    *,
+    definition: AgentDefinition | None,
+) -> BaseModel | None:
+    if raw_output is None or definition is None or definition.output_model is None:
+        return None
+    envelope = ValidatedFinalOutput.model_validate(raw_output)
+    expected_path = output_model_path(definition.output_model)
+    if envelope.model_path != expected_path:
+        raise ValueError(
+            "Checkpoint final output model does not match AgentDefinition.output_model"
+        )
+    return definition.output_model.model_validate(envelope.data)
 
 
 __all__ = [

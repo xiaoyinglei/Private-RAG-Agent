@@ -4,16 +4,14 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from rag.agent.tools.spec import ToolError, ToolPermissions, ToolSpec
 from rag.schema.query import RetrievalSignals
-from rag.schema.runtime import AccessPolicy
 
 
 class SearchInput(BaseModel):
-    model_config = ConfigDict(arbitrary_types_allowed=True)
+    model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
 
     query: str
     top_k: int = 8
     retrieval_signals: RetrievalSignals | None = Field(default=None)
-    access_policy: AccessPolicy | None = Field(default=None)
 
 
 RAG_SIGNAL_AWARE_TOOLS = frozenset({
@@ -34,7 +32,7 @@ vector_search = ToolSpec(
     permissions=ToolPermissions(read_db=True, embed=True),
     timeout_seconds=10.0,
     max_retries=1,
-    token_budget_cost=500,
+    work_budget_cost=500,
 )
 
 keyword_search = ToolSpec(
@@ -46,7 +44,7 @@ keyword_search = ToolSpec(
     permissions=ToolPermissions(read_db=True),
     timeout_seconds=5.0,
     max_retries=1,
-    token_budget_cost=200,
+    work_budget_cost=200,
 )
 
 grounding = ToolSpec(
@@ -58,7 +56,7 @@ grounding = ToolSpec(
     permissions=ToolPermissions(read_db=True, read_object_store=True),
     timeout_seconds=15.0,
     max_retries=2,
-    token_budget_cost=1000,
+    work_budget_cost=1000,
 )
 
 rerank = ToolSpec(
@@ -70,7 +68,7 @@ rerank = ToolSpec(
     permissions=ToolPermissions(read_db=True, embed=True, generate=True),
     timeout_seconds=10.0,
     max_retries=1,
-    token_budget_cost=800,
+    work_budget_cost=800,
 )
 
 graph_expand = ToolSpec(
@@ -82,7 +80,7 @@ graph_expand = ToolSpec(
     permissions=ToolPermissions(read_db=True),
     timeout_seconds=5.0,
     max_retries=1,
-    token_budget_cost=300,
+    work_budget_cost=300,
 )
 
 ALL_RAG_TOOLS = [vector_search, keyword_search, grounding, rerank, graph_expand]

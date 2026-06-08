@@ -7,9 +7,12 @@ import time
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Literal
+from uuid import uuid4
 
 from pydantic import BaseModel, Field, ValidationError
 
+from rag.providers.llm_gateway import LLMGateway
+from rag.schema.llm import LLMCallStage
 from rag.schema.model_protocols import Generator
 from rag.schema.query import (
     AnswerCitation,
@@ -111,6 +114,7 @@ class GeneratorBinding:
     provider_name: str
     model_name: str | None
     location: Literal["local", "cloud"] = "local"
+    gateway: LLMGateway | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -909,11 +913,21 @@ class AnswerGenerator:
             # structured path
             started = time.perf_counter()
             try:
-                payload = await asyncio.to_thread(
-                    binding.backend.generate_structured,
-                    prompt=prompt,
-                    schema=StructuredAnswerPayload,
-                )
+                if binding.gateway is None:
+                    payload = await asyncio.to_thread(
+                        binding.backend.generate_structured,
+                        prompt=prompt,
+                        schema=StructuredAnswerPayload,
+                    )
+                else:
+                    payload = (
+                        await binding.gateway.agenerate_structured(
+                            stage=LLMCallStage.RAG_ANSWER,
+                            prompt=prompt,
+                            schema=StructuredAnswerPayload,
+                            lease_id=f"rag_answer:structured:{uuid4().hex}",
+                        )
+                    ).value
                 latency_ms = (time.perf_counter() - started) * 1000.0
                 answer = self.answer_generation_service.answer_from_structured_payload(
                     query=query,
@@ -944,10 +958,19 @@ class AnswerGenerator:
             # text fallback
             started = time.perf_counter()
             try:
-                output = await asyncio.to_thread(
-                    binding.backend.generate_text,
-                    prompt=prompt,
-                )
+                if binding.gateway is None:
+                    output = await asyncio.to_thread(
+                        binding.backend.generate_text,
+                        prompt=prompt,
+                    )
+                else:
+                    output = (
+                        await binding.gateway.agenerate_text(
+                            stage=LLMCallStage.RAG_ANSWER,
+                            prompt=prompt,
+                            lease_id=f"rag_answer:text:{uuid4().hex}",
+                        )
+                    ).value
                 latency_ms = (time.perf_counter() - started) * 1000.0
                 answer = self.answer_generation_service.answer_from_model_output(
                     query=query,
@@ -1008,10 +1031,19 @@ class AnswerGenerator:
 
             started = time.perf_counter()
             try:
-                output = await asyncio.to_thread(
-                    binding.backend.generate_text,
-                    prompt=prompt,
-                )
+                if binding.gateway is None:
+                    output = await asyncio.to_thread(
+                        binding.backend.generate_text,
+                        prompt=prompt,
+                    )
+                else:
+                    output = (
+                        await binding.gateway.agenerate_text(
+                            stage=LLMCallStage.RAG_ANSWER,
+                            prompt=prompt,
+                            lease_id=f"rag_answer:direct:{uuid4().hex}",
+                        )
+                    ).value
                 latency_ms = (time.perf_counter() - started) * 1000.0
                 answer_text = str(output).strip() or "模型没有返回内容。"
                 answer = GroundedAnswer(

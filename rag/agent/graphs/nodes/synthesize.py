@@ -6,6 +6,14 @@ from typing import Any, Protocol
 
 from pydantic import BaseModel
 
+from rag.agent.core.definition import AgentDefinition
+from rag.agent.core.llm_context import AgentLLMContextOverflowError
+from rag.agent.core.output_finalizer import (
+    OutputValidationExhaustedError,
+    StructuredOutputFinalizer,
+    final_answer_from_output,
+    validated_final_output,
+)
 from rag.agent.state import AgentState
 from rag.agent.tools.spec import ToolResult
 from rag.schema.query import AnswerCitation, EvidenceItem
@@ -20,6 +28,7 @@ class SynthesisRunResult(Protocol):
     citations: list[AnswerCitation]
     groundedness_flag: bool
     insufficient_evidence_flag: bool
+    needs_user_input: str | None
 
 
 class SynthesisRunner(Protocol):
@@ -34,7 +43,16 @@ async def build_answer(
     state: AgentState,
     *,
     synthesis_runner: SynthesisRunner | None = None,
+    definition: AgentDefinition | None = None,
+    output_finalizer: StructuredOutputFinalizer | None = None,
 ) -> dict[str, Any]:
+    if definition is not None and definition.output_model is not None:
+        return await _build_structured_output(
+            state,
+            definition=definition,
+            output_finalizer=output_finalizer,
+        )
+
     if state.get("stop_reason") == "goal_satisfied":
         if final_answer := _structured_goal_final_answer(state):
             return {
@@ -58,6 +76,100 @@ async def build_answer(
         return _synthesis_agent_update(state, result)
 
     return _build_answer_fallback(state)
+
+
+async def _build_structured_output(
+    state: AgentState,
+    *,
+    definition: AgentDefinition,
+    output_finalizer: StructuredOutputFinalizer | None,
+) -> dict[str, Any]:
+    if state.get("status") == "failed":
+        return {
+            "status": "failed",
+            "final_output": None,
+            "final_answer": None,
+            "output_validation_errors": [],
+        }
+    if output_finalizer is None:
+        return {
+            "status": "failed",
+            "stop_reason": "output_finalizer_unavailable",
+            "final_output": None,
+            "final_answer": None,
+            "output_validation_errors": [],
+        }
+    output_model = definition.output_model
+    if output_model is None:
+        raise RuntimeError("structured output requires an output model")
+
+    try:
+        raw_output = output_finalizer.finalize(
+            definition=definition,
+            state=state,
+            candidate_text=_structured_output_candidate_text(state),
+        )
+        output = await raw_output if isawaitable(raw_output) else raw_output
+        validated = output_model.model_validate(output)
+    except AgentLLMContextOverflowError as exc:
+        return {
+            "status": "paused",
+            "decision_reason": "context_overflow",
+            "needs_user_input": (
+                "Required context does not fit the final output model budget."
+            ),
+            "controller_next": "pause",
+            "context_budget": exc.context_budget,
+            "final_output": None,
+            "final_answer": None,
+            "output_validation_errors": [],
+        }
+    except OutputValidationExhaustedError as exc:
+        return {
+            "status": "failed",
+            "stop_reason": "output_validation_failed",
+            "decision_reason": "output_validation_failed",
+            "final_output": None,
+            "final_answer": None,
+            "output_validation_errors": exc.validation_errors,
+        }
+    except Exception as exc:
+        return {
+            "status": "failed",
+            "stop_reason": f"output_synthesis_failed: {exc}",
+            "decision_reason": "output_synthesis_failed",
+            "final_output": None,
+            "final_answer": None,
+            "output_validation_errors": [],
+        }
+
+    fallback = _build_answer_fallback(state)
+    return {
+        "status": "done",
+        "final_output": validated_final_output(validated),
+        "final_answer": final_answer_from_output(validated),
+        "output_validation_errors": [],
+        "groundedness_flag": fallback["groundedness_flag"],
+        "insufficient_evidence_flag": fallback[
+            "insufficient_evidence_flag"
+        ],
+    }
+
+
+def _structured_output_candidate_text(state: AgentState) -> str:
+    for candidate in reversed(state.get("answer_candidates", [])):
+        text = getattr(candidate, "text", None)
+        if isinstance(text, str) and text.strip():
+            return text.strip()
+    for result in reversed(state.get("tool_results", [])):
+        if result.status != "ok" or result.output is None:
+            continue
+        text = getattr(result.output, "text", None)
+        if isinstance(text, str) and text.strip():
+            return text.strip()
+    fallback = _build_answer_fallback(state)
+    answer = fallback.get("final_answer")
+    return answer if isinstance(answer, str) else ""
 
 
 def _structured_goal_final_answer(state: AgentState) -> str | None:
@@ -194,6 +306,19 @@ def _has_grounded_answer_tool_result(tool_results: list[ToolResult]) -> bool:
 
 def _synthesis_agent_update(state: AgentState, result: SynthesisRunResult) -> dict[str, Any]:
     fallback = _build_answer_fallback(state)
+    if result.status == "paused":
+        return {
+            "status": "paused",
+            "final_answer": None,
+            "stop_reason": result.stop_reason or "synthesis_paused",
+            "needs_user_input": result.needs_user_input,
+            "controller_next": "pause",
+            "tool_results": result.tool_results,
+            "evidence": result.evidence,
+            "citations": result.citations,
+            "groundedness_flag": False,
+            "insufficient_evidence_flag": False,
+        }
     if result.status != "done" or not result.final_answer:
         return {
             **fallback,

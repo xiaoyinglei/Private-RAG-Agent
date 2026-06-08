@@ -8,9 +8,12 @@ from pydantic.functional_serializers import field_serializer
 from pydantic.functional_validators import field_validator
 
 ContextSectionName = Literal[
+    "instructions",
     "system",
     "policy_hints",
     "task",
+    "call_context",
+    "output_schema",
     "plan",
     "evidence",
     "memory",

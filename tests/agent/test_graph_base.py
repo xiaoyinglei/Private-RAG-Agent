@@ -5,7 +5,9 @@ from pydantic import BaseModel
 
 from rag.agent.core.context import AgentRunConfig, RunRegistry
 from rag.agent.core.definition import AgentDefinition, ToolPolicy
+from rag.agent.goal_runtime import GoalContractHint
 from rag.agent.graphs.base import build_agent_graph
+from rag.agent.graphs.nodes.goal_runtime import init_goal
 from rag.agent.memory.models import InjectedContext
 from rag.agent.state import AgentState, ThinkOutput, ToolCallPlan
 from rag.agent.tools.registry import ToolRegistry
@@ -61,7 +63,7 @@ _costly_spec = ToolSpec(
     error_model=ToolError,
     permissions=ToolPermissions(),
     timeout_seconds=1.0,
-    token_budget_cost=50,
+    work_budget_cost=50,
 )
 
 
@@ -100,11 +102,13 @@ def _make_config(
     run_id: str = "graph-test",
     max_parallel_calls: int = 4,
     budget_total: int = 10000,
+    work_budget_total: int = 10000,
 ) -> AgentRunConfig:
     return AgentRunConfig(
         run_id=run_id,
         thread_id=run_id,
         budget_total=budget_total,
+        work_budget_total=work_budget_total,
         max_depth=2,
         access_policy=AccessPolicy.default(),
         tool_policy=ToolPolicy(max_parallel_calls=max_parallel_calls),
@@ -192,6 +196,31 @@ class _ScriptedDecisionProvider:
         del state, definition, budget_remaining, context
         self.calls += 1
         return self._decisions.pop(0)
+
+
+class _GoalContractProvider:
+    async def infer(self, state: AgentState) -> GoalContractHint:
+        del state
+        return GoalContractHint(
+            deliverable_kinds=["answer", "evidence"],
+            reason="Traceable evidence is required.",
+        )
+
+
+@pytest.mark.anyio
+async def test_init_goal_uses_structured_contract_provider() -> None:
+    state = _initial_state(config=_make_config(run_id="goal-contract"))
+
+    update = await init_goal(
+        state,
+        goal_contract_provider=_GoalContractProvider(),
+    )
+
+    assert update["goal_spec"].requirement_ids == ["answer", "evidence"]
+    assert update["goal_contract_hint"].deliverable_kinds == [
+        "answer",
+        "evidence",
+    ]
 
 
 class TestBaseGraph:
@@ -403,7 +432,7 @@ class TestBaseGraph:
                 config=_make_config(
                     run_id="budget-too-low",
                     max_parallel_calls=1,
-                    budget_total=10,
+                    work_budget_total=10,
                 ),
             ),
             config={"configurable": {"thread_id": "budget-too-low"}},
@@ -427,6 +456,7 @@ class TestBaseGraph:
                 run_id="budget-commit",
                 max_parallel_calls=1,
                 budget_total=100,
+                work_budget_total=100,
             ),
         )
 
@@ -434,10 +464,12 @@ class TestBaseGraph:
 
         [tool_result] = result["tool_results"]
         assert tool_result.status == "ok"
-        assert tool_result.token_used == 50
+        assert tool_result.work_units_used == 50
+        assert tool_result.token_used == 0
         assert runner_calls == ["hello"]
-        remaining = await RunRegistry.get("budget-commit").budget_ledger.remaining()
-        assert remaining == 50
+        handles = RunRegistry.get("budget-commit")
+        assert await handles.tool_work_ledger.remaining() == 50
+        assert await handles.budget_ledger.remaining() == 100
 
     @pytest.mark.anyio
     async def test_missing_runtime_handles_fail_visibly(self) -> None:

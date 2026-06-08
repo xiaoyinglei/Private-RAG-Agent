@@ -1,10 +1,15 @@
 from __future__ import annotations
 
 import pytest
+from pydantic import BaseModel
 
 from rag.agent.builtin.synthesize import SYNTHESIZE_AGENT
 from rag.agent.core.agent_service_factory import AgentServiceFactory
 from rag.agent.core.context import AgentRunConfig, RunRegistry
+from rag.agent.core.definition import AgentDefinition
+from rag.agent.core.llm_context import AgentLLMContextOverflowError
+from rag.agent.core.output_finalizer import OutputValidationExhaustedError
+from rag.agent.core.output_models import ValidatedFinalOutput
 from rag.agent.core.registry import AgentRegistry
 from rag.agent.core.subagent_runner import BuiltinSynthesisRunner
 from rag.agent.goal_runtime import (
@@ -20,13 +25,20 @@ from rag.agent.primitive_ops import (
     StructuredProbeOutput,
     StructuredTableProbe,
 )
+from rag.agent.service import AgentRunResult
 from rag.agent.state import AgentState
 from rag.agent.tools.builtin_registry import create_builtin_tool_registry
 from rag.agent.tools.llm_tools import LLMGenerateInput, LLMTextOutput
 from rag.agent.tools.rag_answer_tools import RAGSearchAnswerOutput
 from rag.agent.tools.spec import ToolResult
+from rag.schema.llm import LLMCallStage
 from rag.schema.query import AnswerCitation, EvidenceItem, RetrievalSignals
 from rag.schema.runtime import AccessPolicy
+
+
+class _StructuredFinalAnswer(BaseModel):
+    answer: str
+    confidence: float
 
 
 def _state() -> AgentState:
@@ -180,6 +192,178 @@ async def test_build_answer_preserves_grounded_rag_search_answer() -> None:
     assert update["groundedness_flag"] is True
     assert update["insufficient_evidence_flag"] is False
     assert called is False
+    RunRegistry.remove("synthesis-parent")
+
+
+@pytest.mark.anyio
+async def test_synthesis_context_overflow_pauses_parent_without_fallback_completion() -> None:
+    class _PausedSynthesisRunner:
+        def run_synthesis(self, *, parent_state: AgentState) -> AgentRunResult:
+            del parent_state
+            return AgentRunResult(
+                run_id="synthesis-child",
+                thread_id="synthesis-child",
+                status="paused",
+                stop_reason="context_overflow",
+                needs_user_input=(
+                    "Required context does not fit the final synthesis model budget."
+                ),
+            )
+
+    update = await build_answer(
+        _state(),
+        synthesis_runner=_PausedSynthesisRunner(),  # type: ignore[arg-type]
+    )
+
+    assert update["status"] == "paused"
+    assert update["stop_reason"] == "context_overflow"
+    assert "final synthesis model budget" in update["needs_user_input"]
+    assert update.get("final_answer") is None
+    RunRegistry.remove("synthesis-parent")
+
+
+@pytest.mark.anyio
+async def test_output_model_finalization_persists_validated_envelope() -> None:
+    class _Finalizer:
+        def __init__(self) -> None:
+            self.candidates: list[str] = []
+
+        def finalize(
+            self,
+            *,
+            definition: AgentDefinition,
+            state: AgentState,
+            candidate_text: str,
+        ) -> _StructuredFinalAnswer:
+            del definition, state
+            self.candidates.append(candidate_text)
+            return _StructuredFinalAnswer(
+                answer="validated structured answer",
+                confidence=0.95,
+            )
+
+    definition = AgentDefinition(
+        agent_type="structured",
+        description="Structured",
+        system_prompt="Return structured output.",
+        allowed_tools=[],
+        output_model=_StructuredFinalAnswer,
+    )
+    state = _state()
+    state["answer_candidates"] = [
+        AnswerCandidate(text="candidate answer")
+    ]
+    finalizer = _Finalizer()
+
+    update = await build_answer(
+        state,
+        definition=definition,
+        output_finalizer=finalizer,  # type: ignore[arg-type]
+    )
+
+    assert update["status"] == "done"
+    assert update["final_answer"] == "validated structured answer"
+    assert update["final_output"] == ValidatedFinalOutput(
+        model_path=(
+            f"{_StructuredFinalAnswer.__module__}."
+            f"{_StructuredFinalAnswer.__qualname__}"
+        ),
+        data={
+            "answer": "validated structured answer",
+            "confidence": 0.95,
+        },
+    )
+    assert finalizer.candidates == ["candidate answer"]
+    RunRegistry.remove("synthesis-parent")
+
+
+@pytest.mark.anyio
+async def test_output_validation_retry_exhaustion_fails_without_final_answer() -> None:
+    class _ExhaustedFinalizer:
+        def finalize(
+            self,
+            *,
+            definition: AgentDefinition,
+            state: AgentState,
+            candidate_text: str,
+        ) -> BaseModel:
+            del definition, state, candidate_text
+            raise OutputValidationExhaustedError(
+                attempts=3,
+                validation_errors=[
+                    {
+                        "location": ["confidence"],
+                        "message": "Field required",
+                        "type": "missing",
+                    }
+                ],
+            )
+
+    definition = AgentDefinition(
+        agent_type="structured",
+        description="Structured",
+        system_prompt="Return structured output.",
+        allowed_tools=[],
+        output_model=_StructuredFinalAnswer,
+        output_validation_max_retries=2,
+    )
+
+    update = await build_answer(
+        _state(),
+        definition=definition,
+        output_finalizer=_ExhaustedFinalizer(),  # type: ignore[arg-type]
+    )
+
+    assert update["status"] == "failed"
+    assert update["stop_reason"] == "output_validation_failed"
+    assert update["final_output"] is None
+    assert update["final_answer"] is None
+    assert update.get("controller_next") != "pause"
+    RunRegistry.remove("synthesis-parent")
+
+
+@pytest.mark.anyio
+async def test_output_finalizer_context_overflow_remains_paused() -> None:
+    class _OverflowFinalizer:
+        def finalize(
+            self,
+            *,
+            definition: AgentDefinition,
+            state: AgentState,
+            candidate_text: str,
+        ) -> BaseModel:
+            del definition, state, candidate_text
+            from rag.agent.memory.models import ContextBudgetSnapshot
+
+            raise AgentLLMContextOverflowError(
+                stage=LLMCallStage.FINAL_SYNTHESIS,
+                context_budget=ContextBudgetSnapshot(
+                    max_context_tokens=10,
+                    overflow=True,
+                    degraded=True,
+                    required_truncated=["task"],
+                    warnings=["context_overflow"],
+                ),
+            )
+
+    definition = AgentDefinition(
+        agent_type="structured",
+        description="Structured",
+        system_prompt="Return structured output.",
+        allowed_tools=[],
+        output_model=_StructuredFinalAnswer,
+    )
+
+    update = await build_answer(
+        _state(),
+        definition=definition,
+        output_finalizer=_OverflowFinalizer(),  # type: ignore[arg-type]
+    )
+
+    assert update["status"] == "paused"
+    assert update["decision_reason"] == "context_overflow"
+    assert update["final_output"] is None
+    assert update["final_answer"] is None
     RunRegistry.remove("synthesis-parent")
 
 

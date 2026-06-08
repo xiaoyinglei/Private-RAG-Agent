@@ -20,12 +20,48 @@ AcceptanceRule = Literal[
 ]
 
 
+def _default_goal_deliverable_kinds() -> list[DeliverableKind]:
+    return ["answer"]
+
+
 class GoalConstraint(BaseModel):
     constraint_id: str
     constraint_type: str
     expected_value: object
     required: bool = True
     metadata: dict[str, object] = Field(default_factory=dict)
+
+
+class GoalContractConstraintHint(BaseModel):
+    constraint_type: str = Field(min_length=1, max_length=100)
+    expected_value: object
+    required: bool = True
+
+
+class GoalContractHint(BaseModel):
+    deliverable_kinds: list[DeliverableKind] = Field(
+        default_factory=_default_goal_deliverable_kinds,
+        max_length=3,
+    )
+    constraints: list[GoalContractConstraintHint] = Field(
+        default_factory=list,
+        max_length=8,
+    )
+    reason: str = Field(min_length=1, max_length=1000)
+
+    @model_validator(mode="after")
+    def normalize_deliverables(self) -> Self:
+        kinds = list(dict.fromkeys(self.deliverable_kinds))
+        if "answer" not in kinds:
+            kinds.insert(0, "answer")
+        self.deliverable_kinds = kinds
+        return self
+
+
+class GoalInitializationHints(BaseModel):
+    evidence_requested: bool = False
+    context_titles: list[str] = Field(default_factory=list)
+    source: Literal["legacy_rules"] = "legacy_rules"
 
 
 class GoalDeliverable(BaseModel):
@@ -72,6 +108,9 @@ class GoalSpec(BaseModel):
     required_operations: list[str] = Field(default_factory=list)
     constraints: list[GoalConstraint] = Field(default_factory=list)
     success_criteria: list[str] = Field(default_factory=list)
+    initialization_hints: GoalInitializationHints = Field(
+        default_factory=GoalInitializationHints
+    )
 
     @model_validator(mode="after")
     def normalize_legacy_deliverables(self) -> Self:
@@ -286,19 +325,50 @@ class SatisfactionReport(BaseModel):
 
 
 class GoalBuilder:
-    def initialize(self, query: str) -> GoalSpec:
+    def initialize(
+        self,
+        query: str,
+        *,
+        contract_hint: GoalContractHint | None = None,
+    ) -> GoalSpec:
         stripped = query.strip()
-        required_evidence: list[str] = []
-        deliverables = [_answer_deliverable()]
-        if _explicitly_requests_evidence(stripped):
-            required_evidence.append("citation")
-            deliverables.append(_evidence_deliverable())
+        hints = _legacy_goal_hints(stripped)
+        kinds: list[DeliverableKind] = (
+            list(contract_hint.deliverable_kinds)
+            if contract_hint is not None
+            else ["answer"]
+        )
+        deliverables = [
+            _deliverable_for_kind(kind)
+            for kind in kinds
+        ]
+        required_evidence = (
+            ["citation"] if "evidence" in kinds else []
+        )
+        required_operations = (
+            ["computation"] if "computation" in kinds else []
+        )
+        constraints = [
+            GoalConstraint(
+                constraint_id=f"contract-constraint-{index}",
+                constraint_type=constraint.constraint_type,
+                expected_value=constraint.expected_value,
+                required=constraint.required,
+                metadata={"origin": "structured_contract_hint"},
+            )
+            for index, constraint in enumerate(
+                contract_hint.constraints if contract_hint is not None else [],
+                start=1,
+            )
+        ]
         return GoalSpec(
             original_query=stripped,
             deliverables=deliverables,
             required_evidence=required_evidence,
-            constraints=_explicit_context_title_constraints(stripped),
+            required_operations=required_operations,
+            constraints=constraints,
             success_criteria=_success_criteria(required_evidence=required_evidence),
+            initialization_hints=hints,
         )
 
 
@@ -649,6 +719,24 @@ def _explicit_context_title_constraints(query: str) -> list[GoalConstraint]:
             metadata={"origin": "explicit_query_scope"},
         )
     ]
+
+
+def _legacy_goal_hints(query: str) -> GoalInitializationHints:
+    return GoalInitializationHints(
+        evidence_requested=_explicitly_requests_evidence(query),
+        context_titles=[
+            str(constraint.expected_value)
+            for constraint in _explicit_context_title_constraints(query)
+        ],
+    )
+
+
+def _deliverable_for_kind(kind: DeliverableKind) -> GoalDeliverable:
+    if kind == "answer":
+        return _answer_deliverable()
+    if kind == "evidence":
+        return _evidence_deliverable()
+    return _computation_deliverable()
 
 
 def _success_criteria(*, required_evidence: Sequence[str]) -> list[str]:
@@ -1608,10 +1696,13 @@ __all__ = [
     "ContextUnit",
     "EvidenceRef",
     "GoalConflict",
+    "GoalContractConstraintHint",
+    "GoalContractHint",
     "GoalConstraint",
     "GoalDeliverable",
     "GoalGap",
     "GoalBuilder",
+    "GoalInitializationHints",
     "GoalSpec",
     "ObservationBuilder",
     "RuntimeState",

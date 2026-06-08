@@ -4,6 +4,27 @@ from collections.abc import Sequence
 
 from rag.agent.state import AgentState
 
+# ── Goal contract prompt ──
+
+
+def build_goal_contract_prompt(state: AgentState) -> str:
+    task = state.get("task", "").strip()
+    return f"""You define a bounded completion contract for an agent task.
+
+Return only a structured GoalContractHint. Select required deliverable kinds:
+- answer: always required
+- evidence: only when the user requires traceable sources or citations
+- computation: only when the task requires a calculated or reproducible result
+
+Add constraints only when the task explicitly fixes a source, table, sheet,
+document, scope, or other acceptance boundary. Do not invent identifiers,
+titles, files, or constraints. The contract describes acceptance conditions;
+it does not choose tools or execution steps.
+
+User task:
+{task}"""
+
+
 # ── Retrieval hint prompt ──
 
 
@@ -82,13 +103,13 @@ def build_tool_decision_prompt(
     "plan_update": {{
         "mode": "replace" | "patch",
         "objective": "当前目标摘要，可省略",
-        "status": "active" | "complete" | "blocked" | "needs_replan",
+        "status": "active" | "blocked" | "needs_replan",
         "active_step_id": "step_xxx",
         "steps": [
             {{
                 "step_id": "step_xxx",
                 "title": "有界步骤说明",
-                "status": "pending" | "in_progress" | "completed" | "blocked" | "skipped",
+                "status": "pending" | "in_progress" | "blocked" | "skipped",
                 "related_gap_ids": ["answer"],
                 "expected_tool_names": ["list_files"],
                 "notes": "短说明"
@@ -110,6 +131,8 @@ def build_tool_decision_prompt(
 - 每一次 LLM 决策必须对应当前 open_gaps；如果没有 open_gaps，不要继续调用工具
 - 维护 plan_update，让主循环拥有可恢复 todo/replan 状态；计划不是权限，不能替代 tool_calls，
   也不能绕过工具白名单、审批、workspace 或 Python 沙箱。
+- 不得把 plan status 设为 complete，也不得把 step status 设为 completed。LLM 只能描述计划和推进状态；
+  step 完成必须来自绑定成功的 structured observation，plan 完成必须来自 goal checker。
 - plan_update 最多保留 12 个步骤；每个步骤只写短标题、相关 open_gaps、预期工具名和短 notes。
   不要把完整表格、完整日志、完整工具输出、长 scratchpad 或大段推理写进计划。
 - 如果当前计划方向不再匹配 open_gaps，用 mode="replace" 给出新的有界步骤；否则用 mode="patch"

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from dataclasses import replace
 from typing import Any
 
 from pydantic import ValidationError
@@ -9,12 +10,20 @@ from pydantic import ValidationError
 from rag.agent.core.agent_as_tool import AgentAsToolExecutionError
 from rag.agent.core.approval_policy import ApprovalDecision, ApprovalPolicy, merge_approval_requests
 from rag.agent.core.context import AgentRunConfig, RunRegistry
+from rag.agent.core.definition import AgentDefinition
+from rag.agent.core.llm_context import AgentLLMContextOverflowError
 from rag.agent.goal_runtime import ObservationExtractor
 from rag.agent.memory.compactor import MemoryCompactor
 from rag.agent.planning import PlanTracker
-from rag.agent.state import AgentState, ToolCallPlan, _merge_tool_results
+from rag.agent.state import (
+    AgentState,
+    ContextBudgetSnapshot,
+    ToolCallPlan,
+    _merge_tool_results,
+)
 from rag.agent.tools.rag_tools import RAG_SIGNAL_AWARE_TOOLS
 from rag.agent.tools.registry import (
+    ToolExecutionContext,
     ToolInputValidationError,
     ToolOutputValidationError,
     ToolRegistry,
@@ -28,6 +37,7 @@ async def run_tools_raw(
     *,
     tool_registry: ToolRegistry,
     allowed_tools: frozenset[str],
+    definition: AgentDefinition | None = None,
 ) -> dict[str, Any]:
     pending = state.get("pending_tool_calls", [])
 
@@ -166,7 +176,13 @@ async def run_tools_raw(
 
     gathered = await asyncio.gather(
         *[
-            _execute_one_tool(call, run_config=state["run_config"], tool_registry=tool_registry)
+            _execute_one_tool(
+                call,
+                state=state,
+                definition=definition,
+                run_config=state["run_config"],
+                tool_registry=tool_registry,
+            )
             for call in batch
         ],
         return_exceptions=True,
@@ -185,7 +201,45 @@ async def run_tools_raw(
         else:
             results.append(result_or_exc)
 
-    return {"tool_results": results, "pending_tool_calls": excess}
+    context_overflow = next(
+        (
+            result.error
+            for result in results
+            if result.error is not None and result.error.code == "context_overflow"
+        ),
+        None,
+    )
+    try:
+        committed = await RunRegistry.get(
+            state["run_config"].run_id
+        ).budget_ledger.committed()
+    except KeyError:
+        run_config = state["run_config"]
+    else:
+        run_config = replace(
+            state["run_config"],
+            budget_committed=committed,
+        )
+    update: dict[str, Any] = {
+        "tool_results": results,
+        "pending_tool_calls": excess,
+        "run_config": run_config,
+    }
+    if context_overflow is not None:
+        update.update(
+            {
+                "status": "paused",
+                "needs_user_input": context_overflow.message,
+                "decision_reason": "context_overflow",
+                "controller_next": "pause",
+            }
+        )
+        snapshot = context_overflow.detail.get("context_budget")
+        if isinstance(snapshot, dict):
+            update["context_budget"] = ContextBudgetSnapshot.model_validate(
+                snapshot
+            )
+    return update
 
 
 async def run_tools_guarded(
@@ -193,6 +247,7 @@ async def run_tools_guarded(
     *,
     tool_registry: ToolRegistry,
     allowed_tools: frozenset[str],
+    definition: AgentDefinition | None = None,
 ) -> dict[str, Any]:
     """Execute pending tools and return only observation-reduced, compacted state.
 
@@ -205,6 +260,7 @@ async def run_tools_guarded(
         state,
         tool_registry=tool_registry,
         allowed_tools=allowed_tools,
+        definition=definition,
     )
     if not raw_update:
         return raw_update
@@ -264,6 +320,8 @@ def _execution_call(
 async def _execute_one_tool(
     call: ToolCallPlan,
     *,
+    state: AgentState,
+    definition: AgentDefinition | None,
     run_config: AgentRunConfig,
     tool_registry: ToolRegistry,
 ) -> ToolResult:
@@ -301,9 +359,9 @@ async def _execute_one_tool(
             started_at=started_at,
         )
 
-    budget_cost = max(0, spec.token_budget_cost)
-    reserved_budget = False
-    if budget_cost > 0:
+    work_cost = max(0, spec.work_budget_cost)
+    reserved_work_budget = False
+    if work_cost > 0:
         try:
             handles = RunRegistry.get(run_config.run_id)
         except KeyError:
@@ -314,28 +372,42 @@ async def _execute_one_tool(
                 retryable=False,
                 started_at=started_at,
             )
-        reserved_budget = await handles.budget_ledger.reserve(call.tool_call_id, budget_cost)
-        if not reserved_budget:
+        reserved_work_budget = await handles.tool_work_ledger.reserve(
+            call.tool_call_id,
+            work_cost,
+        )
+        if not reserved_work_budget:
             return _error_result(
                 call,
                 code="budget_exhausted",
                 message=f"Insufficient budget to execute {call.tool_name}",
                 retryable=False,
                 started_at=started_at,
-                detail={"required": budget_cost},
+                detail={"required": work_cost},
             )
 
     attempt = 0
     while True:
         try:
             output = await asyncio.wait_for(
-                tool_registry.run(call.tool_name, arguments),
+                tool_registry.run(
+                    call.tool_name,
+                    arguments,
+                    execution_context=ToolExecutionContext(
+                        run_config=run_config,
+                        tool_call_id=call.tool_call_id,
+                        state=state,
+                        definition=definition,
+                    ),
+                ),
                 timeout=spec.timeout_seconds,
             )
             break
         except ToolInputValidationError as exc:
-            if reserved_budget:
-                await RunRegistry.get(run_config.run_id).budget_ledger.refund(call.tool_call_id)
+            if reserved_work_budget:
+                await RunRegistry.get(run_config.run_id).tool_work_ledger.refund(
+                    call.tool_call_id
+                )
             return _error_result(
                 call,
                 code="invalid_arguments",
@@ -346,8 +418,10 @@ async def _execute_one_tool(
                 retry_count=attempt,
             )
         except ToolRunnerMissingError:
-            if reserved_budget:
-                await RunRegistry.get(run_config.run_id).budget_ledger.refund(call.tool_call_id)
+            if reserved_work_budget:
+                await RunRegistry.get(run_config.run_id).tool_work_ledger.refund(
+                    call.tool_call_id
+                )
             return _error_result(
                 call,
                 code="tool_not_implemented",
@@ -357,10 +431,10 @@ async def _execute_one_tool(
                 retry_count=attempt,
             )
         except ToolOutputValidationError as exc:
-            if reserved_budget:
-                await RunRegistry.get(run_config.run_id).budget_ledger.commit(
+            if reserved_work_budget:
+                await RunRegistry.get(run_config.run_id).tool_work_ledger.commit(
                     call.tool_call_id,
-                    budget_cost,
+                    work_cost,
                 )
             return _error_result(
                 call,
@@ -369,17 +443,36 @@ async def _execute_one_tool(
                 retryable=False,
                 started_at=started_at,
                 detail={"errors": exc.errors()},
-                token_used=budget_cost,
+                work_units_used=work_cost,
+                retry_count=attempt,
+            )
+        except AgentLLMContextOverflowError as exc:
+            if reserved_work_budget:
+                await RunRegistry.get(run_config.run_id).tool_work_ledger.refund(
+                    call.tool_call_id
+                )
+            return _error_result(
+                call,
+                code="context_overflow",
+                message=(
+                    f"Required context does not fit the {exc.stage.value} "
+                    "model budget."
+                ),
+                retryable=False,
+                started_at=started_at,
+                detail={
+                    "context_budget": exc.context_budget.model_dump(mode="json")
+                },
                 retry_count=attempt,
             )
         except TimeoutError:
             if attempt < spec.max_retries:
                 attempt += 1
                 continue
-            if reserved_budget:
-                await RunRegistry.get(run_config.run_id).budget_ledger.commit(
+            if reserved_work_budget:
+                await RunRegistry.get(run_config.run_id).tool_work_ledger.commit(
                     call.tool_call_id,
-                    budget_cost,
+                    work_cost,
                 )
             return _error_result(
                 call,
@@ -387,14 +480,14 @@ async def _execute_one_tool(
                 message=f"{call.tool_name} timed out after {spec.timeout_seconds}s",
                 retryable=True,
                 started_at=started_at,
-                token_used=budget_cost,
+                work_units_used=work_cost,
                 retry_count=attempt,
             )
         except AgentAsToolExecutionError as exc:
-            if reserved_budget:
-                await RunRegistry.get(run_config.run_id).budget_ledger.commit(
+            if reserved_work_budget:
+                await RunRegistry.get(run_config.run_id).tool_work_ledger.commit(
                     call.tool_call_id,
-                    budget_cost,
+                    work_cost,
                 )
             return _error_result(
                 call,
@@ -407,17 +500,17 @@ async def _execute_one_tool(
                     "status": exc.status,
                     "stop_reason": exc.stop_reason or "",
                 },
-                token_used=budget_cost,
+                work_units_used=work_cost,
                 retry_count=attempt,
             )
         except Exception as exc:
             if attempt < spec.max_retries:
                 attempt += 1
                 continue
-            if reserved_budget:
-                await RunRegistry.get(run_config.run_id).budget_ledger.commit(
+            if reserved_work_budget:
+                await RunRegistry.get(run_config.run_id).tool_work_ledger.commit(
                     call.tool_call_id,
-                    budget_cost,
+                    work_cost,
                 )
             return _error_result(
                 call,
@@ -425,14 +518,14 @@ async def _execute_one_tool(
                 message=str(exc),
                 retryable=True,
                 started_at=started_at,
-                token_used=budget_cost,
+                work_units_used=work_cost,
                 retry_count=attempt,
             )
 
-    if reserved_budget:
-        await RunRegistry.get(run_config.run_id).budget_ledger.commit(
+    if reserved_work_budget:
+        await RunRegistry.get(run_config.run_id).tool_work_ledger.commit(
             call.tool_call_id,
-            budget_cost,
+            work_cost,
         )
     failure = _structured_output_failure(output)
     if failure is not None:
@@ -443,7 +536,7 @@ async def _execute_one_tool(
             retryable=False,
             started_at=started_at,
             detail=failure["detail"],
-            token_used=budget_cost,
+            work_units_used=work_cost,
             retry_count=attempt,
         )
     return ToolResult(
@@ -452,7 +545,7 @@ async def _execute_one_tool(
         status="ok",
         output=output,
         latency_ms=(time.perf_counter() - started_at) * 1000,
-        token_used=budget_cost,
+        work_units_used=work_cost,
         retry_count=attempt,
     )
 
@@ -488,7 +581,7 @@ def _error_result(
     retryable: bool,
     started_at: float,
     detail: dict[str, Any] | None = None,
-    token_used: int = 0,
+    work_units_used: int = 0,
     retry_count: int = 0,
 ) -> ToolResult:
     return ToolResult(
@@ -497,7 +590,7 @@ def _error_result(
         status="error",
         error=ToolError(code=code, message=message, retryable=retryable, detail=detail or {}),
         latency_ms=(time.perf_counter() - started_at) * 1000,
-        token_used=token_used,
+        work_units_used=work_units_used,
         retry_count=retry_count,
     )
 

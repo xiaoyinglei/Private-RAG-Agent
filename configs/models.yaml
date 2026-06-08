@@ -14,6 +14,7 @@ models:
     protocol: openai_compatible
     model: mlx-community/Qwen3-14B-4bit
     base_url: http://127.0.0.1:8080/v1
+    context_window_tokens: 32768
 
   qwen3_0_6b_4bit:
     capability: chat
@@ -21,6 +22,7 @@ models:
     protocol: openai_compatible
     model: mlx-community/Qwen3-0.6B-4bit
     base_url: http://127.0.0.1:8080/v1
+    context_window_tokens: 32768
 
   qwen3_8b_mlx_4bit:
     capability: chat
@@ -28,6 +30,7 @@ models:
     protocol: openai_compatible
     model: Qwen/Qwen3-8B-MLX-4bit
     base_url: http://127.0.0.1:8080/v1
+    context_window_tokens: 32768
 
   deepseek_chat:
     capability: chat
@@ -36,6 +39,7 @@ models:
     model: deepseek-chat
     base_url: https://api.deepseek.com/v1
     api_key_env: DEEPSEEK_API_KEY
+    context_window_tokens: 128000
 
   deepseek_reasoner:
     capability: chat
@@ -44,6 +48,7 @@ models:
     model: deepseek-reasoner
     base_url: https://api.deepseek.com/v1
     api_key_env: DEEPSEEK_API_KEY
+    context_window_tokens: 128000
 
   deepseek_v4_flash:
     capability: chat
@@ -52,6 +57,7 @@ models:
     model: deepseek-v4-flash
     base_url: https://api.deepseek.com/v1
     api_key_env: DEEPSEEK_API_KEY
+    context_window_tokens: 128000
 
   qwen3_embedding_8b_4bit_dwq:
     capability: embedding
@@ -86,6 +92,7 @@ models:
     model: mimo-v2-flash
     base_url: https://api.xiaomimimo.com/v1
     api_key_env: MIMO_API_KEY
+    context_window_tokens: 256000
 
 
 defaults:
@@ -97,7 +104,7 @@ generation:
   # 默认继承 defaults.primary_model。
   # 只有某个任务必须使用特殊模型时，才在该任务下单独写 model: <chat_model_alias>。
   summary:
-    max_tokens: 2048
+    max_tokens: 1024
     temperature: 0.3
 
   answer:
@@ -105,16 +112,54 @@ generation:
     temperature: 0.7
 
   planner:
-    max_tokens: 4096
+    max_tokens: 2048
     temperature: 0.3
 
   synthesize:
-    max_tokens: 8192
+    max_tokens: 4096
     temperature: 0.5
 
   factcheck:
     max_tokens: 2048
     temperature: 0.1
+
+llm_budgets:
+  goal_contract:
+    max_input_tokens: 3000
+    max_output_tokens: 512
+    safety_margin_tokens: 256
+  retrieval_hint:
+    max_input_tokens: 2000
+    max_output_tokens: 256
+    safety_margin_tokens: 512
+  tool_decision:
+    max_input_tokens: 12000
+    max_output_tokens: 2048
+    safety_margin_tokens: 512
+  retrieval_summary:
+    max_input_tokens: 6000
+    max_output_tokens: 1024
+    safety_margin_tokens: 512
+  llm_summarize:
+    max_input_tokens: 16000
+    max_output_tokens: 2048
+    safety_margin_tokens: 512
+  llm_compare:
+    max_input_tokens: 20000
+    max_output_tokens: 3072
+    safety_margin_tokens: 512
+  llm_generate:
+    max_input_tokens: 16000
+    max_output_tokens: 3072
+    safety_margin_tokens: 512
+  rag_answer:
+    max_input_tokens: 16000
+    max_output_tokens: 4096
+    safety_margin_tokens: 512
+  final_synthesis:
+    max_input_tokens: 24000
+    max_output_tokens: 4096
+    safety_margin_tokens: 512
 
 tokenizer:
   tokenizer_backend: auto

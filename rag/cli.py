@@ -141,6 +141,10 @@ def _runtime(
             overrides=overrides,
         ),
         generation_config=runtime_config.generation,
+        chat_context_window_tokens=(
+            runtime_config.primary_model.context_window_tokens or 32_768
+        ),
+        llm_stage_budgets=runtime_config.llm_stage_budgets,
     )
 
 

@@ -9,6 +9,7 @@ from typing_extensions import TypedDict
 
 from rag.agent.core.context import AgentRunConfig
 from rag.agent.core.human_input import HumanInputRequest, HumanInputResponse
+from rag.agent.core.output_models import ValidatedFinalOutput
 from rag.agent.memory.models import (
     ContextBudgetSnapshot,
     ExtractedFact,
@@ -72,9 +73,13 @@ class AgentState(TypedDict):
     extracted_facts: list[ExtractedFact]
     context_budget: ContextBudgetSnapshot | None
     final_answer: str | None
+    final_output: ValidatedFinalOutput | None
+    output_validation_errors: list[dict[str, object]]
     groundedness_flag: bool
     insufficient_evidence_flag: bool
     goal_spec: Any | None
+    goal_contract_hint: Any | None
+    goal_contract_debug: dict[str, object] | None
     goal_requirements: list[str]
     satisfied_requirements: list[str]
     open_gaps: list[Any]

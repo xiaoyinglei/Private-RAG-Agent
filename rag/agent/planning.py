@@ -193,12 +193,16 @@ class PlanTracker:
         open_gap_ids: frozenset[str],
     ) -> tuple[AgentPlan, list[PlanEvent]]:
         warnings: list[str] = []
+        plan_status = update.status
+        if plan_status == "complete":
+            warnings.append("llm_completion_ignored")
+            plan_status = plan.status
         if update.mode == "replace" and update.steps:
             if len(update.steps) > self.max_steps:
                 warnings.append("steps_truncated")
             steps = [
                 self._normalize_step(
-                    step,
+                    _without_llm_step_completion(step, warnings=warnings),
                     allowed_tool_names=allowed_tool_names,
                     open_gap_ids=open_gap_ids,
                     warnings=warnings,
@@ -217,7 +221,10 @@ class PlanTracker:
             ]
             steps = self._apply_patches(
                 steps,
-                update.step_updates,
+                [
+                    _without_llm_patch_completion(patch, warnings=warnings)
+                    for patch in update.step_updates
+                ],
                 allowed_tool_names=allowed_tool_names,
                 open_gap_ids=open_gap_ids,
                 warnings=warnings,
@@ -226,7 +233,7 @@ class PlanTracker:
         active_step_id = update.active_step_id or plan.active_step_id
         updated = AgentPlan(
             objective=update.objective or plan.objective,
-            status=update.status or plan.status,
+            status=plan_status or plan.status,
             revision=plan.revision + 1,
             active_step_id=active_step_id,
             steps=steps,
@@ -484,6 +491,28 @@ def _patch_step(step: PlanStep, patch: PlanStepPatch) -> PlanStep:
     if patch.notes is not None:
         update["notes"] = patch.notes
     return step.model_copy(update=update)
+
+
+def _without_llm_step_completion(
+    step: PlanStep,
+    *,
+    warnings: list[str],
+) -> PlanStep:
+    if step.status != "completed":
+        return step
+    warnings.append("llm_completion_ignored")
+    return step.model_copy(update={"status": "pending"})
+
+
+def _without_llm_patch_completion(
+    patch: PlanStepPatch,
+    *,
+    warnings: list[str],
+) -> PlanStepPatch:
+    if patch.status != "completed":
+        return patch
+    warnings.append("llm_completion_ignored")
+    return patch.model_copy(update={"status": None})
 
 
 def _active_or_next_step(plan: AgentPlan) -> PlanStep | None:

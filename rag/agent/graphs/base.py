@@ -7,6 +7,7 @@ from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
 
 from rag.agent.core.definition import AgentDefinition
+from rag.agent.core.output_finalizer import StructuredOutputFinalizer
 from rag.agent.graphs.nodes import goal_runtime as graph_goal_nodes
 from rag.agent.graphs.nodes.execute import run_tools_guarded
 from rag.agent.graphs.nodes.llm_decide import ToolDecisionProvider, decide_next
@@ -26,8 +27,10 @@ def build_agent_graph(
     definition: AgentDefinition,
     tool_registry: ToolRegistry,
     tool_decision_provider: ToolDecisionProvider | None = None,
+    goal_contract_provider: graph_goal_nodes.GoalContractProvider | None = None,
     retrieval_hint_provider: RetrievalHintProvider | None = None,
     synthesis_runner: SynthesisRunner | None = None,
+    output_finalizer: StructuredOutputFinalizer | None = None,
     checkpointer: BaseCheckpointSaver[str] | MemorySaver | None = None,
 ) -> Any:
     graph = StateGraph(AgentState)
@@ -40,6 +43,7 @@ def build_agent_graph(
     async def bound_init_goal(state: AgentState) -> dict[str, Any]:
         return await init_goal(
             state,
+            goal_contract_provider=goal_contract_provider,
             retrieval_hint_provider=effective_retrieval_hint_provider,
         )
 
@@ -55,6 +59,7 @@ def build_agent_graph(
             state,
             tool_registry=tool_registry,
             allowed_tools=allowed_tools,
+            definition=definition,
         )
 
     async def bound_decide_next(state: AgentState) -> dict[str, Any]:
@@ -68,6 +73,8 @@ def build_agent_graph(
         return await build_answer(
             state,
             synthesis_runner=effective_synthesis_runner,
+            definition=definition,
+            output_finalizer=output_finalizer,
         )
 
     graph.add_node("initialize_goal", bound_init_goal)

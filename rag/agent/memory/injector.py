@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol
 
 from pydantic import BaseModel
 
@@ -15,7 +15,7 @@ from rag.agent.memory.models import (
     InjectedContext,
     MemoryRef,
 )
-from rag.utils.text import text_unit_count
+from rag.assembly.tokenizer import TokenAccountingService, TokenizerContract
 
 if TYPE_CHECKING:
     from langchain_core.messages import BaseMessage
@@ -37,6 +37,18 @@ class _ContextSelection:
     warnings: list[str] = field(default_factory=list)
 
 
+class ContextTokenAccounting(Protocol):
+    def count(self, text: str) -> int: ...
+
+    def clip(
+        self,
+        text: str,
+        token_budget: int,
+        *,
+        add_ellipsis: bool = False,
+    ) -> str: ...
+
+
 class ContextBuilder:
     """Assemble bounded LLM context in the authority order defined by the spec."""
 
@@ -45,11 +57,13 @@ class ContextBuilder:
     _MAX_HEAD_ROWS_PER_LOCATOR = 8
     _MAX_ROW_CELLS = 12
     _SECTION_PRIORITY: dict[ContextSectionName, int] = {
+        "instructions": 0,
         "system": 0,
         "policy_hints": 0,
         "task": 1,
         "open_decisions": 2,
         "plan": 3,
+        "call_context": 4,
         "tool_results": 4,
         "evidence": 5,
         "memory": 6,
@@ -63,6 +77,7 @@ class ContextBuilder:
         *,
         max_context_tokens: int,
         max_section_chars: int = 4000,
+        token_accounting: ContextTokenAccounting | None = None,
     ) -> None:
         if max_context_tokens < 0:
             raise ValueError("max_context_tokens must be non-negative")
@@ -70,6 +85,17 @@ class ContextBuilder:
             raise ValueError("max_section_chars must be positive")
         self._max_context_tokens = max_context_tokens
         self._max_section_chars = max_section_chars
+        self._token_accounting = token_accounting or TokenAccountingService(
+            TokenizerContract(
+                embedding_model_name="agent-context",
+                tokenizer_model_name="agent-context",
+                chunking_tokenizer_model_name="agent-context",
+                tokenizer_backend="simple",
+                max_context_tokens=max(max_context_tokens, 1),
+                prompt_reserved_tokens=0,
+                local_files_only=True,
+            )
+        )
 
     def assemble(
         self,
@@ -78,14 +104,34 @@ class ContextBuilder:
         state: AgentState,
         policy_hints: Sequence[str] = (),
         recalled_memories: Sequence[str] = (),
+        included_sections: frozenset[ContextSectionName] | None = None,
+        required_sections: frozenset[ContextSectionName] | None = None,
     ) -> InjectedContext:
         candidates: list[ContextSection] = []
 
-        self._add_section(candidates, "system", definition.system_prompt, required=True)
-        self._add_section(candidates, "policy_hints", self._format_policy_hints(policy_hints))
-        self._add_section(candidates, "task", self._format_task(state.get("task", "")), required=True)
-        self._add_section(
-            candidates,
+        def add(
+            name: ContextSectionName,
+            content: str,
+            *,
+            required: bool = False,
+        ) -> None:
+            if included_sections is not None and name not in included_sections:
+                return
+            self._add_section(
+                candidates,
+                name,
+                content,
+                required=(
+                    required
+                    if required_sections is None
+                    else name in required_sections
+                ),
+            )
+
+        add("system", definition.system_prompt, required=True)
+        add("policy_hints", self._format_policy_hints(policy_hints))
+        add("task", self._format_task(state.get("task", "")), required=True)
+        add(
             "open_decisions",
             self._format_open_decisions(
                 pending_tool_calls=state.get("pending_tool_calls", []),
@@ -98,14 +144,12 @@ class ContextBuilder:
             ),
             required=True,
         )
-        self._add_section(
-            candidates,
+        add(
             "plan",
             self._format_plan(state.get("agent_plan")),
             required=True,
         )
-        self._add_section(
-            candidates,
+        add(
             "evidence",
             self._format_evidence(
                 state.get("evidence", []),
@@ -113,34 +157,29 @@ class ContextBuilder:
             ),
             required=True,
         )
-        self._add_section(
-            candidates,
+        add(
             "memory",
             self._format_memory_refs(
                 state.get("memory_refs", []),
                 state.get("memory_warnings", []),
             ),
         )
-        self._add_section(
-            candidates,
+        add(
             "working_memory",
             self._format_working_memory(
                 state.get("working_summary"),
                 state.get("extracted_facts", []),
             ),
         )
-        self._add_section(
-            candidates,
+        add(
             "historical_hints",
             self._format_historical_hints(recalled_memories),
         )
-        self._add_section(
-            candidates,
+        add(
             "message_tail",
             self._format_message_tail(state.get("messages", [])),
         )
-        self._add_section(
-            candidates,
+        add(
             "tool_results",
             self._format_tool_observations(state),
             required=True,
@@ -166,12 +205,12 @@ class ContextBuilder:
         normalized = content.strip()
         if not normalized:
             return
-        bounded = self._truncate(normalized)
+        bounded = normalized if required else self._truncate(normalized)
         sections.append(
             ContextSection(
                 name=name,
                 content=bounded,
-                token_count=text_unit_count(bounded),
+                token_count=self._section_token_count(name, bounded),
                 required=required,
             )
         )
@@ -189,45 +228,47 @@ class ContextBuilder:
         required_truncated: list[ContextSectionName] = []
         dropped_reasons: dict[str, str] = {}
         warnings: list[str] = []
-        used = 0
         overflow = False
         degraded = False
         indexed = list(enumerate(candidates))
-        for _, section in sorted(
+        ordered = sorted(
             indexed,
-            key=lambda item: (self._SECTION_PRIORITY[item[1].name], item[0]),
-        ):
-            projected = used + section.token_count
-            if projected <= self._max_context_tokens:
+            key=lambda item: (
+                0 if item[1].required else 1,
+                self._SECTION_PRIORITY[item[1].name],
+                item[0],
+            ),
+        )
+        for _, section in ordered:
+            candidate_selection = {
+                **selected_by_name,
+                section.name: section,
+            }
+            if self._selected_token_count(candidates, candidate_selection) <= (
+                self._max_context_tokens
+            ):
                 selected_by_name[section.name] = section
-                used = projected
                 continue
 
-            compacted = self._compact_section(section)
-            if compacted is not None and used + compacted.token_count <= self._max_context_tokens:
-                selected_by_name[section.name] = compacted
-                used += compacted.token_count
-                summarized.append(section.name)
-                degraded = True
-                if section.required:
-                    required_truncated.append(section.name)
-                continue
             if section.required:
-                remaining = self._max_context_tokens - used
-                forced = self._force_fit_section(section, remaining)
                 overflow = True
                 degraded = True
                 warnings.append("context_overflow")
                 required_truncated.append(section.name)
-                if forced is not None:
-                    selected_by_name[section.name] = forced
-                    used += forced.token_count
-                    summarized.append(section.name)
-                else:
-                    dropped.append(section.name)
-                    dropped_reasons[section.name] = "required_section_overflow"
+                dropped.append(section.name)
+                dropped_reasons[section.name] = "required_section_overflow"
                 continue
 
+            clipped = self._clip_optional_section(
+                candidates=candidates,
+                selected_by_name=selected_by_name,
+                section=section,
+            )
+            if clipped is not None:
+                selected_by_name[section.name] = clipped
+                summarized.append(section.name)
+                degraded = True
+                continue
             dropped.append(section.name)
             dropped_reasons[section.name] = "budget_priority"
             degraded = True
@@ -260,7 +301,9 @@ class ContextBuilder:
         summarized = list(dict.fromkeys([*summarized, *selection.summarized_sections]))
         return ContextBudgetSnapshot(
             max_context_tokens=self._max_context_tokens,
-            used_context_tokens=sum(by_name.values()),
+            used_context_tokens=self._token_accounting.count(
+                self._render_sections(sections)
+            ),
             system_tokens=by_name.get("system", 0) + by_name.get("policy_hints", 0),
             planning_tokens=by_name.get("plan", 0),
             evidence_tokens=by_name.get("evidence", 0),
@@ -283,68 +326,71 @@ class ContextBuilder:
             warnings=list(dict.fromkeys([*state.get("memory_warnings", []), *selection.warnings])),
         )
 
-    def _compact_section(self, section: ContextSection) -> ContextSection | None:
-        content = self._compact_section_content(section)
-        if not content:
-            return None
-        return ContextSection(
-            name=section.name,
-            content=content,
-            token_count=text_unit_count(content),
-            required=section.required,
-        )
-
-    def _force_fit_section(
+    def _clip_optional_section(
         self,
+        *,
+        candidates: list[ContextSection],
+        selected_by_name: dict[ContextSectionName, ContextSection],
         section: ContextSection,
-        remaining_tokens: int,
     ) -> ContextSection | None:
-        if remaining_tokens <= 0:
+        if not section.content:
             return None
-        candidates = [
-            f"{section.name}: compact",
-            str(section.name),
-        ]
-        for content in candidates:
-            token_count = text_unit_count(content)
-            if token_count <= remaining_tokens:
-                return ContextSection(
-                    name=section.name,
-                    content=content,
-                    token_count=token_count,
-                    required=section.required,
-                )
-        return None
+        low = 1
+        high = self._token_accounting.count(section.content)
+        best: ContextSection | None = None
+        while low <= high:
+            midpoint = (low + high) // 2
+            content = self._token_accounting.clip(
+                section.content,
+                midpoint,
+                add_ellipsis=True,
+            ).strip()
+            if not content:
+                high = midpoint - 1
+                continue
+            clipped = ContextSection(
+                name=section.name,
+                content=content,
+                token_count=self._section_token_count(section.name, content),
+                required=False,
+            )
+            candidate_selection = {
+                **selected_by_name,
+                section.name: clipped,
+            }
+            if self._selected_token_count(candidates, candidate_selection) <= (
+                self._max_context_tokens
+            ):
+                best = clipped
+                low = midpoint + 1
+            else:
+                high = midpoint - 1
+        return best
 
-    def _compact_section_content(self, section: ContextSection) -> str:
-        if section.name == "system":
-            return self._small_snapshot("system", section.content)
-        if section.name == "task":
-            return self._small_snapshot("task", section.content)
-        if section.name == "open_decisions":
-            return self._small_snapshot("open_decisions", section.content)
-        if section.name == "plan":
-            return self._small_snapshot("plan", section.content)
-        if section.name == "evidence":
-            return self._small_snapshot("evidence", section.content)
-        if section.name == "tool_results":
-            return self._small_snapshot("tool_results", section.content)
-        if section.name == "memory":
-            return self._small_snapshot("memory", section.content)
-        if section.name == "working_memory":
-            return self._small_snapshot("working_memory", section.content)
-        if section.name == "message_tail":
-            return self._small_snapshot("message_tail", section.content)
-        if section.name == "historical_hints":
-            return self._small_snapshot("historical_hints", section.content)
-        if section.name == "policy_hints":
-            return self._small_snapshot("policy_hints", section.content)
-        return self._small_snapshot(str(section.name), section.content)
+    def _selected_token_count(
+        self,
+        candidates: Sequence[ContextSection],
+        selected_by_name: dict[ContextSectionName, ContextSection],
+    ) -> int:
+        selected = [
+            selected_by_name[section.name]
+            for section in candidates
+            if section.name in selected_by_name
+        ]
+        return self._token_accounting.count(self._render_sections(selected))
+
+    def _section_token_count(
+        self,
+        name: ContextSectionName,
+        content: str,
+    ) -> int:
+        return self._token_accounting.count(f"[{name}]\n{content}")
 
     @staticmethod
-    def _small_snapshot(label: str, content: str) -> str:
-        digest = __import__("hashlib").sha256(content.encode("utf-8")).hexdigest()[:12]
-        return f"{label}: compact chars={len(content)} sha256={digest}"
+    def _render_sections(sections: Sequence[ContextSection]) -> str:
+        return "\n\n".join(
+            f"[{section.name}]\n{section.content}" for section in sections
+        )
 
     @staticmethod
     def _format_policy_hints(policy_hints: Sequence[str]) -> str:

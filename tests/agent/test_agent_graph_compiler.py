@@ -92,9 +92,10 @@ def test_compiler_constructs_only_model_driven_runtime_providers(
     def fake_create_default_providers(
         registry: object,
         selection: object,
+        definition: AgentDefinition,
     ) -> tuple[_HintProvider, _ToolDecisionProvider]:
         nonlocal calls
-        del registry, selection
+        del registry, selection, definition
         calls += 1
         return _HintProvider(), _ToolDecisionProvider()
 
@@ -112,6 +113,87 @@ def test_compiler_constructs_only_model_driven_runtime_providers(
     assert calls == 1
 
 
+def test_compiler_constructs_output_finalizer_for_output_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    finalizer = object()
+    captured: dict[str, object] = {}
+
+    def fake_create_output_finalizer(registry: object) -> object:
+        captured["registry"] = registry
+        return finalizer
+
+    def fake_build_agent_graph(**kwargs: object) -> object:
+        captured.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(
+        "rag.agent.core.compiler.create_model_structured_output_finalizer",
+        fake_create_output_finalizer,
+    )
+    monkeypatch.setattr(
+        "rag.agent.core.compiler.build_agent_graph",
+        fake_build_agent_graph,
+    )
+    model_registry = object()
+    compiler = GraphCompiler(
+        tool_registry=_registry(),
+        model_registry=model_registry,  # type: ignore[arg-type]
+    )
+    definition = AgentDefinition(
+        agent_type="research",
+        description="Research agent",
+        system_prompt="Use grounded evidence.",
+        allowed_tools=["vector_search"],
+        output_model=SearchOutput,
+    )
+
+    compiler.compile(definition)
+
+    assert captured["registry"] is model_registry
+    assert captured["output_finalizer"] is finalizer
+
+
+def test_compiler_preserves_explicit_output_finalizer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+    finalizer = object()
+
+    def fail_create_output_finalizer(registry: object) -> object:
+        del registry
+        raise AssertionError("explicit output finalizer must be preserved")
+
+    def fake_build_agent_graph(**kwargs: object) -> object:
+        captured.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(
+        "rag.agent.core.compiler.create_model_structured_output_finalizer",
+        fail_create_output_finalizer,
+    )
+    monkeypatch.setattr(
+        "rag.agent.core.compiler.build_agent_graph",
+        fake_build_agent_graph,
+    )
+    compiler = GraphCompiler(
+        tool_registry=_registry(),
+        output_finalizer=finalizer,  # type: ignore[arg-type]
+        model_registry=object(),  # type: ignore[arg-type]
+    )
+    definition = AgentDefinition(
+        agent_type="research",
+        description="Research agent",
+        system_prompt="Use grounded evidence.",
+        allowed_tools=["vector_search"],
+        output_model=SearchOutput,
+    )
+
+    compiler.compile(definition)
+
+    assert captured["output_finalizer"] is finalizer
+
+
 @pytest.mark.anyio
 async def test_model_cannot_finalize_while_required_goal_gaps_are_open(
     monkeypatch: pytest.MonkeyPatch,
@@ -119,8 +201,9 @@ async def test_model_cannot_finalize_while_required_goal_gaps_are_open(
     def fake_create_default_providers(
         registry: object,
         selection: object,
+        definition: AgentDefinition,
     ) -> tuple[_RaisingHintProvider, _ToolDecisionProvider]:
-        del registry, selection
+        del registry, selection, definition
         return _RaisingHintProvider(), _ToolDecisionProvider()
 
     monkeypatch.setattr(

@@ -357,7 +357,7 @@ def build_agent_tool_spec(agent_definition: AgentDefinition) -> AgentToolSpec:
         ),
         timeout_seconds=120.0,
         max_retries=0,
-        token_budget_cost=agent_definition.estimated_token_budget,
+        work_budget_cost=2_000,
     )
 
     return AgentToolSpec(

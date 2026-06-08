@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import Any
 
 from rag.agent.tools.rag_tools import SearchInput, SearchOutput
+from rag.agent.tools.registry import ToolExecutionContext
 from rag.retrieval.models import QueryOptions
 from rag.schema.runtime import AccessPolicy
 
@@ -25,15 +26,18 @@ class AsyncRAGToolRunner:
 
     runtime: Any | None = None
     retrieval_service: Any | None = None
-    access_policy: AccessPolicy | None = None
     max_context_tokens: int = 4096
     allow_sync_fallback: bool = True
 
     # ── Public API ──
 
-    async def retrieve_evidence(self, payload: SearchInput) -> SearchOutput:
+    async def retrieve_evidence(
+        self,
+        payload: SearchInput,
+        execution_context: ToolExecutionContext,
+    ) -> SearchOutput:
         """执行 RAG 检索，返回 SearchOutput。"""
-        ap = self._resolve_access_policy(payload)
+        access_policy = execution_context.run_config.access_policy
 
         # 能力不存在 → fallback，不能 fail loud
         has_async = self.retrieval_service is not None and callable(
@@ -42,17 +46,17 @@ class AsyncRAGToolRunner:
 
         # 优先级 1: aretrieve_payload()
         if has_async:
-            return await self._via_aretrieve_payload(payload, ap)
+            return await self._via_aretrieve_payload(payload, access_policy)
 
         # 优先级 2: runtime.aquery()
         if self.runtime is not None and callable(getattr(self.runtime, "aquery", None)):
-            return await self._via_aquery(payload, ap)
+            return await self._via_aquery(payload, access_policy)
 
         # 优先级 3: to_thread(runtime.query)
         if self.allow_sync_fallback and self.runtime is not None and callable(
             getattr(self.runtime, "query", None)
         ):
-            return await self._via_to_thread(payload)
+            return await self._via_to_thread(payload, access_policy)
 
         raise RAGToolRunnerNotConfiguredError(
             "RAG tool runner is not configured. "
@@ -107,8 +111,12 @@ class AsyncRAGToolRunner:
             return SearchOutput(items=items)
         return SearchOutput(items=[])
 
-    async def _via_to_thread(self, payload: SearchInput) -> SearchOutput:
-        query_options = self._query_options(payload, access_policy=self._resolve_access_policy(payload))
+    async def _via_to_thread(
+        self,
+        payload: SearchInput,
+        access_policy: AccessPolicy,
+    ) -> SearchOutput:
+        query_options = self._query_options(payload, access_policy=access_policy)
         runtime = self.runtime
         if runtime is None:
             raise RAGToolRunnerNotConfiguredError("runtime is not configured")
@@ -129,16 +137,6 @@ class AsyncRAGToolRunner:
                 if text:
                     items.append({"text": text})
         return SearchOutput(items=items)
-
-    def _resolve_access_policy(self, payload: SearchInput) -> AccessPolicy:
-        if payload.access_policy is not None:
-            return payload.access_policy
-        if self.access_policy is not None:
-            return self.access_policy
-        runtime_policy = getattr(self.runtime, "access_policy", None) if self.runtime is not None else None
-        if runtime_policy is not None:
-            return cast(AccessPolicy, runtime_policy)
-        return AccessPolicy.default()
 
     def _query_options(self, payload: SearchInput, *, access_policy: AccessPolicy) -> QueryOptions:
         retrieval_signals = getattr(payload, "retrieval_signals", None)
