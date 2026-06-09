@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import StrEnum
 
+from rag.schema.llm import DEFAULT_LLM_STAGE_BUDGETS, LLMCallStage, LLMStageBudget
+
 
 class ModelCapability(StrEnum):
     CHAT = "chat"
@@ -19,6 +21,7 @@ class ModelSpec:
     base_url: str | None = None
     api_key_env: str | None = None
     embedding_space: str | None = None
+    context_window_tokens: int | None = None
 
     @property
     def requires_api_key(self) -> bool:
@@ -70,3 +73,9 @@ class ModelRuntimeConfig:
     reranker_model: ModelSpec | None = None
     generation: GenerationConfig = field(default_factory=GenerationConfig)
     tokenizer: TokenizerModelConfig = field(default_factory=TokenizerModelConfig)
+    llm_stage_budgets: dict[LLMCallStage, LLMStageBudget] = field(
+        default_factory=lambda: {
+            stage: budget.model_copy()
+            for stage, budget in DEFAULT_LLM_STAGE_BUDGETS.items()
+        }
+    )

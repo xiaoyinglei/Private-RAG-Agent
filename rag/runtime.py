@@ -41,6 +41,7 @@ from rag.ingest.retrievalsummarizer import RetrievalSummarizer, RetrievalSummary
 from rag.ingest.section_refiner import SectionRefiner
 from rag.ingest.table_executor import TableExecutor, _AssetMetadataRepo, _RangeReadableObjectStore
 from rag.providers.generation import AnswerGenerationService, AnswerGenerator, GeneratorBinding
+from rag.providers.llm_gateway import LLMGateway
 from rag.query_pipeline import _QueryPipeline
 from rag.retrieval.authorization_service import AuthorizationService
 from rag.retrieval.context import (
@@ -66,6 +67,7 @@ from rag.retrieval.reranker import ModelBackedRerankService
 from rag.retrieval.synthesis_service import SynthesisService
 from rag.schema.core import Document, ProcessingStateRecord, Source, SourceType, StorageTier
 from rag.schema.graph import GraphEdge, GraphNode
+from rag.schema.llm import DEFAULT_LLM_STAGE_BUDGETS, LLMCallStage, LLMStageBudget
 from rag.schema.runtime import CacheEntry, DataContractMetadataRepo, ProviderAttempt, VisualDescriptionRepo
 from rag.storage import StorageBundle, StorageConfig
 from rag.storage.data_contract_service import DataContractService
@@ -153,6 +155,32 @@ class _ChatGeneratorAdapter:
             return generate_structured(prompt=prompt, schema=schema, **kwargs)
         return schema.model_validate_json(self.generate_text(prompt=prompt))
 
+    def generate_text_with_usage(self, *, prompt: str, **kwargs: Any) -> object:
+        backend = getattr(self._binding, "backend", None)
+        method = getattr(backend, "generate_text_with_usage", None)
+        if callable(method):
+            return method(prompt=prompt, **kwargs)
+        from rag.schema.llm import LLMProviderResult
+
+        return LLMProviderResult(value=self.generate_text(prompt=prompt, **kwargs))
+
+    def generate_structured_with_usage(
+        self,
+        *,
+        prompt: str,
+        schema: type[Any],
+        **kwargs: Any,
+    ) -> object:
+        backend = getattr(self._binding, "backend", None)
+        method = getattr(backend, "generate_structured_with_usage", None)
+        if callable(method):
+            return method(prompt=prompt, schema=schema, **kwargs)
+        from rag.schema.llm import LLMProviderResult
+
+        return LLMProviderResult(
+            value=self.generate_structured(prompt=prompt, schema=schema, **kwargs)
+        )
+
 
 class _LazySummaryGeneratorAdapter:
     def __init__(self, *, binding: object | None) -> None:
@@ -173,16 +201,33 @@ class _LazySummaryGeneratorAdapter:
         return self._adapter.generate_structured(prompt=prompt, schema=schema, **kwargs)
 
 
-def _generator_bindings_from_chat_bindings(chat_bindings: Sequence[object]) -> tuple[GeneratorBinding, ...]:
+def _generator_bindings_from_chat_bindings(
+    chat_bindings: Sequence[object],
+    *,
+    token_accounting: object | None = None,
+    model_context_tokens: int = 32_768,
+    stage_budgets: dict[LLMCallStage, LLMStageBudget] | None = None,
+) -> tuple[GeneratorBinding, ...]:
     bindings: list[GeneratorBinding] = []
     for binding in chat_bindings:
         location = str(getattr(binding, "location", "") or "local")
+        adapter = _ChatGeneratorAdapter(binding)
         bindings.append(
             GeneratorBinding(
-                backend=_ChatGeneratorAdapter(binding),
+                backend=adapter,
                 provider_name=str(getattr(binding, "provider_name", "chat")),
                 model_name=getattr(binding, "model_name", None),
                 location="cloud" if location == "cloud" else "local",
+                gateway=(
+                    None
+                    if token_accounting is None
+                    else LLMGateway(
+                        generator=adapter,
+                        token_accounting=cast(Any, token_accounting),
+                        model_context_tokens=model_context_tokens,
+                        stage_budgets=stage_budgets,
+                    )
+                ),
             )
         )
     return tuple(bindings)
@@ -247,6 +292,13 @@ class RAGRuntime:
     telemetry_service: TelemetryService | None = None
     vlm_repo: VisualDescriptionRepo | None = None
     generation_config: object | None = None  # GenerationConfig from rag.models.config
+    chat_context_window_tokens: int = 32_768
+    llm_stage_budgets: dict[LLMCallStage, LLMStageBudget] = field(
+        default_factory=lambda: {
+            stage: budget.model_copy()
+            for stage, budget in DEFAULT_LLM_STAGE_BUDGETS.items()
+        }
+    )
     capability_bundle: CapabilityBundle = field(init=False, repr=False)
     token_contract: TokenizerContract = field(init=False, repr=False)
     token_accounting: TokenAccountingService = field(init=False, repr=False)
@@ -276,6 +328,8 @@ class RAGRuntime:
         telemetry_service: TelemetryService | None = None,
         vlm_repo: VisualDescriptionRepo | None = None,
         generation_config: object | None = None,
+        chat_context_window_tokens: int = 32_768,
+        llm_stage_budgets: dict[LLMCallStage, LLMStageBudget] | None = None,
     ) -> RAGRuntime:
         return cls(
             storage=storage,
@@ -284,6 +338,14 @@ class RAGRuntime:
             telemetry_service=telemetry_service,
             vlm_repo=vlm_repo,
             generation_config=generation_config,
+            chat_context_window_tokens=chat_context_window_tokens,
+            llm_stage_budgets=(
+                llm_stage_budgets
+                or {
+                    stage: budget.model_copy()
+                    for stage, budget in DEFAULT_LLM_STAGE_BUDGETS.items()
+                }
+            ),
         )
 
     @property
@@ -321,6 +383,9 @@ class RAGRuntime:
                 llm_client=_ChatGeneratorAdapter(binding),
                 token_accounting=self.token_accounting,
                 config=self._summary_config(strict_generation=strict_generation),
+                gateway=self._gateway_for_chat_binding(
+                    _ChatGeneratorAdapter(binding)
+                ),
             )
         )
 
@@ -338,6 +403,9 @@ class RAGRuntime:
                 config=self._summary_config(
                     raw_text_mode=raw_text_mode,
                     strict_generation=strict_generation,
+                ),
+                gateway=self._gateway_for_chat_binding(
+                    _LazySummaryGeneratorAdapter(binding=chat_binding)
                 ),
             )
         )
@@ -684,6 +752,9 @@ class RAGRuntime:
                 llm_client=_LazySummaryGeneratorAdapter(binding=chat_binding),
                 token_accounting=self.token_accounting,
                 config=self._summary_config(),
+                gateway=self._gateway_for_chat_binding(
+                    _LazySummaryGeneratorAdapter(binding=chat_binding)
+                ),
             ),
             embedder=embedding_binding,
             metadata_repo=cast(MetadataWriterRepo, self.stores.metadata_repo),
@@ -720,7 +791,12 @@ class RAGRuntime:
             ),
             answer_generator=AnswerGenerator(
                 answer_generation_service=answer_generation_service,
-                generators=_generator_bindings_from_chat_bindings(self.capability_bundle.chat_bindings),
+                generators=_generator_bindings_from_chat_bindings(
+                    self.capability_bundle.chat_bindings,
+                    token_accounting=self.token_accounting,
+                    model_context_tokens=self.chat_context_window_tokens,
+                    stage_budgets=self.llm_stage_budgets,
+                ),
             ),
             authorization_service=AuthorizationService(resolver=self.stores.metadata_repo),
             table_executor=TableExecutor(
@@ -729,6 +805,14 @@ class RAGRuntime:
             ),
             rate_limiter=query_rate_limiter,
             llm_circuit_breaker=llm_breaker,
+        )
+
+    def _gateway_for_chat_binding(self, generator: object) -> LLMGateway:
+        return LLMGateway(
+            generator=generator,
+            token_accounting=self.token_accounting,
+            model_context_tokens=self.chat_context_window_tokens,
+            stage_budgets=self.llm_stage_budgets,
         )
 
     def _build_data_contract_service(self) -> DataContractService | None:

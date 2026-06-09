@@ -5,13 +5,31 @@ from langchain_core.messages import HumanMessage
 from rag.agent.core.context import AgentRunConfig
 from rag.agent.core.definition import AgentDefinition
 from rag.agent.goal_runtime import AnswerCandidate, ContextUnit, EvidenceRef, GoalSpec, StructuredObservation
-from rag.agent.memory.injector import ContextInjector
-from rag.agent.memory.models import ExtractedFact, WorkingSummary
+from rag.agent.memory.injector import ContextBuilder
+from rag.agent.memory.models import ExternalizedToolOutput, ExtractedFact, MemoryRef, WorkingSummary
+from rag.agent.planning import AgentPlan, PlanStep
 from rag.agent.state import AgentState
 from rag.agent.tools.llm_tools import LLMTextOutput
 from rag.agent.tools.spec import ToolError, ToolResult
 from rag.schema.query import AnswerCitation, EvidenceItem
 from rag.schema.runtime import AccessPolicy
+
+
+class _CharacterTokenAccounting:
+    def count(self, text: str) -> int:
+        return len(text)
+
+    def clip(
+        self,
+        text: str,
+        token_budget: int,
+        *,
+        add_ellipsis: bool = False,
+    ) -> str:
+        clipped = text[: max(token_budget, 0)]
+        if add_ellipsis and len(clipped) < len(text) and token_budget >= 4:
+            return clipped[: token_budget - 4].rstrip() + " ..."
+        return clipped
 
 
 def _definition() -> AgentDefinition:
@@ -97,11 +115,14 @@ def _state() -> AgentState:
         "no_progress_count": 0,
         "satisfaction_report": None,
         "controller_next": None,
+        "memory_refs": [],
+        "memory_budget": None,
+        "memory_warnings": [],
     }
 
 
 def test_context_sections_follow_spec_order() -> None:
-    context = ContextInjector(max_context_tokens=1000).assemble(
+    context = ContextBuilder(max_context_tokens=1000).assemble(
         definition=_definition(),
         state=_state(),
     )
@@ -114,7 +135,7 @@ def test_context_sections_follow_spec_order() -> None:
 
 
 def test_historical_hints_are_marked_non_authoritative() -> None:
-    context = ContextInjector(max_context_tokens=1000).assemble(
+    context = ContextBuilder(max_context_tokens=1000).assemble(
         definition=_definition(),
         state=_state(),
         recalled_memories=["Old project preference"],
@@ -129,7 +150,7 @@ def test_budget_keeps_evidence_before_tail() -> None:
     state = _state()
     state["messages"] = [HumanMessage(content="tail " * 200, id="h-tail")]
 
-    context = ContextInjector(max_context_tokens=18).assemble(
+    context = ContextBuilder(max_context_tokens=18).assemble(
         definition=_definition(),
         state=state,
     )
@@ -137,13 +158,89 @@ def test_budget_keeps_evidence_before_tail() -> None:
     names = [section.name for section in context.sections]
     assert "system" in names
     assert "task" in names
-    assert "evidence" in names
+    assert "evidence" not in names
     assert "message_tail" not in names
-    assert context.context_budget.evidence_tokens > 0
+    assert context.context_budget.overflow is True
+    assert "evidence" in context.context_budget.required_truncated
+    assert "message_tail" in context.context_budget.dropped_sections
+
+
+def test_budget_priority_keeps_open_decisions_before_evidence_refs_and_tail() -> None:
+    state = _state()
+    state["messages"] = [HumanMessage(content="tail " * 200, id="h-tail")]
+    state["open_gaps"] = ["evidence"]
+    state["memory_refs"] = [
+            MemoryRef(
+                ref_id=f"mem_{index}",
+                path=f".agent_memory/records/mem_{index}.json",
+                summary="large run output",
+                source_tool_call_id=f"tc-{index}",
+                source_tool_name="run_python",
+                size_bytes=5000,
+            )
+            for index in range(8)
+        ]
+
+    context = ContextBuilder(max_context_tokens=350).assemble(
+        definition=_definition(),
+        state=state,
+    )
+
+    names = [section.name for section in context.sections]
+    assert "open_decisions" in names
+    assert "memory" in names
+    if "message_tail" in names:
+        assert "message_tail" in context.context_budget.summarized_sections
+        assert "tail tail tail" in context.section("message_tail").content
+        assert "sha256=" not in context.section("message_tail").content
+    else:
+        assert "message_tail" in context.context_budget.dropped_sections
+    assert names.index("open_decisions") < names.index("memory")
+    assert context.context_budget.memory_ref_count == 8
+
+
+def test_context_injects_memory_summaries_and_refs_not_raw_payload() -> None:
+    state = _state()
+    state["structured_observations"] = []
+    state["tool_results"] = [
+        ToolResult(
+            tool_call_id="tc-big",
+            tool_name="run_python",
+            status="ok",
+            output=ExternalizedToolOutput(
+                original_output_model="rag.agent.primitive_ops.RunPythonOutput",
+                summary="run_python ok=True exit_code=0 stdout_preview=total=42",
+                ref=MemoryRef(
+                    ref_id="mem_big",
+                    path=".agent_memory/records/mem_big.json",
+                    summary="run_python ok=True exit_code=0 stdout_preview=total=42",
+                    source_tool_call_id="tc-big",
+                    source_tool_name="run_python",
+                    size_bytes=9999,
+                ),
+            ),
+            latency_ms=0,
+        )
+    ]
+    state["memory_refs"] = [state["tool_results"][0].output.ref]  # type: ignore[union-attr]
+
+    context = ContextBuilder(max_context_tokens=1000).assemble(
+        definition=_definition(),
+        state=state,
+    )
+
+    memory_context = context.section("memory").content
+    tool_context = context.section("tool_results").content
+    assert "mem_big" in memory_context
+    assert "total=42" in memory_context
+    assert ".agent_memory/records/mem_big.json" not in memory_context
+    assert "raw stdout" not in memory_context
+    assert "ExternalizedToolOutput" not in tool_context
+    assert "mem_big" in tool_context
 
 
 def test_context_budget_snapshot_counts_sections() -> None:
-    context = ContextInjector(max_context_tokens=1000).assemble(
+    context = ContextBuilder(max_context_tokens=1000).assemble(
         definition=_definition(),
         state=_state(),
     )
@@ -155,6 +252,129 @@ def test_context_budget_snapshot_counts_sections() -> None:
     assert budget.working_memory_tokens > 0
     assert budget.message_tail_tokens > 0
     assert budget.tool_result_tokens > 0
+
+
+def test_context_builder_uses_injected_model_token_accounting() -> None:
+    accounting = _CharacterTokenAccounting()
+    state = _state()
+    state["evidence"] = []
+    state["citations"] = []
+    state["tool_results"] = []
+    state["messages"] = []
+
+    context = ContextBuilder(
+        max_context_tokens=500,
+        token_accounting=accounting,
+    ).assemble(
+        definition=_definition(),
+        state=state,
+    )
+
+    assert context.context_budget.used_context_tokens == accounting.count(
+        context.as_text()
+    )
+    assert context.section("system").token_count == accounting.count(
+        "[system]\nSystem prompt"
+    )
+
+
+def test_required_section_overflow_never_replaces_real_content_with_hash() -> None:
+    state = _state()
+    state["evidence"] = []
+    state["citations"] = []
+    state["tool_results"] = []
+    state["messages"] = []
+    definition = AgentDefinition(
+        agent_type="research",
+        description="Research agent",
+        system_prompt="SYSTEM_REAL_CONTENT",
+        allowed_tools=[],
+    )
+
+    context = ContextBuilder(
+        max_context_tokens=20,
+        token_accounting=_CharacterTokenAccounting(),
+        max_section_chars=10_000,
+    ).assemble(
+        definition=definition,
+        state=state,
+    )
+
+    assert context.context_budget.overflow is True
+    assert "system" in context.context_budget.required_truncated
+    assert all("sha256=" not in section.content for section in context.sections)
+    assert all("system: compact" not in section.content for section in context.sections)
+    if "system" in [section.name for section in context.sections]:
+        assert context.section("system").content == "SYSTEM_REAL_CONTENT"
+
+
+def test_optional_section_is_real_text_clipped_or_dropped() -> None:
+    state = _state()
+    state["evidence"] = []
+    state["citations"] = []
+    state["tool_results"] = []
+    state["messages"] = [HumanMessage(content="OPTIONAL_REAL_TEXT " * 30, id="tail")]
+
+    context = ContextBuilder(
+        max_context_tokens=120,
+        token_accounting=_CharacterTokenAccounting(),
+        max_section_chars=10_000,
+    ).assemble(
+        definition=_definition(),
+        state=state,
+    )
+
+    names = [section.name for section in context.sections]
+    if "message_tail" in names:
+        content = context.section("message_tail").content
+        assert "OPTIONAL_REAL_TEXT" in content
+        assert "sha256=" not in content
+        assert "message_tail: compact" not in content
+    else:
+        assert "message_tail" in context.context_budget.dropped_sections
+
+
+def test_context_hard_budget_compacts_required_sections_without_overrun() -> None:
+    state = _state()
+    state["task"] = "TASK_RAW " * 400
+    state["open_gaps"] = ["answer", "evidence"]
+    definition = AgentDefinition(
+        agent_type="research",
+        description="Research agent",
+        system_prompt="SYSTEM_RAW " * 400,
+        allowed_tools=["search"],
+    )
+
+    context = ContextBuilder(max_context_tokens=40, max_section_chars=10_000).assemble(
+        definition=definition,
+        state=state,
+    )
+
+    assert sum(section.token_count for section in context.sections) <= 40
+    assert context.context_budget.used_context_tokens <= 40
+    assert context.context_budget.degraded is True
+    assert "system" in context.context_budget.required_truncated
+    assert "task" in context.context_budget.required_truncated
+
+
+def test_context_overflow_marks_budget_when_minimal_snapshot_cannot_fit() -> None:
+    state = _state()
+    state["task"] = "irreducible task"
+    definition = AgentDefinition(
+        agent_type="research",
+        description="Research agent",
+        system_prompt="irreducible system",
+        allowed_tools=["search"],
+    )
+
+    context = ContextBuilder(max_context_tokens=1, max_section_chars=10_000).assemble(
+        definition=definition,
+        state=state,
+    )
+
+    assert context.context_budget.overflow is True
+    assert "context_overflow" in context.context_budget.warnings
+    assert sum(section.token_count for section in context.sections) <= 1
 
 
 def test_context_uses_structured_observations_instead_of_large_raw_tool_outputs() -> None:
@@ -189,7 +409,7 @@ def test_context_uses_structured_observations_instead_of_large_raw_tool_outputs(
         )
     ]
 
-    context = ContextInjector(max_context_tokens=1000).assemble(
+    context = ContextBuilder(max_context_tokens=1000).assemble(
         definition=_definition(),
         state=state,
     )
@@ -201,6 +421,35 @@ def test_context_uses_structured_observations_instead_of_large_raw_tool_outputs(
     assert "RAW_RESULT" not in tool_context
     assert "open_gaps: evidence" in decisions_context
     assert "satisfied_requirements: answer" in decisions_context
+
+
+def test_context_includes_bounded_agent_plan_without_raw_scratchpad() -> None:
+    state = _state()
+    state["agent_plan"] = AgentPlan(
+        objective="Analyze the spreadsheet and answer with evidence.",
+        active_step_id="step_probe",
+        steps=[
+            PlanStep(
+                step_id="step_probe",
+                title="Probe workbook structure",
+                status="in_progress",
+                expected_tool_names=["structured_probe"],
+                notes="Keep this bounded. " + ("RAW_SCRATCHPAD " * 200),
+            )
+        ],
+        summary="Need structure before computation.",
+    )
+
+    context = ContextBuilder(max_context_tokens=1000).assemble(
+        definition=_definition(),
+        state=state,
+    )
+
+    plan_context = context.section("plan").content
+    assert "Current autonomous plan" in plan_context
+    assert "active_step_id=step_probe" in plan_context
+    assert "structured_probe" in plan_context
+    assert plan_context.count("RAW_SCRATCHPAD") < 20
 
 
 def test_context_formats_asset_locators_compactly() -> None:
@@ -238,7 +487,7 @@ def test_context_formats_asset_locators_compactly() -> None:
         )
     ]
 
-    context = ContextInjector(max_context_tokens=1000).assemble(
+    context = ContextBuilder(max_context_tokens=1000).assemble(
         definition=_definition(),
         state=state,
     )
@@ -278,7 +527,7 @@ def test_context_formats_workspace_file_observations() -> None:
         )
     ]
 
-    context = ContextInjector(max_context_tokens=1000).assemble(
+    context = ContextBuilder(max_context_tokens=1000).assemble(
         definition=_definition(),
         state=state,
     )
@@ -318,7 +567,7 @@ def test_context_preserves_workspace_path_spacing() -> None:
         )
     ]
 
-    context = ContextInjector(max_context_tokens=1000).assemble(
+    context = ContextBuilder(max_context_tokens=1000).assemble(
         definition=_definition(),
         state=state,
     )

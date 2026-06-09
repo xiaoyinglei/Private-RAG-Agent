@@ -8,7 +8,7 @@ from rag.agent.core.context import (
     AgentRunConfig,
     AgentRuntimeHandles,
     BudgetLedger,
-    RuntimeRegistry,
+    RunRegistry,
     derive_child_config,
 )
 from rag.agent.core.definition import AgentDefinition, ModelSelectionPolicy, ToolPolicy
@@ -61,6 +61,16 @@ class TestBudgetLedger:
 
         results = await asyncio.gather(reserve_300(), reserve_300_b())
         assert sum(1 for result in results if result) == 1
+
+    @pytest.mark.anyio
+    async def test_exposes_committed_and_reserved_totals(self) -> None:
+        ledger = BudgetLedger(total=500)
+        assert await ledger.reserve("call-1", 200) is True
+        assert await ledger.commit("call-1", 125) == 0
+        assert await ledger.reserve("call-2", 50) is True
+
+        assert await ledger.committed() == 125
+        assert await ledger.reserved() == 50
 
 
 class TestAgentRunConfig:
@@ -124,6 +134,36 @@ class TestDeriveChildConfig:
         assert child.budget_reserved == {}
         assert child.tool_policy.max_parallel_calls == 1
 
+    @pytest.mark.anyio
+    async def test_child_runtime_shares_parent_llm_token_ledger(self) -> None:
+        parent = AgentRunConfig(
+            run_id="parent-shared-budget",
+            thread_id="parent-shared-budget",
+            budget_total=20_000,
+            max_depth=2,
+            access_policy=AccessPolicy.default(),
+        )
+        child = derive_child_config(
+            parent,
+            AgentDefinition(
+                agent_type="research",
+                description="Research",
+                system_prompt="Research",
+                allowed_tools=[],
+                estimated_token_budget=3_500,
+            ),
+        )
+        RunRegistry.remove(parent.run_id)
+        RunRegistry.remove(child.run_id)
+        parent_handles = RunRegistry.get_or_create(parent)
+        child_handles = RunRegistry.get_or_create(child)
+
+        assert child_handles.budget_ledger is parent_handles.budget_ledger
+        assert await child_handles.budget_ledger.reserve("child-call", 1_000)
+        assert await parent_handles.budget_ledger.remaining() == 19_000
+        RunRegistry.remove(child.run_id)
+        RunRegistry.remove(parent.run_id)
+
     def test_derive_child_config_inherits_parent_access_policy(self) -> None:
         parent = AgentRunConfig(
             run_id="parent-policy",
@@ -163,7 +203,7 @@ class TestDeriveChildConfig:
             derive_child_config(parent, child_def)
 
 
-class TestRuntimeRegistry:
+class TestRunRegistry:
     def test_get_or_create_initializes_handles(self) -> None:
         cfg = AgentRunConfig(
             run_id="reg-test",
@@ -172,8 +212,8 @@ class TestRuntimeRegistry:
             max_depth=2,
             access_policy=AccessPolicy.default(),
         )
-        RuntimeRegistry.remove(cfg.run_id)
-        handles = RuntimeRegistry.get_or_create(cfg)
+        RunRegistry.remove(cfg.run_id)
+        handles = RunRegistry.get_or_create(cfg)
         assert isinstance(handles, AgentRuntimeHandles)
         assert isinstance(handles.budget_ledger, BudgetLedger)
         assert isinstance(handles.cancellation, asyncio.Event)
@@ -186,9 +226,9 @@ class TestRuntimeRegistry:
             max_depth=2,
             access_policy=AccessPolicy.default(),
         )
-        RuntimeRegistry.remove(cfg.run_id)
-        h1 = RuntimeRegistry.get_or_create(cfg)
-        h2 = RuntimeRegistry.get_or_create(cfg)
+        RunRegistry.remove(cfg.run_id)
+        h1 = RunRegistry.get_or_create(cfg)
+        h2 = RunRegistry.get_or_create(cfg)
         assert h1 is h2
 
     def test_remove_cleans_up(self) -> None:
@@ -199,10 +239,10 @@ class TestRuntimeRegistry:
             max_depth=2,
             access_policy=AccessPolicy.default(),
         )
-        RuntimeRegistry.remove(cfg.run_id)
-        RuntimeRegistry.get_or_create(cfg)
-        RuntimeRegistry.remove("reg-test-3")
-        h_new = RuntimeRegistry.get_or_create(cfg)
+        RunRegistry.remove(cfg.run_id)
+        RunRegistry.get_or_create(cfg)
+        RunRegistry.remove("reg-test-3")
+        h_new = RunRegistry.get_or_create(cfg)
         assert h_new is not None
 
 
@@ -220,6 +260,20 @@ class TestAgentDefinition:
         assert ad.max_iterations == 10
         assert ad.max_depth == 2
         assert ad.estimated_token_budget == 8000
+        assert ad.output_validation_max_retries == 2
+
+    def test_definition_rejects_negative_output_validation_retries(self) -> None:
+        with pytest.raises(
+            ValueError,
+            match="output_validation_max_retries must be non-negative",
+        ):
+            AgentDefinition(
+                agent_type="invalid_output_retry",
+                description="Invalid",
+                system_prompt="Invalid",
+                allowed_tools=[],
+                output_validation_max_retries=-1,
+            )
 
     def test_definition_with_access_policy(self) -> None:
         policy = AccessPolicy.default()

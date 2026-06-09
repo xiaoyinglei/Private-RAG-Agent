@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 from rag.agent.builtin.research import RESEARCH_AGENT, create_research_agent_service
-from rag.agent.core.compiler import AgentGraphCompiler
+from rag.agent.core.compiler import GraphCompiler
 from rag.agent.service import AgentRunRequest
 from rag.agent.state import ToolCallPlan
 from rag.agent.tools.asset_tools import ALL_ASSET_TOOLS
@@ -58,7 +58,7 @@ def test_research_agent_tool_decision_budget_can_emit_script_tool_calls() -> Non
 
 
 def test_research_agent_compiles_when_builtin_tools_registered() -> None:
-    compiler = AgentGraphCompiler(tool_registry=_registry_with_builtin_tools())
+    compiler = GraphCompiler(tool_registry=_registry_with_builtin_tools())
 
     graph = compiler.compile(RESEARCH_AGENT)
 

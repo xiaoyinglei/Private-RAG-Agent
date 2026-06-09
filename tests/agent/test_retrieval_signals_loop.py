@@ -12,7 +12,7 @@ from rag.agent.core.llm_providers import (
     _merge_quoted_terms,
     _validate_retrieval_signals,
 )
-from rag.agent.graphs.nodes.execute import execute_node
+from rag.agent.graphs.nodes.execute import run_tools_raw
 from rag.agent.tools.rag_tools import RAG_SIGNAL_AWARE_TOOLS, SearchInput, SearchOutput
 from rag.agent.tools.registry import ToolRegistry
 from rag.agent.tools.spec import ToolError, ToolPermissions, ToolSpec
@@ -278,7 +278,7 @@ class TestLLMRetrievalHintProviderSignals:
         assert debug["signals_source"] == "validation_failed"
 
 
-# ── execute_node injects signals ──
+# ── run_tools_raw injects signals ──
 
 
 class TestExecuteNodeSignalInjection:
@@ -307,7 +307,7 @@ class TestExecuteNodeSignalInjection:
         )
         call = ToolCallPlan.create("vector_search", {"query": "test", "top_k": 8})
 
-        update = await execute_node(
+        update = await run_tools_raw(
             _make_state(
                 retrieval_signals=signals,
                 pending_tool_calls=[call],
@@ -320,6 +320,7 @@ class TestExecuteNodeSignalInjection:
         assert isinstance(passed_signals, RetrievalSignals)
         assert passed_signals.special_targets == ["table"]
         assert passed_signals.allow_graph_expansion is True
+        assert "retrieval_signals" not in call.arguments
 
     @pytest.mark.anyio
     async def test_does_not_inject_for_non_rag_tools(self) -> None:
@@ -348,7 +349,7 @@ class TestExecuteNodeSignalInjection:
         from rag.agent.state import ToolCallPlan
         call = ToolCallPlan.create("llm_summarize", {"text": "hello"})
 
-        await execute_node(
+        await run_tools_raw(
             _make_state(
                 retrieval_signals=RetrievalSignals(quoted_terms=["test"]),
                 pending_tool_calls=[call],
@@ -382,7 +383,7 @@ class TestExecuteNodeSignalInjection:
             "retrieval_signals": explicit_signals.model_dump(mode="json"),
         })
 
-        await execute_node(
+        await run_tools_raw(
             _make_state(
                 retrieval_signals=RetrievalSignals(quoted_terms=["state中的"]),
                 pending_tool_calls=[call],
@@ -414,7 +415,7 @@ class TestExecuteNodeSignalInjection:
         from rag.agent.state import ToolCallPlan
         call = ToolCallPlan.create("keyword_search", {"query": "test"})
 
-        await execute_node(
+        await run_tools_raw(
             _make_state(
                 retrieval_signals=None,  # type: ignore[arg-type]
                 pending_tool_calls=[call],
@@ -482,7 +483,7 @@ class TestNoRoutingMapping:
         assert "RuntimeMode" not in text
         assert "runtime_mode" not in text.lower()
 
-    def test_execute_node_has_no_routing_from_signals(self) -> None:
+    def test_run_tools_raw_has_no_routing_from_signals(self) -> None:
         import inspect
 
         import rag.agent.graphs.nodes.execute as m

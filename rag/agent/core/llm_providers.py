@@ -3,19 +3,25 @@ from __future__ import annotations
 import re
 from collections.abc import Awaitable
 from typing import Any
+from uuid import uuid4
 
 from pydantic import BaseModel
 
+from rag.agent.core.context import RunRegistry
 from rag.agent.core.definition import AgentDefinition, ModelSelectionPolicy
-from rag.agent.core.llm_prompts import (
-    build_retrieval_hint_prompt,
-    build_tool_decision_prompt,
+from rag.agent.core.llm_context import (
+    AgentLLMContextAssembler,
+    AgentLLMContextOverflowError,
 )
 from rag.agent.core.llm_registry import ModelRegistry
+from rag.agent.goal_runtime import GoalContractHint
 from rag.agent.graphs.nodes.llm_decide import ToolDecisionProvider
 from rag.agent.graphs.nodes.retrieval_hint import RetrievalHintProvider
 from rag.agent.memory.models import InjectedContext
 from rag.agent.state import AgentState, ThinkOutput
+from rag.assembly.tokenizer import TokenAccountingService, TokenizerContract
+from rag.providers.llm_gateway import LLMGateway
+from rag.schema.llm import DEFAULT_LLM_STAGE_BUDGETS, LLMCallStage
 from rag.schema.query import RetrievalSignals
 
 _QUOTED_TERM_RE = re.compile(
@@ -93,25 +99,68 @@ def _validate_retrieval_signals(
         return RetrievalSignals(), "validation_failed"
 
 
-def _generate_structured[T: BaseModel](
-    generator: Any,
-    prompt: str,
-    schema: type[T],
-    *,
-    kwargs: dict[str, Any] | None = None,
-) -> T | None:
-    """调用 Generator.generate_structured，解析失败返回 None。"""
-    extra = kwargs or {}
-    try:
-        result = generator.generate_structured(prompt=prompt, schema=schema, **extra)
-        if isinstance(result, schema):
-            return result
-        return schema.model_validate(result)
-    except Exception:
-        return None
-
-
 # ── Retrieval hints ──
+
+
+class LLMGoalContractProvider:
+    """Model-backed, schema-validated goal contract inference."""
+
+    def __init__(
+        self,
+        generator: Any,
+        *,
+        kwargs: dict[str, Any] | None = None,
+        gateway: LLMGateway | None = None,
+        context_assembler: AgentLLMContextAssembler | None = None,
+        definition: AgentDefinition | None = None,
+    ) -> None:
+        self._kwargs = kwargs or {}
+        self._gateway = gateway or _fallback_gateway(
+            generator,
+            LLMCallStage.GOAL_CONTRACT,
+        )
+        _validate_shared_token_accounting(
+            gateway=self._gateway,
+            context_assembler=context_assembler,
+        )
+        self._context_assembler = context_assembler or _assembler_from_gateway(
+            self._gateway,
+            LLMCallStage.GOAL_CONTRACT,
+            kwargs=self._kwargs,
+        )
+        self._definition = definition or AgentDefinition(
+            agent_type="goal_contract",
+            description="Goal contract context",
+            system_prompt="",
+            allowed_tools=[],
+        )
+
+    async def infer(self, state: AgentState) -> GoalContractHint:
+        try:
+            ledger = RunRegistry.get(
+                state["run_config"].run_id
+            ).budget_ledger
+        except KeyError:
+            ledger = None
+        assembler = self._context_assembler
+        if assembler is None:
+            raise RuntimeError("goal contract context assembler is not configured")
+        assembled = assembler.assemble_goal_contract(
+            definition=self._definition,
+            state=state,
+            output_schema=GoalContractHint,
+        )
+        result = await self._gateway.agenerate_structured(
+            stage=LLMCallStage.GOAL_CONTRACT,
+            prompt=assembled.prompt,
+            schema=GoalContractHint,
+            ledger=ledger,
+            lease_id=(
+                f"{state['run_config'].run_id}:goal_contract:{uuid4().hex}"
+            ),
+            kwargs=self._kwargs,
+        )
+        return result.value
 
 
 class RetrievalHintDecision(BaseModel):
@@ -127,16 +176,103 @@ class LLMRetrievalHintProvider(RetrievalHintProvider):
         generator: Any,
         *,
         kwargs: dict[str, Any] | None = None,
+        gateway: LLMGateway | None = None,
+        context_assembler: AgentLLMContextAssembler | None = None,
+        definition: AgentDefinition | None = None,
     ) -> None:
-        self._generator = generator
         self._kwargs = kwargs or {}
-
-    def hint(self, state: AgentState) -> dict[Any, Any]:
-        task = state.get("task", "")
-        prompt = build_retrieval_hint_prompt(state)
-        decision = _generate_structured(
-            self._generator, prompt, RetrievalHintDecision, kwargs=self._kwargs
+        self._uses_async_gateway = gateway is not None
+        self._gateway = gateway or _fallback_gateway(
+            generator,
+            LLMCallStage.RETRIEVAL_HINT,
         )
+        _validate_shared_token_accounting(
+            gateway=self._gateway,
+            context_assembler=context_assembler,
+        )
+        self._context_assembler = context_assembler or _assembler_from_gateway(
+            self._gateway,
+            LLMCallStage.RETRIEVAL_HINT,
+            kwargs=self._kwargs,
+        )
+        self._definition = definition or AgentDefinition(
+            agent_type="retrieval_hint",
+            description="Retrieval hint context",
+            system_prompt="",
+            allowed_tools=[],
+        )
+
+    def hint(
+        self,
+        state: AgentState,
+    ) -> dict[Any, Any] | Awaitable[dict[Any, Any]]:
+        if self._uses_async_gateway:
+            return self._hint_with_gateway(state)
+        assembler = self._context_assembler
+        if assembler is None:
+            raise RuntimeError("retrieval hint context assembler is not configured")
+        try:
+            assembled = assembler.assemble_retrieval_hint(
+                definition=self._definition,
+                state=state,
+                output_schema=RetrievalHintDecision,
+            )
+            decision = self._gateway.generate_structured(
+                stage=LLMCallStage.RETRIEVAL_HINT,
+                prompt=assembled.prompt,
+                schema=RetrievalHintDecision,
+                kwargs=self._kwargs,
+            ).value
+        except AgentLLMContextOverflowError:
+            raise
+        except Exception:
+            decision = None
+        return self._build_hint_update(state, decision)
+
+    async def _hint_with_gateway(self, state: AgentState) -> dict[Any, Any]:
+        gateway = self._gateway
+        if gateway is None:
+            raise RuntimeError("retrieval hint gateway is not configured")
+        run_id = state["run_config"].run_id
+        try:
+            ledger = RunRegistry.get(run_id).budget_ledger
+        except KeyError:
+            ledger = None
+        try:
+            assembler = self._context_assembler
+            if assembler is None:
+                raise RuntimeError("retrieval hint context assembler is not configured")
+            assembled = assembler.assemble_retrieval_hint(
+                definition=self._definition,
+                state=state,
+                output_schema=RetrievalHintDecision,
+            )
+            result = await gateway.agenerate_structured(
+                stage=LLMCallStage.RETRIEVAL_HINT,
+                prompt=assembled.prompt,
+                schema=RetrievalHintDecision,
+                ledger=ledger,
+                lease_id=f"{run_id}:retrieval_hint:{uuid4().hex}",
+                kwargs=self._kwargs,
+            )
+        except AgentLLMContextOverflowError:
+            raise
+        except Exception as exc:
+            update = self._build_hint_update(state, None)
+            update["retrieval_signals_debug"] = {
+                **update["retrieval_signals_debug"],
+                "signals_source": "llm_gateway_failed",
+                "gateway_error": str(exc),
+            }
+            return update
+        return self._build_hint_update(state, result.value)
+
+    def _build_hint_update(
+        self,
+        state: AgentState,
+        decision: RetrievalHintDecision | None,
+    ) -> dict[Any, Any]:
+        task = state.get("task", "")
 
         # 规则提取 quoted_terms（从原始 query），过滤空字符串
         rule_quoted_terms = _filter_non_empty(_extract_quoted_terms(task))
@@ -185,9 +321,31 @@ class LLMRetrievalHintProvider(RetrievalHintProvider):
 class LLMToolDecisionProvider(ToolDecisionProvider):
     """Model tool-choice decision provider. Invalid output pauses visibly."""
 
-    def __init__(self, generator: Any, *, kwargs: dict[str, Any] | None = None) -> None:
-        self._generator = generator
+    manages_llm_context = True
+
+    def __init__(
+        self,
+        generator: Any,
+        *,
+        kwargs: dict[str, Any] | None = None,
+        gateway: LLMGateway | None = None,
+        context_assembler: AgentLLMContextAssembler | None = None,
+    ) -> None:
         self._kwargs = kwargs or {}
+        self._uses_async_gateway = gateway is not None
+        self._gateway = gateway or _fallback_gateway(
+            generator,
+            LLMCallStage.TOOL_DECISION,
+        )
+        _validate_shared_token_accounting(
+            gateway=self._gateway,
+            context_assembler=context_assembler,
+        )
+        self._context_assembler = context_assembler or _assembler_from_gateway(
+            self._gateway,
+            LLMCallStage.TOOL_DECISION,
+            kwargs=self._kwargs,
+        )
 
     def decide(
         self,
@@ -197,15 +355,33 @@ class LLMToolDecisionProvider(ToolDecisionProvider):
         budget_remaining: int,
         context: InjectedContext,
     ) -> ThinkOutput | dict[str, object] | Awaitable[ThinkOutput | dict[str, object]]:
-        prompt = build_tool_decision_prompt(
-            state,
-            budget_remaining=budget_remaining,
-            context_text=context.as_text(),
-            allowed_tools=definition.allowed_tools,
-        )
-        decision = _generate_structured(
-            self._generator, prompt, ThinkOutput, kwargs=self._kwargs
-        )
+        del context
+        if self._uses_async_gateway:
+            return self._decide_with_gateway(
+                state,
+                definition=definition,
+                budget_remaining=budget_remaining,
+            )
+        assembler = self._context_assembler
+        if assembler is None:
+            raise RuntimeError("tool decision context assembler is not configured")
+        try:
+            assembled = assembler.assemble_tool_decision(
+                definition=definition,
+                state=state,
+                budget_remaining=budget_remaining,
+                output_schema=ThinkOutput,
+            )
+            decision = self._gateway.generate_structured(
+                stage=LLMCallStage.TOOL_DECISION,
+                prompt=assembled.prompt,
+                schema=ThinkOutput,
+                kwargs=self._kwargs,
+            ).value
+        except AgentLLMContextOverflowError:
+            raise
+        except Exception:
+            decision = None
         if decision is None:
             return ThinkOutput(
                 action="pause",
@@ -215,6 +391,53 @@ class LLMToolDecisionProvider(ToolDecisionProvider):
             )
         return decision
 
+    async def _decide_with_gateway(
+        self,
+        state: AgentState,
+        *,
+        definition: AgentDefinition,
+        budget_remaining: int,
+    ) -> ThinkOutput:
+        gateway = self._gateway
+        if gateway is None:
+            raise RuntimeError("tool decision gateway is not configured")
+        run_id = state["run_config"].run_id
+        try:
+            ledger = RunRegistry.get(run_id).budget_ledger
+        except KeyError:
+            ledger = None
+        try:
+            assembler = self._context_assembler
+            if assembler is None:
+                raise RuntimeError("tool decision context assembler is not configured")
+            assembled = assembler.assemble_tool_decision(
+                definition=definition,
+                state=state,
+                budget_remaining=budget_remaining,
+                output_schema=ThinkOutput,
+            )
+            result = await gateway.agenerate_structured(
+                stage=LLMCallStage.TOOL_DECISION,
+                prompt=assembled.prompt,
+                schema=ThinkOutput,
+                ledger=ledger,
+                lease_id=(
+                    f"{run_id}:tool_decision:{state.get('iteration', 0)}:"
+                    f"{uuid4().hex}"
+                ),
+                kwargs=self._kwargs,
+            )
+        except AgentLLMContextOverflowError:
+            raise
+        except Exception as exc:
+            return ThinkOutput(
+                action="pause",
+                thought="LLM gateway rejected or failed the tool decision call",
+                needs_user_input=f"Tool-decision LLM call failed: {exc}",
+                confidence=0.0,
+            )
+        return result.value
+
 
 # ── 从 ModelRegistry 批量创建 ──
 
@@ -222,6 +445,7 @@ class LLMToolDecisionProvider(ToolDecisionProvider):
 def create_default_providers(
     registry: ModelRegistry,
     selection: ModelSelectionPolicy,
+    definition: AgentDefinition | None = None,
 ) -> tuple[LLMRetrievalHintProvider, LLMToolDecisionProvider]:
     """Create retrieval-hint and tool-decision providers for an agent loop."""
 
@@ -250,7 +474,122 @@ def create_default_providers(
         selection.tool_decision_temperature,
         selection.tool_decision_max_tokens,
     )
-    return (
-        LLMRetrievalHintProvider(hint_gen, kwargs=hint_kwargs),
-        LLMToolDecisionProvider(decision_gen, kwargs=decision_kwargs),
+    hint_resolved = registry.resolve_for_node(
+        node_model=selection.retrieval_hint_model,
+        node_name="retrieval_hint",
     )
+    decision_resolved = registry.resolve_for_node(
+        node_model=selection.tool_decision_model,
+        node_name="tool_decision",
+    )
+    return (
+        LLMRetrievalHintProvider(
+            hint_gen,
+            kwargs=hint_kwargs,
+            gateway=hint_resolved.gateway,
+            context_assembler=_assembler_from_gateway(
+                hint_resolved.gateway,
+                LLMCallStage.RETRIEVAL_HINT,
+                kwargs=hint_kwargs,
+            ),
+            definition=definition,
+        ),
+        LLMToolDecisionProvider(
+            decision_gen,
+            kwargs=decision_kwargs,
+            gateway=decision_resolved.gateway,
+            context_assembler=_assembler_from_gateway(
+                decision_resolved.gateway,
+                LLMCallStage.TOOL_DECISION,
+                kwargs=decision_kwargs,
+            ),
+        ),
+    )
+
+
+def create_goal_contract_provider(
+    registry: ModelRegistry,
+    definition: AgentDefinition,
+) -> LLMGoalContractProvider:
+    resolved = registry.resolve_for_node(
+        node_model=None,
+        node_name="goal_contract",
+    )
+    kwargs = dict(resolved.kwargs)
+    kwargs.setdefault("temperature", 0.0)
+    kwargs["max_tokens"] = min(
+        int(kwargs.get("max_tokens", 512)),
+        DEFAULT_LLM_STAGE_BUDGETS[
+            LLMCallStage.GOAL_CONTRACT
+        ].max_output_tokens,
+    )
+    gateway = resolved.gateway or _fallback_gateway(
+        resolved.generator,
+        LLMCallStage.GOAL_CONTRACT,
+    )
+    return LLMGoalContractProvider(
+        resolved.generator,
+        kwargs=kwargs,
+        gateway=gateway,
+        context_assembler=_assembler_from_gateway(
+            gateway,
+            LLMCallStage.GOAL_CONTRACT,
+            kwargs=kwargs,
+        ),
+        definition=definition,
+    )
+
+
+def _assembler_from_gateway(
+    gateway: LLMGateway | None,
+    stage: LLMCallStage,
+    *,
+    kwargs: dict[str, Any] | None = None,
+) -> AgentLLMContextAssembler | None:
+    if gateway is None:
+        return None
+    return AgentLLMContextAssembler(
+        token_accounting=gateway.token_accounting,
+        stage_budgets={
+            stage: gateway.effective_stage_budget(stage, kwargs=kwargs)
+        },
+    )
+
+
+def _fallback_gateway(
+    generator: object,
+    stage: LLMCallStage,
+) -> LLMGateway:
+    model_context_tokens = 32_768
+    accounting = TokenAccountingService(
+        TokenizerContract(
+            embedding_model_name="agent-fallback",
+            tokenizer_model_name="agent-fallback",
+            chunking_tokenizer_model_name="agent-fallback",
+            tokenizer_backend="simple",
+            max_context_tokens=model_context_tokens,
+            prompt_reserved_tokens=512,
+            local_files_only=True,
+        )
+    )
+    return LLMGateway(
+        generator=generator,
+        token_accounting=accounting,
+        model_context_tokens=model_context_tokens,
+        stage_budgets={stage: DEFAULT_LLM_STAGE_BUDGETS[stage]},
+    )
+
+
+def _validate_shared_token_accounting(
+    *,
+    gateway: LLMGateway,
+    context_assembler: AgentLLMContextAssembler | None,
+) -> None:
+    if (
+        context_assembler is not None
+        and context_assembler.token_accounting is not gateway.token_accounting
+    ):
+        raise ValueError(
+            "AgentLLMContextAssembler and LLMGateway must share the same "
+            "TokenAccountingService instance"
+        )

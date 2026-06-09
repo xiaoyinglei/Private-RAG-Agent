@@ -8,12 +8,13 @@ from rag.agent.tools.llm_tools import ALL_LLM_TOOLS
 from rag.agent.tools.primitive_tools import ALL_PRIMITIVE_TOOLS
 from rag.agent.tools.rag_answer_tools import ALL_RAG_ANSWER_TOOLS
 from rag.agent.tools.rag_tools import ALL_RAG_TOOLS
-from rag.agent.tools.registry import ToolRegistry, ToolRunner
+from rag.agent.tools.registry import ContextualToolRunner, ToolRegistry, ToolRunner
 
 
 def create_builtin_tool_registry(
     *,
     runners: Mapping[str, ToolRunner] | None = None,
+    contextual_runners: Mapping[str, ContextualToolRunner] | None = None,
 ) -> ToolRegistry:
     # Lazy import to avoid circular: builtin_registry → builtin → research → builtin_registry
     from rag.agent.builtin import (  # noqa: PLC0415
@@ -42,10 +43,20 @@ def create_builtin_tool_registry(
     agent_tool_names = {spec.name for spec in agent_tool_specs}
 
     runner_by_name = runners or {}
+    contextual_runner_by_name = contextual_runners or {}
+    duplicate_runners = sorted(set(runner_by_name) & set(contextual_runner_by_name))
+    if duplicate_runners:
+        raise ValueError(
+            f"runners cannot be both ordinary and contextual: {', '.join(duplicate_runners)}"
+        )
     for spec in all_tools + agent_tool_specs:
         registry.register(spec, runner=runner_by_name.get(spec.name))
+        contextual_runner = contextual_runner_by_name.get(spec.name)
+        if contextual_runner is not None:
+            registry.register_contextual_runner(spec.name, contextual_runner)
+    known_tool_names = {spec.name for spec in all_tools} | agent_tool_names
     unknown_runners = sorted(
-        set(runner_by_name) - {spec.name for spec in all_tools} - agent_tool_names
+        (set(runner_by_name) | set(contextual_runner_by_name)) - known_tool_names
     )
     if unknown_runners:
         raise ValueError(f"unknown builtin tool runners: {', '.join(unknown_runners)}")

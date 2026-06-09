@@ -6,7 +6,10 @@ from typing import Any, cast
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from rag.agent.core.context import RunRegistry
+from rag.agent.tools.registry import ToolExecutionContext
 from rag.agent.tools.spec import ToolError, ToolPermissions, ToolSpec
+from rag.providers.llm_gateway import llm_budget_scope
 from rag.schema.query import AnswerCitation, EvidenceItem, RetrievalSignals
 
 
@@ -35,7 +38,7 @@ rag_search_answer = ToolSpec(
     permissions=ToolPermissions(read_db=True, embed=True, generate=True),
     timeout_seconds=45.0,
     max_retries=0,
-    token_budget_cost=3000,
+    work_budget_cost=3000,
 )
 
 
@@ -47,7 +50,11 @@ class RAGSearchAnswerRunner:
     runtime: Any
     max_context_tokens: int = 12000
 
-    async def answer(self, payload: RAGSearchAnswerInput) -> RAGSearchAnswerOutput:
+    async def answer(
+        self,
+        payload: RAGSearchAnswerInput,
+        execution_context: ToolExecutionContext,
+    ) -> RAGSearchAnswerOutput:
         from rag.retrieval import QueryOptions
 
         options_kwargs: dict[str, object] = {
@@ -65,11 +72,17 @@ class RAGSearchAnswerRunner:
             }
         if access_policy := getattr(self.runtime, "access_policy", None):
             options_kwargs["access_policy"] = access_policy
-        result = await asyncio.to_thread(
-            self.runtime.query_public,
-            payload.query,
-            options=QueryOptions(**cast(Any, options_kwargs)),
-        )
+        run_id = execution_context.run_config.run_id
+        try:
+            ledger = RunRegistry.get(run_id).budget_ledger
+        except KeyError as exc:
+            raise RuntimeError(f"Runtime handles missing for run_id={run_id}") from exc
+        with llm_budget_scope(ledger):
+            result = await asyncio.to_thread(
+                self.runtime.query_public,
+                payload.query,
+                options=QueryOptions(**cast(Any, options_kwargs)),
+            )
         answer = result.answer
         context = getattr(result, "context", None)
         return RAGSearchAnswerOutput(

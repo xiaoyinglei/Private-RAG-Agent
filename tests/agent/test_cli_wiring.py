@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import cast
+
 import pytest
 
 from rag.agent.builtin import create_builtin_agent_registry
@@ -9,20 +11,32 @@ from rag.agent.cli import (
     _build_llm_tool_runners,
     _resolve_cli_agent_definition,
 )
-from rag.agent.tools.llm_tools import LLMCompareInput, LLMGenerateInput, LLMTextOutput
+from rag.agent.core.context import AgentRunConfig, RunRegistry
+from rag.agent.core.definition import AgentDefinition
+from rag.agent.state import AgentState
+from rag.agent.tools.llm_tools import LLMCompareInput, LLMGenerateInput
+from rag.agent.tools.registry import ToolExecutionContext
+from rag.schema.runtime import AccessPolicy, RuntimeMode
 
 
 class _ChatBinding:
     def __init__(self) -> None:
         self.prompts: list[str] = []
 
-    def chat(self, prompt: str) -> str:
+    def chat(self, prompt: str, **_: object) -> str:
         self.prompts.append(prompt)
         return f"response:{prompt}"
 
 
 class _Runtime:
     retrieval_service = None
+    chat_context_window_tokens = 32_768
+    llm_stage_budgets = None
+    token_accounting = type(
+        "WordTokens",
+        (),
+        {"count": lambda self, text: len(text.split())},
+    )()
 
     def __init__(self) -> None:
         self.capability_bundle = type(
@@ -45,38 +59,118 @@ class _RuntimeWithAssetStores(_Runtime):
         )()
 
 
-def test_cli_llm_runner_wiring_includes_compare_runner() -> None:
+class _RetrievalService:
+    def __init__(self) -> None:
+        self.access_policies: list[AccessPolicy] = []
+
+    async def aretrieve_payload(
+        self,
+        query: str,
+        *,
+        access_policy: AccessPolicy,
+        query_options: object,
+    ) -> object:
+        del query, query_options
+        self.access_policies.append(access_policy)
+        evidence = type(
+            "Evidence",
+            (),
+            {"internal": [], "external": [], "graph": []},
+        )()
+        return type("Payload", (), {"evidence": evidence})()
+
+
+class _RuntimeWithRetrieval(_Runtime):
+    def __init__(self) -> None:
+        super().__init__()
+        self.retrieval_service = _RetrievalService()
+
+
+def _trusted_llm_execution_context(
+    config: AgentRunConfig,
+    *,
+    tool_name: str,
+) -> ToolExecutionContext:
+    state = cast(
+        AgentState,
+        {
+            "task": "CLI model tool test",
+            "run_config": config,
+        },
+    )
+    definition = AgentDefinition(
+        agent_type="test",
+        description="CLI model tool test",
+        system_prompt="Use only trusted supplied context.",
+        allowed_tools=[tool_name],
+    )
+    return ToolExecutionContext(
+        run_config=config,
+        state=state,
+        definition=definition,
+    )
+
+
+@pytest.mark.anyio
+async def test_cli_llm_runner_wiring_includes_compare_runner() -> None:
     chat = _ChatBinding()
     runners = _build_llm_tool_runners(chat)
+    config = AgentRunConfig(
+        run_id="cli-compare",
+        thread_id="cli-compare",
+        budget_total=10_000,
+        max_depth=1,
+        access_policy=AccessPolicy.default(),
+    )
+    RunRegistry.remove(config.run_id)
+    RunRegistry.get_or_create(config)
 
     assert {"llm_generate", "llm_summarize", "llm_compare"} <= set(runners)
-    result = runners["llm_compare"](
+    result = await runners["llm_compare"](
         LLMCompareInput(
             question="Compare A and B",
             left_context_sections=["A evidence"],
             right_context_sections=["B evidence"],
-        )
+        ),
+        _trusted_llm_execution_context(config, tool_name="llm_compare"),
     )
 
-    assert result == LLMTextOutput(text="response:Compare A and B\n\n左:\nA evidence\n\n右:\nB evidence")
+    assert result.text.startswith("response:")
+    assert "[system]\nUse only trusted supplied context." in result.text
+    assert "[task]\nCompare A and B" in result.text
+    assert "Left context:\nA evidence" in result.text
+    assert "Right context:\nB evidence" in result.text
+    RunRegistry.remove(config.run_id)
 
 
-def test_cli_generate_runner_preserves_supplied_grounding_ids() -> None:
+@pytest.mark.anyio
+async def test_cli_generate_runner_preserves_supplied_grounding_ids() -> None:
     runners = _build_llm_tool_runners(_ChatBinding())
+    config = AgentRunConfig(
+        run_id="cli-generate",
+        thread_id="cli-generate",
+        budget_total=10_000,
+        max_depth=1,
+        access_policy=AccessPolicy.default(),
+    )
+    RunRegistry.remove(config.run_id)
+    RunRegistry.get_or_create(config)
 
-    result = runners["llm_generate"](
+    result = await runners["llm_generate"](
         LLMGenerateInput(
             prompt="Write grounded answer",
             evidence_ids=["ev1"],
             citation_ids=["cit1"],
-        )
+        ),
+        _trusted_llm_execution_context(config, tool_name="llm_generate"),
     )
 
-    assert result == LLMTextOutput(
-        text="response:Write grounded answer",
-        evidence_ids=["ev1"],
-        citation_ids=["cit1"],
-    )
+    assert result.text.startswith("response:")
+    assert "[system]\nUse only trusted supplied context." in result.text
+    assert "[task]\nWrite grounded answer" in result.text
+    assert result.evidence_ids == ["ev1"]
+    assert result.citation_ids == ["cit1"]
+    RunRegistry.remove(config.run_id)
 
 
 def test_cli_agent_choices_expose_top_level_agents_only() -> None:
@@ -114,6 +208,30 @@ def test_build_agent_service_honors_cli_model_alias_for_agent_decisions() -> Non
 
     assert service._model_registry is not None
     assert service._model_registry.default_model == "qwen3_8b_mlx_4bit"
+
+
+@pytest.mark.anyio
+async def test_build_agent_service_registers_rag_runner_with_execution_context() -> None:
+    runtime = _RuntimeWithRetrieval()
+    service = _build_agent_service(runtime, agent_type="research")
+    access_policy = AccessPolicy(
+        allowed_runtimes=frozenset({RuntimeMode.FAST})
+    )
+    run_config = AgentRunConfig(
+        run_id="cli-rag-context",
+        thread_id="cli-rag-context",
+        budget_total=100,
+        max_depth=1,
+        access_policy=access_policy,
+    )
+
+    await service._base_tool_registry.run(
+        "vector_search",
+        {"query": "test"},
+        execution_context=ToolExecutionContext(run_config=run_config),
+    )
+
+    assert runtime.retrieval_service.access_policies == [access_policy]
 
 
 def test_build_agent_service_rejects_unknown_agent() -> None:

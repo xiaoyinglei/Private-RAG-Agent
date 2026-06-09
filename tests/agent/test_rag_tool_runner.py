@@ -1,18 +1,22 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 from typing import Any
 
 import pytest
+from pydantic import ValidationError
 
+from rag.agent.core.context import AgentRunConfig
 from rag.agent.tools.rag_tool_runner import (
     AsyncRAGToolRunner,
     RAGToolRunnerNotConfiguredError,
     _evidence_to_output,
 )
 from rag.agent.tools.rag_tools import SearchInput
+from rag.agent.tools.registry import ToolExecutionContext
 from rag.schema.query import RetrievalSignals
-from rag.schema.runtime import AccessPolicy
+from rag.schema.runtime import AccessPolicy, RuntimeMode
 
 # ── Fake evidence ──
 
@@ -79,6 +83,22 @@ class _FakePayload:
     evidence: _FakeEvidenceBundle = field(default_factory=_FakeEvidenceBundle)
 
 
+def _execution_context(
+    *,
+    access_policy: AccessPolicy | None = None,
+    run_id: str = "rag-tool-runner",
+) -> ToolExecutionContext:
+    return ToolExecutionContext(
+        run_config=AgentRunConfig(
+            run_id=run_id,
+            thread_id=run_id,
+            budget_total=1000,
+            max_depth=1,
+            access_policy=access_policy or AccessPolicy.default(),
+        )
+    )
+
+
 # ── _evidence_to_output ──
 
 
@@ -107,6 +127,15 @@ class TestEvidenceToOutput:
 
 
 class TestAsyncRAGToolRunner:
+    def test_search_input_rejects_access_policy_override(self) -> None:
+        with pytest.raises(ValidationError, match="access_policy"):
+            SearchInput.model_validate(
+                {
+                    "query": "test",
+                    "access_policy": AccessPolicy.default().model_dump(mode="json"),
+                }
+            )
+
     @pytest.mark.anyio
     async def test_aretrieve_payload_primary_path(self) -> None:
         """验证 aretrieve_payload 是第一优先级。"""
@@ -115,7 +144,8 @@ class TestAsyncRAGToolRunner:
 
         runner = AsyncRAGToolRunner(retrieval_service=svc)
         output = await runner.retrieve_evidence(
-            SearchInput(query="test")
+            SearchInput(query="test"),
+            _execution_context(),
         )
         assert len(output.items) == 2
         assert output.items[0]["text"] == "text 1"
@@ -129,7 +159,10 @@ class TestAsyncRAGToolRunner:
 
         runner = AsyncRAGToolRunner(retrieval_service=svc, allow_sync_fallback=False)
         with pytest.raises(RuntimeError, match="simulated retrieval failure"):
-            await runner.retrieve_evidence(SearchInput(query="test"))
+            await runner.retrieve_evidence(
+                SearchInput(query="test"),
+                _execution_context(),
+            )
 
     @pytest.mark.anyio
     async def test_to_thread_fallback_when_no_async(self) -> None:
@@ -149,7 +182,10 @@ class TestAsyncRAGToolRunner:
 
         runtime = _FakeRuntime()
         runner = AsyncRAGToolRunner(runtime=runtime)
-        output = await runner.retrieve_evidence(SearchInput(query="test"))
+        output = await runner.retrieve_evidence(
+            SearchInput(query="test"),
+            _execution_context(),
+        )
         assert "query" in calls
         assert len(output.items) == 1
 
@@ -171,7 +207,8 @@ class TestAsyncRAGToolRunner:
 
         runner = AsyncRAGToolRunner(runtime=_FakeRuntime())
         output = await runner.retrieve_evidence(
-            SearchInput(query="test", retrieval_signals=signals)
+            SearchInput(query="test", retrieval_signals=signals),
+            _execution_context(),
         )
 
         assert len(output.items) == 1
@@ -186,30 +223,64 @@ class TestAsyncRAGToolRunner:
         """无 runtime、无 retrieval_service → fail closed。"""
         runner = AsyncRAGToolRunner()
         with pytest.raises(RAGToolRunnerNotConfiguredError, match="not configured"):
-            await runner.retrieve_evidence(SearchInput(query="test"))
+            await runner.retrieve_evidence(
+                SearchInput(query="test"),
+                _execution_context(),
+            )
 
     @pytest.mark.anyio
     async def test_no_sync_fallback_when_disabled(self) -> None:
         """allow_sync_fallback=False + 无 async → fail closed。"""
         runner = AsyncRAGToolRunner(allow_sync_fallback=False)
         with pytest.raises(RAGToolRunnerNotConfiguredError, match="not configured"):
-            await runner.retrieve_evidence(SearchInput(query="test"))
+            await runner.retrieve_evidence(
+                SearchInput(query="test"),
+                _execution_context(),
+            )
 
-    def test_access_policy_priority(self) -> None:
-        """access_policy 来源优先级验证。"""
-        payload_ap = AccessPolicy(local_only=True)
-        runner_ap = AccessPolicy(local_only=False)
-
-        # 无 runtime 时用 runner policy
-        runner = AsyncRAGToolRunner(access_policy=runner_ap)
-        ap = runner._resolve_access_policy(SearchInput(query="test"))
-        assert ap is runner_ap
-
-        # payload 优先：通过额外属性注入
-        class _SearchInputWithPolicy(SearchInput):
-            access_policy: AccessPolicy | None = None
-
-        ap = runner._resolve_access_policy(
-            _SearchInputWithPolicy(query="test", access_policy=payload_ap)
+    @pytest.mark.anyio
+    async def test_access_policy_comes_from_execution_context(self) -> None:
+        access_policy = AccessPolicy(
+            allowed_runtimes=frozenset({RuntimeMode.FAST})
         )
-        assert ap is payload_ap
+        svc = _FakeRetrievalService(evidence=_FakeEvidenceBundle())
+        runner = AsyncRAGToolRunner(retrieval_service=svc)
+
+        await runner.retrieve_evidence(
+            SearchInput(query="test"),
+            _execution_context(access_policy=access_policy),
+        )
+
+        assert svc.calls[0]["access_policy"] is access_policy
+        assert svc.calls[0]["query_options"].access_policy is access_policy
+
+    @pytest.mark.anyio
+    async def test_shared_runner_keeps_concurrent_run_policies_isolated(self) -> None:
+        fast_policy = AccessPolicy(
+            allowed_runtimes=frozenset({RuntimeMode.FAST})
+        )
+        deep_policy = AccessPolicy(
+            allowed_runtimes=frozenset({RuntimeMode.DEEP})
+        )
+        svc = _FakeRetrievalService(evidence=_FakeEvidenceBundle())
+        runner = AsyncRAGToolRunner(retrieval_service=svc)
+
+        await asyncio.gather(
+            runner.retrieve_evidence(
+                SearchInput(query="fast"),
+                _execution_context(access_policy=fast_policy, run_id="fast-run"),
+            ),
+            runner.retrieve_evidence(
+                SearchInput(query="deep"),
+                _execution_context(access_policy=deep_policy, run_id="deep-run"),
+            ),
+        )
+
+        policies_by_query = {
+            call["query"]: call["access_policy"]
+            for call in svc.calls
+        }
+        assert policies_by_query == {
+            "fast": fast_policy,
+            "deep": deep_policy,
+        }

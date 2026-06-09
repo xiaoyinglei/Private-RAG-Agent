@@ -5,7 +5,14 @@ from typing import Any
 
 import yaml
 
-from rag.models.config import GenerationConfig, GenerationTaskConfig, ModelCapability, ModelSpec, TokenizerModelConfig
+from rag.models.config import (
+    GenerationConfig,
+    GenerationTaskConfig,
+    ModelCapability,
+    ModelSpec,
+    TokenizerModelConfig,
+)
+from rag.schema.llm import LLMCallStage, LLMStageBudget, parse_llm_stage_budgets
 
 _DEFAULT_CATALOG_PATH = "configs/models.yaml"
 
@@ -24,11 +31,13 @@ class ModelCatalog:
         defaults: dict[str, str],
         generation: GenerationConfig,
         tokenizer: TokenizerModelConfig,
+        llm_stage_budgets: dict[LLMCallStage, LLMStageBudget],
     ) -> None:
         self._models = models
         self._defaults = defaults
         self._generation = generation
         self._tokenizer = tokenizer
+        self._llm_stage_budgets = llm_stage_budgets
 
     @classmethod
     def from_yaml(cls, path: str = _DEFAULT_CATALOG_PATH) -> ModelCatalog:
@@ -62,6 +71,11 @@ class ModelCatalog:
                 base_url=entry.get("base_url"),
                 api_key_env=entry.get("api_key_env"),
                 embedding_space=entry.get("embedding_space"),
+                context_window_tokens=(
+                    int(entry["context_window_tokens"])
+                    if "context_window_tokens" in entry
+                    else None
+                ),
             )
 
         defaults = {
@@ -72,7 +86,13 @@ class ModelCatalog:
 
         generation = cls._parse_generation(data.get("generation"), defaults)
         tokenizer = cls._parse_tokenizer(data.get("tokenizer"))
-        return cls(models=models, defaults=defaults, generation=generation, tokenizer=tokenizer)
+        return cls(
+            models=models,
+            defaults=defaults,
+            generation=generation,
+            tokenizer=tokenizer,
+            llm_stage_budgets=parse_llm_stage_budgets(data.get("llm_budgets")),
+        )
 
     @staticmethod
     def _parse_generation(raw: object, defaults: dict[str, str]) -> GenerationConfig:
@@ -104,6 +124,13 @@ class ModelCatalog:
     @property
     def tokenizer(self) -> TokenizerModelConfig:
         return self._tokenizer
+
+    @property
+    def llm_stage_budgets(self) -> dict[LLMCallStage, LLMStageBudget]:
+        return {
+            stage: budget.model_copy()
+            for stage, budget in self._llm_stage_budgets.items()
+        }
 
     def get_model(self, alias: str) -> ModelSpec:
         spec = self._models.get(alias)

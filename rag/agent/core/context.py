@@ -2,10 +2,15 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 from uuid import uuid4
 
 from rag.agent.core.definition import AgentDefinition, ToolPolicy
+from rag.agent.memory.models import MemoryPolicy
 from rag.schema.runtime import AccessPolicy
+
+if TYPE_CHECKING:
+    from rag.agent.memory.store import WorkspaceMemoryStore
 
 
 @dataclass(frozen=True)
@@ -15,6 +20,9 @@ class AgentRunConfig:
     budget_total: int
     max_depth: int
     access_policy: AccessPolicy
+    work_budget_total: int = 20_000
+    agent_type: str | None = None
+    max_context_tokens: int | None = None
     parent_run_id: str | None = None
     source_scope: tuple[str, ...] = ()
     deadline_iso: str | None = None
@@ -22,6 +30,7 @@ class AgentRunConfig:
     budget_committed: int = 0
     budget_reserved: dict[str, int] = field(default_factory=dict)
     tool_policy: ToolPolicy = field(default_factory=ToolPolicy)
+    memory_policy: MemoryPolicy = field(default_factory=MemoryPolicy)
 
 
 def derive_child_config(parent: AgentRunConfig, child_def: AgentDefinition) -> AgentRunConfig:
@@ -36,7 +45,11 @@ def derive_child_config(parent: AgentRunConfig, child_def: AgentDefinition) -> A
         source_scope=parent.source_scope,
         max_depth=parent.max_depth - 1,
         budget_total=child_def.estimated_token_budget,
+        work_budget_total=child_def.estimated_work_budget,
+        agent_type=child_def.agent_type,
+        max_context_tokens=parent.max_context_tokens,
         tool_policy=child_def.tool_policy,
+        memory_policy=parent.memory_policy,
     )
 
 
@@ -70,21 +83,41 @@ class BudgetLedger:
         async with self._lock:
             return self._reserved.pop(lease_id, 0)
 
+    async def committed(self) -> int:
+        async with self._lock:
+            return self._committed
+
+    async def reserved(self) -> int:
+        async with self._lock:
+            return sum(self._reserved.values())
+
 
 @dataclass
 class AgentRuntimeHandles:
     budget_ledger: BudgetLedger
+    tool_work_ledger: BudgetLedger
     cancellation: asyncio.Event
+    memory_store: WorkspaceMemoryStore | None = None
 
 
-class RuntimeRegistry:
+class RunRegistry:
     _handles: dict[str, AgentRuntimeHandles] = {}
 
     @classmethod
     def get_or_create(cls, run_config: AgentRunConfig) -> AgentRuntimeHandles:
         if run_config.run_id not in cls._handles:
+            parent_handles = (
+                cls._handles.get(run_config.parent_run_id)
+                if run_config.parent_run_id
+                else None
+            )
             cls._handles[run_config.run_id] = AgentRuntimeHandles(
-                budget_ledger=BudgetLedger(total=run_config.budget_total),
+                budget_ledger=(
+                    parent_handles.budget_ledger
+                    if parent_handles is not None
+                    else BudgetLedger(total=run_config.budget_total)
+                ),
+                tool_work_ledger=BudgetLedger(total=run_config.work_budget_total),
                 cancellation=asyncio.Event(),
             )
         return cls._handles[run_config.run_id]
@@ -96,3 +129,12 @@ class RuntimeRegistry:
     @classmethod
     def remove(cls, run_id: str) -> None:
         cls._handles.pop(run_id, None)
+
+
+__all__ = [
+    "AgentRunConfig",
+    "AgentRuntimeHandles",
+    "BudgetLedger",
+    "RunRegistry",
+    "derive_child_config",
+]

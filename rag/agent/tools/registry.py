@@ -1,18 +1,41 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from inspect import isawaitable
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 from pydantic import BaseModel, ValidationError
 
 from rag.agent.tools.spec import ToolSpec
 
+if TYPE_CHECKING:
+    from rag.agent.core.context import AgentRunConfig
+    from rag.agent.core.definition import AgentDefinition
+    from rag.agent.state import AgentState
+
+
+@dataclass(frozen=True)
+class ToolExecutionContext:
+    run_config: AgentRunConfig
+    tool_call_id: str | None = None
+    state: AgentState | None = None
+    definition: AgentDefinition | None = None
+
+
 ToolRunnerResult = BaseModel | dict[str, object]
 ToolRunner = Callable[[BaseModel], ToolRunnerResult | Awaitable[ToolRunnerResult]]
+ContextualToolRunner = Callable[
+    [BaseModel, ToolExecutionContext],
+    ToolRunnerResult | Awaitable[ToolRunnerResult],
+]
 
 
 class ToolRunnerMissingError(LookupError):
+    pass
+
+
+class ToolExecutionContextMissingError(RuntimeError):
     pass
 
 
@@ -40,13 +63,16 @@ class ToolRegistry:
     def __init__(self) -> None:
         self._tools: dict[str, ToolSpec] = {}
         self._runners: dict[str, ToolRunner] = {}
+        self._contextual_runners: dict[str, ContextualToolRunner] = {}
 
     def register(self, spec: ToolSpec, *, runner: ToolRunner | None = None) -> None:
         self._tools[spec.name] = spec
         if runner is None:
             self._runners.pop(spec.name, None)
+            self._contextual_runners.pop(spec.name, None)
         else:
             self._runners[spec.name] = runner
+            self._contextual_runners.pop(spec.name, None)
 
     def get(self, name: str) -> ToolSpec:
         if name not in self._tools:
@@ -56,22 +82,48 @@ class ToolRegistry:
     def register_runner(self, tool_name: str, runner: ToolRunner) -> None:
         self.get(tool_name)
         self._runners[tool_name] = runner
+        self._contextual_runners.pop(tool_name, None)
+
+    def register_contextual_runner(
+        self,
+        tool_name: str,
+        runner: ContextualToolRunner,
+    ) -> None:
+        self.get(tool_name)
+        self._contextual_runners[tool_name] = runner
+        self._runners.pop(tool_name, None)
 
     def has_runner(self, tool_name: str) -> bool:
-        return tool_name in self._runners
+        return tool_name in self._runners or tool_name in self._contextual_runners
 
-    async def run(self, tool_name: str, arguments: dict[str, object]) -> BaseModel:
+    async def run(
+        self,
+        tool_name: str,
+        arguments: dict[str, object],
+        *,
+        execution_context: ToolExecutionContext | None = None,
+    ) -> BaseModel:
         spec = self.get(tool_name)
         try:
             input_payload = spec.input_model.model_validate(arguments)
         except ValidationError as exc:
             raise ToolInputValidationError(tool_name, exc) from exc
 
+        contextual_runner = self._contextual_runners.get(tool_name)
         runner = self._runners.get(tool_name)
-        if runner is None:
+        if contextual_runner is None and runner is None:
             raise ToolRunnerMissingError(f"{tool_name} has no registered callable runner")
 
-        raw_output = runner(input_payload)
+        if contextual_runner is not None:
+            if execution_context is None:
+                raise ToolExecutionContextMissingError(
+                    f"{tool_name} requires a trusted execution context"
+                )
+            raw_output = contextual_runner(input_payload, execution_context)
+        else:
+            if runner is None:
+                raise ToolRunnerMissingError(f"{tool_name} has no registered callable runner")
+            raw_output = runner(input_payload)
         if isawaitable(raw_output):
             raw_output = await raw_output
 
@@ -89,6 +141,7 @@ class ToolRegistry:
         cloned = ToolRegistry()
         cloned._tools = dict(self._tools)
         cloned._runners = dict(self._runners)
+        cloned._contextual_runners = dict(self._contextual_runners)
         return cloned
 
     def list_all(self) -> list[ToolSpec]:

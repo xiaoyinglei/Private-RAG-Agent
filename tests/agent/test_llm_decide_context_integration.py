@@ -1,15 +1,19 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 from langchain_core.messages import HumanMessage
 
-from rag.agent.core.context import AgentRunConfig, RuntimeRegistry
+from rag.agent.core.context import AgentRunConfig, RunRegistry
 from rag.agent.core.definition import AgentDefinition
-from rag.agent.graphs.nodes.llm_decide import llm_decide_node
-from rag.agent.memory.models import InjectedContext, WorkingSummary
+from rag.agent.core.llm_context import AgentLLMContextOverflowError
+from rag.agent.graphs.nodes.llm_decide import decide_next
+from rag.agent.memory.models import ContextBudgetSnapshot, InjectedContext, WorkingSummary
 from rag.agent.primitive_ops import RunPythonOutput
 from rag.agent.state import AgentState, ThinkOutput
 from rag.agent.tools.spec import ToolResult
+from rag.schema.llm import LLMCallStage
 from rag.schema.query import AnswerCitation, EvidenceItem
 from rag.schema.runtime import AccessPolicy
 
@@ -32,8 +36,8 @@ def _state(run_id: str) -> AgentState:
         max_depth=2,
         access_policy=AccessPolicy.default(),
     )
-    RuntimeRegistry.remove(run_id)
-    RuntimeRegistry.get_or_create(config)
+    RunRegistry.remove(run_id)
+    RunRegistry.get_or_create(config)
     return {
         "messages": [HumanMessage(content="Recent message", id="m1")],
         "evidence": [
@@ -96,10 +100,32 @@ class _ContextAwareDecisionProvider:
         return ThinkOutput(action="synthesize", thought="enough", stop_reason="evidence_sufficient")
 
 
+class _FailIfCalledDecisionProvider:
+    def decide(self, *args: object, **kwargs: object) -> ThinkOutput:
+        raise AssertionError("decision provider should not be called when context overflows")
+
+
+class _AssemblerOverflowDecisionProvider:
+    manages_llm_context = True
+
+    def decide(self, *args: object, **kwargs: object) -> ThinkOutput:
+        del args, kwargs
+        raise AgentLLMContextOverflowError(
+            stage=LLMCallStage.TOOL_DECISION,
+            context_budget=ContextBudgetSnapshot(
+                max_context_tokens=10,
+                overflow=True,
+                degraded=True,
+                required_truncated=["system"],
+                warnings=["context_overflow"],
+            ),
+        )
+
+
 @pytest.mark.anyio
 async def test_llm_decide_passes_injected_context_to_tool_decision_provider() -> None:
     provider = _ContextAwareDecisionProvider()
-    result = await llm_decide_node(
+    result = await decide_next(
         _state("eval-context"),
         definition=_definition(),
         decision_provider=provider,
@@ -112,7 +138,7 @@ async def test_llm_decide_passes_injected_context_to_tool_decision_provider() ->
     names = [section.name for section in provider.context.sections]
     assert names.index("evidence") < names.index("working_memory")
     assert "ev1" in provider.context.section("evidence").content
-    RuntimeRegistry.remove("eval-context")
+    RunRegistry.remove("eval-context")
 
 
 @pytest.mark.anyio
@@ -137,7 +163,7 @@ async def test_llm_decide_redirects_premature_synthesis_to_llm_summarize() -> No
             latency_ms=0,
         )
     ]
-    result = await llm_decide_node(
+    result = await decide_next(
         state,
         definition=AgentDefinition(
             agent_type="research",
@@ -155,4 +181,45 @@ async def test_llm_decide_redirects_premature_synthesis_to_llm_summarize() -> No
     assert call.tool_name == "llm_summarize"
     assert call.arguments["task"] == "Explain policy"
     assert "Total amount: 40.0" in "\n".join(call.arguments["context_sections"])
-    RuntimeRegistry.remove("eval-premature-summary")
+    RunRegistry.remove("eval-premature-summary")
+
+
+@pytest.mark.anyio
+async def test_llm_decide_pauses_without_calling_provider_on_context_overflow() -> None:
+    state = _state("eval-context-overflow")
+    state["run_config"] = replace(state["run_config"], max_context_tokens=1)
+    state["task"] = "TASK_RAW " * 200
+
+    result = await decide_next(
+        state,
+        definition=AgentDefinition(
+            agent_type="research",
+            description="Research agent",
+            system_prompt="SYSTEM_RAW " * 200,
+            allowed_tools=["search"],
+            estimated_token_budget=1000,
+        ),
+        decision_provider=_FailIfCalledDecisionProvider(),
+    )
+
+    assert result["status"] == "paused"
+    assert result["decision_reason"] == "context_overflow"
+    assert result["context_budget"].overflow is True
+    assert "context_overflow" in result["context_budget"].warnings
+    RunRegistry.remove("eval-context-overflow")
+
+
+@pytest.mark.anyio
+async def test_llm_decide_pauses_on_model_assembler_required_overflow() -> None:
+    state = _state("eval-assembler-overflow")
+
+    result = await decide_next(
+        state,
+        definition=_definition(),
+        decision_provider=_AssemblerOverflowDecisionProvider(),
+    )
+
+    assert result["status"] == "paused"
+    assert result["decision_reason"] == "context_overflow"
+    assert result["context_budget"].required_truncated == ["system"]
+    RunRegistry.remove("eval-assembler-overflow")

@@ -9,6 +9,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
+from rag.agent.memory.store import MEMORY_DIR_NAME
 from rag.agent.runner.python_runner import (
     PythonRunner,
     SeatbeltPythonRunner,
@@ -161,6 +162,8 @@ class PrimitiveOps:
             else self._workspace.root
         )
         self._workspace.ensure_within_workspace(base)
+        if base.resolve() != self._workspace.root.resolve():
+            _ensure_not_agent_memory(self._workspace, base)
 
         if not base.is_dir():
             return ListFilesOutput(files=[])
@@ -168,6 +171,8 @@ class PrimitiveOps:
         entries: list[FileInfo] = []
         truncated = False
         for entry in sorted(base.iterdir()):
+            if entry.name == MEMORY_DIR_NAME:
+                continue
             if payload.pattern and not entry.match(payload.pattern):
                 continue
             if len(entries) >= payload.limit:
@@ -190,6 +195,7 @@ class PrimitiveOps:
     def read_file(self, payload: ReadFileInput) -> ReadFileOutput:
         target = self._workspace.resolve_path(payload.path)
         self._workspace.ensure_within_workspace(target)
+        _ensure_not_agent_memory(self._workspace, target)
 
         if not target.is_file():
             raise FileNotFoundError(f"File not found: {payload.path}")
@@ -296,6 +302,7 @@ class PrimitiveOps:
     def structured_probe(self, payload: StructuredProbeInput) -> StructuredProbeOutput:
         target = self._workspace.resolve_path(payload.path)
         self._workspace.ensure_within_workspace(target)
+        _ensure_not_agent_memory(self._workspace, target)
 
         if not target.is_file():
             raise FileNotFoundError(f"File not found: {payload.path}")
@@ -355,6 +362,16 @@ class PrimitiveOps:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _ensure_not_agent_memory(workspace: WorkspaceRuntime, path: Path) -> None:
+    rel = workspace.relative_to_root(path)
+    if rel.parts and rel.parts[0] == MEMORY_DIR_NAME:
+        raise PermissionError(
+            "Cannot access agent memory through primitive file tools; "
+            "use internal MemoryStore.resolve(ref)"
+        )
+
 
 def _snapshot_files(root: Path) -> set[str]:
     files: set[str] = set()

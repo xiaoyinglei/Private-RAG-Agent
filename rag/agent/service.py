@@ -10,15 +10,25 @@ from langgraph.checkpoint.base import BaseCheckpointSaver
 from pydantic import BaseModel, ConfigDict, Field
 
 from rag.agent.core.checkpointing import create_agent_checkpointer
-from rag.agent.core.compiler import AgentGraphCompiler
-from rag.agent.core.context import AgentRunConfig, RuntimeRegistry
+from rag.agent.core.compiler import GraphCompiler
+from rag.agent.core.context import AgentRunConfig, RunRegistry
 from rag.agent.core.definition import AgentDefinition
 from rag.agent.core.delegation import DelegatedAgentRunner
 from rag.agent.core.human_input import HumanInputRequest, HumanInputResponse
 from rag.agent.core.llm_registry import ModelRegistry
+from rag.agent.core.output_finalizer import StructuredOutputFinalizer
+from rag.agent.core.output_models import (
+    ValidatedFinalOutput,
+    output_model_path,
+)
+from rag.agent.goal_runtime import GoalSpec
+from rag.agent.graphs.nodes.goal_runtime import GoalContractProvider
 from rag.agent.graphs.nodes.llm_decide import ToolDecisionProvider
 from rag.agent.graphs.nodes.retrieval_hint import RetrievalHintProvider
 from rag.agent.graphs.nodes.synthesize import SynthesisRunner
+from rag.agent.memory.compactor import MessageCompactor
+from rag.agent.memory.models import MemoryPolicy
+from rag.agent.memory.store import WorkspaceMemoryStore
 from rag.agent.state import AgentState, ToolCallPlan
 from rag.agent.tools.registry import ToolRegistry, ToolRunner
 from rag.agent.tools.spec import ToolResult
@@ -33,6 +43,7 @@ class AgentRunRequest(BaseModel):
     run_id: str | None = None
     thread_id: str | None = None
     budget_total: int | None = Field(default=None, gt=0)
+    max_context_tokens: int | None = Field(default=None, gt=0)
     max_depth: int | None = Field(default=None, ge=0)
     pending_tool_calls: list[ToolCallPlan] = Field(default_factory=list)
     approved_tool_call_ids: list[str] = Field(default_factory=list)
@@ -40,6 +51,8 @@ class AgentRunRequest(BaseModel):
     messages: list[BaseMessage] = Field(default_factory=list)
     input_files: list[str] = Field(default_factory=list)
     workspace_path: str | None = None
+    memory_policy: MemoryPolicy | None = None
+    goal_spec: GoalSpec | None = None
 
     def to_run_config(self, definition: AgentDefinition) -> AgentRunConfig:
         run_id = self.run_id or f"run_{uuid4().hex[:12]}"
@@ -47,9 +60,13 @@ class AgentRunRequest(BaseModel):
             run_id=run_id,
             thread_id=self.thread_id or run_id,
             budget_total=self.budget_total or definition.estimated_token_budget,
+            work_budget_total=definition.estimated_work_budget,
+            agent_type=definition.agent_type,
+            max_context_tokens=self.max_context_tokens,
             max_depth=definition.max_depth if self.max_depth is None else self.max_depth,
             access_policy=definition.access_policy or AccessPolicy.default(),
             tool_policy=definition.tool_policy,
+            memory_policy=self.memory_policy or MemoryPolicy(),
         )
 
 
@@ -60,6 +77,10 @@ class AgentRunResult(BaseModel):
     thread_id: str
     status: str
     final_answer: str | None = None
+    final_output: BaseModel | None = None
+    output_validation_errors: list[dict[str, object]] = Field(
+        default_factory=list
+    )
     stop_reason: str | None = None
     tool_results: list[ToolResult] = Field(default_factory=list)
     evidence: list[EvidenceItem] = Field(default_factory=list)
@@ -73,7 +94,13 @@ class AgentRunResult(BaseModel):
     workspace_path: str | None = None
 
     @classmethod
-    def from_state(cls, state: AgentState, *, workspace_path: str | None = None) -> AgentRunResult:
+    def from_state(
+        cls,
+        state: AgentState,
+        *,
+        definition: AgentDefinition | None = None,
+        workspace_path: str | None = None,
+    ) -> AgentRunResult:
         run_config = state["run_config"]
         is_terminal = state["status"] in {"done", "failed"}
         human_request = None if is_terminal else state.get("human_input_request")
@@ -83,6 +110,13 @@ class AgentRunResult(BaseModel):
             thread_id=run_config.thread_id,
             status=state["status"],
             final_answer=state.get("final_answer"),
+            final_output=_restore_final_output(
+                state.get("final_output"),
+                definition=definition,
+            ),
+            output_validation_errors=list(
+                state.get("output_validation_errors", [])
+            ),
             stop_reason=state.get("stop_reason"),
             tool_results=list(state.get("tool_results", [])),
             evidence=list(state.get("evidence", [])),
@@ -107,25 +141,31 @@ class AgentService:
         definition: AgentDefinition,
         tool_registry: ToolRegistry,
         tool_decision_provider: ToolDecisionProvider | None = None,
+        goal_contract_provider: GoalContractProvider | None = None,
         retrieval_hint_provider: RetrievalHintProvider | None = None,
         subagent_runner: DelegatedAgentRunner | None = None,
         synthesis_runner: SynthesisRunner | None = None,
+        output_finalizer: StructuredOutputFinalizer | None = None,
         model_registry: ModelRegistry | None = None,
         checkpointer: BaseCheckpointSaver[str] | None = None,
     ) -> None:
         self._definition = definition
         self._base_tool_registry = tool_registry
         self._tool_decision_provider = tool_decision_provider
+        self._goal_contract_provider = goal_contract_provider
         self._retrieval_hint_provider = retrieval_hint_provider
         self._subagent_runner = subagent_runner
         self._synthesis_runner = synthesis_runner
+        self._output_finalizer = output_finalizer
         self._model_registry = model_registry
         self._checkpointer = checkpointer or create_agent_checkpointer(None)
-        self._compiler = AgentGraphCompiler(
+        self._compiler = GraphCompiler(
             tool_registry=tool_registry,
             tool_decision_provider=tool_decision_provider,
+            goal_contract_provider=goal_contract_provider,
             retrieval_hint_provider=retrieval_hint_provider,
             synthesis_runner=synthesis_runner,
+            output_finalizer=output_finalizer,
             model_registry=model_registry,
             checkpointer=self._checkpointer,
         )
@@ -139,6 +179,7 @@ class AgentService:
             approved_tool_call_ids=request.approved_tool_call_ids,
             denied_tool_call_ids=request.denied_tool_call_ids,
             messages=request.messages,
+            goal_spec=request.goal_spec,
         )
 
     def initial_state_from_config(
@@ -150,10 +191,14 @@ class AgentService:
         approved_tool_call_ids: list[str] | None = None,
         denied_tool_call_ids: list[str] | None = None,
         messages: list[BaseMessage] | None = None,
+        goal_spec: GoalSpec | None = None,
+        memory_store: WorkspaceMemoryStore | None = None,
     ) -> AgentState:
-        RuntimeRegistry.remove(run_config.run_id)
-        RuntimeRegistry.get_or_create(run_config)
-        return {
+        RunRegistry.remove(run_config.run_id)
+        handles = RunRegistry.get_or_create(run_config)
+        if memory_store is not None:
+            handles.memory_store = memory_store
+        state: AgentState = {
             "messages": list(messages or []),
             "evidence": [],
             "citations": [],
@@ -178,9 +223,13 @@ class AgentService:
             "extracted_facts": [],
             "context_budget": None,
             "final_answer": None,
+            "final_output": None,
+            "output_validation_errors": [],
             "groundedness_flag": False,
             "insufficient_evidence_flag": False,
-            "goal_spec": None,
+            "goal_spec": goal_spec,
+            "goal_contract_hint": None,
+            "goal_contract_debug": None,
             "goal_requirements": [],
             "satisfied_requirements": [],
             "open_gaps": [],
@@ -196,7 +245,19 @@ class AgentService:
             "no_progress_count": 0,
             "satisfaction_report": None,
             "controller_next": None,
+            "agent_plan": None,
+            "plan_events": [],
+            "memory_refs": [],
+            "memory_budget": None,
+            "memory_warnings": [],
         }
+        return cast(
+            AgentState,
+            MessageCompactor(
+                policy=run_config.memory_policy,
+                store=memory_store,
+            ).compact_initial_state(dict(state)),
+        )
 
     async def run(self, request: AgentRunRequest) -> AgentRunResult:
         run_config = request.to_run_config(self._definition)
@@ -207,6 +268,7 @@ class AgentService:
             approved_tool_call_ids=request.approved_tool_call_ids,
             denied_tool_call_ids=request.denied_tool_call_ids,
             messages=request.messages,
+            goal_spec=request.goal_spec,
             input_files=request.input_files,
             workspace_path=request.workspace_path,
         )
@@ -220,6 +282,7 @@ class AgentService:
         approved_tool_call_ids: list[str] | None = None,
         denied_tool_call_ids: list[str] | None = None,
         messages: list[BaseMessage] | None = None,
+        goal_spec: GoalSpec | None = None,
         input_files: list[str] | None = None,
         workspace_path: str | None = None,
     ) -> AgentRunResult:
@@ -238,12 +301,18 @@ class AgentService:
 
         # 3. Create PrimitiveOps and inject runners
         ops = PrimitiveOps(workspace=workspace)
+        memory_store = WorkspaceMemoryStore(
+            workspace=workspace,
+            policy=run_config.memory_policy,
+        )
         runtime_registry = self._runtime_tool_registry(run_config, runners=ops.runners())
-        compiler = AgentGraphCompiler(
+        compiler = GraphCompiler(
             tool_registry=runtime_registry,
             tool_decision_provider=self._tool_decision_provider,
+            goal_contract_provider=self._goal_contract_provider,
             retrieval_hint_provider=self._retrieval_hint_provider,
             synthesis_runner=self._synthesis_runner,
+            output_finalizer=self._output_finalizer,
             model_registry=self._model_registry,
             checkpointer=self._checkpointer,
         )
@@ -255,6 +324,8 @@ class AgentService:
             approved_tool_call_ids=approved_tool_call_ids,
             denied_tool_call_ids=denied_tool_call_ids,
             messages=messages,
+            goal_spec=goal_spec,
+            memory_store=memory_store,
         )
         try:
             result_state = await graph.ainvoke(
@@ -262,11 +333,15 @@ class AgentService:
                 config={"configurable": {"thread_id": run_config.thread_id}},
             )
         except Exception:
-            RuntimeRegistry.remove(run_config.run_id)
+            RunRegistry.remove(run_config.run_id)
             raise
         if result_state.get("status") in {"done", "failed"}:
-            RuntimeRegistry.remove(run_config.run_id)
-        return AgentRunResult.from_state(result_state, workspace_path=str(workspace.root))
+            RunRegistry.remove(run_config.run_id)
+        return AgentRunResult.from_state(
+            result_state,
+            definition=self._definition,
+            workspace_path=str(workspace.root),
+        )
 
     def _runtime_tool_registry(
         self,
@@ -321,7 +396,7 @@ class AgentService:
             if registry.has_runner(tool_name):
                 continue
             try:
-                registry.register_runner(tool_name, runner)
+                registry.register_contextual_runner(tool_name, runner)
             except KeyError:
                 pass
 
@@ -346,20 +421,24 @@ class AgentService:
         # 1. Restore PrimitiveOps runners if workspace_path provided
         runtime_registry = self._base_tool_registry.clone()
         self._inject_model_llm_tool_runners(runtime_registry)
+        memory_store: WorkspaceMemoryStore | None = None
         if workspace_path:
             workspace = open_workspace(workspace_path)
             ops = PrimitiveOps(workspace=workspace)
+            memory_store = WorkspaceMemoryStore(workspace=workspace)
             for extra_name, extra_runner in ops.runners().items():
                 try:
                     runtime_registry.register_runner(extra_name, extra_runner)
                 except KeyError:
                     pass
 
-        compiler = AgentGraphCompiler(
+        compiler = GraphCompiler(
             tool_registry=runtime_registry,
             tool_decision_provider=self._tool_decision_provider,
+            goal_contract_provider=self._goal_contract_provider,
             retrieval_hint_provider=self._retrieval_hint_provider,
             synthesis_runner=self._synthesis_runner,
+            output_finalizer=self._output_finalizer,
             model_registry=self._model_registry,
             checkpointer=self._checkpointer,
         )
@@ -368,13 +447,22 @@ class AgentService:
             graph,
             thread_id=run_id,
         )
+        if memory_store is not None:
+            RunRegistry.get(run_config.run_id).memory_store = WorkspaceMemoryStore(
+                workspace=workspace,
+                policy=run_config.memory_policy,
+            )
         result_state = await graph.ainvoke(
             Command(resume=response.model_dump(mode="json")),
             config={"configurable": {"thread_id": run_config.thread_id}},
         )
         if result_state.get("status") in {"done", "failed"}:
-            RuntimeRegistry.remove(run_config.run_id)
-        return AgentRunResult.from_state(result_state, workspace_path=workspace_path)
+            RunRegistry.remove(run_config.run_id)
+        return AgentRunResult.from_state(
+            result_state,
+            definition=self._definition,
+            workspace_path=workspace_path,
+        )
 
     def pending_human_input_request(self, *, run_id: str) -> HumanInputRequest:
         graph = self._compiler.compile(self._definition)
@@ -401,15 +489,12 @@ class AgentService:
         state = await self._acheckpoint_state(graph, thread_id=thread_id)
         run_config = state["run_config"]
         try:
-            RuntimeRegistry.get(run_config.run_id)
+            RunRegistry.get(run_config.run_id)
             return run_config
         except KeyError:
-            handles = RuntimeRegistry.get_or_create(run_config)
+            handles = RunRegistry.get_or_create(run_config)
 
-        committed = sum(
-            max(0, getattr(result, "token_used", 0))
-            for result in state.get("tool_results", [])
-        )
+        committed = max(0, run_config.budget_committed)
         if committed > 0:
             lease_id = f"checkpoint_restore:{run_config.run_id}"
             reserved = await handles.budget_ledger.reserve(
@@ -437,6 +522,22 @@ class AgentService:
         if not snapshot.values:
             raise KeyError(f"No checkpoint found for run_id={thread_id}")
         return cast(AgentState, snapshot.values)
+
+
+def _restore_final_output(
+    raw_output: ValidatedFinalOutput | dict[str, object] | None,
+    *,
+    definition: AgentDefinition | None,
+) -> BaseModel | None:
+    if raw_output is None or definition is None or definition.output_model is None:
+        return None
+    envelope = ValidatedFinalOutput.model_validate(raw_output)
+    expected_path = output_model_path(definition.output_model)
+    if envelope.model_path != expected_path:
+        raise ValueError(
+            "Checkpoint final output model does not match AgentDefinition.output_model"
+        )
+    return definition.output_model.model_validate(envelope.data)
 
 
 __all__ = [

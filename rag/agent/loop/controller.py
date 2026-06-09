@@ -4,7 +4,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
-from rag.agent.core.context import RuntimeRegistry
+from rag.agent.core.context import RunRegistry
 from rag.agent.core.definition import AgentDefinition
 from rag.agent.goal_runtime import (
     ContextBinding,
@@ -13,6 +13,7 @@ from rag.agent.goal_runtime import (
     SatisfactionChecker,
     SatisfactionReport,
 )
+from rag.agent.planning import PlanTracker
 from rag.agent.state import AgentState
 
 
@@ -30,7 +31,7 @@ class GoalChecker(Protocol):
 
 
 @dataclass(slots=True)
-class AgentLoopController:
+class TurnController:
     """Advance the goal-driven agent loop by one control decision."""
 
     definition: AgentDefinition
@@ -40,7 +41,7 @@ class AgentLoopController:
 
     def advance(self, state: AgentState) -> dict[str, Any]:
         try:
-            RuntimeRegistry.get(state["run_config"].run_id)
+            RunRegistry.get(state["run_config"].run_id)
         except KeyError:
             return {
                 "status": "failed",
@@ -60,7 +61,6 @@ class AgentLoopController:
                     "controller_next": "finalize",
                 }
             return {"status": "running", "controller_next": "execute"}
-
         assessed_bindings = self.binding_assessor.assess_bindings(
             dict(state),
             context_units=state.get("context_units", []),
@@ -99,6 +99,37 @@ class AgentLoopController:
             )
             if report.reason != "goal_satisfied":
                 update["insufficient_evidence_flag"] = True
+            plan, events = PlanTracker().record_completion(
+                state.get("agent_plan"),
+                blocked=report.reason != "goal_satisfied",
+            )
+            if plan is not None:
+                update["agent_plan"] = plan
+            if events:
+                update["plan_events"] = events
+            return update
+
+        plan = state.get("agent_plan")
+        if getattr(plan, "status", None) == "needs_replan":
+            if self.has_tool_decision_provider:
+                update.update(
+                    {
+                        "status": "running",
+                        "controller_next": "llm_decide",
+                        "decision_reason": "plan_needs_replan",
+                    }
+                )
+                return update
+            update.update(
+                {
+                    "status": "paused",
+                    "needs_user_input": (
+                        "Plan requires replanning but no decision provider is available."
+                    ),
+                    "controller_next": "pause",
+                    "decision_reason": "plan_needs_replan",
+                }
+            )
             return update
 
         if report.is_stuck:
@@ -109,6 +140,14 @@ class AgentLoopController:
                     "controller_next": "pause",
                 }
             )
+            plan, events = PlanTracker().record_completion(
+                state.get("agent_plan"),
+                blocked=True,
+            )
+            if plan is not None:
+                update["agent_plan"] = plan
+            if events:
+                update["plan_events"] = events
             return update
         if self.has_tool_decision_provider:
             update["controller_next"] = "llm_decide"
@@ -134,5 +173,4 @@ def _gap_ids(gaps: Sequence[object]) -> set[str]:
             ids.add(gap_id)
     return ids
 
-
-__all__ = ["AgentLoopController", "BindingAssessor", "GoalChecker"]
+__all__ = ["BindingAssessor", "GoalChecker", "TurnController"]

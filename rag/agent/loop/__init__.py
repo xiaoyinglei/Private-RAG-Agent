@@ -1,3 +1,3 @@
-from rag.agent.loop.controller import AgentLoopController
+from rag.agent.loop.controller import TurnController
 
-__all__ = ["AgentLoopController"]
+__all__ = ["TurnController"]

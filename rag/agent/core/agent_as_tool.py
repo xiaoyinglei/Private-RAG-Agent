@@ -253,6 +253,11 @@ class AgentAsToolAdapter:
             "no_progress_count": 0,
             "satisfaction_report": None,
             "controller_next": None,
+            "agent_plan": None,
+            "plan_events": [],
+            "memory_refs": [],
+            "memory_budget": None,
+            "memory_warnings": [],
         }
 
         prompt = _build_delegation_prompt(request)
@@ -352,7 +357,7 @@ def build_agent_tool_spec(agent_definition: AgentDefinition) -> AgentToolSpec:
         ),
         timeout_seconds=120.0,
         max_retries=0,
-        token_budget_cost=agent_definition.estimated_token_budget,
+        work_budget_cost=2_000,
     )
 
     return AgentToolSpec(

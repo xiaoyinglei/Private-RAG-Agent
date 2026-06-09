@@ -75,6 +75,29 @@ def test_tool_decision_prompt_includes_primitive_tool_contracts() -> None:
     assert "重复表头" not in prompt
 
 
+def test_tool_decision_prompt_includes_bounded_plan_update_contract() -> None:
+    prompt = build_tool_decision_prompt(
+        {
+            "task": "分析工作区表格并回答",
+            "iteration": 1,
+            "tool_results": [],
+        },
+        budget_remaining=5000,
+        context_text="open_gaps: answer\nCurrent autonomous plan: ...",
+        allowed_tools=["list_files", "structured_probe", "run_python"],
+    )
+
+    assert '"plan_update"' in prompt
+    assert '"mode": "replace" | "patch"' in prompt
+    assert "计划不是权限" in prompt
+    assert "最多保留" in prompt
+    assert "不要把完整表格" in prompt
+    assert "不得把 plan status 设为 complete" in prompt
+    assert "不得把 step status 设为 completed" in prompt
+    assert "structured observation" in prompt
+    assert "goal checker" in prompt
+
+
 def test_tool_decision_prompt_tells_model_how_to_finish_workspace_results() -> None:
     prompt = build_tool_decision_prompt(
         {

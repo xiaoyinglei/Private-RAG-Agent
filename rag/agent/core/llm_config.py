@@ -5,6 +5,12 @@ from typing import Any
 
 from pydantic import BaseModel, Field, model_validator
 
+from rag.schema.llm import (
+    DEFAULT_LLM_STAGE_BUDGETS,
+    LLMCallStage,
+    LLMStageBudget,
+)
+
 
 class ModelProvider(StrEnum):
     """当前 Agent 模型配置真正支持的 provider。"""
@@ -24,6 +30,7 @@ class ModelSpec(BaseModel):
     base_url: str | None = None
     api_key_env: str | None = None
     defaults: dict[str, Any] = Field(default_factory=dict)
+    context_window_tokens: int = Field(default=32_768, gt=0)
 
 
 class AgentModelsConfig(BaseModel):
@@ -33,6 +40,12 @@ class AgentModelsConfig(BaseModel):
     models: dict[str, ModelSpec] = Field(default_factory=dict)
     default_model: str
     fallback_model: str | None = None
+    llm_stage_budgets: dict[LLMCallStage, LLMStageBudget] = Field(
+        default_factory=lambda: {
+            stage: budget.model_copy()
+            for stage, budget in DEFAULT_LLM_STAGE_BUDGETS.items()
+        }
+    )
 
     @model_validator(mode="after")
     def validate_model_refs(self) -> AgentModelsConfig:

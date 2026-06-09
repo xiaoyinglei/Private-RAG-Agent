@@ -72,7 +72,8 @@ RESEARCH_AGENT = AgentDefinition(
         "run_python",
     ],
     # TODO: migrate estimated_token_budget / max_iterations / max_depth to runtime config
-    estimated_token_budget=10000,
+    estimated_token_budget=96_000,
+    estimated_work_budget=20_000,
     model_selection=ModelSelectionPolicy(
         thinking=True,
         retrieval_hint_max_tokens=256,

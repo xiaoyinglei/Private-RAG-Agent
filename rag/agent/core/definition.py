@@ -35,8 +35,16 @@ class AgentDefinition:
     allowed_tools: list[str]
     access_policy: AccessPolicy | None = None
     estimated_token_budget: int = 8000
+    estimated_work_budget: int = 20_000
     model_selection: ModelSelectionPolicy = field(default_factory=ModelSelectionPolicy)
     output_model: type[BaseModel] | None = None
+    output_validation_max_retries: int = 2
     max_iterations: int = 10
     max_depth: int = 2
     tool_policy: ToolPolicy = field(default_factory=ToolPolicy)
+
+    def __post_init__(self) -> None:
+        if self.output_validation_max_retries < 0:
+            raise ValueError(
+                "output_validation_max_retries must be non-negative"
+            )

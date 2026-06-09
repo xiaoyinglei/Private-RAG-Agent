@@ -6,7 +6,9 @@ from typing import Any, Protocol
 
 from rag.assembly import TokenAccountingService, TokenizerContract
 from rag.ingest.parsers.util import normalize_whitespace
+from rag.providers.llm_gateway import LLMGateway
 from rag.schema.core import ParsedSection
+from rag.schema.llm import LLMCallStage
 from rag.utils.text import text_unit_count
 
 
@@ -73,9 +75,11 @@ class RetrievalSummarizer:
         *,
         config: RetrievalSummaryConfig | None = None,
         token_accounting: TokenAccountingClient | None = None,
+        gateway: LLMGateway | None = None,
     ) -> None:
         self._llm = llm_client
         self._config = config or RetrievalSummaryConfig()
+        self._gateway = gateway
         self._token_accounting = token_accounting or TokenAccountingService(
             TokenizerContract(
                 embedding_model_name="default",
@@ -90,10 +94,15 @@ class RetrievalSummarizer:
         kwargs: dict[str, Any] = {}
         if self._config.temperature is not None:
             kwargs["temperature"] = self._config.temperature
+        kwargs["max_tokens"] = self._config.max_output_tokens
+        if self._gateway is not None:
+            return self._gateway.generate_text(
+                stage=LLMCallStage.RETRIEVAL_SUMMARY,
+                prompt=prompt,
+                kwargs=kwargs,
+            ).value
         try:
-            return self._llm.generate_text(
-                prompt=prompt, max_tokens=self._config.max_output_tokens, **kwargs
-            )
+            return self._llm.generate_text(prompt=prompt, **kwargs)
         except TypeError as exc:
             if "unexpected keyword argument" in str(exc):
                 return self._llm.generate_text(prompt=prompt)

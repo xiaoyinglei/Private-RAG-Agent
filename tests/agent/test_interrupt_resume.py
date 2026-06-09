@@ -5,7 +5,7 @@ from pydantic import BaseModel
 
 from rag.agent.core.context import AgentRunConfig
 from rag.agent.core.human_input import HumanInputResponse
-from rag.agent.graphs.nodes.execute import execute_node
+from rag.agent.graphs.nodes.execute import run_tools_raw
 from rag.agent.graphs.nodes.pause import pause_node
 from rag.agent.state import ToolCallPlan
 from rag.agent.tools.registry import ToolRegistry
@@ -63,7 +63,7 @@ def _state(**overrides: object) -> dict:
     return s
 
 
-# ── execute_node + ApprovalPolicy ──
+# ── run_tools_raw + ApprovalPolicy ──
 
 
 class TestExecuteNodeWithApproval:
@@ -80,7 +80,7 @@ class TestExecuteNodeWithApproval:
         registry.register(spec, runner=lambda p: _DummyOutput(result=f"found:{p.data}"))
 
         call = ToolCallPlan.create("vector_search", {"data": "hello"})
-        update = await execute_node(
+        update = await run_tools_raw(
             _state(pending_tool_calls=[call], approved_tool_call_ids=[], denied_tool_call_ids=[]),
             tool_registry=registry, allowed_tools=frozenset({"vector_search"}),
         )
@@ -102,7 +102,7 @@ class TestExecuteNodeWithApproval:
         registry.register(spec, runner=lambda p: _DummyOutput(result=f"wrote:{p.data}"))
 
         call = ToolCallPlan.create("kg_upsert", {"data": "important"})
-        update = await execute_node(
+        update = await run_tools_raw(
             _state(pending_tool_calls=[call], approved_tool_call_ids=[], denied_tool_call_ids=[]),
             tool_registry=registry, allowed_tools=frozenset({"kg_upsert"}),
         )
@@ -125,7 +125,7 @@ class TestExecuteNodeWithApproval:
         registry.register(spec, runner=lambda p: _DummyOutput(result=f"wrote:{p.data}"))
 
         call = ToolCallPlan.create("kg_upsert", {"data": "again"})
-        update = await execute_node(
+        update = await run_tools_raw(
             _state(
                 pending_tool_calls=[call],
                 approved_tool_call_ids=[call.tool_call_id],
@@ -151,7 +151,7 @@ class TestExecuteNodeWithApproval:
         registry.register(spec, runner=lambda p: _DummyOutput(result="should not run"))
 
         call = ToolCallPlan.create("kg_upsert", {"data": "blocked"})
-        update = await execute_node(
+        update = await run_tools_raw(
             _state(
                 pending_tool_calls=[call],
                 approved_tool_call_ids=[],
@@ -167,7 +167,7 @@ class TestExecuteNodeWithApproval:
     async def test_unregistered_tool_denied(self) -> None:
         """未注册工具直接 DENY。"""
         call = ToolCallPlan.create("unknown_tool", {"x": 1})
-        update = await execute_node(
+        update = await run_tools_raw(
             _state(pending_tool_calls=[call]),
             tool_registry=ToolRegistry(), allowed_tools=frozenset({"unknown_tool"}),
         )
@@ -197,7 +197,7 @@ class TestExecuteNodeWithApproval:
 
         call1 = ToolCallPlan.create("read_only", {"data": "x"})
         call2 = ToolCallPlan.create("write_tool", {"data": "y"})
-        update = await execute_node(
+        update = await run_tools_raw(
             _state(pending_tool_calls=[call1, call2]),
             tool_registry=registry,
             allowed_tools=frozenset({"read_only", "write_tool"}),

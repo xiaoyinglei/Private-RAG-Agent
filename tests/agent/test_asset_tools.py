@@ -7,8 +7,8 @@ import pandas as pd
 import pytest
 
 from rag.agent.builtin.research import RESEARCH_AGENT
-from rag.agent.core.context import AgentRunConfig, RuntimeRegistry
-from rag.agent.graphs.nodes.execute import execute_node
+from rag.agent.core.context import AgentRunConfig, RunRegistry
+from rag.agent.graphs.nodes.execute import run_tools_raw
 from rag.agent.state import AgentState, ToolCallPlan
 from rag.agent.tools.asset_tools import (
     AssetAnalyzeInput,
@@ -275,7 +275,7 @@ def test_rag_search_output_preserves_asset_ids_for_followup_asset_tools() -> Non
 
 
 @pytest.mark.anyio
-async def test_execute_node_runs_generic_asset_analysis_tool() -> None:
+async def test_run_tools_raw_runs_generic_asset_analysis_tool() -> None:
     parquet = _create_parquet(
         {
             "区域公司": ["总计（不含一体化）", "北方", "东北"],
@@ -294,8 +294,8 @@ async def test_execute_node_runs_generic_asset_analysis_tool() -> None:
         max_depth=2,
         access_policy=AccessPolicy.default(),
     )
-    RuntimeRegistry.remove(run_config.run_id)
-    RuntimeRegistry.get_or_create(run_config)
+    RunRegistry.remove(run_config.run_id)
+    RunRegistry.get_or_create(run_config)
     state: AgentState = {
         "messages": [],
         "evidence": [],
@@ -338,7 +338,7 @@ async def test_execute_node_runs_generic_asset_analysis_tool() -> None:
     }
     registry = create_builtin_tool_registry(runners={"asset_analyze": runner.analyze_asset})
 
-    update = await execute_node(
+    update = await run_tools_raw(
         state,
         tool_registry=registry,
         allowed_tools=frozenset({"asset_analyze"}),
@@ -350,11 +350,11 @@ async def test_execute_node_runs_generic_asset_analysis_tool() -> None:
     output = tool_result.output
     assert isinstance(output, AssetAnalyzeOutput)
     assert output.rows == [["25.532808"]]
-    RuntimeRegistry.remove(run_config.run_id)
+    RunRegistry.remove(run_config.run_id)
 
 
 @pytest.mark.anyio
-async def test_execute_node_runs_generic_asset_read_slice_tool() -> None:
+async def test_run_tools_raw_runs_generic_asset_read_slice_tool() -> None:
     parquet = _create_parquet(
         {
             "区域公司": ["总计（不含一体化）", "北方", "东北"],
@@ -373,8 +373,8 @@ async def test_execute_node_runs_generic_asset_read_slice_tool() -> None:
         max_depth=2,
         access_policy=AccessPolicy.default(),
     )
-    RuntimeRegistry.remove(run_config.run_id)
-    RuntimeRegistry.get_or_create(run_config)
+    RunRegistry.remove(run_config.run_id)
+    RunRegistry.get_or_create(run_config)
     state: AgentState = {
         "messages": [],
         "evidence": [],
@@ -415,7 +415,7 @@ async def test_execute_node_runs_generic_asset_read_slice_tool() -> None:
     }
     registry = create_builtin_tool_registry(runners={"asset_read_slice": runner.read_slice})
 
-    update = await execute_node(
+    update = await run_tools_raw(
         state,
         tool_registry=registry,
         allowed_tools=frozenset({"asset_read_slice"}),
@@ -427,4 +427,4 @@ async def test_execute_node_runs_generic_asset_read_slice_tool() -> None:
     output = tool_result.output
     assert isinstance(output, AssetReadSliceOutput)
     assert output.rows == [{"区域公司": "北方"}]
-    RuntimeRegistry.remove(run_config.run_id)
+    RunRegistry.remove(run_config.run_id)

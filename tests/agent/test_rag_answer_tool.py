@@ -4,10 +4,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from rag.agent.core.context import AgentRunConfig, RuntimeRegistry
+from rag.agent.core.context import AgentRunConfig, RunRegistry
 from rag.agent.core.definition import AgentDefinition
 from rag.agent.graphs.base import build_agent_graph
-from rag.agent.graphs.nodes.execute import execute_node
+from rag.agent.graphs.nodes.execute import run_tools_raw
 from rag.agent.state import AgentState, ThinkOutput, ToolCallPlan
 from rag.agent.tools.builtin_registry import create_builtin_tool_registry
 from rag.agent.tools.rag_answer_tools import (
@@ -15,6 +15,8 @@ from rag.agent.tools.rag_answer_tools import (
     RAGSearchAnswerOutput,
     RAGSearchAnswerRunner,
 )
+from rag.agent.tools.registry import ToolExecutionContext
+from rag.providers.llm_gateway import current_llm_budget_ledger
 from rag.schema.query import AnswerCitation, EvidenceItem, GroundedAnswer, RetrievalSignals
 from rag.schema.runtime import AccessPolicy
 
@@ -68,8 +70,8 @@ def _state() -> AgentState:
         max_depth=2,
         access_policy=AccessPolicy.default(),
     )
-    RuntimeRegistry.remove(run_config.run_id)
-    RuntimeRegistry.get_or_create(run_config)
+    RunRegistry.remove(run_config.run_id)
+    RunRegistry.get_or_create(run_config)
     return {
         "messages": [],
         "evidence": [],
@@ -161,16 +163,16 @@ async def test_model_decision_can_select_rag_search_answer_from_retrieval_hint()
     assert calls[0].retrieval_signals is not None
     assert calls[0].retrieval_signals.quoted_terms == ["policy"]
     assert provider.calls == 1
-    RuntimeRegistry.remove("rag-answer-test")
+    RunRegistry.remove("rag-answer-test")
 
 
 @pytest.mark.anyio
-async def test_execute_node_does_not_create_tool_call_from_legacy_execution_mode() -> None:
+async def test_run_tools_raw_does_not_create_tool_call_from_legacy_execution_mode() -> None:
     calls: list[object] = []
     state = _state()
     state["execution_mode"] = "fast_path"  # type: ignore[typeddict-unknown-key]
 
-    update = await execute_node(
+    update = await run_tools_raw(
         state,
         tool_registry=create_builtin_tool_registry(
             runners={"vector_search": lambda payload: calls.append(payload)}
@@ -180,7 +182,7 @@ async def test_execute_node_does_not_create_tool_call_from_legacy_execution_mode
 
     assert update == {}
     assert calls == []
-    RuntimeRegistry.remove("rag-answer-test")
+    RunRegistry.remove("rag-answer-test")
 
 
 @pytest.mark.anyio
@@ -203,9 +205,11 @@ async def test_rag_search_answer_runner_uses_fast_runtime_query_and_preserves_co
     class _Runtime:
         def __init__(self) -> None:
             self.calls: list[tuple[str, object]] = []
+            self.active_ledgers: list[object | None] = []
 
         def query_public(self, query: str, *, options: object) -> object:
             self.calls.append((query, options))
+            self.active_ledgers.append(current_llm_budget_ledger())
             return SimpleNamespace(
                 answer=GroundedAnswer(
                     answer_text="Runtime fast answer",
@@ -218,6 +222,7 @@ async def test_rag_search_answer_runner_uses_fast_runtime_query_and_preserves_co
 
     runtime = _Runtime()
     runner = RAGSearchAnswerRunner(runtime=runtime)
+    state = _state()
 
     output = await runner.answer(
         RAGSearchAnswerInput(
@@ -227,7 +232,8 @@ async def test_rag_search_answer_runner_uses_fast_runtime_query_and_preserves_co
                 special_targets=["table"],
                 quoted_terms=["runtime"],
             ),
-        )
+        ),
+        ToolExecutionContext(run_config=state["run_config"]),
     )
 
     assert output.text == "Runtime fast answer"
@@ -244,3 +250,7 @@ async def test_rag_search_answer_runner_uses_fast_runtime_query_and_preserves_co
     assert options.retrieval_signals.quoted_terms == ["runtime"]
     assert options.retrieval_signals_debug["special_targets"] == ["table"]
     assert options.retrieval_signals_debug["answer_path_special_targets_skipped"] == ["table"]
+    assert runtime.active_ledgers == [
+        RunRegistry.get("rag-answer-test").budget_ledger
+    ]
+    RunRegistry.remove("rag-answer-test")

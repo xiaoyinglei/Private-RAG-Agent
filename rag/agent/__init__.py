@@ -2,12 +2,26 @@
 
 from rag.agent.core.agent_as_tool import AgentAsToolRunner, AgentToolSpec
 from rag.agent.core.agent_service_factory import AgentServiceFactory
-from rag.agent.core.compiler import AgentGraphCompiler
-from rag.agent.core.context import AgentRunConfig, BudgetLedger, RuntimeRegistry, derive_child_config
+from rag.agent.core.compiler import GraphCompiler
+from rag.agent.core.context import (
+    AgentRunConfig,
+    BudgetLedger,
+    RunRegistry,
+    derive_child_config,
+)
 from rag.agent.core.definition import AgentDefinition, ModelSelectionPolicy, ToolPolicy
 from rag.agent.core.delegation import AgentDelegationRequest, DelegatedAgentRunner
 from rag.agent.core.registry import AgentRegistry
 from rag.agent.core.subagent_runner import BuiltinSubAgentRunner, BuiltinSynthesisRunner
+from rag.agent.memory.models import MemoryPolicy
+from rag.agent.planning import (
+    AgentPlan,
+    PlanEvent,
+    PlanStep,
+    PlanStepPatch,
+    PlanTracker,
+    PlanUpdate,
+)
 from rag.agent.service import AgentRunRequest, AgentRunResult, AgentService
 from rag.agent.state import (
     AgentState,
@@ -22,7 +36,7 @@ from rag.agent.tools.spec import ToolError, ToolPermissions, ToolResult, ToolSpe
 
 __all__ = [
     "AgentDefinition",
-    "AgentGraphCompiler",
+    "GraphCompiler",
     "AgentRegistry",
     "AgentRunConfig",
     "AgentRunRequest",
@@ -30,6 +44,7 @@ __all__ = [
     "AgentServiceFactory",
     "AgentService",
     "AgentState",
+    "AgentPlan",
     "AgentAsToolRunner",
     "AgentDelegationRequest",
     "AgentToolSpec",
@@ -38,8 +53,14 @@ __all__ = [
     "BudgetLedger",
     "ContextBudgetSnapshot",
     "ExtractedFact",
+    "MemoryPolicy",
     "ModelSelectionPolicy",
-    "RuntimeRegistry",
+    "PlanEvent",
+    "PlanStep",
+    "PlanStepPatch",
+    "PlanTracker",
+    "PlanUpdate",
+    "RunRegistry",
     "DelegatedAgentRunner",
     "ThinkOutput",
     "ToolCallPlan",

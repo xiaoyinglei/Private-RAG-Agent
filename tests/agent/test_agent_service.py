@@ -1,16 +1,23 @@
 from __future__ import annotations
 
 import pytest
+from pydantic import BaseModel
 
 from rag.agent.builtin.research import RESEARCH_AGENT
-from rag.agent.core.context import AgentRunConfig, RuntimeRegistry
+from rag.agent.core.context import AgentRunConfig, RunRegistry
 from rag.agent.core.definition import AgentDefinition
+from rag.agent.goal_runtime import GoalDeliverable, GoalSpec
 from rag.agent.service import AgentRunRequest, AgentRunResult, AgentService
 from rag.agent.state import ToolCallPlan
 from rag.agent.tools.builtin_registry import create_builtin_tool_registry
 from rag.agent.tools.llm_tools import LLMTextOutput
 from rag.schema.query import RetrievalSignals
 from rag.schema.runtime import AccessPolicy
+
+
+class _StructuredAnswer(BaseModel):
+    answer: str
+    confidence: float
 
 
 class _TextGenerator:
@@ -107,8 +114,39 @@ def test_agent_service_initial_state_creates_runtime_handles() -> None:
     assert "tool_action_proposals" not in state
     assert "plan" not in state
     assert "subtask_results" not in state
-    assert RuntimeRegistry.get("svc-state") is not None
-    RuntimeRegistry.remove("svc-state")
+    assert RunRegistry.get("svc-state") is not None
+    RunRegistry.remove("svc-state")
+
+
+def test_agent_run_request_preserves_explicit_goal_spec() -> None:
+    service = _service_with_registry()
+    goal = GoalSpec(
+        original_query="Explain policy",
+        deliverables=[
+            GoalDeliverable(
+                deliverable_id="answer",
+                kind="answer",
+                acceptance_rule="non_empty_answer",
+            ),
+            GoalDeliverable(
+                deliverable_id="evidence",
+                kind="evidence",
+                acceptance_rule="traceable_evidence",
+            ),
+        ],
+    )
+
+    state = service.initial_state(
+        AgentRunRequest(
+            task="Explain policy",
+            run_id="explicit-goal",
+            thread_id="explicit-goal",
+            goal_spec=goal,
+        )
+    )
+
+    assert state["goal_spec"] == goal
+    RunRegistry.remove("explicit-goal")
 
 
 def test_agent_run_result_clears_stale_human_input_when_done() -> None:
@@ -125,7 +163,41 @@ def test_agent_run_result_clears_stale_human_input_when_done() -> None:
     assert result.status == "done"
     assert result.needs_user_input is None
     assert result.human_input_request is None
-    RuntimeRegistry.remove("svc-clear")
+    RunRegistry.remove("svc-clear")
+
+
+def test_agent_run_result_restores_configured_concrete_final_output() -> None:
+    definition = AgentDefinition(
+        agent_type="structured",
+        description="Structured",
+        system_prompt="Return structured output.",
+        allowed_tools=[],
+        output_model=_StructuredAnswer,
+    )
+    service = AgentService(
+        definition=definition,
+        tool_registry=create_builtin_tool_registry(),
+    )
+    state = service.initial_state(
+        AgentRunRequest(
+            task="Return a structured answer",
+            run_id="svc-final-output",
+            thread_id="svc-final-output",
+        )
+    )
+    state["status"] = "done"
+    state["final_output"] = {
+        "model_path": f"{_StructuredAnswer.__module__}.{_StructuredAnswer.__qualname__}",
+        "data": {"answer": "validated", "confidence": 0.9},
+    }
+
+    result = AgentRunResult.from_state(state, definition=definition)
+
+    assert result.final_output == _StructuredAnswer(
+        answer="validated",
+        confidence=0.9,
+    )
+    RunRegistry.remove("svc-final-output")
 
 
 @pytest.mark.anyio
@@ -162,7 +234,7 @@ async def test_agent_service_run_executes_explicit_tool_call_with_runner() -> No
         citation_ids=["cit1"],
     )
     with pytest.raises(KeyError):
-        RuntimeRegistry.get("svc-ok")
+        RunRegistry.get("svc-ok")
 
 
 @pytest.mark.anyio
@@ -265,7 +337,7 @@ async def test_agent_service_run_with_config_uses_supplied_runtime_contract() ->
     assert result.status == "done"
     assert result.final_answer == "summary:Explain policy"
     with pytest.raises(KeyError):
-        RuntimeRegistry.get("svc-child")
+        RunRegistry.get("svc-child")
 
 
 @pytest.mark.anyio

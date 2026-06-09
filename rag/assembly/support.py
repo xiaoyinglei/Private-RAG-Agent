@@ -19,6 +19,7 @@ from rag.providers.huggingface.rerank import FlagEmbeddingReranker
 from rag.providers.mlx.embedder import MLXEmbedder
 from rag.providers.ollama.embedder import OllamaEmbedder
 from rag.providers.ollama.generator import OllamaGenerator
+from rag.schema.llm import LLMProviderResult, LLMUsage
 
 T = TypeVar("T")
 _JSON_CODE_FENCE_RE = re.compile(
@@ -82,12 +83,39 @@ class _CompositeProvider:
             raise RuntimeError(f"{self.provider_name} does not implement chat generation")
         return str(generate_text(prompt=prompt, **kwargs))
 
+    def generate_text_with_usage(
+        self,
+        *,
+        prompt: str,
+        **kwargs: Any,
+    ) -> LLMProviderResult[str]:
+        backend = self._require(self.generator, capability="chat")
+        method = getattr(backend, "generate_text_with_usage", None)
+        if callable(method):
+            return method(prompt=prompt, **kwargs)  # type: ignore[no-any-return]
+        return LLMProviderResult(value=self.generate_text(prompt=prompt, **kwargs))
+
     def generate_structured(self, *, prompt: str, schema: type[T], **kwargs: Any) -> T:
         backend = self._require(self.generator, capability="chat")
         generate_structured = getattr(backend, "generate_structured", None)
         if not callable(generate_structured):
             raise RuntimeError(f"{self.provider_name} does not implement structured generation")
         return generate_structured(prompt=prompt, schema=schema, **kwargs)  # type: ignore[no-any-return]
+
+    def generate_structured_with_usage(
+        self,
+        *,
+        prompt: str,
+        schema: type[T],
+        **kwargs: Any,
+    ) -> LLMProviderResult[T]:
+        backend = self._require(self.generator, capability="chat")
+        method = getattr(backend, "generate_structured_with_usage", None)
+        if callable(method):
+            return method(prompt=prompt, schema=schema, **kwargs)  # type: ignore[no-any-return]
+        return LLMProviderResult(
+            value=self.generate_structured(prompt=prompt, schema=schema, **kwargs)
+        )
 
     def embed(self, texts: Sequence[str], **kwargs: Any) -> list[list[float]]:
         backend = self._require(self.embedder, capability="embedding")
@@ -136,6 +164,15 @@ class _OpenAICompatibleChatGenerator:
     def generate_text(
         self, *, prompt: str, system_prompt: str | None = None, **kwargs: object
     ) -> str:
+        return self.generate_text_with_usage(
+            prompt=prompt,
+            system_prompt=system_prompt,
+            **kwargs,
+        ).value
+
+    def generate_text_with_usage(
+        self, *, prompt: str, system_prompt: str | None = None, **kwargs: object
+    ) -> LLMProviderResult[str]:
         messages: list[dict[str, str]] = []
         if system_prompt:
             messages.append({"role": "system", "content": system_prompt})
@@ -146,7 +183,10 @@ class _OpenAICompatibleChatGenerator:
             **kwargs,
         )
         content = response.choices[0].message.content
-        return str(content) if content is not None else ""
+        return LLMProviderResult(
+            value=str(content) if content is not None else "",
+            usage=_openai_response_usage(response),
+        )
 
     def generate_structured(
         self,
@@ -156,6 +196,21 @@ class _OpenAICompatibleChatGenerator:
         system_prompt: str | None = None,
         **kwargs: object,
     ) -> T:
+        return self.generate_structured_with_usage(
+            prompt=prompt,
+            schema=schema,
+            system_prompt=system_prompt,
+            **kwargs,
+        ).value
+
+    def generate_structured_with_usage(
+        self,
+        *,
+        prompt: str,
+        schema: type[T],
+        system_prompt: str | None = None,
+        **kwargs: object,
+    ) -> LLMProviderResult[T]:
         schema_json = json.dumps(cast(Any, schema).model_json_schema(), ensure_ascii=False)
         structured_prompt = f"""
 Return ONLY valid JSON matching this schema.
@@ -167,17 +222,21 @@ JSON schema:
 User task:
 {prompt}
 """.strip()
-        raw_output = self.generate_text(
+        generated = self.generate_text_with_usage(
             prompt=structured_prompt,
             system_prompt=system_prompt,
             **kwargs,
         )
+        raw_output = generated.value
         candidate = _extract_json_object(_strip_json_code_fence(raw_output)).strip()
         try:
             payload = json.loads(candidate)
         except json.JSONDecodeError as exc:
             raise RuntimeError("OpenAI-compatible structured fallback returned invalid JSON") from exc
-        return schema.model_validate(payload)  # type: ignore[attr-defined, no-any-return]
+        return LLMProviderResult(
+            value=schema.model_validate(payload),  # type: ignore[attr-defined]
+            usage=generated.usage,
+        )
 
     def __repr__(self) -> str:
         return (
@@ -202,6 +261,27 @@ def _extract_json_object(text: str) -> str:
         return stripped[start : end + 1]
 
     return stripped
+
+
+def _openai_response_usage(response: object) -> LLMUsage | None:
+    usage = getattr(response, "usage", None)
+    if usage is None:
+        return None
+    input_tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
+    output_tokens = int(getattr(usage, "completion_tokens", 0) or 0)
+    prompt_details = getattr(usage, "prompt_tokens_details", None)
+    completion_details = getattr(usage, "completion_tokens_details", None)
+    return LLMUsage(
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        cached_input_tokens=int(
+            getattr(prompt_details, "cached_tokens", 0) or 0
+        ),
+        reasoning_tokens=int(
+            getattr(completion_details, "reasoning_tokens", 0) or 0
+        ),
+        source="provider",
+    )
 
 
 def _backend_model_name(backend: object | None, capability: str) -> str | None:

@@ -11,19 +11,17 @@ from rag.agent.core.agent_service_factory import AgentServiceFactory
 from rag.agent.core.checkpointing import create_agent_checkpointer
 from rag.agent.core.definition import AgentDefinition
 from rag.agent.core.human_input import HumanInputRequest, HumanInputResponse
-from rag.agent.core.llm_registry import ModelRegistry
+from rag.agent.core.llm_registry import ModelRegistry, ResolvedModel
+from rag.agent.core.llm_tool_runners import create_model_llm_tool_runners
 from rag.agent.core.registry import AgentRegistry
 from rag.agent.core.subagent_runner import BuiltinSubAgentRunner, BuiltinSynthesisRunner
 from rag.agent.service import AgentRunRequest, AgentRunResult, AgentService
 from rag.agent.tools.builtin_registry import create_builtin_tool_registry
-from rag.agent.tools.llm_tools import (
-    LLMCompareInput,
-    LLMGenerateInput,
-    LLMSummarizeInput,
-    LLMTextOutput,
-)
 from rag.agent.tools.rag_answer_tools import RAGSearchAnswerRunner
-from rag.agent.tools.registry import ToolRunner
+from rag.agent.tools.registry import ContextualToolRunner, ToolRunner
+from rag.assembly.tokenizer import TokenAccountingService, TokenizerContract
+from rag.providers.llm_gateway import LLMGateway
+from rag.schema.llm import DEFAULT_LLM_STAGE_BUDGETS
 from rag.storage.runtime_config import DEFAULT_VECTOR_BACKEND, runtime_storage_config
 from rag.utils.text import load_env_file
 
@@ -32,42 +30,54 @@ agent_app = typer.Typer(add_completion=False, no_args_is_help=True)
 CLI_AGENT_CHOICES = ("research", "orchestrator", "compare", "factcheck")
 
 
-def _build_llm_tool_runners(primary_chat: Any) -> dict[str, ToolRunner]:
+def _build_llm_tool_runners(
+    primary_chat: Any,
+    *,
+    token_accounting: object | None = None,
+    model_context_tokens: int = 32_768,
+    stage_budgets: object | None = None,
+) -> dict[str, ContextualToolRunner]:
     if primary_chat is None:
         return {}
 
-    def _llm_generate(payload: LLMGenerateInput) -> LLMTextOutput:
-        text = primary_chat.chat(payload.prompt)
-        return LLMTextOutput(
-            text=text,
-            evidence_ids=payload.evidence_ids,
-            citation_ids=payload.citation_ids,
+    accounting = token_accounting or TokenAccountingService(
+        TokenizerContract(
+            embedding_model_name="cli-chat",
+            tokenizer_model_name="cli-chat",
+            chunking_tokenizer_model_name="cli-chat",
+            tokenizer_backend="simple",
+            max_context_tokens=model_context_tokens,
+            prompt_reserved_tokens=512,
+            local_files_only=True,
         )
+    )
+    gateway = LLMGateway(
+        generator=primary_chat,
+        token_accounting=cast(Any, accounting),
+        model_context_tokens=model_context_tokens,
+        stage_budgets=cast(
+            Any,
+            stage_budgets or DEFAULT_LLM_STAGE_BUDGETS,
+        ),
+    )
 
-    def _llm_summarize(payload: LLMSummarizeInput) -> LLMTextOutput:
-        prompt = payload.task
-        if payload.context_sections:
-            prompt = payload.task + "\n\n" + "\n".join(payload.context_sections)
-        text = primary_chat.chat(prompt)
-        return LLMTextOutput(
-            text=text,
-            evidence_ids=payload.evidence_ids,
-            citation_ids=payload.citation_ids,
-        )
+    class _Registry:
+        def resolve_for_node(
+            self,
+            *,
+            node_model: str | None,
+            node_name: str,
+        ) -> ResolvedModel:
+            del node_model, node_name
+            return ResolvedModel(
+                generator=primary_chat,
+                kwargs={},
+                context_window_tokens=model_context_tokens,
+                gateway=gateway,
+                token_accounting=cast(Any, accounting),
+            )
 
-    def _llm_compare(payload: LLMCompareInput) -> LLMTextOutput:
-        prompt = payload.question
-        if payload.left_context_sections or payload.right_context_sections:
-            prompt += "\n\n左:\n" + "\n".join(payload.left_context_sections)
-            prompt += "\n\n右:\n" + "\n".join(payload.right_context_sections)
-        text = primary_chat.chat(prompt)
-        return LLMTextOutput(text=text)
-
-    return {
-        "llm_generate": cast(ToolRunner, _llm_generate),
-        "llm_summarize": cast(ToolRunner, _llm_summarize),
-        "llm_compare": cast(ToolRunner, _llm_compare),
-    }
+    return create_model_llm_tool_runners(cast(Any, _Registry()))
 
 
 def _resolve_cli_agent_definition(
@@ -99,6 +109,7 @@ def _build_agent_service(
     primary_chat = chat_bindings[0] if chat_bindings else None
 
     runners: dict[str, ToolRunner] = {}
+    contextual_runners: dict[str, ContextualToolRunner] = {}
 
     # RAG tools — AsyncRAGToolRunner（aretrieve_payload → to_thread fallback）
     from rag.agent.tools.rag_tool_runner import AsyncRAGToolRunner
@@ -109,9 +120,15 @@ def _build_agent_service(
         max_context_tokens=4096,
     )
     for name in ("vector_search", "keyword_search", "grounding", "rerank", "graph_expand"):
-        runners[name] = cast(ToolRunner, rag_runner.retrieve_evidence)
+        contextual_runners[name] = cast(
+            ContextualToolRunner,
+            rag_runner.retrieve_evidence,
+        )
     rag_answer_runner = RAGSearchAnswerRunner(runtime=runtime)
-    runners["rag_search_answer"] = cast(ToolRunner, rag_answer_runner.answer)
+    contextual_runners["rag_search_answer"] = cast(
+        ContextualToolRunner,
+        rag_answer_runner.answer,
+    )
 
     from rag.agent.tools.asset_tools import AssetToolRunner
 
@@ -128,9 +145,27 @@ def _build_agent_service(
         runners["asset_read_slice"] = cast(ToolRunner, asset_runner.read_slice)
         runners["asset_analyze"] = cast(ToolRunner, asset_runner.analyze_asset)
 
-    runners.update(_build_llm_tool_runners(primary_chat))
+    contextual_runners.update(
+        _build_llm_tool_runners(
+            primary_chat,
+            token_accounting=runtime.token_accounting,
+            model_context_tokens=getattr(
+                runtime,
+                "chat_context_window_tokens",
+                32_768,
+            ),
+            stage_budgets=getattr(
+                runtime,
+                "llm_stage_budgets",
+                DEFAULT_LLM_STAGE_BUDGETS,
+            ),
+        )
+    )
 
-    tool_registry = create_builtin_tool_registry(runners=runners)
+    tool_registry = create_builtin_tool_registry(
+        runners=runners,
+        contextual_runners=contextual_runners,
+    )
     try:
         model_registry = ModelRegistry.from_env(default_model=model_alias)
     except Exception:
@@ -348,6 +383,10 @@ def agent_chat(
             overrides=assembly_overrides,
         ),
         generation_config=runtime_config.generation,
+        chat_context_window_tokens=(
+            runtime_config.primary_model.context_window_tokens or 32_768
+        ),
+        llm_stage_budgets=runtime_config.llm_stage_budgets,
     )
 
     with runtime:
@@ -487,6 +526,10 @@ def agent_run(
         storage=storage,
         request=AssemblyRequest(requirements=requirements, overrides=assembly_overrides),
         generation_config=runtime_config.generation,
+        chat_context_window_tokens=(
+            runtime_config.primary_model.context_window_tokens or 32_768
+        ),
+        llm_stage_budgets=runtime_config.llm_stage_budgets,
     )
 
     with runtime:
@@ -629,6 +672,10 @@ def agent_resume(
         storage=storage,
         request=AssemblyRequest(requirements=requirements, overrides=assembly_overrides),
         generation_config=runtime_config.generation,
+        chat_context_window_tokens=(
+            runtime_config.primary_model.context_window_tokens or 32_768
+        ),
+        llm_stage_budgets=runtime_config.llm_stage_budgets,
     )
 
     with runtime:

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, cast
 
 from langchain_core.messages import BaseMessage
 from langgraph.graph import add_messages
@@ -9,7 +9,16 @@ from typing_extensions import TypedDict
 
 from rag.agent.core.context import AgentRunConfig
 from rag.agent.core.human_input import HumanInputRequest, HumanInputResponse
-from rag.agent.memory.models import ContextBudgetSnapshot, ExtractedFact, WorkingSummary
+from rag.agent.core.output_models import ValidatedFinalOutput
+from rag.agent.memory.models import (
+    ContextBudgetSnapshot,
+    ExtractedFact,
+    MemoryBudgetSnapshot,
+    MemoryRef,
+    StateChannelReplacement,
+    WorkingSummary,
+)
+from rag.agent.planning import MAX_PLAN_EVENTS, AgentPlan, PlanEvent, PlanUpdate
 from rag.schema.query import RetrievalSignals
 
 
@@ -36,10 +45,11 @@ class ThinkOutput(BaseModel):
     confidence: float = Field(default=1.0, ge=0.0, le=1.0)
     stop_reason: str | None = None
     needs_user_input: str | None = None
+    plan_update: PlanUpdate | None = None
 
 
 class AgentState(TypedDict):
-    messages: Annotated[list[BaseMessage], add_messages]
+    messages: Annotated[list[BaseMessage], _merge_messages]
     evidence: Annotated[list[Any], _merge_evidence]
     citations: Annotated[list[Any], _merge_citations]
     tool_results: Annotated[list[Any], _merge_tool_results]
@@ -63,9 +73,13 @@ class AgentState(TypedDict):
     extracted_facts: list[ExtractedFact]
     context_budget: ContextBudgetSnapshot | None
     final_answer: str | None
+    final_output: ValidatedFinalOutput | None
+    output_validation_errors: list[dict[str, object]]
     groundedness_flag: bool
     insufficient_evidence_flag: bool
     goal_spec: Any | None
+    goal_contract_hint: Any | None
+    goal_contract_debug: dict[str, object] | None
     goal_requirements: list[str]
     satisfied_requirements: list[str]
     open_gaps: list[Any]
@@ -81,10 +95,19 @@ class AgentState(TypedDict):
     no_progress_count: int
     satisfaction_report: Any | None
     controller_next: str | None
+    agent_plan: AgentPlan | None
+    plan_events: Annotated[list[PlanEvent], _merge_plan_events]
+    memory_refs: Annotated[list[MemoryRef], _merge_memory_refs]
+    memory_budget: MemoryBudgetSnapshot | None
+    memory_warnings: Annotated[list[str], _merge_strings]
 
 
 def _merge_evidence(left: list[Any], right: list[Any]) -> list[Any]:
     from rag.schema.query import EvidenceItem
+
+    replacement = _replacement_items(right)
+    if replacement is not None:
+        return replacement
 
     merged: dict[str, EvidenceItem] = {}
     for item in left + right:
@@ -107,6 +130,13 @@ def _merge_evidence(left: list[Any], right: list[Any]) -> list[Any]:
     return sorted(merged.values(), key=lambda evidence: evidence.score, reverse=True)
 
 
+def _merge_messages(left: list[BaseMessage], right: list[Any]) -> list[BaseMessage]:
+    replacement = _replacement_items(right)
+    if replacement is not None:
+        return cast(list[BaseMessage], replacement)
+    return cast(list[BaseMessage], add_messages(cast(Any, left), cast(Any, right)))
+
+
 def _texts_contradict(a: str, b: str) -> bool:
     negation_markers = (" not ", " no ", " does not ", " cannot ", " without ", "未", "不")
     a_lower = f" {a.lower().strip()} "
@@ -117,19 +147,33 @@ def _texts_contradict(a: str, b: str) -> bool:
 
 
 def _merge_citations(left: list[Any], right: list[Any]) -> list[Any]:
+    replacement = _replacement_items(right)
+    if replacement is not None:
+        return replacement
     return list({citation.citation_id: citation for citation in left + right}.values())
 
 
 def _merge_tool_results(left: list[Any], right: list[Any]) -> list[Any]:
+    replacement = _replacement_items(right)
+    if replacement is not None:
+        return replacement
     return list({result.tool_call_id: result for result in left + right}.values())
 
 
 def _merge_keyed_items(left: list[Any], right: list[Any]) -> list[Any]:
+    replacement = _replacement_items(right)
+    if replacement is not None:
+        return replacement
     merged: dict[str, Any] = {}
     for index, item in enumerate(left + right):
         key = _item_key(item, fallback=str(index))
         merged[key] = item
     return list(merged.values())
+
+
+def _merge_plan_events(left: list[PlanEvent], right: list[PlanEvent]) -> list[PlanEvent]:
+    merged = _merge_keyed_items(left, right)
+    return cast(list[PlanEvent], merged[-MAX_PLAN_EVENTS:])
 
 
 def _item_key(item: Any, *, fallback: str) -> str:
@@ -150,19 +194,51 @@ def _item_key(item: Any, *, fallback: str) -> str:
 
 
 def _merge_ints(left: list[int], right: list[int]) -> list[int]:
+    replacement = _replacement_items(right)
+    if replacement is not None:
+        return cast(list[int], replacement)
     return list(dict.fromkeys([*left, *right]))
+
+
+def _merge_memory_refs(left: list[MemoryRef], right: list[MemoryRef]) -> list[MemoryRef]:
+    replacement = _replacement_items(cast(list[Any], right))
+    if replacement is not None:
+        return cast(list[MemoryRef], replacement)
+    return cast(list[MemoryRef], _merge_keyed_items(list(left), list(right)))
+
+
+def _merge_strings(left: list[str], right: list[str]) -> list[str]:
+    replacement = _replacement_items(cast(list[Any], right))
+    if replacement is not None:
+        return [str(item) for item in replacement]
+    return list(dict.fromkeys([*left, *right]))
+
+
+def _replacement_items(right: list[Any]) -> list[Any] | None:
+    if len(right) == 1 and isinstance(right[0], StateChannelReplacement):
+        return list(right[0].items)
+    return None
 
 
 __all__ = [
     "AgentState",
+    "AgentPlan",
     "ContextBudgetSnapshot",
     "ExtractedFact",
+    "MemoryBudgetSnapshot",
+    "MemoryRef",
+    "PlanEvent",
+    "PlanUpdate",
     "ThinkOutput",
     "ToolCallPlan",
     "WorkingSummary",
+    "_merge_messages",
     "_merge_citations",
     "_merge_evidence",
     "_merge_ints",
     "_merge_keyed_items",
+    "_merge_memory_refs",
+    "_merge_plan_events",
+    "_merge_strings",
     "_merge_tool_results",
 ]

@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import re
 from collections.abc import Sequence
-from typing import Any, Literal, Protocol, Self, TypedDict
+from typing import Any, Literal, Protocol, Self, TypedDict, cast
 
 from pydantic import BaseModel, Field, model_validator
 
+from rag.agent.memory.models import MemoryRef
 from rag.agent.state import ToolCallPlan
 from rag.agent.tools.spec import ToolResult
 from rag.schema.query import AnswerCitation, EvidenceItem
@@ -19,12 +20,48 @@ AcceptanceRule = Literal[
 ]
 
 
+def _default_goal_deliverable_kinds() -> list[DeliverableKind]:
+    return ["answer"]
+
+
 class GoalConstraint(BaseModel):
     constraint_id: str
     constraint_type: str
     expected_value: object
     required: bool = True
     metadata: dict[str, object] = Field(default_factory=dict)
+
+
+class GoalContractConstraintHint(BaseModel):
+    constraint_type: str = Field(min_length=1, max_length=100)
+    expected_value: object
+    required: bool = True
+
+
+class GoalContractHint(BaseModel):
+    deliverable_kinds: list[DeliverableKind] = Field(
+        default_factory=_default_goal_deliverable_kinds,
+        max_length=3,
+    )
+    constraints: list[GoalContractConstraintHint] = Field(
+        default_factory=list,
+        max_length=8,
+    )
+    reason: str = Field(min_length=1, max_length=1000)
+
+    @model_validator(mode="after")
+    def normalize_deliverables(self) -> Self:
+        kinds = list(dict.fromkeys(self.deliverable_kinds))
+        if "answer" not in kinds:
+            kinds.insert(0, "answer")
+        self.deliverable_kinds = kinds
+        return self
+
+
+class GoalInitializationHints(BaseModel):
+    evidence_requested: bool = False
+    context_titles: list[str] = Field(default_factory=list)
+    source: Literal["legacy_rules"] = "legacy_rules"
 
 
 class GoalDeliverable(BaseModel):
@@ -71,6 +108,9 @@ class GoalSpec(BaseModel):
     required_operations: list[str] = Field(default_factory=list)
     constraints: list[GoalConstraint] = Field(default_factory=list)
     success_criteria: list[str] = Field(default_factory=list)
+    initialization_hints: GoalInitializationHints = Field(
+        default_factory=GoalInitializationHints
+    )
 
     @model_validator(mode="after")
     def normalize_legacy_deliverables(self) -> Self:
@@ -250,6 +290,10 @@ class StructuredObservation(BaseModel):
     warnings: list[str] = Field(default_factory=list)
     error: str | None = None
     raw_result_ref: str
+    raw_memory_ref: MemoryRef | None = None
+    related_gap_ids: list[str] = Field(default_factory=list)
+    related_step_ids: list[str] = Field(default_factory=list)
+    metadata: dict[str, object] = Field(default_factory=dict)
     resolved_gaps: list[str] = Field(default_factory=list)
     produced_gaps: list[str] = Field(default_factory=list)
 
@@ -280,20 +324,51 @@ class SatisfactionReport(BaseModel):
     reason: str
 
 
-class GoalInitializer:
-    def initialize(self, query: str) -> GoalSpec:
+class GoalBuilder:
+    def initialize(
+        self,
+        query: str,
+        *,
+        contract_hint: GoalContractHint | None = None,
+    ) -> GoalSpec:
         stripped = query.strip()
-        required_evidence: list[str] = []
-        deliverables = [_answer_deliverable()]
-        if _explicitly_requests_evidence(stripped):
-            required_evidence.append("citation")
-            deliverables.append(_evidence_deliverable())
+        hints = _legacy_goal_hints(stripped)
+        kinds: list[DeliverableKind] = (
+            list(contract_hint.deliverable_kinds)
+            if contract_hint is not None
+            else ["answer"]
+        )
+        deliverables = [
+            _deliverable_for_kind(kind)
+            for kind in kinds
+        ]
+        required_evidence = (
+            ["citation"] if "evidence" in kinds else []
+        )
+        required_operations = (
+            ["computation"] if "computation" in kinds else []
+        )
+        constraints = [
+            GoalConstraint(
+                constraint_id=f"contract-constraint-{index}",
+                constraint_type=constraint.constraint_type,
+                expected_value=constraint.expected_value,
+                required=constraint.required,
+                metadata={"origin": "structured_contract_hint"},
+            )
+            for index, constraint in enumerate(
+                contract_hint.constraints if contract_hint is not None else [],
+                start=1,
+            )
+        ]
         return GoalSpec(
             original_query=stripped,
             deliverables=deliverables,
             required_evidence=required_evidence,
-            constraints=_explicit_context_title_constraints(stripped),
+            required_operations=required_operations,
+            constraints=constraints,
             success_criteria=_success_criteria(required_evidence=required_evidence),
+            initialization_hints=hints,
         )
 
 
@@ -360,7 +435,7 @@ class ObservationBuilder:
         )
 
 
-class StateReducer:
+class ObservationExtractor:
     def __init__(self, observation_builder: ObservationBuilder | None = None) -> None:
         self._observation_builder = observation_builder or ObservationBuilder()
 
@@ -556,7 +631,7 @@ def _goal_from_state(state: dict[str, Any]) -> GoalSpec:
     goal = state.get("goal_spec")
     if isinstance(goal, GoalSpec):
         return goal
-    return GoalInitializer().initialize(str(state.get("task", "")))
+    return GoalBuilder().initialize(str(state.get("task", "")))
 
 
 def _gaps_from_state(state: dict[str, Any], *, goal: GoalSpec) -> list[GoalGap]:
@@ -644,6 +719,24 @@ def _explicit_context_title_constraints(query: str) -> list[GoalConstraint]:
             metadata={"origin": "explicit_query_scope"},
         )
     ]
+
+
+def _legacy_goal_hints(query: str) -> GoalInitializationHints:
+    return GoalInitializationHints(
+        evidence_requested=_explicitly_requests_evidence(query),
+        context_titles=[
+            str(constraint.expected_value)
+            for constraint in _explicit_context_title_constraints(query)
+        ],
+    )
+
+
+def _deliverable_for_kind(kind: DeliverableKind) -> GoalDeliverable:
+    if kind == "answer":
+        return _answer_deliverable()
+    if kind == "evidence":
+        return _evidence_deliverable()
+    return _computation_deliverable()
 
 
 def _success_criteria(*, required_evidence: Sequence[str]) -> list[str]:
@@ -763,6 +856,7 @@ def _answer_text(tool_name: str, output: BaseModel | None) -> str | None:
         "read_file",
         "write_file",
         "run_python",
+        "structured_probe",
     }:
         return None
     text = getattr(output, "text", None)
@@ -1385,10 +1479,51 @@ def _structured_table_locator(path: str, table: object) -> dict[str, object]:
 
 def _structured_table_preview(table: object) -> str | None:
     rows = getattr(table, "sample_rows", None)
+    row_count = getattr(table, "row_count", None)
+    column_count = getattr(table, "column_count", None)
+    used_range = getattr(table, "used_range", None)
+    parts = [
+        f"rows={row_count}" if isinstance(row_count, int) else "",
+        f"columns={column_count}" if isinstance(column_count, int) else "",
+        f"used_range={used_range}" if isinstance(used_range, str) and used_range else "",
+    ]
+    header_row = _header_sample_row(table, rows)
+    if header_row is not None:
+        parts.append(f"header_row={_bounded_row_preview(header_row)}")
+    elif isinstance(rows, list) and rows:
+        parts.append(f"first_row={_bounded_row_preview(rows[0])}")
+    preview = " ".join(part for part in parts if part)
+    return preview or None
+
+
+def _header_sample_row(table: object, rows: object) -> object | None:
     if not isinstance(rows, list) or not rows:
         return None
-    shown = rows[:5]
-    return "sample_rows: " + repr(shown)[:1000]
+    candidates = getattr(table, "candidate_header_rows", None)
+    if not isinstance(candidates, list) or not candidates:
+        return None
+    row_index = getattr(candidates[0], "row_index", None)
+    if not isinstance(row_index, int):
+        return None
+    sample_index = row_index - 1
+    if sample_index < 0 or sample_index >= len(rows):
+        return None
+    return cast(object, rows[sample_index])
+
+
+def _bounded_row_preview(row: object) -> str:
+    if not isinstance(row, list):
+        return _bounded_cell_preview(row)
+    cells = [_bounded_cell_preview(cell) for cell in row[:8]]
+    suffix = f", ...(+{len(row) - 8})" if len(row) > 8 else ""
+    return "[" + ", ".join(cells) + suffix + "]"
+
+
+def _bounded_cell_preview(cell: object) -> str:
+    text = str(cell)
+    if len(text) > 40:
+        text = text[:40].rstrip() + "..."
+    return repr(text)
 
 
 def _asset_locator_from_descriptor(asset: object) -> dict[str, object]:
@@ -1561,15 +1696,18 @@ __all__ = [
     "ContextUnit",
     "EvidenceRef",
     "GoalConflict",
+    "GoalContractConstraintHint",
+    "GoalContractHint",
     "GoalConstraint",
     "GoalDeliverable",
     "GoalGap",
-    "GoalInitializer",
+    "GoalBuilder",
+    "GoalInitializationHints",
     "GoalSpec",
     "ObservationBuilder",
     "RuntimeState",
     "SatisfactionChecker",
     "SatisfactionReport",
-    "StateReducer",
+    "ObservationExtractor",
     "StructuredObservation",
 ]

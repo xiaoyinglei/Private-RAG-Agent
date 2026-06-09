@@ -1,0 +1,261 @@
+from __future__ import annotations
+
+import pytest
+from pydantic import BaseModel
+
+from rag.agent.core.context import AgentRunConfig, RunRegistry
+from rag.agent.core.definition import AgentDefinition
+from rag.agent.core.llm_context import AgentLLMContextOverflowError
+from rag.agent.core.output_finalizer import (
+    ModelStructuredOutputFinalizer,
+    OutputValidationExhaustedError,
+    final_answer_from_output,
+)
+from rag.agent.state import AgentState
+from rag.assembly.tokenizer import TokenAccountingService, TokenizerContract
+from rag.providers.llm_gateway import LLMGateway
+from rag.schema.llm import LLMCallStage, LLMStageBudget
+from rag.schema.query import RetrievalSignals
+from rag.schema.runtime import AccessPolicy
+
+
+class _AnswerOutput(BaseModel):
+    answer: str
+    confidence: float
+
+
+class _TextOutput(BaseModel):
+    text: str
+    answer: str
+
+
+class _JsonOnlyOutput(BaseModel):
+    value: int
+    labels: list[str]
+
+
+class _StructuredGenerator:
+    def __init__(self, responses: list[object]) -> None:
+        self._responses = responses
+        self.calls = 0
+        self.prompts: list[str] = []
+
+    def generate_structured(
+        self,
+        *,
+        prompt: str,
+        schema: type[BaseModel],
+        **_: object,
+    ) -> object:
+        self.prompts.append(prompt)
+        response = self._responses[self.calls]
+        self.calls += 1
+        return response
+
+
+def _accounting() -> TokenAccountingService:
+    return TokenAccountingService(
+        TokenizerContract(
+            embedding_model_name="output-test",
+            tokenizer_model_name="output-test",
+            chunking_tokenizer_model_name="output-test",
+            tokenizer_backend="simple",
+            max_context_tokens=8_000,
+            prompt_reserved_tokens=0,
+            local_files_only=True,
+        )
+    )
+
+
+def _gateway(
+    generator: object,
+    *,
+    max_input_tokens: int = 4_000,
+) -> LLMGateway:
+    return LLMGateway(
+        generator=generator,
+        token_accounting=_accounting(),
+        model_context_tokens=8_000,
+        stage_budgets={
+            LLMCallStage.FINAL_SYNTHESIS: LLMStageBudget(
+                max_input_tokens=max_input_tokens,
+                max_output_tokens=512,
+                safety_margin_tokens=64,
+            )
+        },
+    )
+
+
+def _definition(*, retries: int = 2) -> AgentDefinition:
+    return AgentDefinition(
+        agent_type="structured",
+        description="Structured output",
+        system_prompt="Return grounded structured output.",
+        allowed_tools=[],
+        output_model=_AnswerOutput,
+        output_validation_max_retries=retries,
+    )
+
+
+def _state(*, task: str = "Answer with confidence") -> AgentState:
+    config = AgentRunConfig(
+        run_id="output-finalizer",
+        thread_id="output-finalizer",
+        budget_total=20_000,
+        max_depth=1,
+        access_policy=AccessPolicy.default(),
+    )
+    RunRegistry.remove(config.run_id)
+    RunRegistry.get_or_create(config)
+    return {
+        "messages": [],
+        "evidence": [],
+        "citations": [],
+        "tool_results": [],
+        "task": task,
+        "retrieval_signals": RetrievalSignals(),
+        "retrieval_signals_debug": None,
+        "run_config": config,
+        "iteration": 0,
+        "status": "done",
+        "decision_reason": None,
+        "stop_reason": "goal_satisfied",
+        "needs_user_input": None,
+        "pending_tool_calls": [],
+        "approved_tool_call_ids": [],
+        "denied_tool_call_ids": [],
+        "user_decision": None,
+        "user_message": None,
+        "human_input_request": None,
+        "human_input_response": None,
+        "working_summary": None,
+        "extracted_facts": [],
+        "context_budget": None,
+        "final_answer": None,
+        "final_output": None,
+        "groundedness_flag": False,
+        "insufficient_evidence_flag": False,
+        "goal_spec": None,
+        "goal_requirements": [],
+        "satisfied_requirements": [],
+        "open_gaps": [],
+        "evidence_refs": [],
+        "answer_candidates": [],
+        "computation_results": [],
+        "structured_observations": [],
+        "context_units": [],
+        "context_bindings": [],
+        "locators": [],
+        "asset_refs": [],
+        "conflicts": [],
+        "no_progress_count": 0,
+        "satisfaction_report": None,
+        "controller_next": None,
+        "agent_plan": None,
+        "plan_events": [],
+        "memory_refs": [],
+        "memory_budget": None,
+        "memory_warnings": [],
+    }
+
+
+@pytest.mark.anyio
+async def test_structured_finalizer_returns_validated_model() -> None:
+    generator = _StructuredGenerator(
+        [{"answer": "validated", "confidence": 0.9}]
+    )
+    gateway = _gateway(generator)
+    finalizer = ModelStructuredOutputFinalizer(gateway=gateway)
+
+    result = await finalizer.finalize(
+        definition=_definition(),
+        state=_state(),
+        candidate_text="candidate",
+    )
+
+    assert result == _AnswerOutput(answer="validated", confidence=0.9)
+    assert finalizer.token_accounting is gateway.token_accounting
+    assert generator.calls == 1
+    RunRegistry.remove("output-finalizer")
+
+
+@pytest.mark.anyio
+async def test_structured_finalizer_repairs_validation_failure_with_bounded_retry() -> None:
+    generator = _StructuredGenerator(
+        [
+            {"answer": "missing confidence"},
+            {"answer": "repaired", "confidence": 0.8},
+        ]
+    )
+    finalizer = ModelStructuredOutputFinalizer(gateway=_gateway(generator))
+
+    result = await finalizer.finalize(
+        definition=_definition(retries=2),
+        state=_state(),
+        candidate_text="candidate",
+    )
+
+    assert result.answer == "repaired"
+    assert generator.calls == 2
+    assert "confidence" in generator.prompts[1]
+    RunRegistry.remove("output-finalizer")
+
+
+@pytest.mark.anyio
+async def test_structured_finalizer_exhausts_configured_validation_retries() -> None:
+    generator = _StructuredGenerator(
+        [
+            {"answer": "attempt 1"},
+            {"answer": "attempt 2"},
+            {"answer": "attempt 3"},
+        ]
+    )
+    finalizer = ModelStructuredOutputFinalizer(gateway=_gateway(generator))
+
+    with pytest.raises(OutputValidationExhaustedError) as exc_info:
+        await finalizer.finalize(
+            definition=_definition(retries=2),
+            state=_state(),
+            candidate_text="candidate",
+        )
+
+    assert exc_info.value.attempts == 3
+    assert generator.calls == 3
+    RunRegistry.remove("output-finalizer")
+
+
+@pytest.mark.anyio
+async def test_structured_finalizer_context_overflow_skips_model_call() -> None:
+    generator = _StructuredGenerator(
+        [{"answer": "unused", "confidence": 1.0}]
+    )
+    finalizer = ModelStructuredOutputFinalizer(
+        gateway=_gateway(generator, max_input_tokens=8)
+    )
+
+    with pytest.raises(AgentLLMContextOverflowError):
+        await finalizer.finalize(
+            definition=_definition(),
+            state=_state(task="required task " * 100),
+            candidate_text="required candidate " * 100,
+        )
+
+    assert generator.calls == 0
+    RunRegistry.remove("output-finalizer")
+
+
+def test_final_answer_prefers_text_then_answer_fields() -> None:
+    assert final_answer_from_output(
+        _TextOutput(text="text field", answer="answer field")
+    ) == "text field"
+    assert final_answer_from_output(
+        _AnswerOutput(answer="answer field", confidence=0.7)
+    ) == "answer field"
+
+
+def test_final_answer_uses_json_when_no_text_field_exists() -> None:
+    output = _JsonOnlyOutput(value=7, labels=["a", "b"])
+
+    assert final_answer_from_output(output) == output.model_dump_json(
+        exclude_none=True
+    )
