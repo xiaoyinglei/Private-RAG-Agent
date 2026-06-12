@@ -6,7 +6,7 @@ import time
 from collections.abc import Mapping
 from dataclasses import replace
 from hashlib import sha256
-from typing import Any, Literal, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
@@ -22,7 +22,7 @@ from rag.agent.core.definition import AgentDefinition
 from rag.agent.core.human_input import HumanInputRequest, HumanInputResponse
 from rag.agent.core.llm_context import AgentLLMContextOverflowError
 from rag.agent.memory.models import ContextBudgetSnapshot
-from rag.agent.state import AgentState, ToolCallPlan
+from rag.agent.state import ToolCallPlan
 from rag.agent.tools.rag_tools import RAG_SIGNAL_AWARE_TOOLS
 from rag.agent.tools.registry import (
     ToolExecutionContext,
@@ -33,6 +33,12 @@ from rag.agent.tools.registry import (
 )
 from rag.agent.tools.spec import ToolError, ToolResult, ToolSpec
 from rag.schema.query import RetrievalSignals
+
+if TYPE_CHECKING:
+    from rag.agent.loop.state import LoopState
+    from rag.agent.state import AgentState
+
+    type ToolState = AgentState | LoopState
 
 ToolExecutionStatus = Literal[
     "prepared",
@@ -155,7 +161,7 @@ class ToolExecutionService:
         self,
         request: ToolBatchRequest,
         *,
-        state: AgentState | None,
+        state: ToolState | None,
         definition: AgentDefinition | None = None,
     ) -> ToolBatchResult:
         records = {
@@ -388,7 +394,7 @@ class ToolExecutionService:
         record: ToolExecutionRecord,
         spec: ToolSpec,
         run_config: AgentRunConfig,
-        state: AgentState | None,
+        state: ToolState | None,
         definition: AgentDefinition | None,
     ) -> tuple[ToolResult, ToolExecutionRecord]:
         started_at = time.perf_counter()

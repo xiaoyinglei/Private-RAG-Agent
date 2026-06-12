@@ -1,0 +1,720 @@
+from __future__ import annotations
+
+from collections.abc import Awaitable, Sequence
+from inspect import isawaitable
+from typing import Protocol, cast
+
+from pydantic import BaseModel, ConfigDict, ValidationError
+
+from rag.agent.core.checkpointing import CheckpointStore
+from rag.agent.core.context import RunRegistry
+from rag.agent.core.definition import AgentDefinition
+from rag.agent.core.finalization import (
+    FinishCandidateBuilder,
+    FinishCandidateBuildError,
+)
+from rag.agent.core.human_input import HumanInputRequest
+from rag.agent.core.observations import ObservationBatch, ObservationExtractor
+from rag.agent.core.output_models import ValidatedFinalOutput
+from rag.agent.core.runtime_diagnostics import RuntimeDiagnostic
+from rag.agent.core.tool_execution import (
+    ToolBatchRequest,
+    ToolBatchResult,
+)
+from rag.agent.loop.state import (
+    LoopPause,
+    LoopState,
+    LoopTerminal,
+    LoopTransition,
+    LoopTransitionReason,
+    ModelTurn,
+    ModelTurnDraft,
+    append_loop_diagnostic,
+    replace_latest_transition,
+)
+from rag.agent.loop.stop_hooks import StopHookOutcome, StopHookRunner
+from rag.agent.memory.compactor import LoopCompactionResult
+from rag.agent.planning import MAX_PLAN_EVENTS, PlanEvent, PlanTracker
+
+
+class ModelTurnEnvelope(BaseModel):
+    """Optional provider metadata surrounding one accepted draft."""
+
+    model_config = ConfigDict(frozen=True)
+
+    draft: ModelTurnDraft
+    transitions: tuple[LoopTransition, ...] = ()
+
+
+class ModelTurnProvider(Protocol):
+    async def next_turn(
+        self,
+        state: LoopState,
+        *,
+        definition: AgentDefinition,
+        budget_remaining: int,
+    ) -> ModelTurnDraft | ModelTurnEnvelope: ...
+
+
+class LoopContextManager(Protocol):
+    def prepare(
+        self,
+        state: LoopState,
+    ) -> LoopCompactionResult | Awaitable[LoopCompactionResult]: ...
+
+
+class LoopToolRunner(Protocol):
+    def execute_batch(
+        self,
+        request: ToolBatchRequest,
+        *,
+        state: LoopState | None,
+        definition: AgentDefinition | None = None,
+    ) -> ToolBatchResult | Awaitable[ToolBatchResult]: ...
+
+
+class LoopEventSink(Protocol):
+    async def emit(self, transition: LoopTransition) -> None: ...
+
+
+class NullLoopEventSink:
+    async def emit(self, transition: LoopTransition) -> None:
+        del transition
+
+
+class AgentLoop:
+    """Claude-like single-agent kernel implemented as an ordinary while loop."""
+
+    def __init__(
+        self,
+        *,
+        definition: AgentDefinition,
+        model_provider: ModelTurnProvider,
+        context_manager: LoopContextManager,
+        tool_runner: LoopToolRunner,
+        checkpoint_store: CheckpointStore,
+        stop_hook_runner: StopHookRunner,
+        finish_candidate_builder: FinishCandidateBuilder,
+        event_sink: LoopEventSink | None = None,
+        observation_extractor: ObservationExtractor | None = None,
+        plan_tracker: PlanTracker | None = None,
+        max_model_retries: int = 1,
+    ) -> None:
+        if max_model_retries < 0:
+            raise ValueError("max_model_retries must be non-negative")
+        self._definition = definition
+        self._model_provider = model_provider
+        self._context_manager = context_manager
+        self._tool_runner = tool_runner
+        self._checkpoint_store = checkpoint_store
+        self._stop_hook_runner = stop_hook_runner
+        self._finish_candidate_builder = finish_candidate_builder
+        self._event_sink = event_sink or NullLoopEventSink()
+        self._observation_extractor = (
+            observation_extractor or ObservationExtractor()
+        )
+        self._plan_tracker = plan_tracker or PlanTracker()
+        self._max_model_retries = max_model_retries
+
+    async def run(self, state: LoopState) -> LoopState:
+        if state["status"] != "running":
+            return state
+        handles = RunRegistry.get_or_create(state["run_config"])
+        if state["agent_plan"] is None:
+            plan, events = self._plan_tracker.initialize_task(
+                task=state["task"]
+            )
+            state["agent_plan"] = plan
+            self._append_plan_events(state, events)
+        await self._checkpoint_store.save_snapshot(
+            state,
+            reason="loop_start",
+        )
+
+        consecutive_model_failures = 0
+        while state["status"] == "running":
+            if state["pending_tool_calls"]:
+                paused = await self._execute_pending_tools(state)
+                if paused:
+                    return state
+                continue
+
+            if state["iteration"] >= self._definition.max_iterations:
+                await self._fail(
+                    state,
+                    stop_reason="max_iterations",
+                    error=(
+                        "Agent loop reached the configured maximum number "
+                        "of model turns."
+                    ),
+                    transition_reason="max_iterations",
+                    checkpoint_reason="max_iterations",
+                )
+                return state
+
+            try:
+                compaction = await _await_value(
+                    self._context_manager.prepare(state)
+                )
+            except Exception as exc:
+                await self._fail(
+                    state,
+                    stop_reason="context_compaction_failed",
+                    error=str(exc) or type(exc).__name__,
+                    transition_reason="failed",
+                    checkpoint_reason="context_compaction_failed",
+                )
+                return state
+            if compaction.changed:
+                transition = state["latest_transition"] or LoopTransition(
+                    reason="compaction",
+                    iteration=state["iteration"],
+                    detail={
+                        "channels": list(compaction.channels),
+                        "warnings": list(compaction.warnings),
+                    },
+                )
+                replace_latest_transition(state, transition)
+                await self._emit_and_save(
+                    state,
+                    transition,
+                    checkpoint_reason="compaction",
+                )
+
+            remaining = await handles.budget_ledger.remaining()
+            if remaining <= 0:
+                await self._fail(
+                    state,
+                    stop_reason="budget_exhausted",
+                    error="The model token budget is exhausted.",
+                    transition_reason="failed",
+                    checkpoint_reason="budget_exhausted",
+                )
+                return state
+
+            state["iteration"] += 1
+            try:
+                provided = await self._model_provider.next_turn(
+                    state,
+                    definition=self._definition,
+                    budget_remaining=remaining,
+                )
+                envelope = (
+                    provided
+                    if isinstance(provided, ModelTurnEnvelope)
+                    else ModelTurnEnvelope(draft=provided)
+                )
+                for provider_transition in envelope.transitions:
+                    transition = provider_transition.model_copy(
+                        update={"iteration": state["iteration"]}
+                    )
+                    await self._set_transition(
+                        state,
+                        transition,
+                        checkpoint_reason=(
+                            f"provider_{provider_transition.reason}"
+                        ),
+                    )
+                turn = await self._finish_candidate_builder.build(
+                    envelope.draft,
+                    state=state,
+                )
+            except (FinishCandidateBuildError, ValidationError, ValueError) as exc:
+                append_loop_diagnostic(
+                    state,
+                    RuntimeDiagnostic.from_exception(
+                        code="invalid_model_turn",
+                        component="agent_loop",
+                        error=exc,
+                        severity="error",
+                    ),
+                )
+                if consecutive_model_failures < self._max_model_retries:
+                    consecutive_model_failures += 1
+                    await self._transition(
+                        state,
+                        reason="retry",
+                        detail={
+                            "component": "model",
+                            "attempt": consecutive_model_failures,
+                            "error": str(exc),
+                        },
+                        checkpoint_reason="model_retry",
+                    )
+                    continue
+                await self._fail(
+                    state,
+                    stop_reason="invalid_model_turn",
+                    error=str(exc) or type(exc).__name__,
+                    transition_reason="failed",
+                    checkpoint_reason="invalid_model_turn",
+                )
+                return state
+            except Exception as exc:
+                append_loop_diagnostic(
+                    state,
+                    RuntimeDiagnostic.from_exception(
+                        code="model_provider_failed",
+                        component="agent_loop",
+                        error=exc,
+                        severity="error",
+                    ),
+                )
+                if consecutive_model_failures < self._max_model_retries:
+                    consecutive_model_failures += 1
+                    await self._transition(
+                        state,
+                        reason="retry",
+                        detail={
+                            "component": "model",
+                            "attempt": consecutive_model_failures,
+                            "error": str(exc) or type(exc).__name__,
+                        },
+                        checkpoint_reason="model_retry",
+                    )
+                    continue
+                await self._fail(
+                    state,
+                    stop_reason="model_provider_failed",
+                    error=str(exc) or type(exc).__name__,
+                    transition_reason="failed",
+                    checkpoint_reason="model_provider_failed",
+                )
+                return state
+
+            consecutive_model_failures = 0
+            state["last_model_turn"] = turn
+            if turn.action == "execute":
+                state["pending_tool_calls"] = list(turn.tool_calls)
+                self._record_plan_decision(state, turn)
+            await self._transition(
+                state,
+                reason="next_turn",
+                detail={"action": turn.action},
+                checkpoint_reason="model_turn",
+            )
+
+            if turn.action == "execute":
+                await self._transition(
+                    state,
+                    reason="tool_execution",
+                    detail={
+                        "phase": "scheduled",
+                        "tool_call_ids": [
+                            call.tool_call_id for call in turn.tool_calls
+                        ],
+                    },
+                    checkpoint_reason="tool_calls_scheduled",
+                )
+                continue
+            if turn.action == "pause":
+                await self._pause(
+                    state,
+                    reason=cast(str, turn.pause_reason),
+                    request=None,
+                    checkpoint_reason="model_pause",
+                    transition_reason="paused",
+                )
+                return state
+
+            finished = await self._evaluate_finish(state, turn)
+            if finished:
+                return state
+
+        return state
+
+    async def _execute_pending_tools(self, state: LoopState) -> bool:
+        result = await _await_value(
+            self._tool_runner.execute_batch(
+                ToolBatchRequest(
+                    calls=tuple(state["pending_tool_calls"]),
+                    run_config=state["run_config"],
+                    allowed_tools=frozenset(
+                        self._definition.allowed_tools
+                    ),
+                    approved_tool_call_ids=tuple(
+                        state["approved_tool_call_ids"]
+                    ),
+                    denied_tool_call_ids=tuple(
+                        state["denied_tool_call_ids"]
+                    ),
+                    execution_records=state[
+                        "tool_execution_records"
+                    ],
+                    retrieval_signals=state["retrieval_signals"],
+                ),
+                state=state,
+                definition=self._definition,
+            )
+        )
+        state["run_config"] = result.run_config
+        state["pending_tool_calls"] = list(result.pending_tool_calls)
+        state["tool_execution_records"] = {
+            call_id: record.model_copy(deep=True)
+            for call_id, record in result.execution_records.items()
+        }
+        new_results = list(result.tool_results)
+        state["tool_results"] = _merge_keyed(
+            state["tool_results"],
+            new_results,
+        )
+        if result.context_budget is not None:
+            state["context_budget"] = result.context_budget
+
+        batch = self._observation_extractor.extract(
+            new_results,
+            seen_tool_call_ids=[
+                observation.tool_call_id
+                for observation in state["structured_observations"]
+            ],
+        )
+        self._merge_observations(state, batch)
+        self._record_plan_observations(state, batch)
+
+        for tool_result in new_results:
+            if tool_result.retry_count <= 0:
+                continue
+            await self._transition(
+                state,
+                reason="retry",
+                detail={
+                    "component": "tool",
+                    "tool_call_id": tool_result.tool_call_id,
+                    "retry_count": tool_result.retry_count,
+                },
+                checkpoint_reason="tool_retry",
+            )
+
+        if result.status in {"paused", "reconciliation_required"}:
+            request = result.human_input_request
+            reason = (
+                request.question
+                if request is not None
+                else result.decision_reason or result.status
+            )
+            state["approval_request"] = request
+            await self._pause(
+                state,
+                reason=reason,
+                request=request,
+                checkpoint_reason="tool_pause",
+                transition_reason="approval_required",
+            )
+            return True
+
+        await self._transition(
+            state,
+            reason="tool_execution",
+            detail={
+                "phase": "recorded",
+                "result_count": len(new_results),
+                "pending_count": len(state["pending_tool_calls"]),
+                "skipped_completed_tool_call_ids": list(
+                    result.skipped_completed_tool_call_ids
+                ),
+            },
+            checkpoint_reason="tool_results_recorded",
+        )
+        return False
+
+    async def _evaluate_finish(
+        self,
+        state: LoopState,
+        turn: ModelTurn,
+    ) -> bool:
+        candidate = cast(str, turn.final_answer)
+        outcome = await self._stop_hook_runner.evaluate(
+            state=state,
+            candidate=candidate,
+        )
+        if outcome.blocked:
+            await self._transition(
+                state,
+                reason="stop_hook_blocked",
+                detail={
+                    "code": outcome.code,
+                    "message": outcome.message or "",
+                },
+                checkpoint_reason="stop_hook_blocked",
+            )
+            return False
+        if outcome.halted:
+            await self._fail(
+                state,
+                stop_reason=outcome.code,
+                error=outcome.message or outcome.code,
+                transition_reason="failed",
+                checkpoint_reason="stop_hook_halt",
+                final_output=outcome.final_output,
+            )
+            return True
+        await self._complete(
+            state,
+            candidate=candidate,
+            outcome=outcome,
+        )
+        return True
+
+    async def _complete(
+        self,
+        state: LoopState,
+        *,
+        candidate: str,
+        outcome: StopHookOutcome,
+    ) -> None:
+        state["status"] = "completed"
+        state["final_answer"] = candidate
+        state["final_output"] = outcome.final_output
+        state["pause"] = None
+        state["terminal"] = LoopTerminal(
+            status="completed",
+            stop_reason=outcome.code,
+            final_answer=candidate,
+            final_output=outcome.final_output,
+        )
+        plan, events = self._plan_tracker.record_completion(
+            state["agent_plan"]
+        )
+        state["agent_plan"] = plan
+        self._append_plan_events(state, events)
+        await self._transition(
+            state,
+            reason="finished",
+            detail={"stop_code": outcome.code},
+            checkpoint_reason="terminal_completed",
+        )
+
+    async def _fail(
+        self,
+        state: LoopState,
+        *,
+        stop_reason: str,
+        error: str,
+        transition_reason: LoopTransitionReason,
+        checkpoint_reason: str,
+        final_output: ValidatedFinalOutput | None = None,
+    ) -> None:
+        state["status"] = "failed"
+        state["pause"] = None
+        state["terminal"] = LoopTerminal(
+            status="failed",
+            stop_reason=stop_reason,
+            final_output=final_output,
+            error=error,
+        )
+        plan, events = self._plan_tracker.record_completion(
+            state["agent_plan"],
+            blocked=True,
+        )
+        state["agent_plan"] = plan
+        self._append_plan_events(state, events)
+        await self._transition(
+            state,
+            reason=transition_reason,
+            detail={
+                "stop_reason": stop_reason,
+                "error": error,
+            },
+            checkpoint_reason=checkpoint_reason,
+        )
+
+    async def _pause(
+        self,
+        state: LoopState,
+        *,
+        reason: str,
+        request: HumanInputRequest | None,
+        checkpoint_reason: str,
+        transition_reason: LoopTransitionReason,
+    ) -> None:
+        state["status"] = "paused"
+        state["pause"] = LoopPause(
+            reason=reason,
+            request=request,
+        )
+        await self._transition(
+            state,
+            reason=transition_reason,
+            detail={
+                "reason": reason,
+                "request_kind": (
+                    getattr(request, "kind", None)
+                    if request is not None
+                    else None
+                ),
+            },
+            checkpoint_reason=checkpoint_reason,
+        )
+
+    async def _transition(
+        self,
+        state: LoopState,
+        *,
+        reason: LoopTransitionReason,
+        detail: dict[str, object],
+        checkpoint_reason: str,
+    ) -> None:
+        transition = LoopTransition(
+            reason=reason,
+            iteration=state["iteration"],
+            detail=detail,
+        )
+        await self._set_transition(
+            state,
+            transition,
+            checkpoint_reason=checkpoint_reason,
+        )
+
+    async def _set_transition(
+        self,
+        state: LoopState,
+        transition: LoopTransition,
+        *,
+        checkpoint_reason: str,
+    ) -> None:
+        replace_latest_transition(state, transition)
+        await self._emit_and_save(
+            state,
+            transition,
+            checkpoint_reason=checkpoint_reason,
+        )
+
+    async def _emit_and_save(
+        self,
+        state: LoopState,
+        transition: LoopTransition,
+        *,
+        checkpoint_reason: str,
+    ) -> None:
+        await self._event_sink.emit(transition)
+        await self._checkpoint_store.save_snapshot(
+            state,
+            reason=checkpoint_reason,
+        )
+
+    def _record_plan_decision(
+        self,
+        state: LoopState,
+        turn: ModelTurn,
+    ) -> None:
+        plan = state["agent_plan"]
+        if plan is None:
+            return
+        updated, events = self._plan_tracker.record_decision_progress(
+            plan,
+            tool_call_ids=[
+                call.tool_call_id for call in turn.tool_calls
+            ],
+            tool_names=[call.tool_name for call in turn.tool_calls],
+        )
+        state["agent_plan"] = updated
+        self._append_plan_events(state, events)
+
+    def _record_plan_observations(
+        self,
+        state: LoopState,
+        batch: ObservationBatch,
+    ) -> None:
+        plan, events = self._plan_tracker.record_observation_progress(
+            state["agent_plan"],
+            observations=batch.structured_observations,
+            satisfied_requirement_ids=(),
+        )
+        state["agent_plan"] = plan
+        self._append_plan_events(state, events)
+
+    @staticmethod
+    def _append_plan_events(
+        state: LoopState,
+        events: Sequence[PlanEvent],
+    ) -> None:
+        state["plan_events"] = [
+            *state["plan_events"],
+            *events,
+        ][-MAX_PLAN_EVENTS:]
+
+    @staticmethod
+    def _merge_observations(
+        state: LoopState,
+        batch: ObservationBatch,
+    ) -> None:
+        state["structured_observations"] = _merge_keyed(
+            state["structured_observations"],
+            batch.structured_observations,
+        )
+        state["answer_candidates"] = _merge_keyed(
+            state["answer_candidates"],
+            batch.answer_candidates,
+        )
+        state["evidence_refs"] = _merge_keyed(
+            state["evidence_refs"],
+            batch.evidence_refs,
+        )
+        state["computation_results"] = _merge_keyed(
+            state["computation_results"],
+            batch.computation_results,
+        )
+        state["context_units"] = _merge_keyed(
+            state["context_units"],
+            batch.context_units,
+        )
+        state["locators"] = _merge_keyed(
+            state["locators"],
+            batch.locators,
+        )
+        state["asset_refs"] = list(
+            dict.fromkeys([*state["asset_refs"], *batch.asset_refs])
+        )
+        state["evidence"] = _merge_keyed(
+            state["evidence"],
+            batch.evidence,
+        )
+        state["citations"] = _merge_keyed(
+            state["citations"],
+            batch.citations,
+        )
+
+
+async def _await_value[T](value: T | Awaitable[T]) -> T:
+    if isawaitable(value):
+        return await value
+    return value
+
+
+def _merge_keyed[T](existing: list[T], additions: list[T]) -> list[T]:
+    merged: dict[str, T] = {}
+    for item in [*existing, *additions]:
+        key = _item_key(item)
+        merged.pop(key, None)
+        merged[key] = item
+    return list(merged.values())
+
+
+def _item_key(item: object) -> str:
+    key = getattr(item, "key", None)
+    if isinstance(key, str) and key:
+        return key
+    for attribute in (
+        "tool_call_id",
+        "source_tool_call_id",
+        "unit_id",
+        "evidence_id",
+        "citation_id",
+    ):
+        value = getattr(item, attribute, None)
+        if value is not None:
+            return f"{attribute}:{value}"
+    if isinstance(item, dict):
+        return repr(sorted(item.items()))
+    return repr(item)
+
+
+__all__ = [
+    "AgentLoop",
+    "LoopContextManager",
+    "LoopEventSink",
+    "LoopToolRunner",
+    "ModelTurnEnvelope",
+    "ModelTurnProvider",
+    "NullLoopEventSink",
+]

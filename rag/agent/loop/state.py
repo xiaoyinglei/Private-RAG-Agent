@@ -39,6 +39,19 @@ MAX_STOP_HOOK_FEEDBACK = 10
 MAX_LOOP_MEMORY_WARNINGS = 20
 
 LoopStatus = Literal["running", "paused", "completed", "failed"]
+LoopTransitionReason = Literal[
+    "next_turn",
+    "tool_execution",
+    "approval_required",
+    "stop_hook_blocked",
+    "retry",
+    "fallback",
+    "compaction",
+    "paused",
+    "finished",
+    "failed",
+    "max_iterations",
+]
 
 
 class ModelTurnDraft(BaseModel):
@@ -89,18 +102,7 @@ class LoopTransition(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    reason: Literal[
-        "next_turn",
-        "tool_execution",
-        "approval_required",
-        "stop_hook_blocked",
-        "retry",
-        "fallback",
-        "compaction",
-        "paused",
-        "finished",
-        "max_iterations",
-    ]
+    reason: LoopTransitionReason
     iteration: int = Field(ge=0)
     detail: dict[str, object] = Field(default_factory=dict)
 
@@ -366,6 +368,7 @@ __all__ = [
     "LoopStatus",
     "LoopTerminal",
     "LoopTransition",
+    "LoopTransitionReason",
     "ModelTurn",
     "ModelTurnDraft",
     "StopHookFeedback",
