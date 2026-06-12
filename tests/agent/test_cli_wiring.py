@@ -9,10 +9,14 @@ from rag.agent.cli import (
     CLI_AGENT_CHOICES,
     _build_agent_service,
     _build_llm_tool_runners,
+    _display_result,
     _resolve_cli_agent_definition,
 )
 from rag.agent.core.context import AgentRunConfig, RunRegistry
 from rag.agent.core.definition import AgentDefinition
+from rag.agent.core.llm_registry import ModelRegistry
+from rag.agent.core.runtime_diagnostics import RuntimeDiagnostic
+from rag.agent.service import AgentRunRequest, AgentRunResult
 from rag.agent.state import AgentState
 from rag.agent.tools.llm_tools import LLMCompareInput, LLMGenerateInput
 from rag.agent.tools.registry import ToolExecutionContext
@@ -208,6 +212,73 @@ def test_build_agent_service_honors_cli_model_alias_for_agent_decisions() -> Non
 
     assert service._model_registry is not None
     assert service._model_registry.default_model == "qwen3_8b_mlx_4bit"
+
+
+def test_build_agent_service_rejects_explicit_model_registry_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_from_env(*args: object, **kwargs: object) -> ModelRegistry:
+        del args, kwargs
+        raise KeyError("unknown explicit alias")
+
+    monkeypatch.setattr(ModelRegistry, "from_env", fail_from_env)
+
+    with pytest.raises(KeyError, match="unknown explicit alias"):
+        _build_agent_service(
+            _Runtime(),
+            agent_type="research",
+            model_alias="missing",
+        )
+
+
+def test_build_agent_service_records_automatic_model_registry_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_from_env(*args: object, **kwargs: object) -> ModelRegistry:
+        del args, kwargs
+        raise FileNotFoundError("models config missing")
+
+    monkeypatch.setattr(ModelRegistry, "from_env", fail_from_env)
+
+    service = _build_agent_service(_Runtime(), agent_type="research")
+    state = service.initial_state(
+        AgentRunRequest(
+            task="Explain policy",
+            run_id="cli-registry-failure",
+            thread_id="cli-registry-failure",
+        )
+    )
+
+    assert state["runtime_diagnostics"][0].code == "model_registry_initialization_failed"
+
+
+@pytest.mark.parametrize("verbose", [False, True])
+def test_display_result_surfaces_runtime_degradation(
+    capsys: pytest.CaptureFixture[str],
+    *,
+    verbose: bool,
+) -> None:
+    result = AgentRunResult(
+        run_id="display-diagnostics",
+        thread_id="display-diagnostics",
+        status="paused",
+        runtime_diagnostics=[
+            RuntimeDiagnostic(
+                code="default_providers_initialization_failed",
+                component="model_providers",
+                message="decision model unavailable",
+                error_type="RuntimeError",
+            )
+        ],
+    )
+
+    _display_result(result, verbose=verbose)
+
+    output = capsys.readouterr().out
+    assert "降级模式" in output
+    if verbose:
+        assert "model_providers" in output
+        assert "decision model unavailable" in output
 
 
 @pytest.mark.anyio

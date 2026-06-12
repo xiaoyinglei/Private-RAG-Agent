@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any, cast
 from uuid import uuid4
@@ -20,6 +20,10 @@ from rag.agent.core.output_finalizer import StructuredOutputFinalizer
 from rag.agent.core.output_models import (
     ValidatedFinalOutput,
     output_model_path,
+)
+from rag.agent.core.runtime_diagnostics import (
+    RuntimeDiagnostic,
+    merge_runtime_diagnostics,
 )
 from rag.agent.goal_runtime import GoalSpec
 from rag.agent.graphs.nodes.goal_runtime import GoalContractProvider
@@ -92,6 +96,7 @@ class AgentRunResult(BaseModel):
     human_input_request: object | None = None
     pending_tool_calls_summary: list[dict[str, object]] = Field(default_factory=list)
     workspace_path: str | None = None
+    runtime_diagnostics: list[RuntimeDiagnostic] = Field(default_factory=list)
 
     @classmethod
     def from_state(
@@ -131,6 +136,7 @@ class AgentRunResult(BaseModel):
                 for tc in pending
             ],
             workspace_path=workspace_path,
+            runtime_diagnostics=list(state.get("runtime_diagnostics", [])),
         )
 
 
@@ -148,6 +154,7 @@ class AgentService:
         output_finalizer: StructuredOutputFinalizer | None = None,
         model_registry: ModelRegistry | None = None,
         checkpointer: BaseCheckpointSaver[str] | None = None,
+        runtime_diagnostics: Sequence[RuntimeDiagnostic] = (),
     ) -> None:
         self._definition = definition
         self._base_tool_registry = tool_registry
@@ -158,6 +165,9 @@ class AgentService:
         self._synthesis_runner = synthesis_runner
         self._output_finalizer = output_finalizer
         self._model_registry = model_registry
+        self._runtime_diagnostics = tuple(
+            merge_runtime_diagnostics([], runtime_diagnostics)
+        )
         self._checkpointer = checkpointer or create_agent_checkpointer(None)
         self._compiler = GraphCompiler(
             tool_registry=tool_registry,
@@ -206,6 +216,7 @@ class AgentService:
             denied_tool_call_ids=denied_tool_call_ids,
             messages=messages,
             goal_spec=goal_spec,
+            runtime_diagnostics=self._runtime_diagnostics,
         )
         return cast(
             AgentState,

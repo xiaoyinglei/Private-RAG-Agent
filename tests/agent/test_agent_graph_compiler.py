@@ -5,6 +5,7 @@ from pydantic import BaseModel
 
 from rag.agent.core.compiler import GraphCompiler
 from rag.agent.core.definition import AgentDefinition
+from rag.agent.core.runtime_diagnostics import RuntimeDiagnostic
 from rag.agent.service import AgentRunRequest, AgentService
 from rag.agent.state import AgentState, ThinkOutput
 from rag.agent.tools.registry import ToolRegistry
@@ -192,6 +193,122 @@ def test_compiler_preserves_explicit_output_finalizer(
     compiler.compile(definition)
 
     assert captured["output_finalizer"] is finalizer
+
+
+def test_compiler_records_optional_provider_initialization_failures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fail_default_providers(*args: object, **kwargs: object) -> object:
+        del args, kwargs
+        raise RuntimeError("decision model unavailable")
+
+    def fail_output_finalizer(*args: object, **kwargs: object) -> object:
+        del args, kwargs
+        raise ValueError("structured output unavailable")
+
+    def fail_goal_contract(*args: object, **kwargs: object) -> object:
+        del args, kwargs
+        raise LookupError("goal model unavailable")
+
+    def fake_build_agent_graph(**kwargs: object) -> object:
+        captured.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(
+        "rag.agent.core.compiler.create_default_providers",
+        fail_default_providers,
+    )
+    monkeypatch.setattr(
+        "rag.agent.core.compiler.create_model_structured_output_finalizer",
+        fail_output_finalizer,
+    )
+    monkeypatch.setattr(
+        "rag.agent.core.compiler.create_goal_contract_provider",
+        fail_goal_contract,
+    )
+    monkeypatch.setattr(
+        "rag.agent.core.compiler.build_agent_graph",
+        fake_build_agent_graph,
+    )
+    compiler = GraphCompiler(
+        tool_registry=_registry(),
+        model_registry=object(),  # type: ignore[arg-type]
+    )
+    definition = AgentDefinition(
+        agent_type="research",
+        description="Research agent",
+        system_prompt="Use grounded evidence.",
+        allowed_tools=["vector_search"],
+        output_model=SearchOutput,
+    )
+
+    compiler.compile(definition)
+
+    diagnostics = captured["runtime_diagnostics"]
+    assert diagnostics == (
+        RuntimeDiagnostic(
+            code="default_providers_initialization_failed",
+            component="model_providers",
+            message="decision model unavailable",
+            error_type="RuntimeError",
+        ),
+        RuntimeDiagnostic(
+            code="structured_output_finalizer_initialization_failed",
+            component="structured_output_finalizer",
+            message="structured output unavailable",
+            error_type="ValueError",
+        ),
+        RuntimeDiagnostic(
+            code="goal_contract_provider_initialization_failed",
+            component="goal_contract_provider",
+            message="goal model unavailable",
+            error_type="LookupError",
+        ),
+    )
+
+
+@pytest.mark.anyio
+async def test_compiler_degradation_reaches_agent_run_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_default_providers(*args: object, **kwargs: object) -> object:
+        del args, kwargs
+        raise RuntimeError("decision model unavailable")
+
+    def fail_goal_contract(*args: object, **kwargs: object) -> object:
+        del args, kwargs
+        raise LookupError("goal model unavailable")
+
+    monkeypatch.setattr(
+        "rag.agent.core.compiler.create_default_providers",
+        fail_default_providers,
+    )
+    monkeypatch.setattr(
+        "rag.agent.core.compiler.create_goal_contract_provider",
+        fail_goal_contract,
+    )
+    service = AgentService(
+        definition=_definition(allowed_tools=["vector_search"]),
+        tool_registry=_registry(),
+        model_registry=object(),  # type: ignore[arg-type]
+    )
+
+    result = await service.run(
+        AgentRunRequest(
+            task="Explain policy",
+            run_id="compiler-degradation-result",
+            thread_id="compiler-degradation-result",
+        )
+    )
+
+    assert result.status == "paused"
+    assert [diagnostic.code for diagnostic in result.runtime_diagnostics] == [
+        "default_providers_initialization_failed",
+        "goal_contract_provider_initialization_failed",
+    ]
+    assert result.runtime_diagnostics[0].message == "decision model unavailable"
 
 
 @pytest.mark.anyio

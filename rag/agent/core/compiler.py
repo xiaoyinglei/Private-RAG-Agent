@@ -13,6 +13,7 @@ from rag.agent.core.output_finalizer import (
     StructuredOutputFinalizer,
     create_model_structured_output_finalizer,
 )
+from rag.agent.core.runtime_diagnostics import RuntimeDiagnostic
 from rag.agent.graphs.base import build_agent_graph
 from rag.agent.graphs.nodes.goal_runtime import GoalContractProvider
 from rag.agent.graphs.nodes.llm_decide import ToolDecisionProvider
@@ -54,6 +55,7 @@ class GraphCompiler:
         tool_decision_provider = self._tool_decision_provider
         goal_contract_provider = self._goal_contract_provider
         output_finalizer = self._output_finalizer
+        runtime_diagnostics: list[RuntimeDiagnostic] = []
         needs_default_retrieval_hint_provider = (
             retrieval_hint_provider is None
             and definition.model_selection.retrieval_hint_model is not None
@@ -69,8 +71,14 @@ class GraphCompiler:
                     definition.model_selection,
                     definition,
                 )
-            except Exception:
-                pass
+            except Exception as exc:
+                runtime_diagnostics.append(
+                    RuntimeDiagnostic.from_exception(
+                        code="default_providers_initialization_failed",
+                        component="model_providers",
+                        error=exc,
+                    )
+                )
             else:
                 if needs_default_retrieval_hint_provider:
                     retrieval_hint_provider = hint_provider
@@ -86,7 +94,14 @@ class GraphCompiler:
                 output_finalizer = create_model_structured_output_finalizer(
                     self._model_registry
                 )
-            except Exception:
+            except Exception as exc:
+                runtime_diagnostics.append(
+                    RuntimeDiagnostic.from_exception(
+                        code="structured_output_finalizer_initialization_failed",
+                        component="structured_output_finalizer",
+                        error=exc,
+                    )
+                )
                 output_finalizer = None
 
         if (
@@ -98,7 +113,14 @@ class GraphCompiler:
                     self._model_registry,
                     definition,
                 )
-            except Exception:
+            except Exception as exc:
+                runtime_diagnostics.append(
+                    RuntimeDiagnostic.from_exception(
+                        code="goal_contract_provider_initialization_failed",
+                        component="goal_contract_provider",
+                        error=exc,
+                    )
+                )
                 goal_contract_provider = None
 
         return build_agent_graph(
@@ -110,6 +132,7 @@ class GraphCompiler:
             synthesis_runner=self._synthesis_runner,
             output_finalizer=output_finalizer,
             checkpointer=self._checkpointer,
+            runtime_diagnostics=tuple(runtime_diagnostics),
         )
 
     def _missing_allowed_tools(self, definition: AgentDefinition) -> list[str]:

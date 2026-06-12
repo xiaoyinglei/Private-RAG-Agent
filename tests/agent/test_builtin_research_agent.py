@@ -4,6 +4,7 @@ import pytest
 
 from rag.agent.builtin.research import RESEARCH_AGENT, create_research_agent_service
 from rag.agent.core.compiler import GraphCompiler
+from rag.agent.core.llm_registry import ModelRegistry
 from rag.agent.service import AgentRunRequest
 from rag.agent.state import ToolCallPlan
 from rag.agent.tools.asset_tools import ALL_ASSET_TOOLS
@@ -63,6 +64,28 @@ def test_research_agent_compiles_when_builtin_tools_registered() -> None:
     graph = compiler.compile(RESEARCH_AGENT)
 
     assert hasattr(graph, "ainvoke")
+
+
+def test_research_agent_factory_records_automatic_registry_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_from_env(*args: object, **kwargs: object) -> ModelRegistry:
+        del args, kwargs
+        raise FileNotFoundError("models config missing")
+
+    monkeypatch.setattr(ModelRegistry, "from_env", fail_from_env)
+
+    service = create_research_agent_service()
+    state = service.initial_state(
+        AgentRunRequest(
+            task="Explain policy",
+            run_id="research-registry-failure",
+            thread_id="research-registry-failure",
+        )
+    )
+
+    assert state["runtime_diagnostics"][0].code == "model_registry_initialization_failed"
+    assert state["runtime_diagnostics"][0].error_type == "FileNotFoundError"
 
 
 @pytest.mark.anyio

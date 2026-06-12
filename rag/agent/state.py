@@ -10,6 +10,10 @@ from typing_extensions import TypedDict
 from rag.agent.core.context import AgentRunConfig
 from rag.agent.core.human_input import HumanInputRequest, HumanInputResponse
 from rag.agent.core.output_models import ValidatedFinalOutput
+from rag.agent.core.runtime_diagnostics import (
+    RuntimeDiagnostic,
+    merge_runtime_diagnostics,
+)
 from rag.agent.memory.models import (
     ContextBudgetSnapshot,
     ExtractedFact,
@@ -100,6 +104,10 @@ class AgentState(TypedDict):
     memory_refs: Annotated[list[MemoryRef], _merge_memory_refs]
     memory_budget: MemoryBudgetSnapshot | None
     memory_warnings: Annotated[list[str], _merge_strings]
+    runtime_diagnostics: Annotated[
+        list[RuntimeDiagnostic],
+        _merge_runtime_diagnostics,
+    ]
 
 
 def create_agent_state(
@@ -111,6 +119,7 @@ def create_agent_state(
     approved_tool_call_ids: list[str] | None = None,
     denied_tool_call_ids: list[str] | None = None,
     goal_spec: Any | None = None,
+    runtime_diagnostics: list[RuntimeDiagnostic] | tuple[RuntimeDiagnostic, ...] | None = None,
 ) -> AgentState:
     return {
         "messages": list(messages or []),
@@ -164,6 +173,7 @@ def create_agent_state(
         "memory_refs": [],
         "memory_budget": None,
         "memory_warnings": [],
+        "runtime_diagnostics": list(runtime_diagnostics or ()),
     }
 
 
@@ -279,6 +289,19 @@ def _merge_strings(left: list[str], right: list[str]) -> list[str]:
     return list(dict.fromkeys([*left, *right]))
 
 
+def _merge_runtime_diagnostics(
+    left: list[RuntimeDiagnostic],
+    right: list[RuntimeDiagnostic],
+) -> list[RuntimeDiagnostic]:
+    replacement = _replacement_items(cast(list[Any], right))
+    if replacement is not None:
+        return merge_runtime_diagnostics(
+            [],
+            [RuntimeDiagnostic.model_validate(item) for item in replacement],
+        )
+    return merge_runtime_diagnostics(left, right)
+
+
 def _replacement_items(right: list[Any]) -> list[Any] | None:
     if len(right) == 1 and isinstance(right[0], StateChannelReplacement):
         return list(right[0].items)
@@ -305,6 +328,7 @@ __all__ = [
     "_merge_keyed_items",
     "_merge_memory_refs",
     "_merge_plan_events",
+    "_merge_runtime_diagnostics",
     "_merge_strings",
     "_merge_tool_results",
 ]
