@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Any
 
 from langgraph.checkpoint.base import BaseCheckpointSaver
@@ -8,6 +9,7 @@ from langgraph.graph import END, START, StateGraph
 
 from rag.agent.core.definition import AgentDefinition
 from rag.agent.core.output_finalizer import StructuredOutputFinalizer
+from rag.agent.core.runtime_diagnostics import RuntimeDiagnostic
 from rag.agent.graphs.nodes import goal_runtime as graph_goal_nodes
 from rag.agent.graphs.nodes.execute import run_tools_guarded
 from rag.agent.graphs.nodes.llm_decide import ToolDecisionProvider, decide_next
@@ -32,6 +34,7 @@ def build_agent_graph(
     synthesis_runner: SynthesisRunner | None = None,
     output_finalizer: StructuredOutputFinalizer | None = None,
     checkpointer: BaseCheckpointSaver[str] | MemorySaver | None = None,
+    runtime_diagnostics: Sequence[RuntimeDiagnostic] = (),
 ) -> Any:
     graph = StateGraph(AgentState)
     allowed_tools = frozenset(definition.allowed_tools)
@@ -41,11 +44,14 @@ def build_agent_graph(
     effective_retrieval_hint_provider = retrieval_hint_provider
 
     async def bound_init_goal(state: AgentState) -> dict[str, Any]:
-        return await init_goal(
+        update = await init_goal(
             state,
             goal_contract_provider=goal_contract_provider,
             retrieval_hint_provider=effective_retrieval_hint_provider,
         )
+        if runtime_diagnostics:
+            update["runtime_diagnostics"] = list(runtime_diagnostics)
+        return update
 
     async def bound_control_turn(state: AgentState) -> dict[str, Any]:
         return control_turn(

@@ -3,7 +3,7 @@ from __future__ import annotations
 from rag.agent.builtin import BUILTIN_AGENT_DEFINITIONS, create_builtin_agent_registry
 from rag.agent.builtin.compare import COMPARE_AGENT
 from rag.agent.builtin.orchestrator import ORCHESTRATOR_AGENT
-from rag.agent.tools.builtin_registry import create_builtin_tool_registry
+from rag.agent.builtin_registry import create_builtin_tool_registry
 
 
 def test_create_builtin_agent_registry_registers_expected_agents() -> None:

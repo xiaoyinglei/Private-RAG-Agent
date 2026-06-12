@@ -7,6 +7,7 @@ from typing import Annotated, Any, Literal, cast
 import typer
 
 from rag.agent.builtin import create_builtin_agent_registry
+from rag.agent.builtin_registry import create_builtin_tool_registry
 from rag.agent.core.agent_service_factory import AgentServiceFactory
 from rag.agent.core.checkpointing import create_agent_checkpointer
 from rag.agent.core.definition import AgentDefinition
@@ -14,9 +15,9 @@ from rag.agent.core.human_input import HumanInputRequest, HumanInputResponse
 from rag.agent.core.llm_registry import ModelRegistry, ResolvedModel
 from rag.agent.core.llm_tool_runners import create_model_llm_tool_runners
 from rag.agent.core.registry import AgentRegistry
+from rag.agent.core.runtime_diagnostics import RuntimeDiagnostic
 from rag.agent.core.subagent_runner import BuiltinSubAgentRunner, BuiltinSynthesisRunner
 from rag.agent.service import AgentRunRequest, AgentRunResult, AgentService
-from rag.agent.tools.builtin_registry import create_builtin_tool_registry
 from rag.agent.tools.rag_answer_tools import RAGSearchAnswerRunner
 from rag.agent.tools.registry import ContextualToolRunner, ToolRunner
 from rag.assembly.tokenizer import TokenAccountingService, TokenizerContract
@@ -166,15 +167,26 @@ def _build_agent_service(
         runners=runners,
         contextual_runners=contextual_runners,
     )
+    runtime_diagnostics: tuple[RuntimeDiagnostic, ...] = ()
     try:
         model_registry = ModelRegistry.from_env(default_model=model_alias)
-    except Exception:
+    except Exception as exc:
+        if model_alias is not None:
+            raise
         model_registry = None
+        runtime_diagnostics = (
+            RuntimeDiagnostic.from_exception(
+                code="model_registry_initialization_failed",
+                component="model_registry",
+                error=exc,
+            ),
+        )
 
     service_factory = AgentServiceFactory(
         tool_registry=tool_registry,
         model_registry=model_registry,
         checkpointer=create_agent_checkpointer(checkpoint_db),
+        runtime_diagnostics=runtime_diagnostics,
     )
     subagent_runner = BuiltinSubAgentRunner(
         agent_registry=agent_registry,
@@ -204,6 +216,23 @@ def _format_tool_summary(result: AgentRunResult) -> str:
 
 def _display_result(result: AgentRunResult, *, verbose: bool) -> None:
     """干净输出 AgentRunResult。"""
+    if result.runtime_diagnostics:
+        degraded = sum(
+            1 for diagnostic in result.runtime_diagnostics if diagnostic.degraded
+        )
+        print(f"\n警告: Agent 以降级模式运行（{degraded} 项诊断）")
+        if verbose:
+            for diagnostic in result.runtime_diagnostics:
+                error_type = (
+                    f", {diagnostic.error_type}"
+                    if diagnostic.error_type is not None
+                    else ""
+                )
+                print(
+                    f"  [{diagnostic.component}] {diagnostic.code}: "
+                    f"{diagnostic.message}{error_type}"
+                )
+
     if result.final_answer:
         print(f"\n{result.final_answer}")
 

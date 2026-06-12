@@ -110,7 +110,12 @@ async def run_tools_raw(
         spec = specs_by_name.get(call.tool_name)
         approval_arguments = {**call.arguments, "tool_call_id": call.tool_call_id}
         decision = approval_policy.decide(
-            tool_name=call.tool_name, arguments=approval_arguments, spec=spec,
+            tool_name=call.tool_name,
+            arguments=approval_arguments,
+            spec=spec,
+            requires_confirmation=(
+                call.tool_name in tool_policy.require_confirmation_for
+            ),
         )
 
         if decision.action == "deny":
@@ -165,13 +170,14 @@ async def run_tools_raw(
 
     # 全部允许 / 已批准 → 执行
     signals = state.get("retrieval_signals")
+    selected, excess = _select_execution_batch(
+        executables,
+        specs_by_name=specs_by_name,
+        max_parallel_calls=tool_policy.max_parallel_calls,
+    )
     batch = [
         _execution_call(call, retrieval_signals=signals)
-        for call in executables[: tool_policy.max_parallel_calls]
-    ]
-    excess = [
-        call.model_copy(deep=True)
-        for call in executables[tool_policy.max_parallel_calls :]
+        for call in selected
     ]
 
     gathered = await asyncio.gather(
@@ -315,6 +321,36 @@ def _execution_call(
             else {}
         )
     return call.model_copy(deep=True, update={"arguments": arguments})
+
+
+def _select_execution_batch(
+    calls: list[ToolCallPlan],
+    *,
+    specs_by_name: dict[str, ToolSpec],
+    max_parallel_calls: int,
+) -> tuple[list[ToolCallPlan], list[ToolCallPlan]]:
+    if not calls:
+        return [], []
+
+    limit = max(1, max_parallel_calls)
+    first_spec = specs_by_name[calls[0].tool_name]
+    if not first_spec.concurrency_safe:
+        return [calls[0]], [
+            call.model_copy(deep=True)
+            for call in calls[1:]
+        ]
+
+    batch: list[ToolCallPlan] = []
+    for call in calls:
+        if len(batch) >= limit:
+            break
+        if not specs_by_name[call.tool_name].concurrency_safe:
+            break
+        batch.append(call)
+    return batch, [
+        call.model_copy(deep=True)
+        for call in calls[len(batch):]
+    ]
 
 
 async def _execute_one_tool(
@@ -466,7 +502,7 @@ async def _execute_one_tool(
                 retry_count=attempt,
             )
         except TimeoutError:
-            if attempt < spec.max_retries:
+            if spec.idempotent and attempt < spec.max_retries:
                 attempt += 1
                 continue
             if reserved_work_budget:
@@ -504,7 +540,7 @@ async def _execute_one_tool(
                 retry_count=attempt,
             )
         except Exception as exc:
-            if attempt < spec.max_retries:
+            if spec.idempotent and attempt < spec.max_retries:
                 attempt += 1
                 continue
             if reserved_work_budget:

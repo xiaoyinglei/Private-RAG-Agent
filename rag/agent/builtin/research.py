@@ -4,13 +4,14 @@ from collections.abc import Mapping
 
 from langgraph.checkpoint.base import BaseCheckpointSaver
 
+from rag.agent.builtin_registry import create_builtin_tool_registry
 from rag.agent.core.definition import AgentDefinition, ModelSelectionPolicy, ToolPolicy
 from rag.agent.core.delegation import DelegatedAgentRunner
 from rag.agent.core.llm_registry import ModelRegistry
+from rag.agent.core.runtime_diagnostics import RuntimeDiagnostic
 from rag.agent.graphs.nodes.llm_decide import ToolDecisionProvider
 from rag.agent.graphs.nodes.retrieval_hint import RetrievalHintProvider
 from rag.agent.service import AgentService
-from rag.agent.tools.builtin_registry import create_builtin_tool_registry
 from rag.agent.tools.registry import ToolRunner
 
 _SENTINEL = object()
@@ -96,11 +97,19 @@ def create_research_agent_service(
 ) -> AgentService:
     # 默认自动加载 models.yaml，测试环境可显式传 None 跳过
     registry: ModelRegistry | None
+    runtime_diagnostics: tuple[RuntimeDiagnostic, ...] = ()
     if model_registry is _SENTINEL:
         try:
             registry = ModelRegistry.from_env()
-        except Exception:
+        except Exception as exc:
             registry = None
+            runtime_diagnostics = (
+                RuntimeDiagnostic.from_exception(
+                    code="model_registry_initialization_failed",
+                    component="model_registry",
+                    error=exc,
+                ),
+            )
     else:
         registry = model_registry  # type: ignore[assignment]
     return AgentService(
@@ -111,4 +120,5 @@ def create_research_agent_service(
         subagent_runner=subagent_runner,
         model_registry=registry,
         checkpointer=checkpointer,
+        runtime_diagnostics=runtime_diagnostics,
     )

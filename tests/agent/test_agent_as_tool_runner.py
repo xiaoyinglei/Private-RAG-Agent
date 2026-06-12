@@ -8,6 +8,7 @@ from rag.agent.builtin.factcheck import FACTCHECK_AGENT
 from rag.agent.builtin.orchestrator import ORCHESTRATOR_AGENT
 from rag.agent.builtin.research import RESEARCH_AGENT
 from rag.agent.builtin.synthesize import SYNTHESIZE_AGENT
+from rag.agent.builtin_registry import create_builtin_tool_registry
 from rag.agent.core.agent_as_tool import (
     AgentAsToolAdapter,
     AgentAsToolExecutionError,
@@ -25,7 +26,6 @@ from rag.agent.core.subagent_runner import BuiltinSubAgentRunner
 from rag.agent.graphs.nodes.execute import run_tools_raw
 from rag.agent.service import AgentRunRequest, AgentRunResult
 from rag.agent.state import AgentState, ThinkOutput, ToolCallPlan
-from rag.agent.tools.builtin_registry import create_builtin_tool_registry
 from rag.agent.tools.llm_tools import LLMTextOutput
 from rag.schema.query import RetrievalSignals
 from rag.schema.runtime import AccessPolicy

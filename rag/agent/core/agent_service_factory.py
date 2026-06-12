@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 from langgraph.checkpoint.base import BaseCheckpointSaver
 
 from rag.agent.core.definition import AgentDefinition
 from rag.agent.core.delegation import DelegatedAgentRunner
 from rag.agent.core.llm_registry import ModelRegistry
+from rag.agent.core.runtime_diagnostics import RuntimeDiagnostic
 from rag.agent.graphs.nodes.goal_runtime import GoalContractProvider
 from rag.agent.graphs.nodes.llm_decide import ToolDecisionProvider
 from rag.agent.graphs.nodes.retrieval_hint import RetrievalHintProvider
@@ -23,6 +26,7 @@ class AgentServiceFactory:
         tool_decision_provider: ToolDecisionProvider | None = None,
         goal_contract_provider: GoalContractProvider | None = None,
         checkpointer: BaseCheckpointSaver[str] | None = None,
+        runtime_diagnostics: Sequence[RuntimeDiagnostic] = (),
     ) -> None:
         self._tool_registry = tool_registry
         self._model_registry = model_registry
@@ -30,6 +34,7 @@ class AgentServiceFactory:
         self._tool_decision_provider = tool_decision_provider
         self._goal_contract_provider = goal_contract_provider
         self._checkpointer = checkpointer
+        self._runtime_diagnostics = tuple(runtime_diagnostics)
         self._subagent_runner: DelegatedAgentRunner | None = None
         self._synthesis_runner: SynthesisRunner | None = None
 
@@ -51,6 +56,7 @@ class AgentServiceFactory:
                 synthesis_runner=None,
                 model_registry=self._model_registry,
                 checkpointer=self._checkpointer,
+                runtime_diagnostics=self._runtime_diagnostics,
             )
         return AgentService(
             definition=definition,
@@ -62,4 +68,5 @@ class AgentServiceFactory:
             synthesis_runner=self._synthesis_runner,
             model_registry=self._model_registry,
             checkpointer=self._checkpointer,
+            runtime_diagnostics=self._runtime_diagnostics,
         )

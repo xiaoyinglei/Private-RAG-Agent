@@ -369,6 +369,8 @@ asset_list = ToolSpec(
     permissions=ToolPermissions(read_db=True),
     timeout_seconds=5.0,
     max_retries=1,
+    idempotent=True,
+    concurrency_safe=True,
     work_budget_cost=300,
 )
 
@@ -384,6 +386,8 @@ asset_inspect = ToolSpec(
     permissions=ToolPermissions(read_db=True, read_object_store=True),
     timeout_seconds=10.0,
     max_retries=1,
+    idempotent=True,
+    concurrency_safe=True,
     work_budget_cost=900,
 )
 
@@ -399,6 +403,8 @@ asset_read_slice = ToolSpec(
     permissions=ToolPermissions(read_db=True, read_object_store=True),
     timeout_seconds=10.0,
     max_retries=1,
+    idempotent=True,
+    concurrency_safe=True,
     work_budget_cost=600,
 )
 
@@ -414,6 +420,8 @@ asset_analyze = ToolSpec(
     permissions=ToolPermissions(read_db=True, read_object_store=True),
     timeout_seconds=10.0,
     max_retries=1,
+    idempotent=True,
+    concurrency_safe=True,
     work_budget_cost=800,
 )
 

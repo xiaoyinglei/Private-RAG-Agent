@@ -2,12 +2,119 @@ from __future__ import annotations
 
 from pydantic import BaseModel
 
+from rag.agent.core.context import AgentRunConfig
+from rag.agent.core.runtime_diagnostics import (
+    MAX_RUNTIME_DIAGNOSTICS,
+    RuntimeDiagnostic,
+)
+from rag.agent.service import AgentRunResult
 from rag.agent.state import (
+    AgentState,
+    ToolCallPlan,
     _merge_citations,
     _merge_evidence,
+    _merge_runtime_diagnostics,
     _merge_tool_results,
+    create_agent_state,
 )
 from rag.schema.query import AnswerCitation, EvidenceItem
+from rag.schema.runtime import AccessPolicy
+
+
+def _run_config(run_id: str) -> AgentRunConfig:
+    return AgentRunConfig(
+        run_id=run_id,
+        thread_id=run_id,
+        budget_total=100,
+        max_depth=2,
+        access_policy=AccessPolicy.default(),
+    )
+
+
+def test_create_agent_state_populates_every_required_channel() -> None:
+    state = create_agent_state(
+        task="Inspect architecture",
+        run_config=_run_config("state-complete"),
+    )
+
+    assert set(state) == set(AgentState.__required_keys__)
+
+
+def test_create_agent_state_copies_mutable_inputs_and_defaults() -> None:
+    pending = [ToolCallPlan.create("vector_search", {"query": "agent loop"})]
+    first = create_agent_state(
+        task="First",
+        run_config=_run_config("state-first"),
+        pending_tool_calls=pending,
+    )
+    second = create_agent_state(
+        task="Second",
+        run_config=_run_config("state-second"),
+    )
+
+    pending.clear()
+    first["memory_warnings"].append("bounded")
+    first["runtime_diagnostics"].append(
+        RuntimeDiagnostic(
+            code="test_warning",
+            component="test",
+            message="test warning",
+        )
+    )
+
+    assert len(first["pending_tool_calls"]) == 1
+    assert second["pending_tool_calls"] == []
+    assert second["memory_warnings"] == []
+    assert second["runtime_diagnostics"] == []
+
+
+def test_runtime_diagnostics_are_deduplicated_and_bounded() -> None:
+    initial = [
+        RuntimeDiagnostic(
+            code="duplicate",
+            component="compiler",
+            message="old",
+        )
+    ]
+    updates = [
+        RuntimeDiagnostic(
+            code="duplicate",
+            component="compiler",
+            message="new",
+        ),
+        *[
+            RuntimeDiagnostic(
+                code=f"warning_{index}",
+                component="compiler",
+                message=f"warning {index}",
+            )
+            for index in range(MAX_RUNTIME_DIAGNOSTICS + 2)
+        ],
+    ]
+
+    merged = _merge_runtime_diagnostics(initial, updates)
+
+    assert len(merged) == MAX_RUNTIME_DIAGNOSTICS
+    assert merged[-1].code == f"warning_{MAX_RUNTIME_DIAGNOSTICS + 1}"
+    assert all(item.message != "old" for item in merged)
+
+
+def test_agent_run_result_exposes_runtime_diagnostics() -> None:
+    state = create_agent_state(
+        task="Inspect architecture",
+        run_config=_run_config("state-diagnostics"),
+    )
+    diagnostic = RuntimeDiagnostic(
+        code="provider_initialization_failed",
+        component="tool_decision_provider",
+        message="model unavailable",
+        error_type="RuntimeError",
+    )
+    state["runtime_diagnostics"] = [diagnostic]
+
+    result = AgentRunResult.from_state(state)
+
+    assert result.runtime_diagnostics == [diagnostic]
 
 
 class TestMergeEvidence:

@@ -43,6 +43,8 @@ llm_generate = ToolSpec(
     permissions=ToolPermissions(generate=True),
     timeout_seconds=30.0,
     max_retries=1,
+    idempotent=True,
+    concurrency_safe=True,
     work_budget_cost=200,
 )
 
@@ -55,6 +57,8 @@ llm_summarize = ToolSpec(
     permissions=ToolPermissions(generate=True),
     timeout_seconds=30.0,
     max_retries=1,
+    idempotent=True,
+    concurrency_safe=True,
     work_budget_cost=200,
 )
 
@@ -67,6 +71,8 @@ llm_compare = ToolSpec(
     permissions=ToolPermissions(generate=True),
     timeout_seconds=30.0,
     max_retries=1,
+    idempotent=True,
+    concurrency_safe=True,
     work_budget_cost=250,
 )
 

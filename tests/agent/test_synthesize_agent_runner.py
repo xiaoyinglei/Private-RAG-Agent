@@ -4,6 +4,7 @@ import pytest
 from pydantic import BaseModel
 
 from rag.agent.builtin.synthesize import SYNTHESIZE_AGENT
+from rag.agent.builtin_registry import create_builtin_tool_registry
 from rag.agent.core.agent_service_factory import AgentServiceFactory
 from rag.agent.core.context import AgentRunConfig, RunRegistry
 from rag.agent.core.definition import AgentDefinition
@@ -27,7 +28,6 @@ from rag.agent.primitive_ops import (
 )
 from rag.agent.service import AgentRunResult
 from rag.agent.state import AgentState
-from rag.agent.tools.builtin_registry import create_builtin_tool_registry
 from rag.agent.tools.llm_tools import LLMGenerateInput, LLMTextOutput
 from rag.agent.tools.rag_answer_tools import RAGSearchAnswerOutput
 from rag.agent.tools.spec import ToolResult

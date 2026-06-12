@@ -10,6 +10,10 @@ from typing_extensions import TypedDict
 from rag.agent.core.context import AgentRunConfig
 from rag.agent.core.human_input import HumanInputRequest, HumanInputResponse
 from rag.agent.core.output_models import ValidatedFinalOutput
+from rag.agent.core.runtime_diagnostics import (
+    RuntimeDiagnostic,
+    merge_runtime_diagnostics,
+)
 from rag.agent.memory.models import (
     ContextBudgetSnapshot,
     ExtractedFact,
@@ -100,6 +104,77 @@ class AgentState(TypedDict):
     memory_refs: Annotated[list[MemoryRef], _merge_memory_refs]
     memory_budget: MemoryBudgetSnapshot | None
     memory_warnings: Annotated[list[str], _merge_strings]
+    runtime_diagnostics: Annotated[
+        list[RuntimeDiagnostic],
+        _merge_runtime_diagnostics,
+    ]
+
+
+def create_agent_state(
+    *,
+    task: str,
+    run_config: AgentRunConfig,
+    messages: list[BaseMessage] | None = None,
+    pending_tool_calls: list[ToolCallPlan] | None = None,
+    approved_tool_call_ids: list[str] | None = None,
+    denied_tool_call_ids: list[str] | None = None,
+    goal_spec: Any | None = None,
+    runtime_diagnostics: list[RuntimeDiagnostic] | tuple[RuntimeDiagnostic, ...] | None = None,
+) -> AgentState:
+    return {
+        "messages": list(messages or []),
+        "evidence": [],
+        "citations": [],
+        "tool_results": [],
+        "task": task,
+        "retrieval_signals": RetrievalSignals(),
+        "retrieval_signals_debug": None,
+        "run_config": run_config,
+        "iteration": 0,
+        "status": "running",
+        "decision_reason": None,
+        "stop_reason": None,
+        "needs_user_input": None,
+        "pending_tool_calls": list(pending_tool_calls or []),
+        "approved_tool_call_ids": list(approved_tool_call_ids or []),
+        "denied_tool_call_ids": list(denied_tool_call_ids or []),
+        "user_decision": None,
+        "user_message": None,
+        "human_input_request": None,
+        "human_input_response": None,
+        "working_summary": None,
+        "extracted_facts": [],
+        "context_budget": None,
+        "final_answer": None,
+        "final_output": None,
+        "output_validation_errors": [],
+        "groundedness_flag": False,
+        "insufficient_evidence_flag": False,
+        "goal_spec": goal_spec,
+        "goal_contract_hint": None,
+        "goal_contract_debug": None,
+        "goal_requirements": [],
+        "satisfied_requirements": [],
+        "open_gaps": [],
+        "evidence_refs": [],
+        "answer_candidates": [],
+        "computation_results": [],
+        "structured_observations": [],
+        "context_units": [],
+        "context_bindings": [],
+        "locators": [],
+        "asset_refs": [],
+        "conflicts": [],
+        "no_progress_count": 0,
+        "satisfaction_report": None,
+        "controller_next": None,
+        "agent_plan": None,
+        "plan_events": [],
+        "memory_refs": [],
+        "memory_budget": None,
+        "memory_warnings": [],
+        "runtime_diagnostics": list(runtime_diagnostics or ()),
+    }
 
 
 def _merge_evidence(left: list[Any], right: list[Any]) -> list[Any]:
@@ -214,6 +289,19 @@ def _merge_strings(left: list[str], right: list[str]) -> list[str]:
     return list(dict.fromkeys([*left, *right]))
 
 
+def _merge_runtime_diagnostics(
+    left: list[RuntimeDiagnostic],
+    right: list[RuntimeDiagnostic],
+) -> list[RuntimeDiagnostic]:
+    replacement = _replacement_items(cast(list[Any], right))
+    if replacement is not None:
+        return merge_runtime_diagnostics(
+            [],
+            [RuntimeDiagnostic.model_validate(item) for item in replacement],
+        )
+    return merge_runtime_diagnostics(left, right)
+
+
 def _replacement_items(right: list[Any]) -> list[Any] | None:
     if len(right) == 1 and isinstance(right[0], StateChannelReplacement):
         return list(right[0].items)
@@ -232,6 +320,7 @@ __all__ = [
     "ThinkOutput",
     "ToolCallPlan",
     "WorkingSummary",
+    "create_agent_state",
     "_merge_messages",
     "_merge_citations",
     "_merge_evidence",
@@ -239,6 +328,7 @@ __all__ = [
     "_merge_keyed_items",
     "_merge_memory_refs",
     "_merge_plan_events",
+    "_merge_runtime_diagnostics",
     "_merge_strings",
     "_merge_tool_results",
 ]

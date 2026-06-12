@@ -32,6 +32,8 @@ vector_search = ToolSpec(
     permissions=ToolPermissions(read_db=True, embed=True),
     timeout_seconds=10.0,
     max_retries=1,
+    idempotent=True,
+    concurrency_safe=True,
     work_budget_cost=500,
 )
 
@@ -44,6 +46,8 @@ keyword_search = ToolSpec(
     permissions=ToolPermissions(read_db=True),
     timeout_seconds=5.0,
     max_retries=1,
+    idempotent=True,
+    concurrency_safe=True,
     work_budget_cost=200,
 )
 
@@ -56,6 +60,8 @@ grounding = ToolSpec(
     permissions=ToolPermissions(read_db=True, read_object_store=True),
     timeout_seconds=15.0,
     max_retries=2,
+    idempotent=True,
+    concurrency_safe=True,
     work_budget_cost=1000,
 )
 
@@ -68,6 +74,8 @@ rerank = ToolSpec(
     permissions=ToolPermissions(read_db=True, embed=True, generate=True),
     timeout_seconds=10.0,
     max_retries=1,
+    idempotent=True,
+    concurrency_safe=True,
     work_budget_cost=800,
 )
 
@@ -80,6 +88,8 @@ graph_expand = ToolSpec(
     permissions=ToolPermissions(read_db=True),
     timeout_seconds=5.0,
     max_retries=1,
+    idempotent=True,
+    concurrency_safe=True,
     work_budget_cost=300,
 )
 

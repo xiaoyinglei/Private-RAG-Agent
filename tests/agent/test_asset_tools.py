@@ -7,6 +7,7 @@ import pandas as pd
 import pytest
 
 from rag.agent.builtin.research import RESEARCH_AGENT
+from rag.agent.builtin_registry import create_builtin_tool_registry
 from rag.agent.core.context import AgentRunConfig, RunRegistry
 from rag.agent.graphs.nodes.execute import run_tools_raw
 from rag.agent.state import AgentState, ToolCallPlan
@@ -19,7 +20,6 @@ from rag.agent.tools.asset_tools import (
     AssetReadSliceOutput,
     AssetToolRunner,
 )
-from rag.agent.tools.builtin_registry import create_builtin_tool_registry
 from rag.agent.tools.rag_tool_runner import _evidence_to_output
 from rag.schema.core import AssetRecord
 from rag.schema.query import EvidenceItem, GroundingTarget, RetrievalSignals
