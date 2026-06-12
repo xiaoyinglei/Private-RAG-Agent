@@ -39,6 +39,7 @@ class AgentDefinition:
     model_selection: ModelSelectionPolicy = field(default_factory=ModelSelectionPolicy)
     output_model: type[BaseModel] | None = None
     output_validation_max_retries: int = 2
+    max_stop_hook_blocks: int = 3
     max_iterations: int = 10
     max_depth: int = 2
     tool_policy: ToolPolicy = field(default_factory=ToolPolicy)
@@ -48,3 +49,5 @@ class AgentDefinition:
             raise ValueError(
                 "output_validation_max_retries must be non-negative"
             )
+        if self.max_stop_hook_blocks < 1:
+            raise ValueError("max_stop_hook_blocks must be positive")

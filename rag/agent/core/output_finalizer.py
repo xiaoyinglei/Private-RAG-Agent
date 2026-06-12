@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Awaitable, Mapping
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol, cast
 from uuid import uuid4
 
 from pydantic import BaseModel, ValidationError
@@ -20,7 +20,10 @@ from rag.schema.llm import DEFAULT_LLM_STAGE_BUDGETS, LLMCallStage
 
 if TYPE_CHECKING:
     from rag.agent.core.definition import AgentDefinition
+    from rag.agent.loop.state import LoopState
     from rag.agent.state import AgentState
+
+    type AgentOutputState = AgentState | LoopState
 
 
 class OutputValidationExhaustedError(RuntimeError):
@@ -42,7 +45,7 @@ class StructuredOutputFinalizer(Protocol):
         self,
         *,
         definition: AgentDefinition,
-        state: AgentState,
+        state: AgentOutputState,
         candidate_text: str,
     ) -> BaseModel | Awaitable[BaseModel]: ...
 
@@ -74,7 +77,7 @@ class ModelStructuredOutputFinalizer:
         self,
         *,
         definition: AgentDefinition,
-        state: AgentState,
+        state: AgentOutputState,
         candidate_text: str,
     ) -> BaseModel:
         output_model = definition.output_model
@@ -95,7 +98,7 @@ class ModelStructuredOutputFinalizer:
         for attempt_index in range(max_attempts):
             assembled = self._assembler.assemble_final_output(
                 definition=definition,
-                state=state,
+                state=cast("AgentState", state),
                 candidate_text=candidate_text,
                 validation_feedback=feedback,
                 output_schema=output_model,

@@ -127,6 +127,7 @@ class StopHookFeedback(BaseModel):
 
     code: str = Field(min_length=1, max_length=120)
     message: str = Field(min_length=1, max_length=1000)
+    occurrences: int = Field(default=1, ge=1)
 
 
 class LoopState(TypedDict):
@@ -163,6 +164,7 @@ class LoopState(TypedDict):
     agent_plan: AgentPlan | None
     plan_events: list[PlanEvent]
     stop_hook_feedback: list[StopHookFeedback]
+    stop_hook_warnings: list[StopHookFeedback]
     runtime_diagnostics: list[RuntimeDiagnostic]
     last_model_turn: ModelTurn | None
     groundedness_flag: bool
@@ -222,6 +224,7 @@ def create_loop_state(
         "agent_plan": None,
         "plan_events": [],
         "stop_hook_feedback": [],
+        "stop_hook_warnings": [],
         "runtime_diagnostics": merge_runtime_diagnostics([], runtime_diagnostics),
         "last_model_turn": None,
         "groundedness_flag": False,
@@ -264,9 +267,63 @@ def replace_latest_transition(
 def append_stop_hook_feedback(
     state: LoopState,
     feedback: StopHookFeedback,
-) -> None:
-    items = [item for item in state["stop_hook_feedback"] if item.code != feedback.code]
-    state["stop_hook_feedback"] = [*items, feedback][-MAX_STOP_HOOK_FEEDBACK:]
+) -> StopHookFeedback:
+    existing = next(
+        (
+            item
+            for item in state["stop_hook_feedback"]
+            if item.code == feedback.code
+            and item.message == feedback.message
+        ),
+        None,
+    )
+    updated = feedback.model_copy(
+        update={
+            "occurrences": (
+                feedback.occurrences
+                if existing is None
+                else existing.occurrences + 1
+            )
+        }
+    )
+    items = [
+        item
+        for item in state["stop_hook_feedback"]
+        if item is not existing
+    ]
+    state["stop_hook_feedback"] = [*items, updated][-MAX_STOP_HOOK_FEEDBACK:]
+    return updated
+
+
+def append_stop_hook_warning(
+    state: LoopState,
+    warning: StopHookFeedback,
+) -> StopHookFeedback:
+    existing = next(
+        (
+            item
+            for item in state["stop_hook_warnings"]
+            if item.code == warning.code
+            and item.message == warning.message
+        ),
+        None,
+    )
+    updated = warning.model_copy(
+        update={
+            "occurrences": (
+                warning.occurrences
+                if existing is None
+                else existing.occurrences + 1
+            )
+        }
+    )
+    items = [
+        item
+        for item in state["stop_hook_warnings"]
+        if item is not existing
+    ]
+    state["stop_hook_warnings"] = [*items, updated][-MAX_STOP_HOOK_FEEDBACK:]
+    return updated
 
 
 def append_memory_warning(state: LoopState, warning: str) -> None:
@@ -315,6 +372,7 @@ __all__ = [
     "append_loop_diagnostic",
     "append_memory_warning",
     "append_stop_hook_feedback",
+    "append_stop_hook_warning",
     "create_loop_state",
     "materialize_model_turn",
     "replace_latest_transition",

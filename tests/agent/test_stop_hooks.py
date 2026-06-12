@@ -1,0 +1,361 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+import pytest
+from pydantic import BaseModel
+
+from rag.agent.core.context import AgentRunConfig
+from rag.agent.core.definition import AgentDefinition
+from rag.agent.core.finalization import FinishCandidateBuilder
+from rag.agent.core.output_finalizer import OutputValidationExhaustedError
+from rag.agent.goal_runtime import GoalBuilder, GoalContractHint
+from rag.agent.loop.state import ModelTurnDraft, create_loop_state
+from rag.agent.loop.stop_hooks import (
+    GoalContractStopHook,
+    StopHookBinding,
+    StopHookRunner,
+    StopVerdict,
+    StructuredOutputStopHook,
+    build_stop_hooks,
+)
+from rag.schema.runtime import AccessPolicy
+
+
+class _StructuredAnswer(BaseModel):
+    answer: str
+
+
+def _config(run_id: str = "stop-hooks") -> AgentRunConfig:
+    return AgentRunConfig(
+        run_id=run_id,
+        thread_id=run_id,
+        budget_total=100,
+        max_depth=2,
+        access_policy=AccessPolicy.default(),
+    )
+
+
+def _state():
+    return create_loop_state(task="Answer carefully", run_config=_config())
+
+
+@dataclass
+class _StaticHook:
+    verdict: StopVerdict
+    calls: list[str] | None = None
+
+    async def evaluate(self, *, state: object, candidate: str) -> StopVerdict:
+        del state
+        if self.calls is not None:
+            self.calls.append(candidate)
+        return self.verdict
+
+
+class _FailingHook:
+    async def evaluate(self, *, state: object, candidate: str) -> StopVerdict:
+        del state, candidate
+        raise RuntimeError("hook unavailable")
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("action", "accepted", "halted"),
+    [
+        ("accept", True, False),
+        ("warn", True, False),
+        ("block", False, False),
+        ("halt", False, True),
+    ],
+)
+async def test_runner_supports_all_verdict_actions(
+    action: str,
+    accepted: bool,
+    halted: bool,
+) -> None:
+    state = _state()
+    runner = StopHookRunner(
+        hooks=[
+            StopHookBinding(
+                name="static",
+                hook=_StaticHook(
+                    StopVerdict(
+                        action=action,
+                        code=f"static_{action}",
+                        message=f"{action} message",
+                    )
+                ),
+                critical=True,
+            )
+        ],
+        max_blocks=3,
+    )
+
+    outcome = await runner.evaluate(state=state, candidate="candidate")
+
+    assert outcome.accepted is accepted
+    assert outcome.halted is halted
+    if action == "warn":
+        assert state["stop_hook_warnings"][0].code == "static_warn"
+    if action == "block":
+        assert state["stop_hook_feedback"][0].code == "static_block"
+
+
+@pytest.mark.anyio
+async def test_hooks_run_in_stable_order_and_warning_does_not_block() -> None:
+    calls: list[str] = []
+    state = _state()
+    runner = StopHookRunner(
+        hooks=[
+            StopHookBinding(
+                name="warning",
+                hook=_StaticHook(
+                    StopVerdict(
+                        action="warn",
+                        code="warning",
+                        message="advisory warning",
+                    ),
+                    calls=calls,
+                ),
+                critical=False,
+            ),
+            StopHookBinding(
+                name="accept",
+                hook=_StaticHook(
+                    StopVerdict(action="accept", code="accepted"),
+                    calls=calls,
+                ),
+                critical=True,
+            ),
+        ],
+        max_blocks=3,
+    )
+
+    outcome = await runner.evaluate(state=state, candidate="candidate")
+
+    assert outcome.accepted is True
+    assert calls == ["candidate", "candidate"]
+    assert [item.code for item in state["stop_hook_warnings"]] == ["warning"]
+
+
+@pytest.mark.anyio
+async def test_repeated_equivalent_block_halts_at_configured_limit() -> None:
+    state = _state()
+    runner = StopHookRunner(
+        hooks=[
+            StopHookBinding(
+                name="critic",
+                hook=_StaticHook(
+                    StopVerdict(
+                        action="block",
+                        code="missing_citation",
+                        message="Add a citation.",
+                    )
+                ),
+                critical=True,
+            )
+        ],
+        max_blocks=2,
+    )
+
+    first = await runner.evaluate(state=state, candidate="draft one")
+    second = await runner.evaluate(state=state, candidate="draft two")
+
+    assert first.blocked is True
+    assert second.halted is True
+    assert second.code == "stop_hook_block_limit"
+    assert state["stop_hook_feedback"][0].occurrences == 2
+
+
+@pytest.mark.anyio
+async def test_advisory_failure_warns_but_critical_failure_halts() -> None:
+    advisory_state = _state()
+    advisory = StopHookRunner(
+        hooks=[
+            StopHookBinding(
+                name="advisory",
+                hook=_FailingHook(),
+                critical=False,
+            )
+        ],
+        max_blocks=2,
+    )
+    critical_state = _state()
+    critical = StopHookRunner(
+        hooks=[
+            StopHookBinding(
+                name="critical",
+                hook=_FailingHook(),
+                critical=True,
+            )
+        ],
+        max_blocks=2,
+    )
+
+    advisory_outcome = await advisory.evaluate(
+        state=advisory_state,
+        candidate="candidate",
+    )
+    critical_outcome = await critical.evaluate(
+        state=critical_state,
+        candidate="candidate",
+    )
+
+    assert advisory_outcome.accepted is True
+    assert advisory_state["stop_hook_warnings"][0].code == "advisory_failed"
+    assert critical_outcome.halted is True
+    assert critical_outcome.code == "critical_failed"
+
+
+class _StructuredFinalizer:
+    async def finalize(
+        self,
+        *,
+        definition: AgentDefinition,
+        state: object,
+        candidate_text: str,
+    ) -> BaseModel:
+        del definition, state
+        return _StructuredAnswer(answer=candidate_text.upper())
+
+
+class _ExhaustedFinalizer:
+    async def finalize(
+        self,
+        *,
+        definition: AgentDefinition,
+        state: object,
+        candidate_text: str,
+    ) -> BaseModel:
+        del definition, state, candidate_text
+        raise OutputValidationExhaustedError(
+            attempts=2,
+            validation_errors=[
+                {
+                    "location": ["answer"],
+                    "message": "field required",
+                    "type": "missing",
+                }
+            ],
+        )
+
+
+@pytest.mark.anyio
+async def test_structured_output_hook_is_critical_and_returns_validated_output() -> None:
+    definition = AgentDefinition(
+        agent_type="structured",
+        description="structured",
+        system_prompt="Return structured output.",
+        allowed_tools=[],
+        output_model=_StructuredAnswer,
+    )
+    state = _state()
+    runner = StopHookRunner(
+        hooks=[
+            StopHookBinding(
+                name="structured_output",
+                hook=StructuredOutputStopHook(
+                    definition=definition,
+                    finalizer=_StructuredFinalizer(),
+                ),
+                critical=True,
+            )
+        ],
+        max_blocks=definition.max_stop_hook_blocks,
+    )
+
+    outcome = await runner.evaluate(state=state, candidate="done")
+
+    assert outcome.accepted is True
+    assert outcome.final_output is not None
+    assert outcome.final_output.data == {"answer": "DONE"}
+
+
+@pytest.mark.anyio
+async def test_structured_output_exhaustion_halts_with_validation_details() -> None:
+    definition = AgentDefinition(
+        agent_type="structured",
+        description="structured",
+        system_prompt="Return structured output.",
+        allowed_tools=[],
+        output_model=_StructuredAnswer,
+    )
+    runner = StopHookRunner(
+        hooks=[
+            StopHookBinding(
+                name="structured_output",
+                hook=StructuredOutputStopHook(
+                    definition=definition,
+                    finalizer=_ExhaustedFinalizer(),
+                ),
+                critical=True,
+            )
+        ],
+        max_blocks=definition.max_stop_hook_blocks,
+    )
+
+    outcome = await runner.evaluate(state=_state(), candidate="invalid")
+
+    assert outcome.halted is True
+    assert outcome.code == "structured_output_invalid"
+    assert outcome.detail["attempts"] == 2
+
+
+@pytest.mark.anyio
+async def test_explicit_goal_contract_blocks_missing_evidence_without_routing_fields() -> None:
+    goal = GoalBuilder().initialize(
+        "Answer with evidence",
+        contract_hint=GoalContractHint(
+            deliverable_kinds=["answer", "evidence"],
+            reason="Explicit test contract.",
+        ),
+    )
+    state = _state()
+    hook = GoalContractStopHook(goal_spec=goal)
+
+    verdict = await hook.evaluate(state=state, candidate="Unsupported answer")
+
+    assert verdict.action == "block"
+    assert verdict.code == "goal_contract_unsatisfied"
+    assert "open_gaps" not in state
+    assert "satisfied_requirements" not in state
+
+
+def test_stop_hook_factory_installs_goal_hook_only_when_explicitly_supplied() -> None:
+    definition = AgentDefinition(
+        agent_type="plain",
+        description="plain",
+        system_prompt="Answer.",
+        allowed_tools=[],
+    )
+    goal = GoalBuilder().initialize("Answer")
+
+    ordinary = build_stop_hooks(definition=definition)
+    explicit = build_stop_hooks(definition=definition, goal_spec=goal)
+
+    assert all(binding.name != "goal_contract" for binding in ordinary)
+    assert [binding.name for binding in explicit] == ["goal_contract"]
+
+
+class _SynthesisResult:
+    final_answer = "Compatibility answer"
+
+
+class _SynthesisRunner:
+    async def run_synthesis(self, *, parent_state: object) -> _SynthesisResult:
+        del parent_state
+        return _SynthesisResult()
+
+
+@pytest.mark.anyio
+async def test_finish_candidate_builder_runs_before_strict_model_turn_validation() -> None:
+    builder = FinishCandidateBuilder(synthesis_runner=_SynthesisRunner())
+
+    turn = await builder.build(
+        ModelTurnDraft.model_validate({"action": "synthesize"}),
+        state=_state(),
+    )
+
+    assert turn.action == "finish"
+    assert turn.final_answer == "Compatibility answer"
+    assert builder.events[-1].code == "finish_candidate_builder_used"
