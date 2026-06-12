@@ -9,6 +9,14 @@ from typing_extensions import TypedDict
 
 from rag.agent.core.context import AgentRunConfig
 from rag.agent.core.human_input import HumanInputRequest, HumanInputResponse
+from rag.agent.core.observations import (
+    AnswerCandidate,
+    ComputationResult,
+    ContextBinding,
+    ContextUnit,
+    EvidenceRef,
+    StructuredObservation,
+)
 from rag.agent.core.output_models import ValidatedFinalOutput
 from rag.agent.core.runtime_diagnostics import (
     RuntimeDiagnostic,
@@ -137,13 +145,13 @@ class LoopState(TypedDict):
     tool_results: list[ToolResult]
     evidence: list[EvidenceItem]
     citations: list[AnswerCitation]
-    evidence_refs: list[BaseModel]
-    answer_candidates: list[BaseModel]
-    computation_results: list[BaseModel]
-    structured_observations: list[BaseModel]
-    context_units: list[BaseModel]
-    context_bindings: list[BaseModel]
-    locators: list[BaseModel]
+    evidence_refs: list[EvidenceRef]
+    answer_candidates: list[AnswerCandidate]
+    computation_results: list[ComputationResult]
+    structured_observations: list[StructuredObservation]
+    context_units: list[ContextUnit]
+    context_bindings: list[ContextBinding]
+    locators: list[dict[str, object]]
     asset_refs: list[int]
     working_summary: WorkingSummary | None
     extracted_facts: list[ExtractedFact]

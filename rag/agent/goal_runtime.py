@@ -6,7 +6,18 @@ from typing import Any, Literal, Protocol, Self, TypedDict, cast
 
 from pydantic import BaseModel, Field, model_validator
 
-from rag.agent.memory.models import MemoryRef
+from rag.agent.core.observations import (
+    AnswerCandidate,
+    ComputationResult,
+    ContextBinding,
+    ContextUnit,
+    EvidenceRef,
+    ObservationBuilder,
+    StructuredObservation,
+)
+from rag.agent.core.observations import (
+    ObservationExtractor as NeutralObservationExtractor,
+)
 from rag.agent.state import ToolCallPlan
 from rag.agent.tools.spec import ToolResult
 from rag.schema.query import AnswerCitation, EvidenceItem
@@ -199,103 +210,11 @@ class GoalGap(BaseModel):
         return self.gap_id
 
 
-class EvidenceRef(BaseModel):
-    evidence_id: str | None = None
-    citation_id: str | None = None
-    citation_anchor: str | None = None
-    doc_id: int | None = None
-    source: str | None = None
-
-    @property
-    def key(self) -> str:
-        return "|".join(
-            value
-            for value in (
-                self.evidence_id,
-                self.citation_id,
-                self.citation_anchor,
-                None if self.doc_id is None else str(self.doc_id),
-                self.source,
-            )
-            if value
-        )
-
-
-class ContextUnit(BaseModel):
-    unit_id: str
-    unit_type: str
-    locator: dict[str, object] = Field(default_factory=dict)
-    preview: str | dict[str, object] | None = None
-    content_ref: str | None = None
-    evidence_refs: list[EvidenceRef] = Field(default_factory=list)
-    capabilities: list[str] = Field(default_factory=list)
-    metadata: dict[str, object] = Field(default_factory=dict)
-
-    @property
-    def key(self) -> str:
-        return self.unit_id
-
-
-class AnswerCandidate(BaseModel):
-    text: str
-    source_tool_call_id: str | None = None
-    source_tool_name: str | None = None
-    evidence_refs: list[EvidenceRef] = Field(default_factory=list)
-
-
-class ComputationResult(BaseModel):
-    source_tool_call_id: str
-    source_tool_name: str
-    operation: str | None = None
-    value_preview: str | None = None
-    expression: str | None = None
-    evidence_refs: list[EvidenceRef] = Field(default_factory=list)
-
-    @property
-    def key(self) -> str:
-        return self.source_tool_call_id
-
-
 class GoalConflict(BaseModel):
     conflict_id: str
     description: str
     related_unit_ids: list[str] = Field(default_factory=list)
     metadata: dict[str, object] = Field(default_factory=dict)
-
-
-class ContextBinding(BaseModel):
-    binding_id: str
-    constraint_id: str
-    unit_id: str | None = None
-    status: Literal["satisfied", "ambiguous", "violated"]
-    evidence_refs: list[EvidenceRef] = Field(default_factory=list)
-    rationale: str | None = None
-    metadata: dict[str, object] = Field(default_factory=dict)
-
-    @property
-    def key(self) -> str:
-        return self.binding_id
-
-
-class StructuredObservation(BaseModel):
-    tool_call_id: str
-    tool_name: str
-    status: Literal["ok", "error"]
-    answer_candidate: AnswerCandidate | None = None
-    evidence_refs: list[EvidenceRef] = Field(default_factory=list)
-    context_units: list[ContextUnit] = Field(default_factory=list)
-    locators: list[dict[str, object]] = Field(default_factory=list)
-    asset_refs: list[int] = Field(default_factory=list)
-    operation: str | None = None
-    warnings: list[str] = Field(default_factory=list)
-    error: str | None = None
-    raw_result_ref: str
-    raw_memory_ref: MemoryRef | None = None
-    related_gap_ids: list[str] = Field(default_factory=list)
-    related_step_ids: list[str] = Field(default_factory=list)
-    metadata: dict[str, object] = Field(default_factory=dict)
-    resolved_gaps: list[str] = Field(default_factory=list)
-    produced_gaps: list[str] = Field(default_factory=list)
 
 
 class RuntimeState(TypedDict, total=False):
@@ -372,124 +291,62 @@ class GoalBuilder:
         )
 
 
-class ObservationBuilder:
-    def from_tool_result(self, result: ToolResult) -> StructuredObservation:
-        if result.status == "error":
-            error_message = result.error.message if result.error is not None else "unknown tool error"
-            return StructuredObservation(
-                tool_call_id=result.tool_call_id,
-                tool_name=result.tool_name,
-                status="error",
-                error=error_message,
-                raw_result_ref=result.tool_call_id,
-                produced_gaps=["tool_error"],
-            )
-
-        output = result.output
-        observation_only = bool(getattr(output, "observation_only", False))
-        if observation_only:
-            evidence_refs: list[EvidenceRef] = []
-        elif result.tool_name.startswith("agent_"):
-            evidence_refs = _delegated_evidence_refs_from_output(output)
-        else:
-            evidence_refs = _dedupe_evidence_refs(
-                [
-                    *_evidence_refs_from_output(output),
-                    *_search_evidence_refs_from_output(output),
-                ]
-            )
-        answer_text = None if observation_only else _answer_text(result.tool_name, output)
-        answer = (
-            AnswerCandidate(
-                text=answer_text,
-                source_tool_call_id=result.tool_call_id,
-                source_tool_name=result.tool_name,
-                evidence_refs=evidence_refs,
-            )
-            if answer_text
-            else None
-        )
-        resolved_gaps: list[str] = []
-        if answer is not None:
-            resolved_gaps.append("answer")
-        if evidence_refs:
-            resolved_gaps.append("evidence")
-
-        locators = _locators_from_output(output, tool_name=result.tool_name)
-        return StructuredObservation(
-            tool_call_id=result.tool_call_id,
-            tool_name=result.tool_name,
-            status="ok",
-            answer_candidate=answer,
-            evidence_refs=evidence_refs,
-            context_units=_context_units_from_output(
-                result,
-                evidence_refs=evidence_refs,
-                locators=locators,
-            ),
-            locators=locators,
-            asset_refs=_asset_refs_from_output(output),
-            operation=_operation_from_output(output),
-            raw_result_ref=result.tool_call_id,
-            resolved_gaps=resolved_gaps,
-        )
-
-
 class ObservationExtractor:
     def __init__(self, observation_builder: ObservationBuilder | None = None) -> None:
-        self._observation_builder = observation_builder or ObservationBuilder()
+        self._neutral_extractor = NeutralObservationExtractor(observation_builder)
 
     def reduce_tool_results(self, state: dict[str, Any]) -> dict[str, Any]:
-        tool_results = list(state.get("tool_results", []))
-        seen_observations = {
-            observation.tool_call_id
-            for observation in state.get("structured_observations", [])
-            if isinstance(observation, StructuredObservation)
-        }
-        new_observations = [
-            self._observation_builder.from_tool_result(result)
-            for result in tool_results
-            if result.tool_call_id not in seen_observations
-        ]
-        if not new_observations:
+        neutral_update = self._neutral_extractor.reduce_tool_results(state)
+        if not neutral_update:
             return {}
 
-        goal = _goal_from_state(state)
-        answer_candidates = [
-            observation.answer_candidate
-            for observation in new_observations
-            if observation.answer_candidate is not None
-        ]
-        evidence_refs = [
-            ref
-            for observation in new_observations
-            for ref in observation.evidence_refs
-        ]
-        computation_results = [
-            ComputationResult(
-                source_tool_call_id=observation.tool_call_id,
-                source_tool_name=observation.tool_name,
-                operation=observation.operation,
-                value_preview=(
-                    None
-                    if observation.answer_candidate is None
-                    else observation.answer_candidate.text[:300]
-                ),
-                expression=_computation_expression(
-                    next(
-                        (
-                            result
-                            for result in tool_results
-                            if result.tool_call_id == observation.tool_call_id
+        raw_observations = cast(
+            list[StructuredObservation],
+            neutral_update["structured_observations"],
+        )
+        new_observations = [
+            observation.model_copy(
+                update={
+                    "resolved_gaps": [
+                        *(
+                            ["answer"]
+                            if observation.answer_candidate is not None
+                            else []
                         ),
-                        None,
-                    )
-                ),
-                evidence_refs=observation.evidence_refs,
+                        *(["evidence"] if observation.evidence_refs else []),
+                    ],
+                    "produced_gaps": (
+                        ["tool_error"]
+                        if observation.status == "error"
+                        else []
+                    ),
+                    "context_units": [
+                        unit.model_copy(
+                            update={"locator": _legacy_observation_locator(unit.locator)}
+                        )
+                        for unit in observation.context_units
+                    ],
+                    "locators": [
+                        _legacy_observation_locator(locator)
+                        for locator in observation.locators
+                    ],
+                }
             )
-            for observation in new_observations
-            if observation.operation is not None
+            for observation in raw_observations
         ]
+        goal = _goal_from_state(state)
+        answer_candidates = cast(
+            list[AnswerCandidate],
+            neutral_update["answer_candidates"],
+        )
+        evidence_refs = cast(
+            list[EvidenceRef],
+            neutral_update["evidence_refs"],
+        )
+        computation_results = cast(
+            list[ComputationResult],
+            neutral_update["computation_results"],
+        )
         context_units = _dedupe_context_units(
             [
                 unit
@@ -497,16 +354,6 @@ class ObservationExtractor:
                 for unit in observation.context_units
             ]
         )
-        locators = [
-            locator
-            for observation in new_observations
-            for locator in observation.locators
-        ]
-        asset_refs = [
-            asset_ref
-            for observation in new_observations
-            for asset_ref in observation.asset_refs
-        ]
 
         all_answers = [*state.get("answer_candidates", []), *answer_candidates]
         all_evidence_refs = [*state.get("evidence_refs", []), *evidence_refs]
@@ -553,16 +400,30 @@ class ObservationExtractor:
             "evidence_refs": evidence_refs,
             "computation_results": computation_results,
             "context_units": context_units,
-            "locators": locators,
-            "asset_refs": asset_refs,
+            "locators": [
+                locator
+                for observation in new_observations
+                for locator in observation.locators
+            ],
+            "asset_refs": neutral_update["asset_refs"],
             "satisfied_requirements": satisfied,
             "open_gaps": open_gaps,
             "insufficient_evidence_flag": bool(state.get("insufficient_evidence_flag", False)) or error_seen,
             "no_progress_count": 0 if progress_made else int(state.get("no_progress_count", 0)) + 1,
             "iteration": int(state.get("iteration", 0)) + 1,
-            "evidence": _evidence_from_outputs(new_observations, tool_results),
-            "citations": _citations_from_outputs(new_observations, tool_results),
+            "evidence": neutral_update["evidence"],
+            "citations": neutral_update["citations"],
         }
+
+
+def _legacy_observation_locator(
+    locator: dict[str, object],
+) -> dict[str, object]:
+    return {
+        key: value
+        for key, value in locator.items()
+        if key not in {"rerank_score", "retrieval_channels", "retrieval_family"}
+    }
 
 
 class SatisfactionChecker:
