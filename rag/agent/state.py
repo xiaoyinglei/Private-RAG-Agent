@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Annotated, Any, Literal, cast
+from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
 
 from langchain_core.messages import BaseMessage
 from langgraph.graph import add_messages
@@ -24,6 +24,9 @@ from rag.agent.memory.models import (
 )
 from rag.agent.planning import MAX_PLAN_EVENTS, AgentPlan, PlanEvent, PlanUpdate
 from rag.schema.query import RetrievalSignals
+
+if TYPE_CHECKING:
+    from rag.agent.loop.state import LoopState
 
 
 class ToolCallPlan(BaseModel):
@@ -177,6 +180,79 @@ def create_agent_state(
     }
 
 
+def agent_state_to_loop_state(state: AgentState) -> LoopState:
+    """Adapt legacy graph state without carrying goal-controller fields forward."""
+
+    from rag.agent.loop.state import (
+        LoopPause,
+        LoopStatus,
+        LoopTerminal,
+        create_loop_state,
+    )
+
+    loop_state = create_loop_state(
+        task=state["task"],
+        run_config=state["run_config"],
+        messages=state["messages"],
+        pending_tool_calls=state["pending_tool_calls"],
+        memory_warnings=state["memory_warnings"],
+        runtime_diagnostics=state["runtime_diagnostics"],
+        retrieval_signals=state["retrieval_signals"],
+    )
+    legacy_status = state["status"]
+    loop_state["status"] = cast(
+        LoopStatus,
+        {
+            "paused": "paused",
+            "done": "completed",
+            "failed": "failed",
+        }.get(legacy_status, "running"),
+    )
+    loop_state["iteration"] = state["iteration"]
+    loop_state["retrieval_signals_debug"] = state["retrieval_signals_debug"]
+    loop_state["approval_request"] = state["human_input_request"]
+    loop_state["approval_response"] = state["human_input_response"]
+    loop_state["approved_tool_call_ids"] = list(state["approved_tool_call_ids"])
+    loop_state["denied_tool_call_ids"] = list(state["denied_tool_call_ids"])
+    loop_state["tool_results"] = list(state["tool_results"])
+    loop_state["evidence"] = list(state["evidence"])
+    loop_state["citations"] = list(state["citations"])
+    loop_state["evidence_refs"] = list(state["evidence_refs"])
+    loop_state["answer_candidates"] = list(state["answer_candidates"])
+    loop_state["computation_results"] = list(state["computation_results"])
+    loop_state["structured_observations"] = list(state["structured_observations"])
+    loop_state["context_units"] = list(state["context_units"])
+    loop_state["context_bindings"] = list(state["context_bindings"])
+    loop_state["locators"] = list(state["locators"])
+    loop_state["asset_refs"] = list(state["asset_refs"])
+    loop_state["working_summary"] = state["working_summary"]
+    loop_state["extracted_facts"] = list(state["extracted_facts"])
+    loop_state["context_budget"] = state["context_budget"]
+    loop_state["memory_refs"] = list(state["memory_refs"])
+    loop_state["memory_budget"] = state["memory_budget"]
+    loop_state["agent_plan"] = state["agent_plan"]
+    loop_state["plan_events"] = list(state["plan_events"])
+    loop_state["groundedness_flag"] = state["groundedness_flag"]
+    loop_state["insufficient_evidence_flag"] = state["insufficient_evidence_flag"]
+    loop_state["final_answer"] = state["final_answer"]
+    loop_state["final_output"] = state["final_output"]
+    loop_state["output_validation_errors"] = list(state["output_validation_errors"])
+
+    if legacy_status == "paused":
+        loop_state["pause"] = LoopPause(
+            reason=state["needs_user_input"] or "legacy graph paused",
+            request=state["human_input_request"],
+        )
+    elif legacy_status in {"done", "failed"}:
+        loop_state["terminal"] = LoopTerminal(
+            status="completed" if legacy_status == "done" else "failed",
+            stop_reason=state["stop_reason"] or legacy_status,
+            final_answer=state["final_answer"],
+            final_output=state["final_output"],
+        )
+    return loop_state
+
+
 def _merge_evidence(left: list[Any], right: list[Any]) -> list[Any]:
     from rag.schema.query import EvidenceItem
 
@@ -320,6 +396,7 @@ __all__ = [
     "ThinkOutput",
     "ToolCallPlan",
     "WorkingSummary",
+    "agent_state_to_loop_state",
     "create_agent_state",
     "_merge_messages",
     "_merge_citations",
