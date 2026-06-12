@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import asdict, is_dataclass
 from typing import Any
 
@@ -86,6 +87,113 @@ def normalize_legacy_state(
         "memory_warnings": list(state.get("memory_warnings", [])),
         "runtime_diagnostics": _normalize_value(
             state.get("runtime_diagnostics", [])
+        ),
+    }
+    if observed is not None:
+        normalized["observed"] = _normalize_value(observed)
+    return normalized
+
+
+def normalize_loop_state(
+    state: Mapping[str, Any],
+    *,
+    observed: dict[str, object] | None = None,
+) -> dict[str, object]:
+    """Return the loop state in the same behavioral comparison shape."""
+
+    terminal = state.get("terminal")
+    pause = state.get("pause")
+    normalized: dict[str, object] = {
+        "status": state.get("status"),
+        "stop_reason": getattr(terminal, "stop_reason", None),
+        "decision_reason": (
+            None
+            if state.get("latest_transition") is None
+            else state["latest_transition"].reason
+        ),
+        "final_answer": state.get("final_answer"),
+        "final_output": _normalize_value(state.get("final_output")),
+        "output_validation_errors": _normalize_value(
+            state.get("output_validation_errors", [])
+        ),
+        "iteration": state.get("iteration", 0),
+        "groundedness_flag": bool(
+            state.get("groundedness_flag", False)
+        ),
+        "insufficient_evidence_flag": bool(
+            state.get("insufficient_evidence_flag", False)
+        ),
+        "needs_user_input": getattr(pause, "reason", None),
+        "human_input_request": _normalize_value(
+            state.get("approval_request")
+        ),
+        "pending_tool_calls": [
+            {
+                "tool_call_id": call.tool_call_id,
+                "tool_name": call.tool_name,
+                "arguments": _normalize_value(call.arguments),
+            }
+            for call in state.get("pending_tool_calls", [])
+        ],
+        "tool_results": [
+            {
+                "tool_call_id": result.tool_call_id,
+                "tool_name": result.tool_name,
+                "status": result.status,
+                "output": _normalize_value(result.output),
+                "error": _normalize_value(result.error),
+                "work_units_used": result.work_units_used,
+                "retry_count": result.retry_count,
+            }
+            for result in state.get("tool_results", [])
+        ],
+        "evidence": _normalize_value(state.get("evidence", [])),
+        "citations": _normalize_value(state.get("citations", [])),
+        "retrieval_signals": _normalize_value(
+            state.get("retrieval_signals")
+        ),
+        "retrieval_signals_debug": _normalize_value(
+            state.get("retrieval_signals_debug")
+        ),
+        "structured_observations": _normalize_value(
+            state.get("structured_observations", [])
+        ),
+        "answer_candidates": _normalize_value(
+            state.get("answer_candidates", [])
+        ),
+        "evidence_refs": _normalize_value(
+            state.get("evidence_refs", [])
+        ),
+        "computation_results": _normalize_value(
+            state.get("computation_results", [])
+        ),
+        "context_units": _normalize_value(
+            state.get("context_units", [])
+        ),
+        "locators": _normalize_value(state.get("locators", [])),
+        "satisfied_requirements": [],
+        "open_gap_ids": [],
+        "messages": [
+            _normalize_message(message)
+            for message in state.get("messages", [])
+        ],
+        "working_summary": _normalize_value(
+            state.get("working_summary")
+        ),
+        "memory_refs": _normalize_value(
+            state.get("memory_refs", [])
+        ),
+        "memory_budget": _normalize_value(
+            state.get("memory_budget")
+        ),
+        "memory_warnings": list(
+            state.get("memory_warnings", [])
+        ),
+        "runtime_diagnostics": _normalize_value(
+            state.get("runtime_diagnostics", [])
+        ),
+        "stop_hook_feedback": _normalize_value(
+            state.get("stop_hook_feedback", [])
         ),
     }
     if observed is not None:

@@ -358,6 +358,28 @@ class AgentLoop:
             state["tool_results"],
             new_results,
         )
+        for tool_result in new_results:
+            output = tool_result.output
+            has_traceable_evidence = bool(
+                getattr(output, "evidence_refs", ())
+                or getattr(output, "citations", ())
+            )
+            state["groundedness_flag"] = (
+                state["groundedness_flag"]
+                or bool(getattr(output, "groundedness_flag", False))
+                or has_traceable_evidence
+            )
+            state["insufficient_evidence_flag"] = (
+                state["insufficient_evidence_flag"]
+                or bool(getattr(output, "insufficient_evidence", False))
+                or bool(
+                    getattr(
+                        output,
+                        "insufficient_evidence_flag",
+                        False,
+                    )
+                )
+            )
         if result.context_budget is not None:
             state["context_budget"] = result.context_budget
 
