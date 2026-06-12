@@ -23,7 +23,12 @@ class HumanInputRequest(BaseModel):
     """
 
     request_id: str  # 唯一 ID，如 "hir_a1b2c3d4"
-    kind: Literal["tool_approval", "choice", "clarification"]
+    kind: Literal[
+        "tool_approval",
+        "tool_reconciliation",
+        "choice",
+        "clarification",
+    ]
     question: str  # 面向用户的自然语言问题
     tool_calls: list[ToolCallSummary] = Field(default_factory=list)
     context: dict[str, object] = Field(default_factory=dict)
@@ -37,7 +42,15 @@ class HumanInputResponse(BaseModel):
     """
 
     request_id: str
-    decision: Literal["allow_once", "deny", "continue", "abort"]
+    decision: Literal[
+        "allow_once",
+        "deny",
+        "continue",
+        "abort",
+        "mark_completed",
+        "mark_failed",
+        "retry_new_operation",
+    ]
     approved_tool_call_ids: list[str] = Field(default_factory=list)
     denied_tool_call_ids: list[str] = Field(default_factory=list)
     user_message: str | None = None

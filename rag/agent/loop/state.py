@@ -22,6 +22,7 @@ from rag.agent.core.runtime_diagnostics import (
     RuntimeDiagnostic,
     merge_runtime_diagnostics,
 )
+from rag.agent.core.tool_execution import ToolExecutionRecord
 from rag.agent.memory.models import (
     ContextBudgetSnapshot,
     ExtractedFact,
@@ -137,7 +138,7 @@ class LoopState(TypedDict):
     iteration: int
     status: LoopStatus
     pending_tool_calls: list[ToolCallPlan]
-    tool_execution_records: dict[str, BaseModel]
+    tool_execution_records: dict[str, ToolExecutionRecord]
     approval_request: HumanInputRequest | None
     approval_response: HumanInputResponse | None
     approved_tool_call_ids: list[str]

@@ -18,6 +18,7 @@ if TYPE_CHECKING:
 @dataclass(frozen=True)
 class ToolExecutionContext:
     run_config: AgentRunConfig
+    operation_id: str | None = None
     tool_call_id: str | None = None
     state: AgentState | None = None
     definition: AgentDefinition | None = None
