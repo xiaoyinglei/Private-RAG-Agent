@@ -40,6 +40,7 @@ class ToolSpec:
     timeout_seconds: float
     max_retries: int = 0
     idempotent: bool = False
+    concurrency_safe: bool = False
     work_budget_cost: int = 0
     requires_confirmation: bool = False
     audit_log: bool = False

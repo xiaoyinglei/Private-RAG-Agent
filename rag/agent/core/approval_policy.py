@@ -35,9 +35,10 @@ class ApprovalPolicy:
     规则（优先级从高到低）：
     1. spec=None → DENY（未注册）
     2. tool_name 在 DENY_TOOLS 中 → DENY
-    3. permissions.write_db / kg_mutation / user_data / write_fs / execute_code → ASK
-    4. permissions.external_network → ASK
-    5. 其余 → ALLOW
+    3. 工具契约或运行时策略要求确认 → ASK
+    4. permissions.write_db / kg_mutation / user_data / write_fs / execute_code → ASK
+    5. permissions.external_network → ASK
+    6. 其余 → ALLOW
     """
 
     def decide(
@@ -46,6 +47,7 @@ class ApprovalPolicy:
         tool_name: str,
         arguments: dict[str, object],
         spec: ToolSpec | None,
+        requires_confirmation: bool = False,
     ) -> ApprovalDecision:
         if spec is None:
             return ApprovalDecision(
@@ -62,6 +64,15 @@ class ApprovalPolicy:
                 action=ApprovalAction.DENY,
                 reason=f"高风险工具被拒绝: {tool_name}",
                 risk_level="high",
+            )
+
+        if requires_confirmation or spec.requires_confirmation:
+            return self._ask_decision(
+                tool_name=tool_name,
+                arguments=arguments,
+                spec=spec,
+                risk_level="medium",
+                reason="工具契约要求执行前确认",
             )
 
         # Ask for write / mutation / user data / filesystem / code execution
@@ -131,6 +142,7 @@ class ApprovalPolicy:
             risk_level=risk_level,
             request=request,
         )
+
 
 def merge_approval_requests(decisions: list[ApprovalDecision]) -> HumanInputRequest:
     """将多个 ASK 决策合并为一个 HumanInputRequest。"""

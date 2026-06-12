@@ -7,6 +7,7 @@ from typing import Annotated, Any, Literal, cast
 import typer
 
 from rag.agent.builtin import create_builtin_agent_registry
+from rag.agent.builtin_registry import create_builtin_tool_registry
 from rag.agent.core.agent_service_factory import AgentServiceFactory
 from rag.agent.core.checkpointing import create_agent_checkpointer
 from rag.agent.core.definition import AgentDefinition
@@ -16,7 +17,6 @@ from rag.agent.core.llm_tool_runners import create_model_llm_tool_runners
 from rag.agent.core.registry import AgentRegistry
 from rag.agent.core.subagent_runner import BuiltinSubAgentRunner, BuiltinSynthesisRunner
 from rag.agent.service import AgentRunRequest, AgentRunResult, AgentService
-from rag.agent.tools.builtin_registry import create_builtin_tool_registry
 from rag.agent.tools.rag_answer_tools import RAGSearchAnswerRunner
 from rag.agent.tools.registry import ContextualToolRunner, ToolRunner
 from rag.assembly.tokenizer import TokenAccountingService, TokenizerContract

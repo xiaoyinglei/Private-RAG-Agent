@@ -1,13 +1,42 @@
 [importlinter]
-root_package = pkp
+root_package = rag
 
-[contract:layer_order]
-name = Layer order
-type = layers
-layers =
-    pkp.types
-    pkp.config
-    pkp.repo
-    pkp.service
-    pkp.runtime
-    pkp.ui
+[importlinter:contract:schema_foundation]
+name = Schema remains independent from agent orchestration
+type = forbidden
+source_modules =
+    rag.schema
+forbidden_modules =
+    rag.agent
+
+[importlinter:contract:tools_boundary]
+name = Tools do not depend on agent orchestration
+type = forbidden
+source_modules =
+    rag.agent.tools
+forbidden_modules =
+    rag.agent.graphs
+    rag.agent.service
+    rag.cli
+ignore_imports =
+    rag.agent.tools.builtin_registry -> rag.agent.builtin_registry
+
+[importlinter:contract:memory_boundary]
+name = Memory does not depend on agent orchestration
+type = forbidden
+source_modules =
+    rag.agent.memory
+forbidden_modules =
+    rag.agent.graphs
+    rag.agent.service
+    rag.cli
+
+[importlinter:contract:state_boundary]
+name = State contract does not depend on agent orchestration
+type = forbidden
+source_modules =
+    rag.agent.state
+forbidden_modules =
+    rag.agent.graphs
+    rag.agent.service
+    rag.cli

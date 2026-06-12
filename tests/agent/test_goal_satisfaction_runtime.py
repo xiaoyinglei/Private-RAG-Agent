@@ -7,6 +7,7 @@ from pydantic import ValidationError
 
 from rag.agent.binding_providers import AssetContextBindingProvider
 from rag.agent.builtin.research import RESEARCH_AGENT
+from rag.agent.builtin_registry import create_builtin_tool_registry
 from rag.agent.core.agent_as_tool import AgentToolOutput, DelegatedEvidenceRef
 from rag.agent.core.context import AgentRunConfig, RunRegistry
 from rag.agent.core.definition import AgentDefinition
@@ -40,7 +41,6 @@ from rag.agent.tools.asset_tools import (
     AssetDescriptor,
     AssetListOutput,
 )
-from rag.agent.tools.builtin_registry import create_builtin_tool_registry
 from rag.agent.tools.llm_tools import LLMTextOutput
 from rag.agent.tools.rag_tools import SearchOutput
 from rag.agent.tools.spec import ToolResult

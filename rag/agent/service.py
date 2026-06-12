@@ -29,10 +29,10 @@ from rag.agent.graphs.nodes.synthesize import SynthesisRunner
 from rag.agent.memory.compactor import MessageCompactor
 from rag.agent.memory.models import MemoryPolicy
 from rag.agent.memory.store import WorkspaceMemoryStore
-from rag.agent.state import AgentState, ToolCallPlan
+from rag.agent.state import AgentState, ToolCallPlan, create_agent_state
 from rag.agent.tools.registry import ToolRegistry, ToolRunner
 from rag.agent.tools.spec import ToolResult
-from rag.schema.query import AnswerCitation, EvidenceItem, RetrievalSignals
+from rag.schema.query import AnswerCitation, EvidenceItem
 from rag.schema.runtime import AccessPolicy
 
 
@@ -198,59 +198,15 @@ class AgentService:
         handles = RunRegistry.get_or_create(run_config)
         if memory_store is not None:
             handles.memory_store = memory_store
-        state: AgentState = {
-            "messages": list(messages or []),
-            "evidence": [],
-            "citations": [],
-            "tool_results": [],
-            "task": task,
-            "retrieval_signals": RetrievalSignals(),
-            "retrieval_signals_debug": None,
-            "run_config": run_config,
-            "iteration": 0,
-            "status": "running",
-            "decision_reason": None,
-            "stop_reason": None,
-            "needs_user_input": None,
-            "pending_tool_calls": list(pending_tool_calls or []),
-            "approved_tool_call_ids": list(approved_tool_call_ids or []),
-            "denied_tool_call_ids": list(denied_tool_call_ids or []),
-            "user_decision": None,
-            "user_message": None,
-            "human_input_request": None,
-            "human_input_response": None,
-            "working_summary": None,
-            "extracted_facts": [],
-            "context_budget": None,
-            "final_answer": None,
-            "final_output": None,
-            "output_validation_errors": [],
-            "groundedness_flag": False,
-            "insufficient_evidence_flag": False,
-            "goal_spec": goal_spec,
-            "goal_contract_hint": None,
-            "goal_contract_debug": None,
-            "goal_requirements": [],
-            "satisfied_requirements": [],
-            "open_gaps": [],
-            "evidence_refs": [],
-            "answer_candidates": [],
-            "computation_results": [],
-            "structured_observations": [],
-            "context_units": [],
-            "context_bindings": [],
-            "locators": [],
-            "asset_refs": [],
-            "conflicts": [],
-            "no_progress_count": 0,
-            "satisfaction_report": None,
-            "controller_next": None,
-            "agent_plan": None,
-            "plan_events": [],
-            "memory_refs": [],
-            "memory_budget": None,
-            "memory_warnings": [],
-        }
+        state = create_agent_state(
+            task=task,
+            run_config=run_config,
+            pending_tool_calls=pending_tool_calls,
+            approved_tool_call_ids=approved_tool_call_ids,
+            denied_tool_call_ids=denied_tool_call_ids,
+            messages=messages,
+            goal_spec=goal_spec,
+        )
         return cast(
             AgentState,
             MessageCompactor(

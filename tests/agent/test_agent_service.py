@@ -4,12 +4,12 @@ import pytest
 from pydantic import BaseModel
 
 from rag.agent.builtin.research import RESEARCH_AGENT
+from rag.agent.builtin_registry import create_builtin_tool_registry
 from rag.agent.core.context import AgentRunConfig, RunRegistry
 from rag.agent.core.definition import AgentDefinition
 from rag.agent.goal_runtime import GoalDeliverable, GoalSpec
 from rag.agent.service import AgentRunRequest, AgentRunResult, AgentService
 from rag.agent.state import ToolCallPlan
-from rag.agent.tools.builtin_registry import create_builtin_tool_registry
 from rag.agent.tools.llm_tools import LLMTextOutput
 from rag.schema.query import RetrievalSignals
 from rag.schema.runtime import AccessPolicy
@@ -343,8 +343,8 @@ async def test_agent_service_run_with_config_uses_supplied_runtime_contract() ->
 @pytest.mark.anyio
 async def test_agent_service_run_creates_workspace_and_injects_primitive_ops() -> None:
     """Verify AgentService.run() creates workspace and PrimitiveOps runners are available."""
+    from rag.agent.builtin_registry import create_builtin_tool_registry
     from rag.agent.primitive_ops import PrimitiveOps
-    from rag.agent.tools.builtin_registry import create_builtin_tool_registry
     from rag.agent.workspace import create_temp_workspace
 
     # Create service with PrimitiveOps-capable registry

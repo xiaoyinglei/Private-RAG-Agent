@@ -2,12 +2,56 @@ from __future__ import annotations
 
 from pydantic import BaseModel
 
+from rag.agent.core.context import AgentRunConfig
 from rag.agent.state import (
+    AgentState,
+    ToolCallPlan,
     _merge_citations,
     _merge_evidence,
     _merge_tool_results,
+    create_agent_state,
 )
 from rag.schema.query import AnswerCitation, EvidenceItem
+from rag.schema.runtime import AccessPolicy
+
+
+def _run_config(run_id: str) -> AgentRunConfig:
+    return AgentRunConfig(
+        run_id=run_id,
+        thread_id=run_id,
+        budget_total=100,
+        max_depth=2,
+        access_policy=AccessPolicy.default(),
+    )
+
+
+def test_create_agent_state_populates_every_required_channel() -> None:
+    state = create_agent_state(
+        task="Inspect architecture",
+        run_config=_run_config("state-complete"),
+    )
+
+    assert set(state) == set(AgentState.__required_keys__)
+
+
+def test_create_agent_state_copies_mutable_inputs_and_defaults() -> None:
+    pending = [ToolCallPlan.create("vector_search", {"query": "agent loop"})]
+    first = create_agent_state(
+        task="First",
+        run_config=_run_config("state-first"),
+        pending_tool_calls=pending,
+    )
+    second = create_agent_state(
+        task="Second",
+        run_config=_run_config("state-second"),
+    )
+
+    pending.clear()
+    first["memory_warnings"].append("bounded")
+
+    assert len(first["pending_tool_calls"]) == 1
+    assert second["pending_tool_calls"] == []
+    assert second["memory_warnings"] == []
 
 
 class TestMergeEvidence:

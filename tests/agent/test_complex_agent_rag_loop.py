@@ -6,11 +6,11 @@ from typing import Any
 import pytest
 
 from rag.agent.builtin.research import RESEARCH_AGENT
+from rag.agent.builtin_registry import create_builtin_tool_registry
 from rag.agent.core.definition import AgentDefinition
 from rag.agent.graphs.nodes.synthesize import SynthesisRunResult
 from rag.agent.service import AgentRunRequest, AgentService
 from rag.agent.state import AgentState, ThinkOutput, ToolCallPlan
-from rag.agent.tools.builtin_registry import create_builtin_tool_registry
 from rag.agent.tools.llm_tools import LLMTextOutput
 from rag.agent.tools.rag_tools import SearchInput, SearchOutput
 from rag.agent.tools.spec import ToolResult

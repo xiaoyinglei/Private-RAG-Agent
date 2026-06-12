@@ -3,7 +3,10 @@ from __future__ import annotations
 import pytest
 
 from rag.agent.builtin.research import RESEARCH_AGENT
-from rag.agent.tools.builtin_registry import create_builtin_tool_registry
+from rag.agent.builtin_registry import create_builtin_tool_registry
+from rag.agent.tools.builtin_registry import (
+    create_builtin_tool_registry as legacy_create_builtin_tool_registry,
+)
 from rag.agent.tools.llm_tools import LLMTextOutput
 
 
@@ -32,6 +35,25 @@ def test_builtin_tool_registry_satisfies_research_agent_allowlist() -> None:
     names = {tool.name for tool in registry.list_all()}
 
     assert set(RESEARCH_AGENT.allowed_tools) <= names
+
+
+def test_legacy_builtin_registry_import_remains_compatible() -> None:
+    assert legacy_create_builtin_tool_registry is create_builtin_tool_registry
+
+
+def test_builtin_tool_execution_contracts_are_safe() -> None:
+    registry = create_builtin_tool_registry()
+
+    for spec in registry.list_all():
+        if spec.max_retries > 0:
+            assert spec.idempotent, f"{spec.name} retries without idempotency"
+        if spec.concurrency_safe:
+            assert not (
+                spec.permissions.write_db
+                or spec.permissions.kg_mutation
+                or spec.permissions.write_fs
+                or spec.permissions.execute_code
+            ), f"{spec.name} allows unsafe concurrent mutation"
 
 
 def test_builtin_tool_registry_has_no_default_runners() -> None:

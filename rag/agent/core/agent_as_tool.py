@@ -18,10 +18,10 @@ from rag.agent.core.delegation import (
 from rag.agent.core.registry import AgentRegistry
 from rag.agent.graphs.nodes.llm_decide import ToolDecisionProvider
 from rag.agent.graphs.nodes.retrieval_hint import RetrievalHintProvider
-from rag.agent.state import AgentState
+from rag.agent.state import AgentState, create_agent_state
 from rag.agent.tools.registry import ToolRegistry
 from rag.agent.tools.spec import ToolError, ToolPermissions, ToolSpec
-from rag.schema.query import AnswerCitation, RetrievalSignals
+from rag.schema.query import AnswerCitation
 
 if TYPE_CHECKING:
     from rag.agent.service import AgentRunResult
@@ -210,55 +210,10 @@ class AgentAsToolAdapter:
     async def __call__(self, payload: BaseModel) -> AgentToolOutput:
         request = AgentToolInput.model_validate(payload)
         # Minimal parent context needed to derive a bounded child run config.
-        parent_state: AgentState = {
-            "run_config": self._run_config,
-            "messages": [],
-            "evidence": [],
-            "citations": [],
-            "tool_results": [],
-            "task": request.task,
-            "retrieval_signals": RetrievalSignals(),
-            "retrieval_signals_debug": None,
-            "iteration": 0,
-            "status": "running",
-            "decision_reason": None,
-            "stop_reason": None,
-            "needs_user_input": None,
-            "pending_tool_calls": [],
-            "approved_tool_call_ids": [],
-            "denied_tool_call_ids": [],
-            "user_decision": None,
-            "user_message": None,
-            "human_input_request": None,
-            "human_input_response": None,
-            "working_summary": None,
-            "extracted_facts": [],
-            "context_budget": None,
-            "final_answer": None,
-            "groundedness_flag": False,
-            "insufficient_evidence_flag": False,
-            "goal_spec": None,
-            "goal_requirements": [],
-            "satisfied_requirements": [],
-            "open_gaps": [],
-            "evidence_refs": [],
-            "answer_candidates": [],
-            "computation_results": [],
-            "structured_observations": [],
-            "context_units": [],
-            "context_bindings": [],
-            "locators": [],
-            "asset_refs": [],
-            "conflicts": [],
-            "no_progress_count": 0,
-            "satisfaction_report": None,
-            "controller_next": None,
-            "agent_plan": None,
-            "plan_events": [],
-            "memory_refs": [],
-            "memory_budget": None,
-            "memory_warnings": [],
-        }
+        parent_state = create_agent_state(
+            task=request.task,
+            run_config=self._run_config,
+        )
 
         prompt = _build_delegation_prompt(request)
         delegation = AgentDelegationRequest(

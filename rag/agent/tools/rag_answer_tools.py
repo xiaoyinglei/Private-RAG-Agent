@@ -38,6 +38,7 @@ rag_search_answer = ToolSpec(
     permissions=ToolPermissions(read_db=True, embed=True, generate=True),
     timeout_seconds=45.0,
     max_retries=0,
+    idempotent=True,
     work_budget_cost=3000,
 )
 

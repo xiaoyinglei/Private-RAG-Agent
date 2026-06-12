@@ -21,6 +21,8 @@ class _DummyOutput(BaseModel):
 
 def _make_spec(
     name: str = "test_tool",
+    *,
+    requires_confirmation: bool = False,
     **permissions: bool,
 ) -> ToolSpec:
     return ToolSpec(
@@ -31,6 +33,7 @@ def _make_spec(
         error_model=ToolError,
         permissions=ToolPermissions(**permissions),
         timeout_seconds=5.0,
+        requires_confirmation=requires_confirmation,
     )
 
 
@@ -79,6 +82,22 @@ class TestApprovalPolicy:
             spec=spec,
         )
         assert result.action == ApprovalAction.ASK
+
+    def test_tool_contract_can_require_approval(self) -> None:
+        policy = ApprovalPolicy()
+        spec = _make_spec(
+            name="sensitive_read",
+            read_db=True,
+            requires_confirmation=True,
+        )
+        result = policy.decide(
+            tool_name="sensitive_read",
+            arguments={"query": "test"},
+            spec=spec,
+        )
+        assert result.action == ApprovalAction.ASK
+        assert result.request is not None
+        assert result.request.tool_calls[0].reason == "工具契约要求执行前确认"
 
     def test_delete_file_tool_denied(self) -> None:
         policy = ApprovalPolicy()

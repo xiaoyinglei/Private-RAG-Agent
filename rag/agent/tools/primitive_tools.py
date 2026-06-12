@@ -26,6 +26,8 @@ list_files_spec = ToolSpec(
     permissions=ToolPermissions(read_fs=True),
     timeout_seconds=5.0,
     max_retries=1,
+    idempotent=True,
+    concurrency_safe=True,
     work_budget_cost=200,
 )
 
@@ -41,6 +43,8 @@ read_file_spec = ToolSpec(
     permissions=ToolPermissions(read_fs=True),
     timeout_seconds=10.0,
     max_retries=1,
+    idempotent=True,
+    concurrency_safe=True,
     work_budget_cost=500,
 )
 
@@ -57,6 +61,8 @@ structured_probe_spec = ToolSpec(
     permissions=ToolPermissions(read_fs=True),
     timeout_seconds=20.0,
     max_retries=0,
+    idempotent=True,
+    concurrency_safe=True,
     work_budget_cost=700,
 )
 

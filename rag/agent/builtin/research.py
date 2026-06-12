@@ -4,13 +4,13 @@ from collections.abc import Mapping
 
 from langgraph.checkpoint.base import BaseCheckpointSaver
 
+from rag.agent.builtin_registry import create_builtin_tool_registry
 from rag.agent.core.definition import AgentDefinition, ModelSelectionPolicy, ToolPolicy
 from rag.agent.core.delegation import DelegatedAgentRunner
 from rag.agent.core.llm_registry import ModelRegistry
 from rag.agent.graphs.nodes.llm_decide import ToolDecisionProvider
 from rag.agent.graphs.nodes.retrieval_hint import RetrievalHintProvider
 from rag.agent.service import AgentService
-from rag.agent.tools.builtin_registry import create_builtin_tool_registry
 from rag.agent.tools.registry import ToolRunner
 
 _SENTINEL = object()

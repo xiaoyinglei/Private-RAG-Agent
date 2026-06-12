@@ -6,7 +6,7 @@ import pytest
 from pydantic import BaseModel
 
 from rag.agent.core.context import AgentRunConfig, RunRegistry
-from rag.agent.core.definition import AgentDefinition
+from rag.agent.core.definition import AgentDefinition, ToolPolicy
 from rag.agent.core.llm_context import AgentLLMContextOverflowError
 from rag.agent.graphs.nodes.execute import run_tools_raw
 from rag.agent.memory.models import ContextBudgetSnapshot
@@ -25,9 +25,17 @@ class RuntimeOutput(BaseModel):
     value: str
 
 
-def _runtime_spec(*, timeout_seconds: float = 1.0, max_retries: int = 0) -> ToolSpec:
+def _runtime_spec(
+    *,
+    name: str = "runtime_tool",
+    timeout_seconds: float = 1.0,
+    max_retries: int = 0,
+    idempotent: bool = False,
+    concurrency_safe: bool = False,
+    requires_confirmation: bool = False,
+) -> ToolSpec:
     return ToolSpec(
-        name="runtime_tool",
+        name=name,
         description="Runtime behavior test tool",
         input_model=RuntimeInput,
         output_model=RuntimeOutput,
@@ -35,21 +43,28 @@ def _runtime_spec(*, timeout_seconds: float = 1.0, max_retries: int = 0) -> Tool
         permissions=ToolPermissions(),
         timeout_seconds=timeout_seconds,
         max_retries=max_retries,
+        idempotent=idempotent,
+        concurrency_safe=concurrency_safe,
+        requires_confirmation=requires_confirmation,
     )
 
 
 def _state(
     *,
-    call: ToolCallPlan,
+    call: ToolCallPlan | None = None,
+    calls: list[ToolCallPlan] | None = None,
     run_id: str,
     access_policy: AccessPolicy | None = None,
+    tool_policy: ToolPolicy | None = None,
 ) -> AgentState:
+    pending = list(calls or ([] if call is None else [call]))
     config = AgentRunConfig(
         run_id=run_id,
         thread_id=run_id,
         budget_total=100,
         max_depth=2,
         access_policy=access_policy or AccessPolicy.default(),
+        tool_policy=tool_policy or ToolPolicy(),
     )
     RunRegistry.remove(run_id)
     RunRegistry.get_or_create(config)
@@ -65,7 +80,7 @@ def _state(
         "decision_reason": None,
         "stop_reason": None,
         "needs_user_input": None,
-        "pending_tool_calls": [call],
+        "pending_tool_calls": pending,
         "approved_tool_call_ids": [],
         "denied_tool_call_ids": [],
         "user_decision": None,
@@ -132,7 +147,7 @@ async def test_run_tools_raw_retries_retryable_runner_failure_before_success() -
         return RuntimeOutput(value=payload.value)
 
     registry = ToolRegistry()
-    registry.register(_runtime_spec(max_retries=1), runner=runner)
+    registry.register(_runtime_spec(max_retries=1, idempotent=True), runner=runner)
     call = ToolCallPlan.create("runtime_tool", {"value": "ok"})
 
     update = await run_tools_raw(
@@ -147,6 +162,131 @@ async def test_run_tools_raw_retries_retryable_runner_failure_before_success() -
     assert result.retry_count == 1
     assert attempts == ["ok", "ok"]
     RunRegistry.remove("tool-retry")
+
+
+@pytest.mark.anyio
+async def test_run_tools_raw_does_not_retry_non_idempotent_tool() -> None:
+    attempts: list[str] = []
+
+    def runner(payload: RuntimeInput) -> RuntimeOutput:
+        attempts.append(payload.value)
+        raise RuntimeError("write may have completed")
+
+    registry = ToolRegistry()
+    registry.register(_runtime_spec(max_retries=3, idempotent=False), runner=runner)
+    call = ToolCallPlan.create("runtime_tool", {"value": "write"})
+
+    update = await run_tools_raw(
+        _state(call=call, run_id="tool-no-retry"),
+        tool_registry=registry,
+        allowed_tools=frozenset({"runtime_tool"}),
+    )
+
+    [result] = update["tool_results"]
+    assert result.status == "error"
+    assert result.retry_count == 0
+    assert attempts == ["write"]
+    RunRegistry.remove("tool-no-retry")
+
+
+@pytest.mark.anyio
+async def test_tool_policy_confirmation_pauses_before_execution() -> None:
+    calls = 0
+
+    def runner(payload: RuntimeInput) -> RuntimeOutput:
+        nonlocal calls
+        calls += 1
+        return RuntimeOutput(value=payload.value)
+
+    registry = ToolRegistry()
+    registry.register(_runtime_spec(), runner=runner)
+    call = ToolCallPlan.create("runtime_tool", {"value": "sensitive"})
+
+    update = await run_tools_raw(
+        _state(
+            call=call,
+            run_id="tool-policy-confirmation",
+            tool_policy=ToolPolicy(
+                require_confirmation_for=frozenset({"runtime_tool"})
+            ),
+        ),
+        tool_registry=registry,
+        allowed_tools=frozenset({"runtime_tool"}),
+    )
+
+    assert update["status"] == "paused"
+    assert update["pending_tool_calls"] == [call]
+    assert calls == 0
+    RunRegistry.remove("tool-policy-confirmation")
+
+
+@pytest.mark.anyio
+async def test_concurrency_safe_tools_execute_in_parallel_batch() -> None:
+    active = 0
+    max_active = 0
+
+    async def runner(payload: RuntimeInput) -> RuntimeOutput:
+        nonlocal active, max_active
+        active += 1
+        max_active = max(max_active, active)
+        await asyncio.sleep(0.01)
+        active -= 1
+        return RuntimeOutput(value=payload.value)
+
+    registry = ToolRegistry()
+    registry.register(
+        _runtime_spec(name="safe_one", concurrency_safe=True),
+        runner=runner,
+    )
+    registry.register(
+        _runtime_spec(name="safe_two", concurrency_safe=True),
+        runner=runner,
+    )
+    calls = [
+        ToolCallPlan.create("safe_one", {"value": "one"}),
+        ToolCallPlan.create("safe_two", {"value": "two"}),
+    ]
+
+    update = await run_tools_raw(
+        _state(
+            calls=calls,
+            run_id="tool-safe-parallel",
+            tool_policy=ToolPolicy(max_parallel_calls=2),
+        ),
+        tool_registry=registry,
+        allowed_tools=frozenset({"safe_one", "safe_two"}),
+    )
+
+    assert max_active == 2
+    assert update["pending_tool_calls"] == []
+    RunRegistry.remove("tool-safe-parallel")
+
+
+@pytest.mark.anyio
+async def test_non_concurrency_safe_tool_executes_alone_and_preserves_queue() -> None:
+    executed: list[str] = []
+
+    def runner(payload: RuntimeInput) -> RuntimeOutput:
+        executed.append(payload.value)
+        return RuntimeOutput(value=payload.value)
+
+    registry = ToolRegistry()
+    registry.register(_runtime_spec(name="write_one"), runner=runner)
+    registry.register(_runtime_spec(name="write_two"), runner=runner)
+    calls = [
+        ToolCallPlan.create("write_one", {"value": "one"}),
+        ToolCallPlan.create("write_two", {"value": "two"}),
+    ]
+
+    update = await run_tools_raw(
+        _state(calls=calls, run_id="tool-unsafe-serial"),
+        tool_registry=registry,
+        allowed_tools=frozenset({"write_one", "write_two"}),
+    )
+
+    assert executed == ["one"]
+    assert update["pending_tool_calls"] == [calls[1]]
+    RunRegistry.remove("tool-unsafe-serial")
 
 
 @pytest.mark.anyio
