@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Awaitable
-from typing import Any
+from collections.abc import Awaitable, Mapping
+from typing import Any, Literal
 from uuid import uuid4
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from rag.agent.core.context import RunRegistry
 from rag.agent.core.definition import AgentDefinition, ModelSelectionPolicy
@@ -14,11 +14,17 @@ from rag.agent.core.llm_context import (
     AgentLLMContextOverflowError,
 )
 from rag.agent.core.llm_registry import ModelRegistry
+from rag.agent.core.runtime_diagnostics import RuntimeDiagnostic
 from rag.agent.goal_runtime import GoalContractHint
 from rag.agent.graphs.nodes.llm_decide import ToolDecisionProvider
 from rag.agent.graphs.nodes.retrieval_hint import RetrievalHintProvider
+from rag.agent.loop.state import (
+    LoopState,
+    ModelTurnDraft,
+    append_loop_diagnostic,
+)
 from rag.agent.memory.models import InjectedContext
-from rag.agent.state import AgentState, ThinkOutput
+from rag.agent.state import AgentState, ThinkOutput, ToolCallPlan
 from rag.assembly.tokenizer import TokenAccountingService, TokenizerContract
 from rag.providers.llm_gateway import LLMGateway
 from rag.schema.llm import DEFAULT_LLM_STAGE_BUDGETS, LLMCallStage
@@ -316,6 +322,134 @@ class LLMRetrievalHintProvider(RetrievalHintProvider):
 
 
 # ── Tool decisions ──
+
+
+class LoopModelDecision(BaseModel):
+    """Provider payload accepting both the new and legacy decision vocabulary."""
+
+    action: Literal["execute", "finish", "synthesize", "pause"]
+    tool_calls: list[ToolCallPlan] = Field(default_factory=list)
+    final_answer: str | None = None
+    pause_reason: str | None = None
+    needs_user_input: str | None = None
+    stop_reason: str | None = None
+    thought: str | None = None
+
+
+def parse_loop_model_turn(
+    value: ModelTurnDraft | LoopModelDecision | ThinkOutput | Mapping[str, object],
+) -> ModelTurnDraft:
+    """Normalize legacy model output without giving labels routing authority."""
+
+    if isinstance(value, ModelTurnDraft):
+        return value
+    if isinstance(value, ThinkOutput):
+        decision = LoopModelDecision(
+            action=value.action,
+            tool_calls=value.tool_calls,
+            needs_user_input=value.needs_user_input,
+            stop_reason=value.stop_reason,
+            thought=value.thought,
+        )
+    elif isinstance(value, LoopModelDecision):
+        decision = value
+    else:
+        decision = LoopModelDecision.model_validate(value)
+
+    calls = tuple(decision.tool_calls)
+    if calls:
+        return ModelTurnDraft(action="execute", tool_calls=calls)
+    if decision.action in {"finish", "synthesize"}:
+        return ModelTurnDraft(
+            action="finish",
+            final_answer=decision.final_answer,
+        )
+    if decision.action == "pause":
+        return ModelTurnDraft(
+            action="pause",
+            pause_reason=(
+                decision.pause_reason
+                or decision.needs_user_input
+                or decision.stop_reason
+                or decision.thought
+            ),
+        )
+    return ModelTurnDraft(action="execute")
+
+
+class LLMLoopModelTurnProvider:
+    """Loop-specific provider returning a focused draft with no goal routing."""
+
+    manages_llm_context = True
+
+    def __init__(
+        self,
+        generator: Any,
+        *,
+        kwargs: dict[str, Any] | None = None,
+        gateway: LLMGateway | None = None,
+        context_assembler: AgentLLMContextAssembler | None = None,
+    ) -> None:
+        self._kwargs = kwargs or {}
+        self._gateway = gateway or _fallback_gateway(
+            generator,
+            LLMCallStage.TOOL_DECISION,
+        )
+        _validate_shared_token_accounting(
+            gateway=self._gateway,
+            context_assembler=context_assembler,
+        )
+        self._context_assembler = context_assembler or _assembler_from_gateway(
+            self._gateway,
+            LLMCallStage.TOOL_DECISION,
+            kwargs=self._kwargs,
+        )
+
+    async def next_turn(
+        self,
+        state: LoopState,
+        *,
+        definition: AgentDefinition,
+        budget_remaining: int,
+    ) -> ModelTurnDraft:
+        assembler = self._context_assembler
+        if assembler is None:
+            raise RuntimeError("loop model context assembler is not configured")
+        assembled = assembler.assemble_loop_turn(
+            definition=definition,
+            state=state,
+            budget_remaining=budget_remaining,
+            output_schema=LoopModelDecision,
+        )
+        run_id = state["run_config"].run_id
+        try:
+            ledger = RunRegistry.get(run_id).budget_ledger
+        except KeyError:
+            ledger = None
+        result = await self._gateway.agenerate_structured(
+            stage=LLMCallStage.TOOL_DECISION,
+            prompt=assembled.prompt,
+            schema=LoopModelDecision,
+            ledger=ledger,
+            lease_id=(
+                f"{run_id}:loop_turn:{state.get('iteration', 0)}:"
+                f"{uuid4().hex}"
+            ),
+            kwargs=self._kwargs,
+        )
+        if result.value.action == "synthesize":
+            append_loop_diagnostic(
+                state,
+                RuntimeDiagnostic(
+                    code="legacy_synthesize_normalized",
+                    component="loop_model_provider",
+                    message=(
+                        "Normalized legacy synthesize action to finish intent."
+                    ),
+                    degraded=False,
+                ),
+            )
+        return parse_loop_model_turn(result.value)
 
 
 class LLMToolDecisionProvider(ToolDecisionProvider):

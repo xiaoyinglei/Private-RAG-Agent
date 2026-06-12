@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from typing import TYPE_CHECKING
 
 from rag.agent.state import AgentState
+
+if TYPE_CHECKING:
+    from rag.agent.loop.state import LoopState
 
 # ── Goal contract prompt ──
 
@@ -165,7 +169,60 @@ def build_tool_decision_prompt(
 - 不要把完整表格放进状态或上下文；只保留候选 asset_id、结构摘要、切片、分析规格、计算结果和 evidence/citation 定位。
 - 如果任务没有指定资产、sheet、产品、场景、口径等范围，但已有多个候选资产都可能回答同一指标，
   不要任选一个 asset_id；应调用 asset_list/asset_inspect 收集候选，分别计算并标注候选答案，
-  或在必须给唯一答案时 pause 请求用户澄清。"""
+    或在必须给唯一答案时 pause 请求用户澄清。"""
+
+
+def build_loop_turn_prompt(
+    state: LoopState,
+    *,
+    budget_remaining: int,
+    allowed_tools: Sequence[str] = (),
+) -> str:
+    """Build the model contract for the ordinary Python loop kernel."""
+
+    task = state.get("task", "")
+    iteration = state.get("iteration", 0)
+    tool_results = state.get("tool_results", [])
+    ok_count = sum(
+        1
+        for result in tool_results
+        if getattr(result, "status", None) == "ok"
+    )
+    error_count = sum(
+        1
+        for result in tool_results
+        if getattr(result, "status", None) == "error"
+    )
+    return f"""You are the model decision boundary for one bounded agent loop turn.
+
+Current task: {task}
+Iteration: {iteration}
+Remaining token budget: {budget_remaining}
+Tool results: {ok_count} successful, {error_count} failed
+Available tools: {", ".join(allowed_tools) if allowed_tools else "none"}
+
+Return one structured outcome:
+{{
+    "action": "execute" | "finish" | "pause",
+    "tool_calls": [
+        {{"tool_call_id": "tc_xxxxxxxxxxxx", "tool_name": "vector_search", "arguments": {{"query": "..."}}}}
+    ],
+    "final_answer": "A complete candidate answer when action is finish",
+    "pause_reason": "The external input required when action is pause"
+}}
+
+Rules:
+- When a tool can materially advance the task, return action="execute" with one or more concrete calls.
+- actual tool calls take precedence over an inconsistent finish label.
+- When the task can be answered from current trusted context, return action="finish" with a non-empty final_answer.
+- Use action="pause" only when external input or authorization is genuinely required.
+- The current plan is advisory task context. It does not authorize tools or decide whether the run may finish.
+- Do not repeat a completed tool call. Read prior structured results before choosing another call.
+- Preserve citation identifiers, evidence links, retrieval scores, rerank scores,
+  computations, and artifact paths in the answer.
+- Keep tool arguments bounded. Do not place full documents, tables, logs, or scratchpad reasoning in the response.
+
+{_format_tool_contracts(allowed_tools)}""".strip()
 
 
 def _format_tool_contracts(allowed_tools: Sequence[str]) -> str:

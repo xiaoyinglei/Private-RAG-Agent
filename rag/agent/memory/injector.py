@@ -20,9 +20,12 @@ from rag.assembly.tokenizer import TokenAccountingService, TokenizerContract
 if TYPE_CHECKING:
     from langchain_core.messages import BaseMessage
 
+    from rag.agent.loop.state import LoopState
     from rag.agent.state import AgentState, ToolCallPlan
     from rag.agent.tools.spec import ToolResult
     from rag.schema.query import AnswerCitation, EvidenceItem
+
+    type ContextState = AgentState | LoopState
 
 
 @dataclass
@@ -194,6 +197,100 @@ class ContextBuilder:
             ),
         )
 
+    def assemble_loop(
+        self,
+        *,
+        definition: AgentDefinition,
+        state: LoopState,
+        policy_hints: Sequence[str] = (),
+        recalled_memories: Sequence[str] = (),
+        included_sections: frozenset[ContextSectionName] | None = None,
+        required_sections: frozenset[ContextSectionName] | None = None,
+    ) -> InjectedContext:
+        """Assemble loop context without importing legacy goal-controller state."""
+
+        candidates: list[ContextSection] = []
+
+        def add(
+            name: ContextSectionName,
+            content: str,
+            *,
+            required: bool = False,
+        ) -> None:
+            if included_sections is not None and name not in included_sections:
+                return
+            self._add_section(
+                candidates,
+                name,
+                content,
+                required=(
+                    required
+                    if required_sections is None
+                    else name in required_sections
+                ),
+            )
+
+        add("system", definition.system_prompt, required=True)
+        add("policy_hints", self._format_policy_hints(policy_hints))
+        add("task", self._format_task(state.get("task", "")), required=True)
+        add(
+            "open_decisions",
+            self._format_loop_open_decisions(state),
+            required=True,
+        )
+        add(
+            "plan",
+            self._format_plan(
+                state.get("agent_plan"),
+                include_goal_refs=False,
+            ),
+            required=True,
+        )
+        add(
+            "evidence",
+            self._format_evidence(
+                state.get("evidence", []),
+                state.get("citations", []),
+            ),
+            required=True,
+        )
+        add(
+            "memory",
+            self._format_memory_refs(
+                state.get("memory_refs", []),
+                state.get("memory_warnings", []),
+            ),
+        )
+        add(
+            "working_memory",
+            self._format_working_memory(
+                state.get("working_summary"),
+                state.get("extracted_facts", []),
+            ),
+        )
+        add(
+            "historical_hints",
+            self._format_historical_hints(recalled_memories),
+        )
+        add(
+            "message_tail",
+            self._format_message_tail(state.get("messages", [])),
+        )
+        add(
+            "tool_results",
+            self._format_tool_observations(state),
+            required=True,
+        )
+
+        selection = self._select_sections(candidates)
+        return InjectedContext(
+            sections=selection.sections,
+            context_budget=self._budget_snapshot(
+                selection,
+                state=state,
+            ),
+        )
+
     def _add_section(
         self,
         sections: list[ContextSection],
@@ -291,7 +388,7 @@ class ContextBuilder:
         self,
         selection: _ContextSelection,
         *,
-        state: AgentState,
+        state: ContextState,
     ) -> ContextBudgetSnapshot:
         sections = selection.sections
         by_name = {section.name: section.token_count for section in sections}
@@ -408,7 +505,12 @@ class ContextBuilder:
             return ""
         return f"Current task:\n{task_text}"
 
-    def _format_plan(self, plan: Any) -> str:
+    def _format_plan(
+        self,
+        plan: Any,
+        *,
+        include_goal_refs: bool = True,
+    ) -> str:
         if plan is None:
             return ""
         steps = getattr(plan, "steps", []) or []
@@ -442,7 +544,11 @@ class ContextBuilder:
                 )
                 lines.append(step_line)
                 related_gap_ids = getattr(step, "related_gap_ids", None)
-                if isinstance(related_gap_ids, list) and related_gap_ids:
+                if (
+                    include_goal_refs
+                    and isinstance(related_gap_ids, list)
+                    and related_gap_ids
+                ):
                     lines.append(
                         "  related_gap_ids: "
                         + self._format_list([str(item) for item in related_gap_ids])
@@ -593,7 +699,7 @@ class ContextBuilder:
         lines.extend(self._format_message(message) for message in messages)
         return "\n".join(lines)
 
-    def _format_tool_observations(self, state: AgentState) -> str:
+    def _format_tool_observations(self, state: ContextState) -> str:
         structured = state.get("structured_observations", [])
         if structured:
             return self._format_structured_observations(structured)
@@ -831,6 +937,58 @@ class ContextBuilder:
                     f"- tool_call_id={call.tool_call_id} "
                     f"tool_name={call.tool_name} "
                     f"arguments={self._one_line(str(call.arguments))}"
+                )
+        return "\n".join(lines)
+
+    def _format_loop_open_decisions(self, state: LoopState) -> str:
+        lines: list[str] = []
+        request = state.get("approval_request")
+        if request is not None:
+            lines.append(
+                "approval_request: "
+                f"kind={request.kind} request_id={request.request_id} "
+                f"question={self._one_line(request.question)}"
+            )
+            for approval_call in request.tool_calls:
+                lines.append(
+                    f"- tool_call_id={approval_call.tool_call_id} "
+                    f"tool_name={approval_call.tool_name} "
+                    f"risk_level={approval_call.risk_level}"
+                )
+        response = state.get("approval_response")
+        if response is not None:
+            lines.append(
+                "approval_response: "
+                f"request_id={response.request_id} decision={response.decision}"
+            )
+            if response.user_message:
+                lines.append(
+                    f"user_message: {self._one_line(response.user_message)}"
+                )
+        pending_tool_calls = state.get("pending_tool_calls", [])
+        if pending_tool_calls:
+            lines.append("pending_tool_calls:")
+            for pending_call in pending_tool_calls:
+                lines.append(
+                    f"- tool_call_id={pending_call.tool_call_id} "
+                    f"tool_name={pending_call.tool_name} "
+                    f"arguments={self._one_line(str(pending_call.arguments))}"
+                )
+        feedback = state.get("stop_hook_feedback", [])
+        if feedback:
+            lines.append("finish_feedback:")
+            for item in feedback:
+                lines.append(
+                    f"- code={item.code} occurrences={item.occurrences} "
+                    f"message={self._one_line(item.message)}"
+                )
+        warnings = state.get("stop_hook_warnings", [])
+        if warnings:
+            lines.append("finish_warnings:")
+            for item in warnings:
+                lines.append(
+                    f"- code={item.code} occurrences={item.occurrences} "
+                    f"message={self._one_line(item.message)}"
                 )
         return "\n".join(lines)
 

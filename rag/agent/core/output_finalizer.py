@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Awaitable, Mapping
-from typing import TYPE_CHECKING, Any, Protocol, cast
+from typing import TYPE_CHECKING, Any, Protocol
 from uuid import uuid4
 
 from pydantic import BaseModel, ValidationError
@@ -98,7 +98,7 @@ class ModelStructuredOutputFinalizer:
         for attempt_index in range(max_attempts):
             assembled = self._assembler.assemble_final_output(
                 definition=definition,
-                state=cast("AgentState", state),
+                state=state,
                 candidate_text=candidate_text,
                 validation_feedback=feedback,
                 output_schema=output_model,

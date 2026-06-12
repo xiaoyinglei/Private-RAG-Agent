@@ -160,6 +160,27 @@ class PlanEvent(BaseModel):
 class PlanTracker:
     max_steps: int = MAX_PLAN_STEPS
 
+    def initialize_task(self, *, task: str) -> tuple[AgentPlan, list[PlanEvent]]:
+        """Create an advisory task plan without deriving completion gaps."""
+
+        step = PlanStep(
+            step_id="step_task",
+            title="Work on the current task.",
+        )
+        plan = AgentPlan(
+            objective=task,
+            status="active",
+            active_step_id=step.step_id,
+            steps=[step],
+        )
+        return plan, [
+            self._event(
+                "initialized",
+                plan,
+                message="Initialized advisory task plan.",
+            )
+        ]
+
     def initialize(self, *, task: str, open_gaps: Sequence[object]) -> tuple[AgentPlan, list[PlanEvent]]:
         steps = [
             PlanStep(
@@ -250,6 +271,53 @@ class PlanTracker:
                 warnings=warnings,
             )
         ]
+
+    def apply_advisory_update(
+        self,
+        plan: AgentPlan,
+        update: PlanUpdate,
+        *,
+        allowed_tool_names: frozenset[str],
+    ) -> tuple[AgentPlan, list[PlanEvent]]:
+        """Apply a task-plan update without accepting goal-gap authority."""
+
+        goal_refs_ignored = any(
+            step.related_gap_ids for step in update.steps
+        ) or any(
+            patch.related_gap_ids for patch in update.step_updates
+        )
+        sanitized = update.model_copy(
+            update={
+                "steps": [
+                    step.model_copy(update={"related_gap_ids": []})
+                    for step in update.steps
+                ],
+                "step_updates": [
+                    patch.model_copy(update={"related_gap_ids": []})
+                    if patch.related_gap_ids is not None
+                    else patch
+                    for patch in update.step_updates
+                ],
+            }
+        )
+        updated, events = self.apply_llm_update(
+            plan,
+            sanitized,
+            allowed_tool_names=allowed_tool_names,
+            open_gap_ids=frozenset(),
+        )
+        if not goal_refs_ignored or not events:
+            return updated, events
+        first = events[0]
+        events[0] = first.model_copy(
+            update={
+                "warnings": _dedupe_texts(
+                    [*first.warnings, "goal_gap_refs_ignored"],
+                    limit=MAX_STEP_REFS,
+                )
+            }
+        )
+        return updated, events
 
     def record_decision_progress(
         self,
