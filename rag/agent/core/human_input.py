@@ -5,6 +5,10 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 
+class HumanInputRequestIdMismatchError(RuntimeError):
+    """A resume response does not match the currently persisted request."""
+
+
 class ToolCallSummary(BaseModel):
     """面向用户的工具摘要，不暴露完整 ToolCallPlan。"""
 

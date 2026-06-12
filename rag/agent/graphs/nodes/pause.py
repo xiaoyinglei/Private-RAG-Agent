@@ -5,12 +5,11 @@ from typing import Any
 from langgraph.types import interrupt
 from pydantic import ValidationError
 
-from rag.agent.core.human_input import HumanInputResponse
+from rag.agent.core.human_input import (
+    HumanInputRequestIdMismatchError,
+    HumanInputResponse,
+)
 from rag.agent.state import AgentState
-
-
-class HumanInputRequestIdMismatchError(RuntimeError):
-    """恢复时的 request_id 与当前 human_input_request.request_id 不匹配。"""
 
 
 def pause_node(state: AgentState) -> dict[str, Any]:
