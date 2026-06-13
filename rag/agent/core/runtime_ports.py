@@ -3,12 +3,21 @@ from __future__ import annotations
 from collections.abc import Awaitable
 from typing import TYPE_CHECKING, Protocol
 
+from typing_extensions import TypedDict
+
 from rag.agent.core.definition import AgentDefinition
 from rag.agent.memory.models import InjectedContext
+from rag.schema.query import RetrievalSignals
 
 if TYPE_CHECKING:
     from rag.agent.loop.state import LoopState
     from rag.agent.state import ThinkOutput
+
+
+class RetrievalHintUpdate(TypedDict):
+    decision_reason: str
+    retrieval_signals: RetrievalSignals
+    retrieval_signals_debug: dict[str, object]
 
 
 class ToolDecisionProvider(Protocol):
@@ -34,13 +43,11 @@ class RetrievalHintProvider(Protocol):
     def hint(
         self,
         state: LoopState,
-    ) -> (
-        dict[str, object]
-        | Awaitable[dict[str, object]]
-    ): ...
+    ) -> RetrievalHintUpdate | Awaitable[RetrievalHintUpdate]: ...
 
 
 __all__ = [
     "RetrievalHintProvider",
+    "RetrievalHintUpdate",
     "ToolDecisionProvider",
 ]

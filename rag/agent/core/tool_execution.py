@@ -21,8 +21,8 @@ from rag.agent.core.definition import AgentDefinition
 from rag.agent.core.delegation import AgentAsToolExecutionError
 from rag.agent.core.human_input import HumanInputRequest, HumanInputResponse
 from rag.agent.core.llm_context import AgentLLMContextOverflowError
-from rag.agent.memory.models import ContextBudgetSnapshot
 from rag.agent.core.turn_contracts import ToolCallPlan
+from rag.agent.memory.models import ContextBudgetSnapshot
 from rag.agent.tools.rag_tools import RAG_SIGNAL_AWARE_TOOLS
 from rag.agent.tools.registry import (
     ToolExecutionContext,

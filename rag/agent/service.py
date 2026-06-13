@@ -10,6 +10,7 @@ from langchain_core.messages import BaseMessage
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from pydantic import BaseModel, ConfigDict, Field
 
+from rag.agent.compat.goal_contract import GoalSpec
 from rag.agent.core.checkpointing import (
     LangGraphCheckpointStore,
     create_agent_checkpointer,
@@ -45,7 +46,6 @@ from rag.agent.core.runtime_ports import (
 )
 from rag.agent.core.tool_execution import ToolExecutionService
 from rag.agent.core.turn_contracts import ToolCallPlan
-from rag.agent.compat.goal_contract import GoalSpec
 from rag.agent.loop.runtime import AgentLoop, ModelTurnProvider
 from rag.agent.loop.state import (
     LoopState,
@@ -471,10 +471,7 @@ class AgentService:
                 max_blocks=self._definition.max_stop_hook_blocks,
             ),
             finish_candidate_builder=FinishCandidateBuilder(
-                synthesis_runner=cast(
-                    CompatibilitySynthesisRunner | None,
-                    self._synthesis_runner,
-                ),
+                synthesis_runner=self._synthesis_runner,
             ),
         )
 
@@ -544,7 +541,7 @@ class AgentService:
         if provider is None:
             return
         try:
-            update = provider.hint(state)  # type: ignore[arg-type]
+            update = provider.hint(state)
             if isawaitable(update):
                 update = await update
         except Exception as exc:

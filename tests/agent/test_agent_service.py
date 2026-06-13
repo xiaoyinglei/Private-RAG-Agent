@@ -5,9 +5,9 @@ from pydantic import BaseModel
 
 from rag.agent.builtin.research import RESEARCH_AGENT
 from rag.agent.builtin_registry import create_builtin_tool_registry
+from rag.agent.compat.goal_contract import GoalDeliverable, GoalSpec
 from rag.agent.core.context import AgentRunConfig, RunRegistry
 from rag.agent.core.definition import AgentDefinition
-from rag.agent.compat.goal_contract import GoalDeliverable, GoalSpec
 from rag.agent.service import AgentRunRequest, AgentRunResult, AgentService
 from rag.agent.state import ToolCallPlan
 from rag.agent.tools.llm_tools import LLMTextOutput

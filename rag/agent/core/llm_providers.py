@@ -18,6 +18,7 @@ from rag.agent.core.llm_registry import ModelRegistry
 from rag.agent.core.runtime_diagnostics import RuntimeDiagnostic
 from rag.agent.core.runtime_ports import (
     RetrievalHintProvider,
+    RetrievalHintUpdate,
     ToolDecisionProvider,
 )
 from rag.agent.core.turn_contracts import ThinkOutput, ToolCallPlan
@@ -153,7 +154,7 @@ class LLMRetrievalHintProvider(RetrievalHintProvider):
     def hint(
         self,
         state: LoopState,
-    ) -> dict[Any, Any] | Awaitable[dict[Any, Any]]:
+    ) -> RetrievalHintUpdate | Awaitable[RetrievalHintUpdate]:
         if self._uses_async_gateway:
             return self._hint_with_gateway(state)
         assembler = self._context_assembler
@@ -177,7 +178,10 @@ class LLMRetrievalHintProvider(RetrievalHintProvider):
             decision = None
         return self._build_hint_update(state, decision)
 
-    async def _hint_with_gateway(self, state: LoopState) -> dict[Any, Any]:
+    async def _hint_with_gateway(
+        self,
+        state: LoopState,
+    ) -> RetrievalHintUpdate:
         gateway = self._gateway
         if gateway is None:
             raise RuntimeError("retrieval hint gateway is not configured")
@@ -219,7 +223,7 @@ class LLMRetrievalHintProvider(RetrievalHintProvider):
         self,
         state: LoopState,
         decision: RetrievalHintDecision | None,
-    ) -> dict[Any, Any]:
+    ) -> RetrievalHintUpdate:
         task = state.get("task", "")
 
         # 规则提取 quoted_terms（从原始 query），过滤空字符串
@@ -254,7 +258,7 @@ class LLMRetrievalHintProvider(RetrievalHintProvider):
 
         reason = decision.reason if decision is not None else "agent_research"
 
-        update: dict[str, Any] = {
+        update: RetrievalHintUpdate = {
             "decision_reason": reason,
             "retrieval_signals": signals,
             "retrieval_signals_debug": signals_debug,
@@ -434,7 +438,7 @@ class LegacyToolDecisionModelTurnProvider:
             )
             state["context_budget"] = context.context_budget
         raw = self._provider.decide(
-            state,  # type: ignore[arg-type]
+            state,
             definition=definition,
             budget_remaining=budget_remaining,
             context=context,

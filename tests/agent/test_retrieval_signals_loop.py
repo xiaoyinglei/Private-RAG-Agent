@@ -5,6 +5,7 @@ from typing import Any
 import pytest
 from pydantic import BaseModel
 
+from rag.agent.core.context import AgentRunConfig, RunRegistry
 from rag.agent.core.llm_providers import (
     LLMRetrievalHintProvider,
     _extract_quoted_terms,
@@ -12,7 +13,6 @@ from rag.agent.core.llm_providers import (
     _merge_quoted_terms,
     _validate_retrieval_signals,
 )
-from rag.agent.core.context import AgentRunConfig, RunRegistry
 from rag.agent.core.tool_execution import (
     ToolBatchRequest,
     ToolExecutionService,

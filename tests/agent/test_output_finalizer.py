@@ -15,7 +15,6 @@ from rag.agent.loop.state import LoopState, create_loop_state
 from rag.assembly.tokenizer import TokenAccountingService, TokenizerContract
 from rag.providers.llm_gateway import LLMGateway
 from rag.schema.llm import LLMCallStage, LLMStageBudget
-from rag.schema.query import RetrievalSignals
 from rag.schema.runtime import AccessPolicy
 
 

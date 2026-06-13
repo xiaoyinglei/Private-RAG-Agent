@@ -24,7 +24,7 @@ class CompatibilitySynthesisRunner(Protocol):
     def run_synthesis(
         self,
         *,
-        parent_state: object,
+        parent_state: LoopState,
     ) -> SynthesisRunResult | Awaitable[SynthesisRunResult]: ...
 
 

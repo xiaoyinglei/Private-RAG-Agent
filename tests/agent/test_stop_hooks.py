@@ -5,12 +5,12 @@ from dataclasses import dataclass
 import pytest
 from pydantic import BaseModel
 
+from rag.agent.compat.goal_contract import GoalDeliverable, GoalSpec
 from rag.agent.core.context import AgentRunConfig
 from rag.agent.core.definition import AgentDefinition
 from rag.agent.core.finalization import FinishCandidateBuilder
 from rag.agent.core.observations import EvidenceRef
 from rag.agent.core.output_finalizer import OutputValidationExhaustedError
-from rag.agent.compat.goal_contract import GoalDeliverable, GoalSpec
 from rag.agent.loop.state import ModelTurnDraft, create_loop_state
 from rag.agent.loop.stop_hooks import (
     GoalContractStopHook,

@@ -10,6 +10,7 @@ from langgraph.checkpoint.memory import MemorySaver
 from pydantic import BaseModel
 
 from rag.agent.builtin.research import RESEARCH_AGENT
+from rag.agent.compat.goal_contract import GoalDeliverable, GoalSpec
 from rag.agent.core.agent_as_tool import (
     AgentAsToolAdapter,
     AgentToolInput,
@@ -23,7 +24,6 @@ from rag.agent.core.definition import AgentDefinition
 from rag.agent.core.finalization import FinishCandidateBuilder
 from rag.agent.core.human_input import HumanInputResponse
 from rag.agent.core.tool_execution import ToolExecutionService
-from rag.agent.compat.goal_contract import GoalDeliverable, GoalSpec
 from rag.agent.loop.runtime import (
     AgentLoop,
     LoopEventSink,
@@ -48,7 +48,6 @@ from rag.agent.tools.registry import ToolRegistry
 from rag.agent.tools.spec import ToolError, ToolPermissions, ToolSpec
 from rag.agent.workspace import WorkspaceRuntime
 from rag.schema.query import AnswerCitation, EvidenceItem, RetrievalSignals
-from tests.agent.parity.normalize import normalize_loop_state
 from tests.agent.parity.fixtures import (
     PARITY_SCENARIO_NAMES,
     _CapturingDelegatedRunner,
@@ -62,6 +61,7 @@ from tests.agent.parity.fixtures import (
     _TextInput,
     _TextOutput,
 )
+from tests.agent.parity.normalize import normalize_loop_state
 
 
 class _CandidateProvider:
