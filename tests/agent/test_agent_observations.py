@@ -9,15 +9,6 @@ from rag.agent.core.observations import (
     ObservationExtractor,
     StructuredObservation,
 )
-from rag.agent.goal_runtime import (
-    ContextUnit as LegacyContextUnit,
-)
-from rag.agent.goal_runtime import (
-    EvidenceRef as LegacyEvidenceRef,
-)
-from rag.agent.goal_runtime import (
-    StructuredObservation as LegacyStructuredObservation,
-)
 from rag.agent.tools.asset_tools import AssetAnalyzeOutput
 from rag.agent.tools.rag_answer_tools import RAGSearchAnswerOutput
 from rag.agent.tools.rag_tools import SearchOutput
@@ -253,9 +244,3 @@ def test_neutral_reducer_skips_already_observed_tool_calls() -> None:
     )
 
     assert update == {}
-
-
-def test_goal_runtime_temporarily_reexports_neutral_observation_models() -> None:
-    assert LegacyContextUnit is ContextUnit
-    assert LegacyEvidenceRef is EvidenceRef
-    assert LegacyStructuredObservation is StructuredObservation

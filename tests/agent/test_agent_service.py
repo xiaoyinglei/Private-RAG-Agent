@@ -7,7 +7,7 @@ from rag.agent.builtin.research import RESEARCH_AGENT
 from rag.agent.builtin_registry import create_builtin_tool_registry
 from rag.agent.core.context import AgentRunConfig, RunRegistry
 from rag.agent.core.definition import AgentDefinition
-from rag.agent.goal_runtime import GoalDeliverable, GoalSpec
+from rag.agent.compat.goal_contract import GoalDeliverable, GoalSpec
 from rag.agent.service import AgentRunRequest, AgentRunResult, AgentService
 from rag.agent.state import ToolCallPlan
 from rag.agent.tools.llm_tools import LLMTextOutput
@@ -100,7 +100,7 @@ def test_agent_service_initial_state_creates_runtime_handles() -> None:
     RunRegistry.remove("svc-state")
 
 
-def test_agent_run_request_preserves_explicit_goal_spec() -> None:
+def test_agent_initial_state_does_not_persist_explicit_goal_spec() -> None:
     service = _service_with_registry()
     goal = GoalSpec(
         original_query="Explain policy",
@@ -127,7 +127,7 @@ def test_agent_run_request_preserves_explicit_goal_spec() -> None:
         )
     )
 
-    assert state["goal_spec"] == goal
+    assert "goal_spec" not in state
     RunRegistry.remove("explicit-goal")
 
 

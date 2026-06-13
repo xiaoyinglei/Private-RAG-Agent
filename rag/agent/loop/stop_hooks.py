@@ -5,15 +5,14 @@ from typing import Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from rag.agent.compat.goal_contract import GoalContractEvaluator, GoalSpec
 from rag.agent.core.definition import AgentDefinition
-from rag.agent.core.observations import AnswerCandidate
 from rag.agent.core.output_finalizer import (
     OutputValidationExhaustedError,
     StructuredOutputFinalizer,
     validated_final_output,
 )
 from rag.agent.core.output_models import ValidatedFinalOutput
-from rag.agent.goal_runtime import GoalSpec, SatisfactionChecker
 from rag.agent.loop.state import (
     LoopState,
     StopHookFeedback,
@@ -223,23 +222,14 @@ class GoalContractStopHook:
         state: LoopState,
         candidate: str,
     ) -> StopVerdict:
-        compatibility_state = dict(state)
-        compatibility_state.update(
-            {
-                "goal_spec": self._goal_spec,
-                "pending_tool_calls": [],
-                "answer_candidates": [
-                    *state["answer_candidates"],
-                    AnswerCandidate(text=candidate),
-                ],
-                "context_bindings": list(state["context_bindings"]),
-                "conflicts": [],
-                "tool_results": list(state["tool_results"]),
-                "no_progress_count": 0,
-            }
+        evaluation = GoalContractEvaluator().evaluate(
+            goal_spec=self._goal_spec,
+            candidate=candidate,
+            evidence_refs=state["evidence_refs"],
+            computation_results=state["computation_results"],
+            context_bindings=state["context_bindings"],
         )
-        report = SatisfactionChecker().check(compatibility_state)
-        if not report.open_gaps and not report.conflicts:
+        if evaluation.satisfied:
             return StopVerdict(
                 action="accept",
                 code="goal_contract_satisfied",
@@ -248,19 +238,12 @@ class GoalContractStopHook:
             action="block",
             code="goal_contract_unsatisfied",
             message="; ".join(
-                gap.description
-                for gap in report.open_gaps
+                issue.description
+                for issue in evaluation.issues
             )
             or "Explicit goal contract is not satisfied.",
             detail={
-                "open_gap_ids": [
-                    gap.gap_id
-                    for gap in report.open_gaps
-                ],
-                "conflict_ids": [
-                    conflict.conflict_id
-                    for conflict in report.conflicts
-                ],
+                "unsatisfied_issue_ids": evaluation.issue_ids,
             },
         )
 

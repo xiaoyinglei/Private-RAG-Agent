@@ -23,7 +23,7 @@ from rag.agent.core.definition import AgentDefinition
 from rag.agent.core.finalization import FinishCandidateBuilder
 from rag.agent.core.human_input import HumanInputResponse
 from rag.agent.core.tool_execution import ToolExecutionService
-from rag.agent.goal_runtime import GoalDeliverable, GoalSpec
+from rag.agent.compat.goal_contract import GoalDeliverable, GoalSpec
 from rag.agent.loop.runtime import (
     AgentLoop,
     LoopEventSink,
@@ -38,11 +38,7 @@ from rag.agent.loop.stop_hooks import StopHookRunner, build_stop_hooks
 from rag.agent.memory.compactor import LoopContextCompactor
 from rag.agent.memory.models import MemoryPolicy
 from rag.agent.memory.store import WorkspaceMemoryStore
-from rag.agent.state import (
-    AgentState,
-    ToolCallPlan,
-    agent_state_to_loop_state,
-)
+from rag.agent.state import ToolCallPlan
 from rag.agent.tools.rag_answer_tools import (
     RAGSearchAnswerOutput,
     rag_search_answer,
@@ -53,8 +49,8 @@ from rag.agent.tools.spec import ToolError, ToolPermissions, ToolSpec
 from rag.agent.workspace import WorkspaceRuntime
 from rag.schema.query import AnswerCitation, EvidenceItem, RetrievalSignals
 from tests.agent.parity.normalize import normalize_loop_state
-from tests.agent.parity.scenarios import (
-    LEGACY_SCENARIO_NAMES,
+from tests.agent.parity.fixtures import (
+    PARITY_SCENARIO_NAMES,
     _CapturingDelegatedRunner,
     _ComputationOutput,
     _config,
@@ -136,18 +132,14 @@ async def _run_loop(
     *,
     definition: AgentDefinition,
     registry: ToolRegistry,
-    legacy_state: AgentState | LoopState,
+    state: LoopState,
     provider: _CandidateProvider,
     goal_spec: GoalSpec | None = None,
     output_finalizer: object | None = None,
     memory_store: WorkspaceMemoryStore | None = None,
     event_recorder: _EventRecorder | None = None,
 ) -> tuple[LoopState, LangGraphCheckpointStore]:
-    loop_state = (
-        cast(LoopState, legacy_state)
-        if "tool_execution_records" in legacy_state
-        else agent_state_to_loop_state(legacy_state)
-    )
+    loop_state = state
     if memory_store is not None:
         from rag.agent.core.context import RunRegistry
 
@@ -187,7 +179,7 @@ async def _plain_without_tools() -> dict[str, object]:
     result, _ = await _run_loop(
         definition=_definition("plain", []),
         registry=ToolRegistry(),
-        legacy_state=_state(
+        state=_state(
             run_id,
             task="Answer directly without tools.",
         ),
@@ -213,7 +205,7 @@ async def _single_tool() -> dict[str, object]:
     result, _ = await _run_loop(
         definition=_definition("single", ["answer_tool"]),
         registry=registry,
-        legacy_state=_state(
+        state=_state(
             run_id,
             task="Answer with one tool.",
             pending_tool_calls=[call],
@@ -268,7 +260,7 @@ async def _multiple_tools() -> dict[str, object]:
             ["echo_tool", "calculate_tool"],
         ),
         registry=registry,
-        legacy_state=_state(
+        state=_state(
             run_id,
             task="Use multiple tools and calculate.",
             pending_tool_calls=calls,
@@ -346,12 +338,12 @@ async def _rag_grounding() -> dict[str, object]:
             arguments={"query": "annual leave", "top_k": 4},
         ),
     ]
-    legacy_state = _state(
+    state = _state(
         run_id,
         task='Answer the "annual leave" policy with citations.',
         pending_tool_calls=calls,
     )
-    legacy_state["retrieval_signals"] = RetrievalSignals(
+    state["retrieval_signals"] = RetrievalSignals(
         quoted_terms=["annual leave"],
         allow_graph_expansion=True,
     )
@@ -361,7 +353,7 @@ async def _rag_grounding() -> dict[str, object]:
             ["vector_search", "rerank", "rag_search_answer"],
         ),
         registry=registry,
-        legacy_state=legacy_state,
+        state=state,
         provider=_CandidateProvider(),
     )
     return normalize_loop_state(result)
@@ -388,7 +380,7 @@ async def _approval_resume() -> dict[str, object]:
     result, store = await _run_loop(
         definition=_definition("approval", ["write_tool"]),
         registry=registry,
-        legacy_state=_state(
+        state=_state(
             run_id,
             task="Run an approved mutation.",
             pending_tool_calls=[call],
@@ -408,7 +400,7 @@ async def _approval_resume() -> dict[str, object]:
     resumed, _ = await _run_loop(
         definition=_definition("approval", ["write_tool"]),
         registry=registry,
-        legacy_state=resumed_state,
+        state=resumed_state,
         provider=_CandidateProvider(),
     )
     return {
@@ -448,7 +440,7 @@ async def _tool_retry() -> dict[str, object]:
     result, _ = await _run_loop(
         definition=_definition("retry", ["retry_tool"]),
         registry=registry,
-        legacy_state=_state(
+        state=_state(
             run_id,
             task="Recover from a transient tool error.",
             pending_tool_calls=[call],
@@ -477,7 +469,7 @@ async def _message_compaction() -> dict[str, object]:
         result, _ = await _run_loop(
             definition=_definition("compaction", []),
             registry=ToolRegistry(),
-            legacy_state=_state(
+            state=_state(
                 run_id,
                 task="Compact prior messages.",
                 memory_policy=policy,
@@ -518,7 +510,7 @@ async def _structured_output() -> dict[str, object]:
             output_model=_StructuredAnswer,
         ),
         registry=registry,
-        legacy_state=_state(
+        state=_state(
             run_id,
             task="Return a structured answer.",
             pending_tool_calls=[call],
@@ -561,7 +553,7 @@ async def _explicit_goal_spec() -> dict[str, object]:
     result, _ = await _run_loop(
         definition=_definition("goal", ["answer_tool"]),
         registry=registry,
-        legacy_state=_state(
+        state=_state(
             run_id,
             task="Answer with evidence.",
             pending_tool_calls=[call],
@@ -582,7 +574,7 @@ async def _model_fallback() -> dict[str, object]:
     result, _ = await _run_loop(
         definition=_definition("model_fallback", []),
         registry=ToolRegistry(),
-        legacy_state=_state(
+        state=_state(
             run_id,
             task='Use the "fallback" model.',
         ),
@@ -630,7 +622,7 @@ async def _child_agent() -> dict[str, object]:
     result, _ = await _run_loop(
         definition=_definition("child", ["agent_research"]),
         registry=registry,
-        legacy_state=_state(
+        state=_state(
             run_id,
             task="Delegate a bounded research task.",
             pending_tool_calls=[call],
@@ -663,5 +655,5 @@ _SCENARIOS = {
 async def run_loop_scenarios() -> dict[str, object]:
     return {
         name: await _SCENARIOS[name]()
-        for name in LEGACY_SCENARIO_NAMES
+        for name in PARITY_SCENARIO_NAMES
     }

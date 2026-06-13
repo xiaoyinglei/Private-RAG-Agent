@@ -21,11 +21,10 @@ if TYPE_CHECKING:
     from langchain_core.messages import BaseMessage
 
     from rag.agent.loop.state import LoopState
-    from rag.agent.state import AgentState, ToolCallPlan
     from rag.agent.tools.spec import ToolResult
     from rag.schema.query import AnswerCitation, EvidenceItem
 
-    type ContextState = AgentState | LoopState
+    type ContextState = LoopState
 
 
 @dataclass
@@ -100,103 +99,6 @@ class ContextBuilder:
             )
         )
 
-    def assemble(
-        self,
-        *,
-        definition: AgentDefinition,
-        state: AgentState,
-        policy_hints: Sequence[str] = (),
-        recalled_memories: Sequence[str] = (),
-        included_sections: frozenset[ContextSectionName] | None = None,
-        required_sections: frozenset[ContextSectionName] | None = None,
-    ) -> InjectedContext:
-        candidates: list[ContextSection] = []
-
-        def add(
-            name: ContextSectionName,
-            content: str,
-            *,
-            required: bool = False,
-        ) -> None:
-            if included_sections is not None and name not in included_sections:
-                return
-            self._add_section(
-                candidates,
-                name,
-                content,
-                required=(
-                    required
-                    if required_sections is None
-                    else name in required_sections
-                ),
-            )
-
-        add("system", definition.system_prompt, required=True)
-        add("policy_hints", self._format_policy_hints(policy_hints))
-        add("task", self._format_task(state.get("task", "")), required=True)
-        add(
-            "open_decisions",
-            self._format_open_decisions(
-                pending_tool_calls=state.get("pending_tool_calls", []),
-                needs_user_input=state.get("needs_user_input"),
-                user_decision=state.get("user_decision"),
-                goal_spec=state.get("goal_spec"),
-                open_gaps=state.get("open_gaps", []),
-                satisfied_requirements=state.get("satisfied_requirements", []),
-                conflicts=state.get("conflicts", []),
-            ),
-            required=True,
-        )
-        add(
-            "plan",
-            self._format_plan(state.get("agent_plan")),
-            required=True,
-        )
-        add(
-            "evidence",
-            self._format_evidence(
-                state.get("evidence", []),
-                state.get("citations", []),
-            ),
-            required=True,
-        )
-        add(
-            "memory",
-            self._format_memory_refs(
-                state.get("memory_refs", []),
-                state.get("memory_warnings", []),
-            ),
-        )
-        add(
-            "working_memory",
-            self._format_working_memory(
-                state.get("working_summary"),
-                state.get("extracted_facts", []),
-            ),
-        )
-        add(
-            "historical_hints",
-            self._format_historical_hints(recalled_memories),
-        )
-        add(
-            "message_tail",
-            self._format_message_tail(state.get("messages", [])),
-        )
-        add(
-            "tool_results",
-            self._format_tool_observations(state),
-            required=True,
-        )
-
-        selection = self._select_sections(candidates)
-        return InjectedContext(
-            sections=selection.sections,
-            context_budget=self._budget_snapshot(
-                selection,
-                state=state,
-            ),
-        )
-
     def assemble_loop(
         self,
         *,
@@ -207,7 +109,7 @@ class ContextBuilder:
         included_sections: frozenset[ContextSectionName] | None = None,
         required_sections: frozenset[ContextSectionName] | None = None,
     ) -> InjectedContext:
-        """Assemble loop context without importing legacy goal-controller state."""
+        """Assemble bounded context from the canonical loop state."""
 
         candidates: list[ContextSection] = []
 
@@ -240,10 +142,7 @@ class ContextBuilder:
         )
         add(
             "plan",
-            self._format_plan(
-                state.get("agent_plan"),
-                include_goal_refs=False,
-            ),
+            self._format_plan(state.get("agent_plan")),
             required=True,
         )
         add(
@@ -505,12 +404,7 @@ class ContextBuilder:
             return ""
         return f"Current task:\n{task_text}"
 
-    def _format_plan(
-        self,
-        plan: Any,
-        *,
-        include_goal_refs: bool = True,
-    ) -> str:
+    def _format_plan(self, plan: Any) -> str:
         if plan is None:
             return ""
         steps = getattr(plan, "steps", []) or []
@@ -543,16 +437,6 @@ class ContextBuilder:
                     f"title={title}"
                 )
                 lines.append(step_line)
-                related_gap_ids = getattr(step, "related_gap_ids", None)
-                if (
-                    include_goal_refs
-                    and isinstance(related_gap_ids, list)
-                    and related_gap_ids
-                ):
-                    lines.append(
-                        "  related_gap_ids: "
-                        + self._format_list([str(item) for item in related_gap_ids])
-                    )
                 expected_tools = getattr(step, "expected_tool_names", None)
                 if isinstance(expected_tools, list) and expected_tools:
                     lines.append(
@@ -890,54 +774,6 @@ class ContextBuilder:
                         f"{prefix} error_code={error.code} retryable={error.retryable} "
                         f"message={self._one_line(error.message)}"
                     )
-        return "\n".join(lines)
-
-    def _format_open_decisions(
-        self,
-        *,
-        pending_tool_calls: Sequence[ToolCallPlan],
-        needs_user_input: str | None,
-        user_decision: str | None,
-        goal_spec: Any | None = None,
-        open_gaps: Sequence[Any] = (),
-        satisfied_requirements: Sequence[str] = (),
-        conflicts: Sequence[Any] = (),
-    ) -> str:
-        lines: list[str] = []
-        if goal_spec is not None:
-            original_query = getattr(goal_spec, "original_query", None)
-            if isinstance(original_query, str) and original_query.strip():
-                lines.append(f"goal: {self._one_line(original_query)}")
-        if open_gaps:
-            lines.append(
-                "open_gaps: "
-                + ", ".join(
-                    str(getattr(gap, "gap_id", gap))
-                    for gap in open_gaps
-                )
-            )
-        if satisfied_requirements:
-            lines.append("satisfied_requirements: " + ", ".join(satisfied_requirements))
-        if conflicts:
-            lines.append(
-                "conflicts: "
-                + ", ".join(
-                    str(getattr(conflict, "description", conflict))
-                    for conflict in conflicts
-                )
-            )
-        if needs_user_input:
-            lines.append(f"needs_user_input: {self._one_line(needs_user_input)}")
-        if user_decision:
-            lines.append(f"user_decision: {self._one_line(user_decision)}")
-        if pending_tool_calls:
-            lines.append("pending_tool_calls:")
-            for call in pending_tool_calls:
-                lines.append(
-                    f"- tool_call_id={call.tool_call_id} "
-                    f"tool_name={call.tool_name} "
-                    f"arguments={self._one_line(str(call.arguments))}"
-                )
         return "\n".join(lines)
 
     def _format_loop_open_decisions(self, state: LoopState) -> str:

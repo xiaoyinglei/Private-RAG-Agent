@@ -664,7 +664,6 @@ class AgentLoop:
         plan, events = self._plan_tracker.record_observation_progress(
             state["agent_plan"],
             observations=batch.structured_observations,
-            satisfied_requirement_ids=(),
         )
         state["agent_plan"] = plan
         self._append_plan_events(state, events)

@@ -7,14 +7,15 @@ from langgraph.checkpoint.base import BaseCheckpointSaver
 from rag.agent.core.checkpointing import create_agent_checkpointer
 from rag.agent.core.definition import AgentDefinition
 from rag.agent.core.delegation import DelegatedAgentRunner
+from rag.agent.core.finalization import CompatibilitySynthesisRunner
 from rag.agent.core.llm_registry import ModelRegistry
 from rag.agent.core.output_finalizer import StructuredOutputFinalizer
 from rag.agent.core.runtime_diagnostics import RuntimeDiagnostic
+from rag.agent.core.runtime_ports import (
+    RetrievalHintProvider,
+    ToolDecisionProvider,
+)
 from rag.agent.graphs.base import build_outer_agent_graph
-from rag.agent.graphs.nodes.goal_runtime import GoalContractProvider
-from rag.agent.graphs.nodes.llm_decide import ToolDecisionProvider
-from rag.agent.graphs.nodes.retrieval_hint import RetrievalHintProvider
-from rag.agent.graphs.nodes.synthesize import SynthesisRunner
 from rag.agent.loop.runtime import ModelTurnProvider
 from rag.agent.service import AgentService
 from rag.agent.tools.registry import ToolRegistry
@@ -29,10 +30,9 @@ class GraphCompiler:
         tool_registry: ToolRegistry,
         model_turn_provider: ModelTurnProvider | None = None,
         tool_decision_provider: ToolDecisionProvider | None = None,
-        goal_contract_provider: GoalContractProvider | None = None,
         retrieval_hint_provider: RetrievalHintProvider | None = None,
         subagent_runner: DelegatedAgentRunner | None = None,
-        synthesis_runner: SynthesisRunner | None = None,
+        synthesis_runner: CompatibilitySynthesisRunner | None = None,
         output_finalizer: StructuredOutputFinalizer | None = None,
         model_registry: ModelRegistry | None = None,
         checkpointer: BaseCheckpointSaver[str] | None = None,
@@ -41,7 +41,6 @@ class GraphCompiler:
         self._tool_registry = tool_registry
         self._model_turn_provider = model_turn_provider
         self._tool_decision_provider = tool_decision_provider
-        self._goal_contract_provider = goal_contract_provider
         self._retrieval_hint_provider = retrieval_hint_provider
         self._subagent_runner = subagent_runner
         self._synthesis_runner = synthesis_runner
@@ -64,7 +63,6 @@ class GraphCompiler:
             tool_registry=self._tool_registry,
             model_turn_provider=self._model_turn_provider,
             tool_decision_provider=self._tool_decision_provider,
-            goal_contract_provider=self._goal_contract_provider,
             retrieval_hint_provider=self._retrieval_hint_provider,
             subagent_runner=self._subagent_runner,
             synthesis_runner=self._synthesis_runner,

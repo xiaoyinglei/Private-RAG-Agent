@@ -9,8 +9,9 @@ from rag.agent.core.delegation import (
     ParentAgentContext,
 )
 from rag.agent.core.registry import AgentRegistry
+from rag.agent.core.turn_contracts import ToolCallPlan
+from rag.agent.loop.state import LoopState
 from rag.agent.service import AgentRunResult
-from rag.agent.state import AgentState, ToolCallPlan
 
 _MAX_SYNTHESIS_SECTIONS = 16
 _MAX_SYNTHESIS_SECTION_CHARS = 1600
@@ -54,7 +55,7 @@ class BuiltinSynthesisRunner:
         self._agent_registry = agent_registry
         self._service_factory = service_factory
 
-    async def run_synthesis(self, *, parent_state: AgentState) -> AgentRunResult:
+    async def run_synthesis(self, *, parent_state: LoopState) -> AgentRunResult:
         synthesis_definition = self._agent_registry.get("synthesize")
         child_config = derive_child_config(parent_state["run_config"], synthesis_definition)
         task = _synthesis_task(parent_state)
@@ -76,7 +77,7 @@ class BuiltinSynthesisRunner:
         )
 
 
-def _synthesis_task(state: AgentState) -> str:
+def _synthesis_task(state: LoopState) -> str:
     return (
         "Synthesize a final grounded answer for the parent task. "
         "Use only the supplied support context and do not add unsupported claims. "
@@ -84,7 +85,7 @@ def _synthesis_task(state: AgentState) -> str:
     )
 
 
-def _synthesis_context_sections(state: AgentState) -> list[str]:
+def _synthesis_context_sections(state: LoopState) -> list[str]:
     sections: list[str] = []
     if evidence_section := _evidence_section(state):
         sections.append(evidence_section)
@@ -95,7 +96,7 @@ def _synthesis_context_sections(state: AgentState) -> list[str]:
     return [_clip_section(section) for section in sections[:_MAX_SYNTHESIS_SECTIONS]]
 
 
-def _evidence_section(state: AgentState) -> str:
+def _evidence_section(state: LoopState) -> str:
     lines = [
         f"- {evidence.evidence_id}: {evidence.text}"
         for evidence in state.get("evidence", [])
@@ -106,7 +107,7 @@ def _evidence_section(state: AgentState) -> str:
     return "Evidence:\n" + "\n".join(lines)
 
 
-def _tool_result_section(state: AgentState) -> str:
+def _tool_result_section(state: LoopState) -> str:
     if state.get("structured_observations"):
         return ""
     lines: list[str] = []
@@ -121,7 +122,7 @@ def _tool_result_section(state: AgentState) -> str:
     return "Tool outputs:\n" + "\n".join(lines)
 
 
-def _structured_observation_section(state: AgentState) -> str:
+def _structured_observation_section(state: LoopState) -> str:
     lines: list[str] = []
     for candidate in state.get("answer_candidates", []):
         text = getattr(candidate, "text", "")
@@ -164,7 +165,7 @@ def _structured_observation_section(state: AgentState) -> str:
     return "Structured observations:\n" + "\n".join(lines)
 
 
-def _evidence_ids(state: AgentState) -> list[str]:
+def _evidence_ids(state: LoopState) -> list[str]:
     ids = [evidence.evidence_id for evidence in state.get("evidence", [])]
     for ref in state.get("evidence_refs", []):
         evidence_id = getattr(ref, "evidence_id", None)
@@ -173,7 +174,7 @@ def _evidence_ids(state: AgentState) -> list[str]:
     return _dedupe(ids)
 
 
-def _citation_ids(state: AgentState) -> list[str]:
+def _citation_ids(state: LoopState) -> list[str]:
     ids = [citation.citation_id for citation in state.get("citations", [])]
     for ref in state.get("evidence_refs", []):
         citation_id = getattr(ref, "citation_id", None)

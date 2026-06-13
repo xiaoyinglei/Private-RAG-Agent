@@ -16,9 +16,11 @@ from rag.agent.core.llm_context import (
 )
 from rag.agent.core.llm_registry import ModelRegistry
 from rag.agent.core.runtime_diagnostics import RuntimeDiagnostic
-from rag.agent.goal_runtime import GoalContractHint
-from rag.agent.graphs.nodes.llm_decide import ToolDecisionProvider
-from rag.agent.graphs.nodes.retrieval_hint import RetrievalHintProvider
+from rag.agent.core.runtime_ports import (
+    RetrievalHintProvider,
+    ToolDecisionProvider,
+)
+from rag.agent.core.turn_contracts import ThinkOutput, ToolCallPlan
 from rag.agent.loop.state import (
     LoopState,
     ModelTurnDraft,
@@ -26,7 +28,6 @@ from rag.agent.loop.state import (
 )
 from rag.agent.memory.injector import ContextBuilder
 from rag.agent.memory.models import ContextBudgetSnapshot, InjectedContext
-from rag.agent.state import AgentState, ThinkOutput, ToolCallPlan
 from rag.assembly.tokenizer import TokenAccountingService, TokenizerContract
 from rag.providers.llm_gateway import LLMGateway
 from rag.schema.llm import DEFAULT_LLM_STAGE_BUDGETS, LLMCallStage
@@ -110,67 +111,6 @@ def _validate_retrieval_signals(
 # ── Retrieval hints ──
 
 
-class LLMGoalContractProvider:
-    """Model-backed, schema-validated goal contract inference."""
-
-    def __init__(
-        self,
-        generator: Any,
-        *,
-        kwargs: dict[str, Any] | None = None,
-        gateway: LLMGateway | None = None,
-        context_assembler: AgentLLMContextAssembler | None = None,
-        definition: AgentDefinition | None = None,
-    ) -> None:
-        self._kwargs = kwargs or {}
-        self._gateway = gateway or _fallback_gateway(
-            generator,
-            LLMCallStage.GOAL_CONTRACT,
-        )
-        _validate_shared_token_accounting(
-            gateway=self._gateway,
-            context_assembler=context_assembler,
-        )
-        self._context_assembler = context_assembler or _assembler_from_gateway(
-            self._gateway,
-            LLMCallStage.GOAL_CONTRACT,
-            kwargs=self._kwargs,
-        )
-        self._definition = definition or AgentDefinition(
-            agent_type="goal_contract",
-            description="Goal contract context",
-            system_prompt="",
-            allowed_tools=[],
-        )
-
-    async def infer(self, state: AgentState) -> GoalContractHint:
-        try:
-            ledger = RunRegistry.get(
-                state["run_config"].run_id
-            ).budget_ledger
-        except KeyError:
-            ledger = None
-        assembler = self._context_assembler
-        if assembler is None:
-            raise RuntimeError("goal contract context assembler is not configured")
-        assembled = assembler.assemble_goal_contract(
-            definition=self._definition,
-            state=state,
-            output_schema=GoalContractHint,
-        )
-        result = await self._gateway.agenerate_structured(
-            stage=LLMCallStage.GOAL_CONTRACT,
-            prompt=assembled.prompt,
-            schema=GoalContractHint,
-            ledger=ledger,
-            lease_id=(
-                f"{state['run_config'].run_id}:goal_contract:{uuid4().hex}"
-            ),
-            kwargs=self._kwargs,
-        )
-        return result.value
-
-
 class RetrievalHintDecision(BaseModel):
     reason: str
     retrieval_signals: dict[str, object] | None = None
@@ -212,7 +152,7 @@ class LLMRetrievalHintProvider(RetrievalHintProvider):
 
     def hint(
         self,
-        state: AgentState,
+        state: LoopState,
     ) -> dict[Any, Any] | Awaitable[dict[Any, Any]]:
         if self._uses_async_gateway:
             return self._hint_with_gateway(state)
@@ -237,7 +177,7 @@ class LLMRetrievalHintProvider(RetrievalHintProvider):
             decision = None
         return self._build_hint_update(state, decision)
 
-    async def _hint_with_gateway(self, state: AgentState) -> dict[Any, Any]:
+    async def _hint_with_gateway(self, state: LoopState) -> dict[Any, Any]:
         gateway = self._gateway
         if gateway is None:
             raise RuntimeError("retrieval hint gateway is not configured")
@@ -277,7 +217,7 @@ class LLMRetrievalHintProvider(RetrievalHintProvider):
 
     def _build_hint_update(
         self,
-        state: AgentState,
+        state: LoopState,
         decision: RetrievalHintDecision | None,
     ) -> dict[Any, Any]:
         task = state.get("task", "")
@@ -575,7 +515,7 @@ class LLMToolDecisionProvider(ToolDecisionProvider):
 
     def decide(
         self,
-        state: AgentState,
+        state: LoopState,
         *,
         definition: AgentDefinition,
         budget_remaining: int,
@@ -619,7 +559,7 @@ class LLMToolDecisionProvider(ToolDecisionProvider):
 
     async def _decide_with_gateway(
         self,
-        state: AgentState,
+        state: LoopState,
         *,
         definition: AgentDefinition,
         budget_remaining: int,
@@ -730,39 +670,6 @@ def create_default_providers(
                 kwargs=decision_kwargs,
             ),
         ),
-    )
-
-
-def create_goal_contract_provider(
-    registry: ModelRegistry,
-    definition: AgentDefinition,
-) -> LLMGoalContractProvider:
-    resolved = registry.resolve_for_node(
-        node_model=None,
-        node_name="goal_contract",
-    )
-    kwargs = dict(resolved.kwargs)
-    kwargs.setdefault("temperature", 0.0)
-    kwargs["max_tokens"] = min(
-        int(kwargs.get("max_tokens", 512)),
-        DEFAULT_LLM_STAGE_BUDGETS[
-            LLMCallStage.GOAL_CONTRACT
-        ].max_output_tokens,
-    )
-    gateway = resolved.gateway or _fallback_gateway(
-        resolved.generator,
-        LLMCallStage.GOAL_CONTRACT,
-    )
-    return LLMGoalContractProvider(
-        resolved.generator,
-        kwargs=kwargs,
-        gateway=gateway,
-        context_assembler=_assembler_from_gateway(
-            gateway,
-            LLMCallStage.GOAL_CONTRACT,
-            kwargs=kwargs,
-        ),
-        definition=definition,
     )
 
 

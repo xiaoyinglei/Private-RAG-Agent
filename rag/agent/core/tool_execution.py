@@ -11,7 +11,6 @@ from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from rag.agent.core.agent_as_tool import AgentAsToolExecutionError
 from rag.agent.core.approval_policy import (
     ApprovalDecision,
     ApprovalPolicy,
@@ -19,10 +18,11 @@ from rag.agent.core.approval_policy import (
 )
 from rag.agent.core.context import AgentRunConfig, RunRegistry
 from rag.agent.core.definition import AgentDefinition
+from rag.agent.core.delegation import AgentAsToolExecutionError
 from rag.agent.core.human_input import HumanInputRequest, HumanInputResponse
 from rag.agent.core.llm_context import AgentLLMContextOverflowError
 from rag.agent.memory.models import ContextBudgetSnapshot
-from rag.agent.state import ToolCallPlan
+from rag.agent.core.turn_contracts import ToolCallPlan
 from rag.agent.tools.rag_tools import RAG_SIGNAL_AWARE_TOOLS
 from rag.agent.tools.registry import (
     ToolExecutionContext,
@@ -36,9 +36,8 @@ from rag.schema.query import RetrievalSignals
 
 if TYPE_CHECKING:
     from rag.agent.loop.state import LoopState
-    from rag.agent.state import AgentState
 
-    type ToolState = AgentState | LoopState
+    type ToolState = LoopState
 
 ToolExecutionStatus = Literal[
     "prepared",

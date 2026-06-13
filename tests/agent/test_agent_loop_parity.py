@@ -52,7 +52,6 @@ def _assert_common_tool_parity(
 ) -> None:
     for field in (
         "final_answer",
-        "final_output",
         "output_validation_errors",
         "tool_results",
         "answer_candidates",
@@ -66,6 +65,16 @@ def _assert_common_tool_parity(
         "insufficient_evidence_flag",
     ):
         assert loop[field] == legacy[field], field
+    legacy_output = legacy["final_output"]
+    loop_output = loop["final_output"]
+    if legacy_output is None:
+        assert loop_output is None
+    else:
+        assert loop_output["data"] == legacy_output["data"]
+        assert (
+            loop_output["model_path"].rsplit(".", maxsplit=1)[-1]
+            == legacy_output["model_path"].rsplit(".", maxsplit=1)[-1]
+        )
 
 
 @pytest.mark.anyio

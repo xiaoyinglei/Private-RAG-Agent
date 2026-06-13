@@ -25,7 +25,12 @@ from rag.agent.loop.state import (
     materialize_model_turn,
     replace_latest_transition,
 )
-from rag.agent.state import ToolCallPlan, agent_state_to_loop_state, create_agent_state
+from rag.agent.state import (
+    AgentState,
+    ToolCallPlan,
+    agent_state_to_loop_state,
+    create_agent_state,
+)
 from rag.schema.runtime import AccessPolicy
 
 
@@ -175,22 +180,17 @@ def test_bounded_append_helpers_keep_only_recent_unique_values() -> None:
     assert len(state["runtime_diagnostics"]) == 20
 
 
-def test_legacy_agent_state_adapter_does_not_copy_goal_controller_fields() -> None:
-    legacy = create_agent_state(
+def test_agent_state_is_a_compatibility_alias_for_loop_state() -> None:
+    state = create_agent_state(
         task="Inspect architecture",
         run_config=_run_config("legacy-adapter"),
     )
-    legacy["goal_spec"] = object()
-    legacy["open_gaps"] = [object()]
-    legacy["satisfied_requirements"] = ["answer"]
 
-    state = agent_state_to_loop_state(legacy)
+    adapted = agent_state_to_loop_state(state)
 
-    assert state["task"] == legacy["task"]
-    assert state["messages"] == legacy["messages"]
-    assert "goal_spec" not in state
-    assert "open_gaps" not in state
-    assert "satisfied_requirements" not in state
+    assert AgentState is LoopState
+    assert set(state) == set(LoopState.__required_keys__)
+    assert adapted is state
 
 
 def test_new_checkpoint_models_round_trip_without_unregistered_warning(

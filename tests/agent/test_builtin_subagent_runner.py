@@ -2,17 +2,20 @@ from __future__ import annotations
 
 import pytest
 
+from rag.agent.builtin.synthesize import SYNTHESIZE_AGENT
 from rag.agent.builtin_registry import create_builtin_tool_registry
 from rag.agent.core.agent_service_factory import AgentServiceFactory
 from rag.agent.core.context import AgentRunConfig, RunRegistry
 from rag.agent.core.definition import AgentDefinition
 from rag.agent.core.delegation import AgentDelegationRequest
+from rag.agent.core.observations import AnswerCandidate, EvidenceRef
 from rag.agent.core.registry import AgentRegistry
-from rag.agent.core.subagent_runner import BuiltinSubAgentRunner
+from rag.agent.core.subagent_runner import BuiltinSubAgentRunner, BuiltinSynthesisRunner
+from rag.agent.core.turn_contracts import ThinkOutput, ToolCallPlan
+from rag.agent.loop.state import LoopState, create_loop_state
 from rag.agent.service import AgentRunResult
-from rag.agent.state import AgentState, ThinkOutput, ToolCallPlan
 from rag.agent.tools.llm_tools import LLMTextOutput
-from rag.schema.query import RetrievalSignals
+from rag.schema.query import AnswerCitation, EvidenceItem
 from rag.schema.runtime import AccessPolicy
 
 
@@ -23,7 +26,7 @@ class _ChildDecisionProvider:
 
     async def decide(
         self,
-        state: AgentState,
+        state: LoopState,
         *,
         definition: AgentDefinition,
         budget_remaining: int,
@@ -54,7 +57,7 @@ class _ChildDecisionProvider:
         )
 
 
-def _parent_state(run_id: str = "parent-run", *, max_depth: int = 2) -> AgentState:
+def _parent_state(run_id: str = "parent-run", *, max_depth: int = 2) -> LoopState:
     config = AgentRunConfig(
         run_id=run_id,
         thread_id=f"{run_id}-thread",
@@ -66,34 +69,7 @@ def _parent_state(run_id: str = "parent-run", *, max_depth: int = 2) -> AgentSta
     )
     RunRegistry.remove(run_id)
     RunRegistry.get_or_create(config)
-    return {
-        "messages": [],
-        "evidence": [],
-        "citations": [],
-        "tool_results": [],
-        "task": "Parent task",
-        "retrieval_signals": RetrievalSignals(),
-        "retrieval_signals_debug": None,
-        "run_config": config,
-        "iteration": 0,
-        "status": "running",
-        "decision_reason": None,
-        "stop_reason": None,
-        "needs_user_input": None,
-        "pending_tool_calls": [],
-        "approved_tool_call_ids": [],
-        "denied_tool_call_ids": [],
-        "user_decision": None,
-        "user_message": None,
-        "human_input_request": None,
-        "human_input_response": None,
-        "working_summary": None,
-        "extracted_facts": [],
-        "context_budget": None,
-        "final_answer": None,
-        "groundedness_flag": False,
-        "insufficient_evidence_flag": False,
-    }
+    return create_loop_state(task="Parent task", run_config=config)
 
 
 @pytest.mark.anyio
@@ -144,6 +120,94 @@ async def test_builtin_subagent_runner_returns_agent_run_result_with_derived_con
     assert first_child_config.budget_total == 2400
     with pytest.raises(KeyError):
         RunRegistry.get(result.run_id)
+
+
+@pytest.mark.anyio
+async def test_builtin_synthesis_runner_passes_bounded_grounding_to_child() -> None:
+    class _SynthesisService:
+        def __init__(self) -> None:
+            self.task = ""
+            self.config: AgentRunConfig | None = None
+            self.pending_tool_calls: list[ToolCallPlan] = []
+
+        async def run_with_config(
+            self,
+            *,
+            task: str,
+            run_config: AgentRunConfig,
+            pending_tool_calls: list[ToolCallPlan],
+        ) -> AgentRunResult:
+            self.task = task
+            self.config = run_config
+            self.pending_tool_calls = pending_tool_calls
+            return AgentRunResult(
+                run_id=run_config.run_id,
+                thread_id=run_config.thread_id,
+                status="done",
+                final_answer="grounded synthesis",
+            )
+
+    class _SynthesisFactory:
+        def __init__(self, service: _SynthesisService) -> None:
+            self.service = service
+
+        def create(self, definition: AgentDefinition) -> _SynthesisService:
+            assert definition == SYNTHESIZE_AGENT
+            return self.service
+
+    registry = AgentRegistry()
+    registry.register(SYNTHESIZE_AGENT)
+    service = _SynthesisService()
+    runner = BuiltinSynthesisRunner(
+        agent_registry=registry,
+        service_factory=_SynthesisFactory(service),  # type: ignore[arg-type]
+    )
+    state = _parent_state(run_id="synthesis-parent")
+    state["evidence"] = [
+        EvidenceItem(
+            evidence_id="ev-1",
+            doc_id=7,
+            citation_anchor="policy#3",
+            text="E" * 2_000,
+            score=0.9,
+        )
+    ]
+    state["citations"] = [
+        AnswerCitation(
+            citation_id="cit-1",
+            evidence_id="ev-1",
+            record_type="section",
+            citation_anchor="policy#3",
+            doc_id=7,
+        )
+    ]
+    state["answer_candidates"] = [
+        AnswerCandidate(
+            text="Candidate answer",
+            evidence_refs=[
+                EvidenceRef(
+                    evidence_id="ev-1",
+                    citation_id="cit-1",
+                    citation_anchor="policy#3",
+                )
+            ],
+        )
+    ]
+    state["evidence_refs"] = list(state["answer_candidates"][0].evidence_refs)
+
+    result = await runner.run_synthesis(parent_state=state)
+
+    assert result.final_answer == "grounded synthesis"
+    assert service.config is not None
+    assert service.config.parent_run_id == "synthesis-parent"
+    [call] = service.pending_tool_calls
+    assert call.tool_name == "llm_generate"
+    assert call.arguments["evidence_ids"] == ["ev-1"]
+    assert call.arguments["citation_ids"] == ["cit-1"]
+    assert all(
+        len(section) <= 1_600
+        for section in call.arguments["context_sections"]
+    )
 
 
 @pytest.mark.anyio

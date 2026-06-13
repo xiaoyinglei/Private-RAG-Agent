@@ -22,8 +22,8 @@ class ToolCallSummary(BaseModel):
 class HumanInputRequest(BaseModel):
     """Agent 暂停时向用户发送的输入请求。
 
-    由 run_tools_raw（经 ApprovalPolicy）或 decide_next（经 LLM）生成，
-    存入 state.human_input_request。pause_node 读取后调用 interrupt()。
+    由工具执行服务（经 ApprovalPolicy）或模型 turn provider 生成，
+    持久化在 canonical loop checkpoint 中。
     """
 
     request_id: str  # 唯一 ID，如 "hir_a1b2c3d4"
@@ -42,7 +42,7 @@ class HumanInputRequest(BaseModel):
 class HumanInputResponse(BaseModel):
     """用户对 HumanInputRequest 的响应。
 
-    由 pause_node 通过 interrupt() 接收，校验后写入 state。
+    由 AgentLoop resume 边界接收、校验并写回 loop state。
     """
 
     request_id: str

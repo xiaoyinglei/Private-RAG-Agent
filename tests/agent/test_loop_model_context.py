@@ -29,7 +29,7 @@ from rag.agent.memory.compactor import LoopContextCompactor, MemoryCompactor
 from rag.agent.memory.injector import ContextBuilder
 from rag.agent.memory.models import MemoryPolicy, StateChannelReplacement
 from rag.agent.planning import PlanStep, PlanTracker, PlanUpdate
-from rag.agent.state import ThinkOutput, ToolCallPlan, _merge_keyed_items
+from rag.agent.state import ThinkOutput, ToolCallPlan
 from rag.assembly.tokenizer import TokenAccountingService, TokenizerContract
 from rag.schema.llm import LLMCallStage, LLMStageBudget
 from rag.schema.runtime import AccessPolicy
@@ -223,12 +223,9 @@ def test_loop_context_keeps_approval_and_feedback_without_goal_fields() -> None:
             message="Add a traceable citation.",
         )
     ]
-    state["agent_plan"] = PlanTracker().initialize(
+    state["agent_plan"] = PlanTracker().initialize_task(
         task=state["task"],
-        open_gaps=["answer"],
     )[0]
-    state["goal_spec"] = object()
-    state["open_gaps"] = ["answer", "evidence"]
 
     context = ContextBuilder(max_context_tokens=4_000).assemble_loop(
         definition=_definition(),
@@ -246,7 +243,6 @@ def test_loop_context_keeps_approval_and_feedback_without_goal_fields() -> None:
 
 def test_loop_context_assembler_uses_focused_loop_entry_point() -> None:
     state = _state()
-    state["open_gaps"] = ["answer"]
 
     assembled = _assembler().assemble_loop_turn(
         definition=_definition(),
@@ -260,7 +256,7 @@ def test_loop_context_assembler_uses_focused_loop_entry_point() -> None:
     assert "Use tools when they help" in assembled.prompt
 
 
-def test_task_plan_is_advisory_and_ignores_goal_gap_references() -> None:
+def test_task_plan_is_advisory_and_filters_unsupported_tools() -> None:
     tracker = PlanTracker()
     plan, _ = tracker.initialize_task(task="Inspect the workspace and answer.")
 
@@ -272,7 +268,6 @@ def test_task_plan_is_advisory_and_ignores_goal_gap_references() -> None:
                 PlanStep(
                     step_id="step_inspect",
                     title="Inspect relevant files",
-                    related_gap_ids=["answer", "invented_gap"],
                     expected_tool_names=["vector_search", "delete_everything"],
                 )
             ],
@@ -281,10 +276,8 @@ def test_task_plan_is_advisory_and_ignores_goal_gap_references() -> None:
     )
 
     assert plan.steps[0].title == "Work on the current task."
-    assert updated.steps[0].related_gap_ids == []
     assert updated.steps[0].expected_tool_names == ["vector_search"]
-    assert "goal_gap_refs_ignored" in events[0].warnings
-    assert "unknown_gap_ids" not in events[0].warnings
+    assert "unsupported_tool_names" in events[0].warnings
 
 
 def test_loop_compaction_pins_pending_approval_and_candidate_evidence() -> None:
@@ -355,11 +348,14 @@ def test_loop_compaction_pins_pending_approval_and_candidate_evidence() -> None:
         ],
     }
 
-    compacted = compactor.compact_update(state, {"open_gaps": ["irrelevant"]})
+    compacted = compactor.compact_update(
+        state,
+        {"retrieval_signals_debug": {"source": "irrelevant"}},
+    )
 
     [replacement] = compacted["structured_observations"]
     assert isinstance(replacement, StateChannelReplacement)
-    observations = _merge_keyed_items(
+    observations = _apply_replacement(
         state["structured_observations"],
         compacted["structured_observations"],
     )
@@ -367,12 +363,14 @@ def test_loop_compaction_pins_pending_approval_and_candidate_evidence() -> None:
         pending.tool_call_id,
         approval.tool_call_id,
     }
-    evidence = _merge_keyed_items(
+    evidence = _apply_replacement(
         state["evidence_refs"],
         compacted["evidence_refs"],
     )
     assert evidence == [evidence_ref]
-    assert compacted["open_gaps"] == ["irrelevant"]
+    assert compacted["retrieval_signals_debug"] == {
+        "source": "irrelevant"
+    }
     assert compacted["memory_budget"].pinned_item_count >= 3
 
 
@@ -405,3 +403,12 @@ def test_loop_context_compaction_is_observable_before_model_turn() -> None:
     assert state["latest_transition"] is not None
     assert state["latest_transition"].reason == "compaction"
     assert "memory_unavailable" in state["memory_warnings"]
+
+
+def _apply_replacement(
+    current: list[object],
+    update: list[object],
+) -> list[object]:
+    if len(update) == 1 and isinstance(update[0], StateChannelReplacement):
+        return list(update[0].items)
+    return [*current, *update]

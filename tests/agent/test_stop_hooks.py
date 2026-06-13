@@ -8,8 +8,9 @@ from pydantic import BaseModel
 from rag.agent.core.context import AgentRunConfig
 from rag.agent.core.definition import AgentDefinition
 from rag.agent.core.finalization import FinishCandidateBuilder
+from rag.agent.core.observations import EvidenceRef
 from rag.agent.core.output_finalizer import OutputValidationExhaustedError
-from rag.agent.goal_runtime import GoalBuilder, GoalContractHint
+from rag.agent.compat.goal_contract import GoalDeliverable, GoalSpec
 from rag.agent.loop.state import ModelTurnDraft, create_loop_state
 from rag.agent.loop.stop_hooks import (
     GoalContractStopHook,
@@ -303,12 +304,20 @@ async def test_structured_output_exhaustion_halts_with_validation_details() -> N
 
 @pytest.mark.anyio
 async def test_explicit_goal_contract_blocks_missing_evidence_without_routing_fields() -> None:
-    goal = GoalBuilder().initialize(
-        "Answer with evidence",
-        contract_hint=GoalContractHint(
-            deliverable_kinds=["answer", "evidence"],
-            reason="Explicit test contract.",
-        ),
+    goal = GoalSpec(
+        original_query="Answer with evidence",
+        deliverables=[
+            GoalDeliverable(
+                deliverable_id="answer",
+                kind="answer",
+                acceptance_rule="non_empty_answer",
+            ),
+            GoalDeliverable(
+                deliverable_id="evidence",
+                kind="evidence",
+                acceptance_rule="traceable_evidence",
+            ),
+        ],
     )
     state = _state()
     hook = GoalContractStopHook(goal_spec=goal)
@@ -317,8 +326,45 @@ async def test_explicit_goal_contract_blocks_missing_evidence_without_routing_fi
 
     assert verdict.action == "block"
     assert verdict.code == "goal_contract_unsatisfied"
+    assert verdict.detail["unsatisfied_issue_ids"] == ["evidence"]
+    assert "open_gap_ids" not in verdict.detail
     assert "open_gaps" not in state
     assert "satisfied_requirements" not in state
+
+
+@pytest.mark.anyio
+async def test_explicit_goal_contract_accepts_traceable_evidence() -> None:
+    goal = GoalSpec(
+        original_query="Answer with evidence",
+        deliverables=[
+            GoalDeliverable(
+                deliverable_id="answer",
+                kind="answer",
+                acceptance_rule="non_empty_answer",
+            ),
+            GoalDeliverable(
+                deliverable_id="evidence",
+                kind="evidence",
+                acceptance_rule="traceable_evidence",
+            ),
+        ],
+    )
+    state = _state()
+    state["evidence_refs"] = [
+        EvidenceRef(
+            evidence_id="evidence-1",
+            citation_id="citation-1",
+            source="citation",
+        )
+    ]
+
+    verdict = await GoalContractStopHook(goal_spec=goal).evaluate(
+        state=state,
+        candidate="Supported answer",
+    )
+
+    assert verdict.action == "accept"
+    assert verdict.code == "goal_contract_satisfied"
 
 
 def test_stop_hook_factory_installs_goal_hook_only_when_explicitly_supplied() -> None:
@@ -328,7 +374,7 @@ def test_stop_hook_factory_installs_goal_hook_only_when_explicitly_supplied() ->
         system_prompt="Answer.",
         allowed_tools=[],
     )
-    goal = GoalBuilder().initialize("Answer")
+    goal = GoalSpec(original_query="Answer")
 
     ordinary = build_stop_hooks(definition=definition)
     explicit = build_stop_hooks(definition=definition, goal_spec=goal)

@@ -11,7 +11,7 @@ from rag.agent.core.output_finalizer import (
     OutputValidationExhaustedError,
     final_answer_from_output,
 )
-from rag.agent.state import AgentState
+from rag.agent.loop.state import LoopState, create_loop_state
 from rag.assembly.tokenizer import TokenAccountingService, TokenizerContract
 from rag.providers.llm_gateway import LLMGateway
 from rag.schema.llm import LLMCallStage, LLMStageBudget
@@ -97,7 +97,7 @@ def _definition(*, retries: int = 2) -> AgentDefinition:
     )
 
 
-def _state(*, task: str = "Answer with confidence") -> AgentState:
+def _state(*, task: str = "Answer with confidence") -> LoopState:
     config = AgentRunConfig(
         run_id="output-finalizer",
         thread_id="output-finalizer",
@@ -107,56 +107,7 @@ def _state(*, task: str = "Answer with confidence") -> AgentState:
     )
     RunRegistry.remove(config.run_id)
     RunRegistry.get_or_create(config)
-    return {
-        "messages": [],
-        "evidence": [],
-        "citations": [],
-        "tool_results": [],
-        "task": task,
-        "retrieval_signals": RetrievalSignals(),
-        "retrieval_signals_debug": None,
-        "run_config": config,
-        "iteration": 0,
-        "status": "done",
-        "decision_reason": None,
-        "stop_reason": "goal_satisfied",
-        "needs_user_input": None,
-        "pending_tool_calls": [],
-        "approved_tool_call_ids": [],
-        "denied_tool_call_ids": [],
-        "user_decision": None,
-        "user_message": None,
-        "human_input_request": None,
-        "human_input_response": None,
-        "working_summary": None,
-        "extracted_facts": [],
-        "context_budget": None,
-        "final_answer": None,
-        "final_output": None,
-        "groundedness_flag": False,
-        "insufficient_evidence_flag": False,
-        "goal_spec": None,
-        "goal_requirements": [],
-        "satisfied_requirements": [],
-        "open_gaps": [],
-        "evidence_refs": [],
-        "answer_candidates": [],
-        "computation_results": [],
-        "structured_observations": [],
-        "context_units": [],
-        "context_bindings": [],
-        "locators": [],
-        "asset_refs": [],
-        "conflicts": [],
-        "no_progress_count": 0,
-        "satisfaction_report": None,
-        "controller_next": None,
-        "agent_plan": None,
-        "plan_events": [],
-        "memory_refs": [],
-        "memory_budget": None,
-        "memory_warnings": [],
-    }
+    return create_loop_state(task=task, run_config=config)
 
 
 @pytest.mark.anyio

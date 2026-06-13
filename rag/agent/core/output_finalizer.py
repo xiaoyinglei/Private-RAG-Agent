@@ -21,9 +21,6 @@ from rag.schema.llm import DEFAULT_LLM_STAGE_BUDGETS, LLMCallStage
 if TYPE_CHECKING:
     from rag.agent.core.definition import AgentDefinition
     from rag.agent.loop.state import LoopState
-    from rag.agent.state import AgentState
-
-    type AgentOutputState = AgentState | LoopState
 
 
 class OutputValidationExhaustedError(RuntimeError):
@@ -45,7 +42,7 @@ class StructuredOutputFinalizer(Protocol):
         self,
         *,
         definition: AgentDefinition,
-        state: AgentOutputState,
+        state: LoopState,
         candidate_text: str,
     ) -> BaseModel | Awaitable[BaseModel]: ...
 
@@ -77,7 +74,7 @@ class ModelStructuredOutputFinalizer:
         self,
         *,
         definition: AgentDefinition,
-        state: AgentOutputState,
+        state: LoopState,
         candidate_text: str,
     ) -> BaseModel:
         output_model = definition.output_model

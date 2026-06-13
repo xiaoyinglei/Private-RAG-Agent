@@ -23,6 +23,7 @@ from rag.agent.core.runtime_diagnostics import (
     merge_runtime_diagnostics,
 )
 from rag.agent.core.tool_execution import ToolExecutionRecord
+from rag.agent.core.turn_contracts import ToolCallPlan
 from rag.agent.memory.models import (
     ContextBudgetSnapshot,
     ExtractedFact,
@@ -31,7 +32,6 @@ from rag.agent.memory.models import (
     WorkingSummary,
 )
 from rag.agent.planning import AgentPlan, PlanEvent
-from rag.agent.state import ToolCallPlan
 from rag.agent.tools.spec import ToolResult
 from rag.schema.query import AnswerCitation, EvidenceItem, RetrievalSignals
 

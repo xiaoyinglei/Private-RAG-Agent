@@ -13,6 +13,21 @@ from rag.schema.query import AnswerCitation, EvidenceItem
 DEFAULT_DELEGATION_TOKEN_BUDGET = 10000
 
 
+class AgentAsToolExecutionError(RuntimeError):
+    def __init__(
+        self,
+        agent_name: str,
+        message: str,
+        *,
+        status: str = "failed",
+        stop_reason: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.agent_name = agent_name
+        self.status = status
+        self.stop_reason = stop_reason
+
+
 class ParentAgentContext(TypedDict):
     """Minimal parent data required to derive a bounded child run."""
 
@@ -50,6 +65,7 @@ class DelegatedAgentRunner(Protocol):
 
 __all__ = [
     "AgentDelegationRequest",
+    "AgentAsToolExecutionError",
     "DEFAULT_DELEGATION_TOKEN_BUDGET",
     "DelegatedAgentResult",
     "DelegatedAgentRunner",

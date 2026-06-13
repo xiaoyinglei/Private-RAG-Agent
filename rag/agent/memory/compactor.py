@@ -966,7 +966,6 @@ class MemoryCompactor:
         plan = combined.get("agent_plan")
         active_step = _active_plan_step(plan)
         active_tool_call_ids = set(getattr(active_step, "tool_call_ids", []) or [])
-        active_gap_ids = set(getattr(active_step, "related_gap_ids", []) or [])
         active_evidence_refs = set(getattr(active_step, "evidence_refs", []) or [])
 
         for tool_call_id in active_tool_call_ids:
@@ -983,10 +982,6 @@ class MemoryCompactor:
             pins["evidence"].add(str(ref))
             pins["citations"].add(str(ref))
 
-        for observation in self._combined_items(state, update, "structured_observations"):
-            if not _observation_matches_active_gap(observation, active_gap_ids):
-                continue
-            pins["structured_observations"].add(_item_key(observation))
         for unit in self._combined_items(state, update, "context_units"):
             content_ref = getattr(unit, "content_ref", None)
             if isinstance(content_ref, str) and content_ref in active_tool_call_ids:
@@ -1456,16 +1451,6 @@ def _active_plan_step(plan: Any) -> Any | None:
         if getattr(step, "status", None) in {"in_progress", "pending"}:
             return step
     return None
-
-
-def _observation_matches_active_gap(observation: Any, active_gap_ids: set[str]) -> bool:
-    if not active_gap_ids:
-        return False
-    values = [
-        *list(getattr(observation, "resolved_gaps", []) or []),
-        *list(getattr(observation, "related_gap_ids", []) or []),
-    ]
-    return bool({str(value) for value in values if str(value)} & active_gap_ids)
 
 
 def _model_path(model: BaseModel) -> str:

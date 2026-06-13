@@ -39,12 +39,13 @@ from rag.agent.core.runtime_diagnostics import (
     RuntimeDiagnostic,
     merge_runtime_diagnostics,
 )
+from rag.agent.core.runtime_ports import (
+    RetrievalHintProvider,
+    ToolDecisionProvider,
+)
 from rag.agent.core.tool_execution import ToolExecutionService
-from rag.agent.goal_runtime import GoalSpec
-from rag.agent.graphs.nodes.goal_runtime import GoalContractProvider
-from rag.agent.graphs.nodes.llm_decide import ToolDecisionProvider
-from rag.agent.graphs.nodes.retrieval_hint import RetrievalHintProvider
-from rag.agent.graphs.nodes.synthesize import SynthesisRunner
+from rag.agent.core.turn_contracts import ToolCallPlan
+from rag.agent.compat.goal_contract import GoalSpec
 from rag.agent.loop.runtime import AgentLoop, ModelTurnProvider
 from rag.agent.loop.state import (
     LoopState,
@@ -59,7 +60,6 @@ from rag.agent.memory.compactor import (
 )
 from rag.agent.memory.models import MemoryPolicy
 from rag.agent.memory.store import WorkspaceMemoryStore
-from rag.agent.state import AgentState, ToolCallPlan, create_agent_state
 from rag.agent.tools.registry import ToolRegistry, ToolRunner
 from rag.agent.tools.spec import ToolResult
 from rag.schema.query import AnswerCitation, EvidenceItem
@@ -127,42 +127,15 @@ class AgentRunResult(BaseModel):
     @classmethod
     def from_state(
         cls,
-        state: AgentState,
+        state: LoopState,
         *,
         definition: AgentDefinition | None = None,
         workspace_path: str | None = None,
     ) -> AgentRunResult:
-        run_config = state["run_config"]
-        is_terminal = state["status"] in {"done", "failed"}
-        human_request = None if is_terminal else state.get("human_input_request")
-        pending = state.get("pending_tool_calls", [])
-        return cls(
-            run_id=run_config.run_id,
-            thread_id=run_config.thread_id,
-            status=state["status"],
-            final_answer=state.get("final_answer"),
-            final_output=_restore_final_output(
-                state.get("final_output"),
-                definition=definition,
-            ),
-            output_validation_errors=list(
-                state.get("output_validation_errors", [])
-            ),
-            stop_reason=state.get("stop_reason"),
-            tool_results=list(state.get("tool_results", [])),
-            evidence=list(state.get("evidence", [])),
-            citations=list(state.get("citations", [])),
-            iteration=state.get("iteration", 0),
-            groundedness_flag=state.get("groundedness_flag", False),
-            insufficient_evidence_flag=state.get("insufficient_evidence_flag", False),
-            needs_user_input=None if is_terminal else state.get("needs_user_input"),
-            human_input_request=human_request,
-            pending_tool_calls_summary=[
-                {"tool_call_id": tc.tool_call_id, "tool_name": tc.tool_name}
-                for tc in pending
-            ],
+        return cls.from_loop_result(
+            state,
+            definition=definition,
             workspace_path=workspace_path,
-            runtime_diagnostics=list(state.get("runtime_diagnostics", [])),
         )
 
     @classmethod
@@ -281,10 +254,9 @@ class AgentService:
         tool_registry: ToolRegistry,
         model_turn_provider: ModelTurnProvider | None = None,
         tool_decision_provider: ToolDecisionProvider | None = None,
-        goal_contract_provider: GoalContractProvider | None = None,
         retrieval_hint_provider: RetrievalHintProvider | None = None,
         subagent_runner: DelegatedAgentRunner | None = None,
-        synthesis_runner: SynthesisRunner | None = None,
+        synthesis_runner: CompatibilitySynthesisRunner | None = None,
         output_finalizer: StructuredOutputFinalizer | None = None,
         model_registry: ModelRegistry | None = None,
         checkpointer: BaseCheckpointSaver[str] | None = None,
@@ -294,7 +266,6 @@ class AgentService:
         self._base_tool_registry = tool_registry
         self._model_turn_provider = model_turn_provider
         self._tool_decision_provider = tool_decision_provider
-        self._goal_contract_provider = goal_contract_provider
         self._retrieval_hint_provider = retrieval_hint_provider
         self._subagent_runner = subagent_runner
         self._synthesis_runner = synthesis_runner
@@ -306,7 +277,7 @@ class AgentService:
         self._checkpointer = checkpointer or create_agent_checkpointer(None)
         self._goal_specs_by_run_id: dict[str, GoalSpec] = {}
 
-    def initial_state(self, request: AgentRunRequest) -> AgentState:
+    def initial_state(self, request: AgentRunRequest) -> LoopState:
         run_config = request.to_run_config(self._definition)
         return self.initial_state_from_config(
             task=request.task,
@@ -315,7 +286,6 @@ class AgentService:
             approved_tool_call_ids=request.approved_tool_call_ids,
             denied_tool_call_ids=request.denied_tool_call_ids,
             messages=request.messages,
-            goal_spec=request.goal_spec,
         )
 
     def initial_state_from_config(
@@ -327,25 +297,27 @@ class AgentService:
         approved_tool_call_ids: list[str] | None = None,
         denied_tool_call_ids: list[str] | None = None,
         messages: list[BaseMessage] | None = None,
-        goal_spec: GoalSpec | None = None,
         memory_store: WorkspaceMemoryStore | None = None,
-    ) -> AgentState:
+    ) -> LoopState:
         RunRegistry.remove(run_config.run_id)
         handles = RunRegistry.get_or_create(run_config)
         if memory_store is not None:
             handles.memory_store = memory_store
-        state = create_agent_state(
+        state = create_loop_state(
             task=task,
             run_config=run_config,
-            pending_tool_calls=pending_tool_calls,
-            approved_tool_call_ids=approved_tool_call_ids,
-            denied_tool_call_ids=denied_tool_call_ids,
-            messages=messages,
-            goal_spec=goal_spec,
+            pending_tool_calls=pending_tool_calls or (),
+            messages=messages or (),
             runtime_diagnostics=self._runtime_diagnostics,
         )
+        state["approved_tool_call_ids"] = list(
+            approved_tool_call_ids or ()
+        )
+        state["denied_tool_call_ids"] = list(
+            denied_tool_call_ids or ()
+        )
         return cast(
-            AgentState,
+            LoopState,
             MessageCompactor(
                 policy=run_config.memory_policy,
                 store=memory_store,

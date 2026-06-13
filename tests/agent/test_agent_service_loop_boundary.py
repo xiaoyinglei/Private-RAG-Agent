@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import cast
+from pathlib import Path
 
 import pytest
 from langgraph.checkpoint.memory import MemorySaver
@@ -18,7 +18,7 @@ from rag.agent.core.tool_execution import (
     ToolExecutionRecord,
     tool_arguments_digest,
 )
-from rag.agent.goal_runtime import GoalDeliverable, GoalSpec
+from rag.agent.compat.goal_contract import GoalDeliverable, GoalSpec
 from rag.agent.loop.state import LoopState, ModelTurnDraft, create_loop_state
 from rag.agent.service import AgentRunRequest, AgentService
 from rag.agent.state import ToolCallPlan
@@ -73,12 +73,6 @@ class _PauseAfterGoalFeedbackProvider:
             action="finish",
             final_answer="unsupported answer",
         )
-
-
-class _ExplodingGoalProvider:
-    def infer(self, state: object) -> object:
-        del state
-        raise AssertionError("goal controller must not run")
 
 
 def _definition(*, requires_confirmation: bool = False) -> AgentDefinition:
@@ -148,7 +142,6 @@ async def test_service_run_invokes_agent_loop_without_compiling_inner_graph(
         definition=_definition(),
         tool_registry=_registry(calls),
         model_turn_provider=_FinishFromResultsProvider(),
-        goal_contract_provider=cast(object, _ExplodingGoalProvider()),
     )
     call = ToolCallPlan.create("write_tool", {"value": "once"})
 
@@ -283,7 +276,6 @@ async def test_explicit_goal_spec_is_a_stop_hook_not_default_controller() -> Non
         definition=_definition(),
         tool_registry=_registry([]),
         model_turn_provider=_PauseAfterGoalFeedbackProvider(),
-        goal_contract_provider=cast(object, _ExplodingGoalProvider()),
     )
     goal = GoalSpec(
         original_query="Answer with evidence.",
@@ -312,3 +304,61 @@ async def test_explicit_goal_spec_is_a_stop_hook_not_default_controller() -> Non
 
     assert result.status == "paused"
     assert result.needs_user_input == "Explicit goal still needs evidence."
+
+
+def test_runtime_boundaries_do_not_import_inner_graph_nodes() -> None:
+    root = Path(__file__).resolve().parents[2]
+    runtime_files = [
+        "rag/agent/service.py",
+        "rag/agent/core/agent_service_factory.py",
+        "rag/agent/core/agent_as_tool.py",
+        "rag/agent/core/compiler.py",
+        "rag/agent/core/llm_providers.py",
+        "rag/agent/builtin/research.py",
+    ]
+
+    offenders = [
+        relative
+        for relative in runtime_files
+        if "rag.agent.graphs.nodes" in (root / relative).read_text()
+    ]
+
+    assert offenders == []
+
+
+def test_runtime_modules_use_loop_state_instead_of_compatibility_state() -> None:
+    root = Path(__file__).resolve().parents[2]
+    runtime_files = [
+        "rag/agent/core/llm_context.py",
+        "rag/agent/core/output_finalizer.py",
+        "rag/agent/memory/injector.py",
+        "rag/agent/tools/registry.py",
+    ]
+
+    offenders = [
+        relative
+        for relative in runtime_files
+        if "rag.agent.state" in (root / relative).read_text(encoding="utf-8")
+    ]
+
+    assert offenders == []
+
+
+def test_default_runtime_has_no_goal_gap_planning_fields() -> None:
+    root = Path(__file__).resolve().parents[2] / "rag" / "agent"
+    forbidden = (
+        "related_gap_ids",
+        "resolved_gaps",
+        "produced_gaps",
+        "goal_gap_refs_ignored",
+    )
+    offenders: list[str] = []
+
+    for path in root.rglob("*.py"):
+        if "compat" in path.parts or path.name == "stop_hooks.py":
+            continue
+        source = path.read_text(encoding="utf-8")
+        if any(symbol in source for symbol in forbidden):
+            offenders.append(str(path.relative_to(root)))
+
+    assert offenders == []

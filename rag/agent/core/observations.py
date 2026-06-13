@@ -95,11 +95,8 @@ class StructuredObservation(BaseModel):
     error: str | None = None
     raw_result_ref: str
     raw_memory_ref: MemoryRef | None = None
-    related_gap_ids: list[str] = Field(default_factory=list)
     related_step_ids: list[str] = Field(default_factory=list)
     metadata: dict[str, object] = Field(default_factory=dict)
-    resolved_gaps: list[str] = Field(default_factory=list)
-    produced_gaps: list[str] = Field(default_factory=list)
 
 
 class ObservationError(BaseModel):
