@@ -7,7 +7,7 @@ from rag.agent.core.context import RunRegistry
 from rag.agent.core.definition import AgentDefinition
 from rag.agent.core.llm_context import AgentLLMContextAssembler
 from rag.agent.core.llm_registry import ModelRegistry, ResolvedModel
-from rag.agent.state import AgentState
+from rag.agent.loop.state import LoopState
 from rag.agent.tools.llm_tools import (
     LLMCompareInput,
     LLMGenerateInput,
@@ -224,10 +224,10 @@ def _model_boundary(
 
 def _trusted_agent_context(
     execution_context: ToolExecutionContext,
-) -> tuple[AgentState, AgentDefinition]:
+) -> tuple[LoopState, AgentDefinition]:
     if execution_context.state is None or execution_context.definition is None:
         raise RuntimeError(
-            "Agent LLM tools require trusted AgentState and AgentDefinition"
+            "Agent LLM tools require trusted LoopState and AgentDefinition"
         )
     return execution_context.state, execution_context.definition
 

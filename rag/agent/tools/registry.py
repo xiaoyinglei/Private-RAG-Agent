@@ -12,14 +12,15 @@ from rag.agent.tools.spec import ToolSpec
 if TYPE_CHECKING:
     from rag.agent.core.context import AgentRunConfig
     from rag.agent.core.definition import AgentDefinition
-    from rag.agent.state import AgentState
+    from rag.agent.loop.state import LoopState
 
 
 @dataclass(frozen=True)
 class ToolExecutionContext:
     run_config: AgentRunConfig
+    operation_id: str | None = None
     tool_call_id: str | None = None
-    state: AgentState | None = None
+    state: LoopState | None = None
     definition: AgentDefinition | None = None
 
 

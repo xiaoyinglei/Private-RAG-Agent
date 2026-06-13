@@ -5,6 +5,7 @@ from typing import Any
 import pytest
 from pydantic import BaseModel
 
+from rag.agent.core.context import AgentRunConfig, RunRegistry
 from rag.agent.core.llm_providers import (
     LLMRetrievalHintProvider,
     _extract_quoted_terms,
@@ -12,7 +13,11 @@ from rag.agent.core.llm_providers import (
     _merge_quoted_terms,
     _validate_retrieval_signals,
 )
-from rag.agent.graphs.nodes.execute import run_tools_raw
+from rag.agent.core.tool_execution import (
+    ToolBatchRequest,
+    ToolExecutionService,
+)
+from rag.agent.loop.state import create_loop_state
 from rag.agent.tools.rag_tools import RAG_SIGNAL_AWARE_TOOLS, SearchInput, SearchOutput
 from rag.agent.tools.registry import ToolRegistry
 from rag.agent.tools.spec import ToolError, ToolPermissions, ToolSpec
@@ -26,32 +31,43 @@ class _DummyResult(BaseModel):
 
 
 def _make_state(**overrides: object) -> dict:
-    from rag.agent.core.context import AgentRunConfig
     from rag.schema.runtime import AccessPolicy
 
-    s: dict[str, Any] = {
-        "messages": [],
-        "evidence": [],
-        "citations": [],
-        "tool_results": [],
-        "task": "test query",
-        "retrieval_signals": RetrievalSignals(),
-        "retrieval_signals_debug": None,
-        "run_config": AgentRunConfig(
+    config = AgentRunConfig(
             run_id="sig-test", thread_id="sig-test", budget_total=10000, max_depth=2,
             access_policy=AccessPolicy.default(),
-        ),
-        "iteration": 0, "status": "running",
-        "decision_reason": None, "stop_reason": None, "needs_user_input": None,
-        "pending_tool_calls": [], "approved_tool_call_ids": [], "denied_tool_call_ids": [],
-        "user_decision": None, "user_message": None,
-        "human_input_request": None, "human_input_response": None,
-        "working_summary": None,
-        "extracted_facts": [], "context_budget": None,
-        "final_answer": None, "groundedness_flag": False, "insufficient_evidence_flag": False,
-    }
+        )
+    RunRegistry.remove(config.run_id)
+    RunRegistry.get_or_create(config)
+    s: dict[str, Any] = create_loop_state(
+        task="test query",
+        run_config=config,
+    )
     s.update(overrides)
     return s
+
+
+async def _run_tools(
+    state: dict[str, Any],
+    *,
+    tool_registry: ToolRegistry,
+    allowed_tools: frozenset[str],
+) -> dict[str, object]:
+    result = await ToolExecutionService(
+        tool_registry=tool_registry
+    ).execute_batch(
+        ToolBatchRequest(
+            calls=tuple(state["pending_tool_calls"]),
+            run_config=state["run_config"],
+            allowed_tools=allowed_tools,
+            retrieval_signals=state.get("retrieval_signals"),
+        ),
+        state=state,  # type: ignore[arg-type]
+    )
+    return {
+        "status": result.status,
+        "tool_results": list(result.tool_results),
+    }
 
 
 def _stub_gen(*responses: dict[str, object]) -> object:
@@ -278,7 +294,7 @@ class TestLLMRetrievalHintProviderSignals:
         assert debug["signals_source"] == "validation_failed"
 
 
-# ── run_tools_raw injects signals ──
+# ToolExecutionService injects retrieval signals.
 
 
 class TestExecuteNodeSignalInjection:
@@ -307,7 +323,7 @@ class TestExecuteNodeSignalInjection:
         )
         call = ToolCallPlan.create("vector_search", {"query": "test", "top_k": 8})
 
-        update = await run_tools_raw(
+        update = await _run_tools(
             _make_state(
                 retrieval_signals=signals,
                 pending_tool_calls=[call],
@@ -349,7 +365,7 @@ class TestExecuteNodeSignalInjection:
         from rag.agent.state import ToolCallPlan
         call = ToolCallPlan.create("llm_summarize", {"text": "hello"})
 
-        await run_tools_raw(
+        await _run_tools(
             _make_state(
                 retrieval_signals=RetrievalSignals(quoted_terms=["test"]),
                 pending_tool_calls=[call],
@@ -383,7 +399,7 @@ class TestExecuteNodeSignalInjection:
             "retrieval_signals": explicit_signals.model_dump(mode="json"),
         })
 
-        await run_tools_raw(
+        await _run_tools(
             _make_state(
                 retrieval_signals=RetrievalSignals(quoted_terms=["state中的"]),
                 pending_tool_calls=[call],
@@ -415,7 +431,7 @@ class TestExecuteNodeSignalInjection:
         from rag.agent.state import ToolCallPlan
         call = ToolCallPlan.create("keyword_search", {"query": "test"})
 
-        await run_tools_raw(
+        await _run_tools(
             _make_state(
                 retrieval_signals=None,  # type: ignore[arg-type]
                 pending_tool_calls=[call],
@@ -483,10 +499,10 @@ class TestNoRoutingMapping:
         assert "RuntimeMode" not in text
         assert "runtime_mode" not in text.lower()
 
-    def test_run_tools_raw_has_no_routing_from_signals(self) -> None:
+    def test_tool_execution_has_no_routing_from_signals(self) -> None:
         import inspect
 
-        import rag.agent.graphs.nodes.execute as m
+        import rag.agent.core.tool_execution as m
         src = inspect.getsource(m)
         assert "_routing_from_signals" not in src
 

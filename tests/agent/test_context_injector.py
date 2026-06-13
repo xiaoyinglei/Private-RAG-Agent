@@ -4,11 +4,17 @@ from langchain_core.messages import HumanMessage
 
 from rag.agent.core.context import AgentRunConfig
 from rag.agent.core.definition import AgentDefinition
-from rag.agent.goal_runtime import AnswerCandidate, ContextUnit, EvidenceRef, GoalSpec, StructuredObservation
+from rag.agent.core.observations import (
+    AnswerCandidate,
+    ContextUnit,
+    EvidenceRef,
+    StructuredObservation,
+)
+from rag.agent.loop.state import LoopState, create_loop_state
 from rag.agent.memory.injector import ContextBuilder
 from rag.agent.memory.models import ExternalizedToolOutput, ExtractedFact, MemoryRef, WorkingSummary
 from rag.agent.planning import AgentPlan, PlanStep
-from rag.agent.state import AgentState
+from rag.agent.state import ToolCallPlan
 from rag.agent.tools.llm_tools import LLMTextOutput
 from rag.agent.tools.spec import ToolError, ToolResult
 from rag.schema.query import AnswerCitation, EvidenceItem
@@ -41,88 +47,67 @@ def _definition() -> AgentDefinition:
     )
 
 
-def _state() -> AgentState:
-    return {
-        "messages": [HumanMessage(content="recent tail", id="h-tail")],
-        "evidence": [
-            EvidenceItem(
-                evidence_id="ev1",
-                doc_id=1,
-                citation_anchor="doc#1",
-                text="Authoritative evidence text",
-                score=0.91,
-                record_type="section",
-            )
-        ],
-        "citations": [
-            AnswerCitation(
-                citation_id="cit1",
-                evidence_id="ev1",
-                record_type="section",
-                citation_anchor="doc#1",
-            )
-        ],
-        "tool_results": [
-            ToolResult(
-                tool_call_id="tc1",
-                tool_name="search",
-                status="error",
-                error=ToolError(code="tool_not_implemented", message="not wired", retryable=False),
-                latency_ms=0,
-            )
-        ],
-        "task": "Explain policy",
-        "run_config": AgentRunConfig(
+def _state() -> LoopState:
+    state = create_loop_state(
+        task="Explain policy",
+        run_config=AgentRunConfig(
             run_id="ctx",
             thread_id="ctx",
             budget_total=1000,
             max_depth=2,
             access_policy=AccessPolicy.default(),
         ),
-        "iteration": 0,
-        "status": "running",
-        "decision_reason": None,
-        "stop_reason": None,
-        "needs_user_input": None,
-        "pending_tool_calls": [],
-        "approved_tool_call_ids": [],
-        "denied_tool_call_ids": [],
-        "user_decision": None,
-        "working_summary": WorkingSummary(
-            summary="Prior working summary",
-            covered_message_ids=["h1"],
-            updated_at="2026-05-08T00:00:00Z",
-            token_count=3,
+        messages=[HumanMessage(content="recent tail", id="h-tail")],
+    )
+    state["evidence"] = [
+        EvidenceItem(
+            evidence_id="ev1",
+            doc_id=1,
+            citation_anchor="doc#1",
+            text="Authoritative evidence text",
+            score=0.91,
+            record_type="section",
+        )
+    ]
+    state["citations"] = [
+        AnswerCitation(
+            citation_id="cit1",
+            evidence_id="ev1",
+            record_type="section",
+            citation_anchor="doc#1",
+        )
+    ]
+    state["tool_results"] = [
+        ToolResult(
+            tool_call_id="tc1",
+            tool_name="search",
+            status="error",
+            error=ToolError(
+                code="tool_not_implemented",
+                message="not wired",
+                retryable=False,
+            ),
+            latency_ms=0,
+        )
+    ]
+    state["working_summary"] = WorkingSummary(
+        summary="Prior working summary",
+        covered_message_ids=["h1"],
+        updated_at="2026-05-08T00:00:00Z",
+        token_count=3,
+    )
+    state["extracted_facts"] = [
+        ExtractedFact(
+            fact_id="f1",
+            text="Memory fact",
+            evidence_ids=["ev1"],
         ),
-        "extracted_facts": [
-            ExtractedFact(fact_id="f1", text="Memory fact", evidence_ids=["ev1"]),
-        ],
-        "context_budget": None,
-        "final_answer": None,
-        "groundedness_flag": False,
-        "insufficient_evidence_flag": False,
-        "goal_spec": None,
-        "goal_requirements": [],
-        "satisfied_requirements": [],
-        "open_gaps": [],
-        "evidence_refs": [],
-        "answer_candidates": [],
-        "computation_results": [],
-        "structured_observations": [],
-        "locators": [],
-        "asset_refs": [],
-        "conflicts": [],
-        "no_progress_count": 0,
-        "satisfaction_report": None,
-        "controller_next": None,
-        "memory_refs": [],
-        "memory_budget": None,
-        "memory_warnings": [],
-    }
+    ]
+    return state
 
 
 def test_context_sections_follow_spec_order() -> None:
-    context = ContextBuilder(max_context_tokens=1000).assemble(
+    context = ContextBuilder(max_context_tokens=1000).assemble_loop(
         definition=_definition(),
         state=_state(),
     )
@@ -135,7 +120,7 @@ def test_context_sections_follow_spec_order() -> None:
 
 
 def test_historical_hints_are_marked_non_authoritative() -> None:
-    context = ContextBuilder(max_context_tokens=1000).assemble(
+    context = ContextBuilder(max_context_tokens=1000).assemble_loop(
         definition=_definition(),
         state=_state(),
         recalled_memories=["Old project preference"],
@@ -150,7 +135,7 @@ def test_budget_keeps_evidence_before_tail() -> None:
     state = _state()
     state["messages"] = [HumanMessage(content="tail " * 200, id="h-tail")]
 
-    context = ContextBuilder(max_context_tokens=18).assemble(
+    context = ContextBuilder(max_context_tokens=18).assemble_loop(
         definition=_definition(),
         state=state,
     )
@@ -165,10 +150,12 @@ def test_budget_keeps_evidence_before_tail() -> None:
     assert "message_tail" in context.context_budget.dropped_sections
 
 
-def test_budget_priority_keeps_open_decisions_before_evidence_refs_and_tail() -> None:
+def test_budget_priority_keeps_pending_decisions_before_memory_and_tail() -> None:
     state = _state()
     state["messages"] = [HumanMessage(content="tail " * 200, id="h-tail")]
-    state["open_gaps"] = ["evidence"]
+    state["pending_tool_calls"] = [
+        ToolCallPlan.create("search", {"query": "policy"})
+    ]
     state["memory_refs"] = [
             MemoryRef(
                 ref_id=f"mem_{index}",
@@ -181,7 +168,7 @@ def test_budget_priority_keeps_open_decisions_before_evidence_refs_and_tail() ->
             for index in range(8)
         ]
 
-    context = ContextBuilder(max_context_tokens=350).assemble(
+    context = ContextBuilder(max_context_tokens=350).assemble_loop(
         definition=_definition(),
         state=state,
     )
@@ -224,7 +211,7 @@ def test_context_injects_memory_summaries_and_refs_not_raw_payload() -> None:
     ]
     state["memory_refs"] = [state["tool_results"][0].output.ref]  # type: ignore[union-attr]
 
-    context = ContextBuilder(max_context_tokens=1000).assemble(
+    context = ContextBuilder(max_context_tokens=1000).assemble_loop(
         definition=_definition(),
         state=state,
     )
@@ -240,7 +227,7 @@ def test_context_injects_memory_summaries_and_refs_not_raw_payload() -> None:
 
 
 def test_context_budget_snapshot_counts_sections() -> None:
-    context = ContextBuilder(max_context_tokens=1000).assemble(
+    context = ContextBuilder(max_context_tokens=1000).assemble_loop(
         definition=_definition(),
         state=_state(),
     )
@@ -265,7 +252,7 @@ def test_context_builder_uses_injected_model_token_accounting() -> None:
     context = ContextBuilder(
         max_context_tokens=500,
         token_accounting=accounting,
-    ).assemble(
+    ).assemble_loop(
         definition=_definition(),
         state=state,
     )
@@ -295,7 +282,7 @@ def test_required_section_overflow_never_replaces_real_content_with_hash() -> No
         max_context_tokens=20,
         token_accounting=_CharacterTokenAccounting(),
         max_section_chars=10_000,
-    ).assemble(
+    ).assemble_loop(
         definition=definition,
         state=state,
     )
@@ -319,7 +306,7 @@ def test_optional_section_is_real_text_clipped_or_dropped() -> None:
         max_context_tokens=120,
         token_accounting=_CharacterTokenAccounting(),
         max_section_chars=10_000,
-    ).assemble(
+    ).assemble_loop(
         definition=_definition(),
         state=state,
     )
@@ -337,7 +324,6 @@ def test_optional_section_is_real_text_clipped_or_dropped() -> None:
 def test_context_hard_budget_compacts_required_sections_without_overrun() -> None:
     state = _state()
     state["task"] = "TASK_RAW " * 400
-    state["open_gaps"] = ["answer", "evidence"]
     definition = AgentDefinition(
         agent_type="research",
         description="Research agent",
@@ -345,7 +331,7 @@ def test_context_hard_budget_compacts_required_sections_without_overrun() -> Non
         allowed_tools=["search"],
     )
 
-    context = ContextBuilder(max_context_tokens=40, max_section_chars=10_000).assemble(
+    context = ContextBuilder(max_context_tokens=40, max_section_chars=10_000).assemble_loop(
         definition=definition,
         state=state,
     )
@@ -367,7 +353,7 @@ def test_context_overflow_marks_budget_when_minimal_snapshot_cannot_fit() -> Non
         allowed_tools=["search"],
     )
 
-    context = ContextBuilder(max_context_tokens=1, max_section_chars=10_000).assemble(
+    context = ContextBuilder(max_context_tokens=1, max_section_chars=10_000).assemble_loop(
         definition=definition,
         state=state,
     )
@@ -379,12 +365,6 @@ def test_context_overflow_marks_budget_when_minimal_snapshot_cannot_fit() -> Non
 
 def test_context_uses_structured_observations_instead_of_large_raw_tool_outputs() -> None:
     state = _state()
-    state["goal_spec"] = GoalSpec(
-        original_query="北方和东北日提货合计是多少？请给出处",
-        required_evidence=["citation"],
-    )
-    state["open_gaps"] = ["evidence"]
-    state["satisfied_requirements"] = ["answer"]
     state["tool_results"] = [
         ToolResult(
             tool_call_id="tc-big",
@@ -405,22 +385,18 @@ def test_context_uses_structured_observations_instead_of_large_raw_tool_outputs(
             ),
             evidence_refs=[EvidenceRef(citation_anchor="table@p4")],
             raw_result_ref="tc-big",
-            resolved_gaps=["answer"],
         )
     ]
 
-    context = ContextBuilder(max_context_tokens=1000).assemble(
+    context = ContextBuilder(max_context_tokens=1000).assemble_loop(
         definition=_definition(),
         state=state,
     )
 
     tool_context = context.section("tool_results").content
-    decisions_context = context.section("open_decisions").content
     assert "Structured tool observations" in tool_context
     assert "15.491928" in tool_context
     assert "RAW_RESULT" not in tool_context
-    assert "open_gaps: evidence" in decisions_context
-    assert "satisfied_requirements: answer" in decisions_context
 
 
 def test_context_includes_bounded_agent_plan_without_raw_scratchpad() -> None:
@@ -440,7 +416,7 @@ def test_context_includes_bounded_agent_plan_without_raw_scratchpad() -> None:
         summary="Need structure before computation.",
     )
 
-    context = ContextBuilder(max_context_tokens=1000).assemble(
+    context = ContextBuilder(max_context_tokens=1000).assemble_loop(
         definition=_definition(),
         state=state,
     )
@@ -487,7 +463,7 @@ def test_context_formats_asset_locators_compactly() -> None:
         )
     ]
 
-    context = ContextBuilder(max_context_tokens=1000).assemble(
+    context = ContextBuilder(max_context_tokens=1000).assemble_loop(
         definition=_definition(),
         state=state,
     )
@@ -527,7 +503,7 @@ def test_context_formats_workspace_file_observations() -> None:
         )
     ]
 
-    context = ContextBuilder(max_context_tokens=1000).assemble(
+    context = ContextBuilder(max_context_tokens=1000).assemble_loop(
         definition=_definition(),
         state=state,
     )
@@ -567,7 +543,7 @@ def test_context_preserves_workspace_path_spacing() -> None:
         )
     ]
 
-    context = ContextBuilder(max_context_tokens=1000).assemble(
+    context = ContextBuilder(max_context_tokens=1000).assemble_loop(
         definition=_definition(),
         state=state,
     )

@@ -13,15 +13,13 @@ from rag.agent.core.llm_context import (
     AgentLLMContextOverflowError,
 )
 from rag.agent.core.llm_providers import (
-    LLMGoalContractProvider,
     LLMRetrievalHintProvider,
     LLMToolDecisionProvider,
     RetrievalHintDecision,
     create_default_providers,
 )
 from rag.agent.core.llm_registry import ModelRegistry, ResolvedModel
-from rag.agent.goal_runtime import GoalContractHint
-from rag.agent.graphs.nodes.goal_runtime import _retrieval_hint
+from rag.agent.loop.state import create_loop_state
 from rag.agent.memory.models import ContextBudgetSnapshot, ContextSection, InjectedContext
 from rag.agent.state import ThinkOutput
 from rag.providers.llm_gateway import LLMGateway, structured_accounted_prompt
@@ -157,29 +155,10 @@ def _make_config() -> AgentRunConfig:
 
 
 def _make_state(**overrides: Any) -> dict:
-    state: dict[str, Any] = {
-        "messages": [],
-        "evidence": [],
-        "citations": [],
-        "tool_results": [],
-        "task": "test task",
-        "run_config": _make_config(),
-        "iteration": 0,
-        "status": "running",
-        "decision_reason": None,
-        "stop_reason": None,
-        "needs_user_input": None,
-        "pending_tool_calls": [],
-        "approved_tool_call_ids": [],
-        "denied_tool_call_ids": [],
-        "user_decision": None,
-        "working_summary": None,
-        "extracted_facts": [],
-        "context_budget": None,
-        "final_answer": None,
-        "groundedness_flag": False,
-        "insufficient_evidence_flag": False,
-    }
+    state: dict[str, Any] = create_loop_state(
+        task="test task",
+        run_config=_make_config(),
+    )
     state.update(overrides)
     return state
 
@@ -194,31 +173,6 @@ def _make_context() -> InjectedContext:
 
 
 # ── LLMRetrievalHintProvider ──
-
-
-@pytest.mark.anyio
-async def test_goal_contract_provider_uses_shared_gateway_and_schema() -> None:
-    generator = _GatewayStructuredGenerator(
-        {
-            "deliverable_kinds": ["answer", "evidence"],
-            "reason": "The task requests sources.",
-        }
-    )
-    gateway = _gateway(generator, LLMCallStage.GOAL_CONTRACT)
-    provider = LLMGoalContractProvider(
-        generator,
-        gateway=gateway,
-        context_assembler=_context_assembler(
-            gateway,
-            LLMCallStage.GOAL_CONTRACT,
-        ),
-    )
-
-    hint = await provider.infer(_make_state(task="Explain with sources"))
-
-    assert isinstance(hint, GoalContractHint)
-    assert hint.deliverable_kinds == ["answer", "evidence"]
-    assert generator.calls == 1
 
 
 class TestLLMRetrievalHintProvider:
@@ -381,34 +335,6 @@ class TestLLMRetrievalHintProvider:
             await provider.hint(state)
 
         assert generator.calls == 0
-
-    @pytest.mark.anyio
-    async def test_goal_initialization_pauses_on_hint_context_overflow(self) -> None:
-        snapshot = ContextBudgetSnapshot(
-            max_context_tokens=5,
-            overflow=True,
-            degraded=True,
-            required_truncated=["instructions"],
-            warnings=["context_overflow"],
-        )
-
-        class _OverflowProvider:
-            def hint(self, state: object) -> dict[str, object]:
-                del state
-                raise AgentLLMContextOverflowError(
-                    stage=LLMCallStage.RETRIEVAL_HINT,
-                    context_budget=snapshot,
-                )
-
-        result = await _retrieval_hint(
-            _make_state(),
-            retrieval_hint_provider=_OverflowProvider(),  # type: ignore[arg-type]
-        )
-
-        assert result["status"] == "paused"
-        assert result["decision_reason"] == "context_overflow"
-        assert result["context_budget"] is snapshot
-
 
 # ── LLMToolDecisionProvider ──
 

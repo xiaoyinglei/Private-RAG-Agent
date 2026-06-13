@@ -20,9 +20,11 @@ from rag.assembly.tokenizer import TokenAccountingService, TokenizerContract
 if TYPE_CHECKING:
     from langchain_core.messages import BaseMessage
 
-    from rag.agent.state import AgentState, ToolCallPlan
+    from rag.agent.loop.state import LoopState
     from rag.agent.tools.spec import ToolResult
     from rag.schema.query import AnswerCitation, EvidenceItem
+
+    type ContextState = LoopState
 
 
 @dataclass
@@ -97,16 +99,18 @@ class ContextBuilder:
             )
         )
 
-    def assemble(
+    def assemble_loop(
         self,
         *,
         definition: AgentDefinition,
-        state: AgentState,
+        state: LoopState,
         policy_hints: Sequence[str] = (),
         recalled_memories: Sequence[str] = (),
         included_sections: frozenset[ContextSectionName] | None = None,
         required_sections: frozenset[ContextSectionName] | None = None,
     ) -> InjectedContext:
+        """Assemble bounded context from the canonical loop state."""
+
         candidates: list[ContextSection] = []
 
         def add(
@@ -133,15 +137,7 @@ class ContextBuilder:
         add("task", self._format_task(state.get("task", "")), required=True)
         add(
             "open_decisions",
-            self._format_open_decisions(
-                pending_tool_calls=state.get("pending_tool_calls", []),
-                needs_user_input=state.get("needs_user_input"),
-                user_decision=state.get("user_decision"),
-                goal_spec=state.get("goal_spec"),
-                open_gaps=state.get("open_gaps", []),
-                satisfied_requirements=state.get("satisfied_requirements", []),
-                conflicts=state.get("conflicts", []),
-            ),
+            self._format_loop_open_decisions(state),
             required=True,
         )
         add(
@@ -291,7 +287,7 @@ class ContextBuilder:
         self,
         selection: _ContextSelection,
         *,
-        state: AgentState,
+        state: ContextState,
     ) -> ContextBudgetSnapshot:
         sections = selection.sections
         by_name = {section.name: section.token_count for section in sections}
@@ -441,12 +437,6 @@ class ContextBuilder:
                     f"title={title}"
                 )
                 lines.append(step_line)
-                related_gap_ids = getattr(step, "related_gap_ids", None)
-                if isinstance(related_gap_ids, list) and related_gap_ids:
-                    lines.append(
-                        "  related_gap_ids: "
-                        + self._format_list([str(item) for item in related_gap_ids])
-                    )
                 expected_tools = getattr(step, "expected_tool_names", None)
                 if isinstance(expected_tools, list) and expected_tools:
                     lines.append(
@@ -593,7 +583,7 @@ class ContextBuilder:
         lines.extend(self._format_message(message) for message in messages)
         return "\n".join(lines)
 
-    def _format_tool_observations(self, state: AgentState) -> str:
+    def _format_tool_observations(self, state: ContextState) -> str:
         structured = state.get("structured_observations", [])
         if structured:
             return self._format_structured_observations(structured)
@@ -786,51 +776,55 @@ class ContextBuilder:
                     )
         return "\n".join(lines)
 
-    def _format_open_decisions(
-        self,
-        *,
-        pending_tool_calls: Sequence[ToolCallPlan],
-        needs_user_input: str | None,
-        user_decision: str | None,
-        goal_spec: Any | None = None,
-        open_gaps: Sequence[Any] = (),
-        satisfied_requirements: Sequence[str] = (),
-        conflicts: Sequence[Any] = (),
-    ) -> str:
+    def _format_loop_open_decisions(self, state: LoopState) -> str:
         lines: list[str] = []
-        if goal_spec is not None:
-            original_query = getattr(goal_spec, "original_query", None)
-            if isinstance(original_query, str) and original_query.strip():
-                lines.append(f"goal: {self._one_line(original_query)}")
-        if open_gaps:
+        request = state.get("approval_request")
+        if request is not None:
             lines.append(
-                "open_gaps: "
-                + ", ".join(
-                    str(getattr(gap, "gap_id", gap))
-                    for gap in open_gaps
-                )
+                "approval_request: "
+                f"kind={request.kind} request_id={request.request_id} "
+                f"question={self._one_line(request.question)}"
             )
-        if satisfied_requirements:
-            lines.append("satisfied_requirements: " + ", ".join(satisfied_requirements))
-        if conflicts:
+            for approval_call in request.tool_calls:
+                lines.append(
+                    f"- tool_call_id={approval_call.tool_call_id} "
+                    f"tool_name={approval_call.tool_name} "
+                    f"risk_level={approval_call.risk_level}"
+                )
+        response = state.get("approval_response")
+        if response is not None:
             lines.append(
-                "conflicts: "
-                + ", ".join(
-                    str(getattr(conflict, "description", conflict))
-                    for conflict in conflicts
-                )
+                "approval_response: "
+                f"request_id={response.request_id} decision={response.decision}"
             )
-        if needs_user_input:
-            lines.append(f"needs_user_input: {self._one_line(needs_user_input)}")
-        if user_decision:
-            lines.append(f"user_decision: {self._one_line(user_decision)}")
+            if response.user_message:
+                lines.append(
+                    f"user_message: {self._one_line(response.user_message)}"
+                )
+        pending_tool_calls = state.get("pending_tool_calls", [])
         if pending_tool_calls:
             lines.append("pending_tool_calls:")
-            for call in pending_tool_calls:
+            for pending_call in pending_tool_calls:
                 lines.append(
-                    f"- tool_call_id={call.tool_call_id} "
-                    f"tool_name={call.tool_name} "
-                    f"arguments={self._one_line(str(call.arguments))}"
+                    f"- tool_call_id={pending_call.tool_call_id} "
+                    f"tool_name={pending_call.tool_name} "
+                    f"arguments={self._one_line(str(pending_call.arguments))}"
+                )
+        feedback = state.get("stop_hook_feedback", [])
+        if feedback:
+            lines.append("finish_feedback:")
+            for item in feedback:
+                lines.append(
+                    f"- code={item.code} occurrences={item.occurrences} "
+                    f"message={self._one_line(item.message)}"
+                )
+        warnings = state.get("stop_hook_warnings", [])
+        if warnings:
+            lines.append("finish_warnings:")
+            for item in warnings:
+                lines.append(
+                    f"- code={item.code} occurrences={item.occurrences} "
+                    f"message={self._one_line(item.message)}"
                 )
         return "\n".join(lines)
 

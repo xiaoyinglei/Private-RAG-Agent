@@ -5,9 +5,9 @@ from pydantic import BaseModel
 
 from rag.agent.builtin.research import RESEARCH_AGENT
 from rag.agent.builtin_registry import create_builtin_tool_registry
+from rag.agent.compat.goal_contract import GoalDeliverable, GoalSpec
 from rag.agent.core.context import AgentRunConfig, RunRegistry
 from rag.agent.core.definition import AgentDefinition
-from rag.agent.goal_runtime import GoalDeliverable, GoalSpec
 from rag.agent.service import AgentRunRequest, AgentRunResult, AgentService
 from rag.agent.state import ToolCallPlan
 from rag.agent.tools.llm_tools import LLMTextOutput
@@ -60,28 +60,10 @@ class _ResearchUnderstandingService:
 
 
 class _NullToolDecisionProvider:
-    """Minimal provider: after PrimitiveOps tools run, call llm_generate to produce an answer."""
-
-    def __init__(self) -> None:
-        self._call_count = 0
+    """Minimal compatibility provider that finishes from existing results."""
 
     def decide(self, state: object, **kwargs: object) -> dict[str, object]:
-        self._call_count += 1
-        if self._call_count <= 1:
-            # First call: execute llm_generate to produce an answer_candidate
-            from rag.agent.state import ToolCallPlan
-
-            call = ToolCallPlan.create(
-                "llm_summarize",
-                {"task": "Summarize the tool execution results", "evidence_ids": [], "citation_ids": []},
-            )
-            return {
-                "action": "execute",
-                "tool_calls": [call.model_dump()],
-                "thought": "Generating answer from tool results",
-                "confidence": 1.0,
-            }
-        # Second call: synthesize
+        del state, kwargs
         return {"action": "synthesize", "tool_calls": [], "thought": "done", "confidence": 1.0}
 
 
@@ -118,7 +100,7 @@ def test_agent_service_initial_state_creates_runtime_handles() -> None:
     RunRegistry.remove("svc-state")
 
 
-def test_agent_run_request_preserves_explicit_goal_spec() -> None:
+def test_agent_initial_state_does_not_persist_explicit_goal_spec() -> None:
     service = _service_with_registry()
     goal = GoalSpec(
         original_query="Explain policy",
@@ -145,7 +127,7 @@ def test_agent_run_request_preserves_explicit_goal_spec() -> None:
         )
     )
 
-    assert state["goal_spec"] == goal
+    assert "goal_spec" not in state
     RunRegistry.remove("explicit-goal")
 
 
@@ -278,6 +260,7 @@ async def test_agent_service_injects_model_backed_llm_tool_runners() -> None:
     service = AgentService(
         definition=RESEARCH_AGENT,
         tool_registry=create_builtin_tool_registry(runners={}),
+        tool_decision_provider=_NullToolDecisionProvider(),
         model_registry=_FakeModelRegistry(generator),  # type: ignore[arg-type]
     )
 

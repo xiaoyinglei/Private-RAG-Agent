@@ -11,14 +11,17 @@ from rag.agent.core.context import AgentRunConfig, derive_child_config
 from rag.agent.core.definition import AgentDefinition
 from rag.agent.core.delegation import (
     DEFAULT_DELEGATION_TOKEN_BUDGET,
+    AgentAsToolExecutionError,
     AgentDelegationRequest,
     DelegatedAgentResult,
     DelegatedAgentRunner,
+    ParentAgentContext,
 )
 from rag.agent.core.registry import AgentRegistry
-from rag.agent.graphs.nodes.llm_decide import ToolDecisionProvider
-from rag.agent.graphs.nodes.retrieval_hint import RetrievalHintProvider
-from rag.agent.state import AgentState, create_agent_state
+from rag.agent.core.runtime_ports import (
+    RetrievalHintProvider,
+    ToolDecisionProvider,
+)
 from rag.agent.tools.registry import ToolRegistry
 from rag.agent.tools.spec import ToolError, ToolPermissions, ToolSpec
 from rag.schema.query import AnswerCitation
@@ -33,21 +36,6 @@ class AgentToolSpec:
     tool_spec: ToolSpec
     agent_definition: AgentDefinition
     inherits_context: bool = True
-
-
-class AgentAsToolExecutionError(RuntimeError):
-    def __init__(
-        self,
-        agent_name: str,
-        message: str,
-        *,
-        status: str = "failed",
-        stop_reason: str | None = None,
-    ) -> None:
-        super().__init__(message)
-        self.agent_name = agent_name
-        self.status = status
-        self.stop_reason = stop_reason
 
 
 # ── Tool I/O schemas ───────────────────────────────────────────
@@ -209,9 +197,7 @@ class AgentAsToolAdapter:
 
     async def __call__(self, payload: BaseModel) -> AgentToolOutput:
         request = AgentToolInput.model_validate(payload)
-        # Minimal parent context needed to derive a bounded child run config.
-        parent_state = create_agent_state(
-            task=request.task,
+        parent_state = ParentAgentContext(
             run_config=self._run_config,
         )
 
@@ -348,7 +334,7 @@ class AgentAsToolRunner:
         self,
         *,
         request: AgentDelegationRequest,
-        parent_state: AgentState,
+        parent_state: ParentAgentContext,
     ) -> AgentRunResult:
         from rag.agent.service import AgentService
 

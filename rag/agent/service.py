@@ -1,22 +1,37 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from inspect import isawaitable
 from pathlib import Path
-from typing import Any, cast
+from typing import cast
 from uuid import uuid4
 
 from langchain_core.messages import BaseMessage
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from pydantic import BaseModel, ConfigDict, Field
 
-from rag.agent.core.checkpointing import create_agent_checkpointer
-from rag.agent.core.compiler import GraphCompiler
+from rag.agent.compat.goal_contract import GoalCompatibilityConfig, GoalSpec
+from rag.agent.core.checkpointing import (
+    LangGraphCheckpointStore,
+    create_agent_checkpointer,
+)
 from rag.agent.core.context import AgentRunConfig, RunRegistry
 from rag.agent.core.definition import AgentDefinition
 from rag.agent.core.delegation import DelegatedAgentRunner
+from rag.agent.core.finalization import (
+    CompatibilitySynthesisRunner,
+    FinishCandidateBuilder,
+)
 from rag.agent.core.human_input import HumanInputRequest, HumanInputResponse
+from rag.agent.core.llm_providers import (
+    LegacyToolDecisionModelTurnProvider,
+    create_loop_model_turn_provider,
+)
 from rag.agent.core.llm_registry import ModelRegistry
-from rag.agent.core.output_finalizer import StructuredOutputFinalizer
+from rag.agent.core.output_finalizer import (
+    StructuredOutputFinalizer,
+    create_model_structured_output_finalizer,
+)
 from rag.agent.core.output_models import (
     ValidatedFinalOutput,
     output_model_path,
@@ -25,15 +40,26 @@ from rag.agent.core.runtime_diagnostics import (
     RuntimeDiagnostic,
     merge_runtime_diagnostics,
 )
-from rag.agent.goal_runtime import GoalSpec
-from rag.agent.graphs.nodes.goal_runtime import GoalContractProvider
-from rag.agent.graphs.nodes.llm_decide import ToolDecisionProvider
-from rag.agent.graphs.nodes.retrieval_hint import RetrievalHintProvider
-from rag.agent.graphs.nodes.synthesize import SynthesisRunner
-from rag.agent.memory.compactor import MessageCompactor
+from rag.agent.core.runtime_ports import (
+    RetrievalHintProvider,
+    ToolDecisionProvider,
+)
+from rag.agent.core.tool_execution import ToolExecutionService
+from rag.agent.core.turn_contracts import ToolCallPlan
+from rag.agent.loop.runtime import AgentLoop, ModelTurnProvider
+from rag.agent.loop.state import (
+    LoopState,
+    ModelTurnDraft,
+    append_loop_diagnostic,
+    create_loop_state,
+)
+from rag.agent.loop.stop_hooks import StopHookRunner, build_stop_hooks
+from rag.agent.memory.compactor import (
+    LoopContextCompactor,
+    MessageCompactor,
+)
 from rag.agent.memory.models import MemoryPolicy
 from rag.agent.memory.store import WorkspaceMemoryStore
-from rag.agent.state import AgentState, ToolCallPlan, create_agent_state
 from rag.agent.tools.registry import ToolRegistry, ToolRunner
 from rag.agent.tools.spec import ToolResult
 from rag.schema.query import AnswerCitation, EvidenceItem
@@ -101,42 +127,122 @@ class AgentRunResult(BaseModel):
     @classmethod
     def from_state(
         cls,
-        state: AgentState,
+        state: LoopState,
+        *,
+        definition: AgentDefinition | None = None,
+        workspace_path: str | None = None,
+    ) -> AgentRunResult:
+        return cls.from_loop_result(
+            state,
+            definition=definition,
+            workspace_path=workspace_path,
+        )
+
+    @classmethod
+    def from_loop_result(
+        cls,
+        state: LoopState,
         *,
         definition: AgentDefinition | None = None,
         workspace_path: str | None = None,
     ) -> AgentRunResult:
         run_config = state["run_config"]
-        is_terminal = state["status"] in {"done", "failed"}
-        human_request = None if is_terminal else state.get("human_input_request")
-        pending = state.get("pending_tool_calls", [])
+        is_terminal = state["status"] in {"completed", "failed"}
+        terminal = state["terminal"]
+        pause = state["pause"]
+        pending = state["pending_tool_calls"]
         return cls(
             run_id=run_config.run_id,
             thread_id=run_config.thread_id,
-            status=state["status"],
-            final_answer=state.get("final_answer"),
+            status=(
+                "done"
+                if state["status"] == "completed"
+                else state["status"]
+            ),
+            final_answer=state["final_answer"],
             final_output=_restore_final_output(
-                state.get("final_output"),
+                state["final_output"],
                 definition=definition,
             ),
             output_validation_errors=list(
-                state.get("output_validation_errors", [])
+                state["output_validation_errors"]
             ),
-            stop_reason=state.get("stop_reason"),
-            tool_results=list(state.get("tool_results", [])),
-            evidence=list(state.get("evidence", [])),
-            citations=list(state.get("citations", [])),
-            iteration=state.get("iteration", 0),
-            groundedness_flag=state.get("groundedness_flag", False),
-            insufficient_evidence_flag=state.get("insufficient_evidence_flag", False),
-            needs_user_input=None if is_terminal else state.get("needs_user_input"),
-            human_input_request=human_request,
+            stop_reason=(
+                None
+                if terminal is None
+                else terminal.stop_reason
+            ),
+            tool_results=list(state["tool_results"]),
+            evidence=list(state["evidence"]),
+            citations=list(state["citations"]),
+            iteration=state["iteration"],
+            groundedness_flag=state["groundedness_flag"],
+            insufficient_evidence_flag=(
+                state["insufficient_evidence_flag"]
+            ),
+            needs_user_input=(
+                None
+                if is_terminal or pause is None
+                else pause.reason
+            ),
+            human_input_request=(
+                None
+                if is_terminal
+                else state["approval_request"]
+            ),
             pending_tool_calls_summary=[
-                {"tool_call_id": tc.tool_call_id, "tool_name": tc.tool_name}
-                for tc in pending
+                {
+                    "tool_call_id": call.tool_call_id,
+                    "tool_name": call.tool_name,
+                }
+                for call in pending
             ],
             workspace_path=workspace_path,
-            runtime_diagnostics=list(state.get("runtime_diagnostics", [])),
+            runtime_diagnostics=list(state["runtime_diagnostics"]),
+        )
+
+
+class _ResultDrivenModelTurnProvider:
+    def __init__(self, *, use_synthesis_builder: bool) -> None:
+        self._use_synthesis_builder = use_synthesis_builder
+
+    async def next_turn(
+        self,
+        state: LoopState,
+        *,
+        definition: AgentDefinition,
+        budget_remaining: int,
+    ) -> ModelTurnDraft:
+        del definition, budget_remaining
+        if state["stop_hook_feedback"]:
+            return ModelTurnDraft(
+                action="pause",
+                pause_reason=(
+                    "No model turn provider is available to address "
+                    "stop-hook feedback."
+                ),
+            )
+        if state["answer_candidates"] and not self._use_synthesis_builder:
+            return ModelTurnDraft(
+                action="finish",
+                final_answer=state["answer_candidates"][-1].text,
+            )
+        if state["tool_results"] and self._use_synthesis_builder:
+            return ModelTurnDraft(action="finish")
+        if state["tool_results"]:
+            latest = state["tool_results"][-1]
+            reason = (
+                latest.error.message
+                if latest.error is not None
+                else "Tool execution produced no answer candidate."
+            )
+            return ModelTurnDraft(
+                action="pause",
+                pause_reason=reason,
+            )
+        return ModelTurnDraft(
+            action="pause",
+            pause_reason="No model turn provider is configured.",
         )
 
 
@@ -146,11 +252,11 @@ class AgentService:
         *,
         definition: AgentDefinition,
         tool_registry: ToolRegistry,
+        model_turn_provider: ModelTurnProvider | None = None,
         tool_decision_provider: ToolDecisionProvider | None = None,
-        goal_contract_provider: GoalContractProvider | None = None,
         retrieval_hint_provider: RetrievalHintProvider | None = None,
         subagent_runner: DelegatedAgentRunner | None = None,
-        synthesis_runner: SynthesisRunner | None = None,
+        synthesis_runner: CompatibilitySynthesisRunner | None = None,
         output_finalizer: StructuredOutputFinalizer | None = None,
         model_registry: ModelRegistry | None = None,
         checkpointer: BaseCheckpointSaver[str] | None = None,
@@ -158,8 +264,8 @@ class AgentService:
     ) -> None:
         self._definition = definition
         self._base_tool_registry = tool_registry
+        self._model_turn_provider = model_turn_provider
         self._tool_decision_provider = tool_decision_provider
-        self._goal_contract_provider = goal_contract_provider
         self._retrieval_hint_provider = retrieval_hint_provider
         self._subagent_runner = subagent_runner
         self._synthesis_runner = synthesis_runner
@@ -169,18 +275,8 @@ class AgentService:
             merge_runtime_diagnostics([], runtime_diagnostics)
         )
         self._checkpointer = checkpointer or create_agent_checkpointer(None)
-        self._compiler = GraphCompiler(
-            tool_registry=tool_registry,
-            tool_decision_provider=tool_decision_provider,
-            goal_contract_provider=goal_contract_provider,
-            retrieval_hint_provider=retrieval_hint_provider,
-            synthesis_runner=synthesis_runner,
-            output_finalizer=output_finalizer,
-            model_registry=model_registry,
-            checkpointer=self._checkpointer,
-        )
 
-    def initial_state(self, request: AgentRunRequest) -> AgentState:
+    def initial_state(self, request: AgentRunRequest) -> LoopState:
         run_config = request.to_run_config(self._definition)
         return self.initial_state_from_config(
             task=request.task,
@@ -189,7 +285,6 @@ class AgentService:
             approved_tool_call_ids=request.approved_tool_call_ids,
             denied_tool_call_ids=request.denied_tool_call_ids,
             messages=request.messages,
-            goal_spec=request.goal_spec,
         )
 
     def initial_state_from_config(
@@ -201,25 +296,27 @@ class AgentService:
         approved_tool_call_ids: list[str] | None = None,
         denied_tool_call_ids: list[str] | None = None,
         messages: list[BaseMessage] | None = None,
-        goal_spec: GoalSpec | None = None,
         memory_store: WorkspaceMemoryStore | None = None,
-    ) -> AgentState:
+    ) -> LoopState:
         RunRegistry.remove(run_config.run_id)
         handles = RunRegistry.get_or_create(run_config)
         if memory_store is not None:
             handles.memory_store = memory_store
-        state = create_agent_state(
+        state = create_loop_state(
             task=task,
             run_config=run_config,
-            pending_tool_calls=pending_tool_calls,
-            approved_tool_call_ids=approved_tool_call_ids,
-            denied_tool_call_ids=denied_tool_call_ids,
-            messages=messages,
-            goal_spec=goal_spec,
+            pending_tool_calls=pending_tool_calls or (),
+            messages=messages or (),
             runtime_diagnostics=self._runtime_diagnostics,
         )
+        state["approved_tool_call_ids"] = list(
+            approved_tool_call_ids or ()
+        )
+        state["denied_tool_call_ids"] = list(
+            denied_tool_call_ids or ()
+        )
         return cast(
-            AgentState,
+            LoopState,
             MessageCompactor(
                 policy=run_config.memory_policy,
                 store=memory_store,
@@ -272,43 +369,208 @@ class AgentService:
             workspace=workspace,
             policy=run_config.memory_policy,
         )
-        runtime_registry = self._runtime_tool_registry(run_config, runners=ops.runners())
-        compiler = GraphCompiler(
-            tool_registry=runtime_registry,
-            tool_decision_provider=self._tool_decision_provider,
-            goal_contract_provider=self._goal_contract_provider,
-            retrieval_hint_provider=self._retrieval_hint_provider,
-            synthesis_runner=self._synthesis_runner,
-            output_finalizer=self._output_finalizer,
-            model_registry=self._model_registry,
-            checkpointer=self._checkpointer,
+        runtime_registry = self._runtime_tool_registry(
+            run_config,
+            runners=ops.runners(),
         )
-        graph = cast(Any, compiler.compile(self._definition))
-        state = self.initial_state_from_config(
+        self._validate_allowed_tools(runtime_registry)
+        state = self._initial_loop_state_from_config(
             task=task,
             run_config=run_config,
             pending_tool_calls=pending_tool_calls,
             approved_tool_call_ids=approved_tool_call_ids,
             denied_tool_call_ids=denied_tool_call_ids,
             messages=messages,
-            goal_spec=goal_spec,
             memory_store=memory_store,
         )
+        await self._apply_retrieval_hint(state)
+        checkpoint_store = LangGraphCheckpointStore(
+            self._checkpointer,
+            run_config=run_config,
+            compatibility_config=GoalCompatibilityConfig(
+                goal_spec=goal_spec
+            ),
+        )
+        loop = self._build_loop(
+            runtime_registry=runtime_registry,
+            checkpoint_store=checkpoint_store,
+            memory_store=memory_store,
+            goal_spec=goal_spec,
+            state=state,
+        )
         try:
-            result_state = await graph.ainvoke(
-                state,
-                config={"configurable": {"thread_id": run_config.thread_id}},
-            )
+            result_state = await loop.run(state)
         except Exception:
             RunRegistry.remove(run_config.run_id)
             raise
-        if result_state.get("status") in {"done", "failed"}:
+        if result_state["status"] in {"completed", "failed"}:
             RunRegistry.remove(run_config.run_id)
-        return AgentRunResult.from_state(
+        return AgentRunResult.from_loop_result(
             result_state,
             definition=self._definition,
             workspace_path=str(workspace.root),
         )
+
+    def _initial_loop_state_from_config(
+        self,
+        *,
+        task: str,
+        run_config: AgentRunConfig,
+        pending_tool_calls: list[ToolCallPlan] | None = None,
+        approved_tool_call_ids: list[str] | None = None,
+        denied_tool_call_ids: list[str] | None = None,
+        messages: list[BaseMessage] | None = None,
+        memory_store: WorkspaceMemoryStore | None = None,
+    ) -> LoopState:
+        RunRegistry.remove(run_config.run_id)
+        handles = RunRegistry.get_or_create(run_config)
+        if memory_store is not None:
+            handles.memory_store = memory_store
+        state = create_loop_state(
+            task=task,
+            run_config=run_config,
+            pending_tool_calls=pending_tool_calls or (),
+            messages=messages or (),
+            runtime_diagnostics=self._runtime_diagnostics,
+        )
+        state["approved_tool_call_ids"] = list(
+            approved_tool_call_ids or ()
+        )
+        state["denied_tool_call_ids"] = list(
+            denied_tool_call_ids or ()
+        )
+        return state
+
+    def _build_loop(
+        self,
+        *,
+        runtime_registry: ToolRegistry,
+        checkpoint_store: LangGraphCheckpointStore,
+        memory_store: WorkspaceMemoryStore | None,
+        goal_spec: GoalSpec | None,
+        state: LoopState | None = None,
+    ) -> AgentLoop:
+        provider = self._resolve_model_turn_provider(state)
+        output_finalizer = self._resolve_output_finalizer(state)
+        return AgentLoop(
+            definition=self._definition,
+            model_provider=provider,
+            context_manager=LoopContextCompactor(store=memory_store),
+            tool_runner=ToolExecutionService(
+                tool_registry=runtime_registry,
+                record_writer=checkpoint_store,
+            ),
+            checkpoint_store=checkpoint_store,
+            stop_hook_runner=StopHookRunner(
+                hooks=build_stop_hooks(
+                    definition=self._definition,
+                    output_finalizer=output_finalizer,
+                    goal_spec=goal_spec,
+                ),
+                max_blocks=self._definition.max_stop_hook_blocks,
+            ),
+            finish_candidate_builder=FinishCandidateBuilder(
+                synthesis_runner=self._synthesis_runner,
+            ),
+        )
+
+    def _resolve_model_turn_provider(
+        self,
+        state: LoopState | None,
+    ) -> ModelTurnProvider:
+        if self._model_turn_provider is not None:
+            return self._model_turn_provider
+        if self._tool_decision_provider is not None:
+            return LegacyToolDecisionModelTurnProvider(
+                self._tool_decision_provider,
+                use_synthesis_builder=self._synthesis_runner is not None,
+            )
+        if self._model_registry is not None:
+            try:
+                return create_loop_model_turn_provider(
+                    self._model_registry,
+                    self._definition.model_selection,
+                )
+            except Exception as exc:
+                if state is not None:
+                    append_loop_diagnostic(
+                        state,
+                        RuntimeDiagnostic.from_exception(
+                            code="default_providers_initialization_failed",
+                            component="model_providers",
+                            error=exc,
+                        ),
+                    )
+        return _ResultDrivenModelTurnProvider(
+            use_synthesis_builder=self._synthesis_runner is not None,
+        )
+
+    def _resolve_output_finalizer(
+        self,
+        state: LoopState | None,
+    ) -> StructuredOutputFinalizer | None:
+        if self._output_finalizer is not None:
+            return self._output_finalizer
+        if (
+            self._definition.output_model is None
+            or self._model_registry is None
+        ):
+            return None
+        try:
+            return create_model_structured_output_finalizer(
+                self._model_registry
+            )
+        except Exception as exc:
+            if state is not None:
+                append_loop_diagnostic(
+                    state,
+                    RuntimeDiagnostic.from_exception(
+                        code=(
+                            "structured_output_finalizer_"
+                            "initialization_failed"
+                        ),
+                        component="structured_output_finalizer",
+                        error=exc,
+                    ),
+                )
+            return None
+
+    async def _apply_retrieval_hint(self, state: LoopState) -> None:
+        provider = self._retrieval_hint_provider
+        if provider is None:
+            return
+        try:
+            update = provider.hint(state)
+            if isawaitable(update):
+                update = await update
+        except Exception as exc:
+            append_loop_diagnostic(
+                state,
+                RuntimeDiagnostic.from_exception(
+                    code="retrieval_hint_failed",
+                    component="retrieval_hint",
+                    error=exc,
+                ),
+            )
+            return
+        retrieval_signals = update.get("retrieval_signals")
+        if retrieval_signals is not None:
+            state["retrieval_signals"] = retrieval_signals
+        state["retrieval_signals_debug"] = update.get(
+            "retrieval_signals_debug"
+        )
+
+    def _validate_allowed_tools(self, registry: ToolRegistry) -> None:
+        registered = {tool.name for tool in registry.list_all()}
+        missing = [
+            name
+            for name in self._definition.allowed_tools
+            if name not in registered
+        ]
+        if missing:
+            raise ValueError(
+                f"unregistered tools: {', '.join(dict.fromkeys(missing))}"
+            )
 
     def _runtime_tool_registry(
         self,
@@ -380,81 +642,86 @@ class AgentService:
         如果原始 run 使用了 PrimitiveOps（write_file / run_python 等），
         调用方必须传入 workspace_path 以恢复 request-scoped runners。
         """
-        from langgraph.types import Command
-
         from rag.agent.primitive_ops import PrimitiveOps
         from rag.agent.workspace import open_workspace
 
-        # 1. Restore PrimitiveOps runners if workspace_path provided
-        runtime_registry = self._base_tool_registry.clone()
-        self._inject_model_llm_tool_runners(runtime_registry)
+        lookup_config = self._checkpoint_lookup_config(run_id)
+        checkpoint_store = LangGraphCheckpointStore(
+            self._checkpointer,
+            run_config=lookup_config,
+        )
+        restored = await checkpoint_store.load_for_resume()
+        if restored is None:
+            raise KeyError(f"No checkpoint found for run_id={run_id}")
+        state = await checkpoint_store.apply_human_response(response)
+        run_config = state["run_config"]
+        await self._restore_runtime_handles_from_checkpoint(run_config)
+
+        runners: Mapping[str, ToolRunner] | None = None
         memory_store: WorkspaceMemoryStore | None = None
         if workspace_path:
             workspace = open_workspace(workspace_path)
             ops = PrimitiveOps(workspace=workspace)
-            memory_store = WorkspaceMemoryStore(workspace=workspace)
-            for extra_name, extra_runner in ops.runners().items():
-                try:
-                    runtime_registry.register_runner(extra_name, extra_runner)
-                except KeyError:
-                    pass
-
-        compiler = GraphCompiler(
-            tool_registry=runtime_registry,
-            tool_decision_provider=self._tool_decision_provider,
-            goal_contract_provider=self._goal_contract_provider,
-            retrieval_hint_provider=self._retrieval_hint_provider,
-            synthesis_runner=self._synthesis_runner,
-            output_finalizer=self._output_finalizer,
-            model_registry=self._model_registry,
-            checkpointer=self._checkpointer,
-        )
-        graph = cast(Any, compiler.compile(self._definition))
-        run_config = await self._restore_runtime_handles_from_checkpoint(
-            graph,
-            thread_id=run_id,
-        )
-        if memory_store is not None:
-            RunRegistry.get(run_config.run_id).memory_store = WorkspaceMemoryStore(
+            runners = ops.runners()
+            memory_store = WorkspaceMemoryStore(
                 workspace=workspace,
                 policy=run_config.memory_policy,
             )
-        result_state = await graph.ainvoke(
-            Command(resume=response.model_dump(mode="json")),
-            config={"configurable": {"thread_id": run_config.thread_id}},
+            RunRegistry.get(run_config.run_id).memory_store = memory_store
+
+        runtime_registry = self._runtime_tool_registry(
+            run_config,
+            runners=runners,
         )
-        if result_state.get("status") in {"done", "failed"}:
+        self._validate_allowed_tools(runtime_registry)
+        loop = self._build_loop(
+            runtime_registry=runtime_registry,
+            checkpoint_store=checkpoint_store,
+            memory_store=memory_store,
+            goal_spec=checkpoint_store.compatibility_config.goal_spec,
+            state=state,
+        )
+        result_state = await loop.run(state)
+        if result_state["status"] in {"completed", "failed"}:
             RunRegistry.remove(run_config.run_id)
-        return AgentRunResult.from_state(
+        return AgentRunResult.from_loop_result(
             result_state,
             definition=self._definition,
             workspace_path=workspace_path,
         )
 
     def pending_human_input_request(self, *, run_id: str) -> HumanInputRequest:
-        graph = self._compiler.compile(self._definition)
-        state = self._checkpoint_state(graph, thread_id=run_id)
-        request = state.get("human_input_request")
+        state = LangGraphCheckpointStore(
+            self._checkpointer,
+            run_config=self._checkpoint_lookup_config(run_id),
+        ).load_latest_sync()
+        if state is None:
+            raise KeyError(f"No checkpoint found for run_id={run_id}")
+        request = state["approval_request"]
+        if request is None and state["pause"] is not None:
+            request = state["pause"].request
         if request is None:
             raise KeyError(f"No pending human input request for run_id={run_id}")
         return request
 
     async def apending_human_input_request(self, *, run_id: str) -> HumanInputRequest:
-        graph = self._compiler.compile(self._definition)
-        state = await self._acheckpoint_state(graph, thread_id=run_id)
-        request = state.get("human_input_request")
+        state = await LangGraphCheckpointStore(
+            self._checkpointer,
+            run_config=self._checkpoint_lookup_config(run_id),
+        ).load_for_resume()
+        if state is None:
+            raise KeyError(f"No checkpoint found for run_id={run_id}")
+        request = state["approval_request"]
+        if request is None and state["pause"] is not None:
+            request = state["pause"].request
         if request is None:
             raise KeyError(f"No pending human input request for run_id={run_id}")
         return request
 
     async def _restore_runtime_handles_from_checkpoint(
         self,
-        graph: object,
-        *,
-        thread_id: str,
+        run_config: AgentRunConfig,
     ) -> AgentRunConfig:
-        state = await self._acheckpoint_state(graph, thread_id=thread_id)
-        run_config = state["run_config"]
         try:
             RunRegistry.get(run_config.run_id)
             return run_config
@@ -472,23 +739,20 @@ class AgentService:
                 await handles.budget_ledger.commit(lease_id, committed)
         return run_config
 
-    @staticmethod
-    def _checkpoint_state(graph: object, *, thread_id: str) -> AgentState:
-        snapshot = graph.get_state(  # type: ignore[attr-defined]
-            {"configurable": {"thread_id": thread_id}}
+    def _checkpoint_lookup_config(self, run_id: str) -> AgentRunConfig:
+        return AgentRunConfig(
+            run_id=run_id,
+            thread_id=run_id,
+            budget_total=self._definition.estimated_token_budget,
+            work_budget_total=self._definition.estimated_work_budget,
+            agent_type=self._definition.agent_type,
+            max_depth=self._definition.max_depth,
+            access_policy=(
+                self._definition.access_policy
+                or AccessPolicy.default()
+            ),
+            tool_policy=self._definition.tool_policy,
         )
-        if not snapshot.values:
-            raise KeyError(f"No checkpoint found for run_id={thread_id}")
-        return cast(AgentState, snapshot.values)
-
-    @staticmethod
-    async def _acheckpoint_state(graph: object, *, thread_id: str) -> AgentState:
-        snapshot = await graph.aget_state(  # type: ignore[attr-defined]
-            {"configurable": {"thread_id": thread_id}}
-        )
-        if not snapshot.values:
-            raise KeyError(f"No checkpoint found for run_id={thread_id}")
-        return cast(AgentState, snapshot.values)
 
 
 def _restore_final_output(

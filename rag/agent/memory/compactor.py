@@ -5,7 +5,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from hashlib import sha256
-from typing import Any, Protocol, cast
+from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from langchain_core.messages import BaseMessage
 from pydantic import BaseModel
@@ -26,6 +26,9 @@ from rag.agent.memory.models import (
 )
 from rag.agent.tools.spec import ToolResult
 from rag.utils.text import text_unit_count
+
+if TYPE_CHECKING:
+    from rag.agent.loop.state import LoopState
 
 
 class ToolOutputMemoryStore(Protocol):
@@ -399,9 +402,11 @@ class MemoryCompactor:
         *,
         policy: MemoryPolicy,
         store: ToolOutputMemoryStore | None = None,
+        loop_mode: bool = False,
     ) -> None:
         self._policy = policy
         self._store = store
+        self._loop_mode = loop_mode
 
     def compact_update(
         self,
@@ -439,7 +444,19 @@ class MemoryCompactor:
                 raw_refs_by_tool_call_id[replacement.tool_call_id] = ref
 
         dropped: dict[str, int] = {}
-        pin_context = self._pin_context(state, compacted, new_memory_refs=new_memory_refs)
+        pin_context = (
+            self._pin_loop_context(
+                state,
+                compacted,
+                new_memory_refs=new_memory_refs,
+            )
+            if self._loop_mode
+            else self._pin_context(
+                state,
+                compacted,
+                new_memory_refs=new_memory_refs,
+            )
+        )
         for channel, limit_attr in self._CAPPED_CHANNELS.items():
             channel_changed = False
             combined: list[Any]
@@ -949,7 +966,6 @@ class MemoryCompactor:
         plan = combined.get("agent_plan")
         active_step = _active_plan_step(plan)
         active_tool_call_ids = set(getattr(active_step, "tool_call_ids", []) or [])
-        active_gap_ids = set(getattr(active_step, "related_gap_ids", []) or [])
         active_evidence_refs = set(getattr(active_step, "evidence_refs", []) or [])
 
         for tool_call_id in active_tool_call_ids:
@@ -966,15 +982,100 @@ class MemoryCompactor:
             pins["evidence"].add(str(ref))
             pins["citations"].add(str(ref))
 
-        for observation in self._combined_items(state, update, "structured_observations"):
-            if not _observation_matches_active_gap(observation, active_gap_ids):
-                continue
-            pins["structured_observations"].add(_item_key(observation))
         for unit in self._combined_items(state, update, "context_units"):
             content_ref = getattr(unit, "content_ref", None)
             if isinstance(content_ref, str) and content_ref in active_tool_call_ids:
                 pins["context_units"].add(_item_key(unit))
         for ref_id in self._referenced_memory_ref_ids(state, update, new_memory_refs):
+            pins["memory_refs"].add(ref_id)
+        return pins
+
+    def _pin_loop_context(
+        self,
+        state: dict[str, Any],
+        update: dict[str, Any],
+        *,
+        new_memory_refs: list[MemoryRef],
+    ) -> dict[str, set[str]]:
+        combined = {**state, **update}
+        pins: dict[str, set[str]] = {
+            channel: set() for channel in self._CAPPED_CHANNELS
+        }
+        active_tool_call_ids = {
+            call.tool_call_id
+            for call in combined.get("pending_tool_calls", [])
+            if getattr(call, "tool_call_id", None)
+        }
+        approval_request = combined.get("approval_request")
+        active_tool_call_ids.update(
+            summary.tool_call_id
+            for summary in getattr(approval_request, "tool_calls", []) or []
+            if getattr(summary, "tool_call_id", None)
+        )
+        plan = combined.get("agent_plan")
+        active_step = _active_plan_step(plan)
+        active_tool_call_ids.update(
+            str(tool_call_id)
+            for tool_call_id in getattr(active_step, "tool_call_ids", []) or []
+            if tool_call_id
+        )
+
+        for tool_call_id in active_tool_call_ids:
+            key = f"tool_call_id:{tool_call_id}"
+            for channel in (
+                "tool_results",
+                "structured_observations",
+                "computation_results",
+            ):
+                pins[channel].add(key)
+            pins["answer_candidates"].add(
+                f"source_tool_call_id:{tool_call_id}"
+            )
+
+        evidence_refs: list[Any] = []
+        for ref in getattr(active_step, "evidence_refs", []) or []:
+            evidence_refs.append(ref)
+        answer_candidates = self._combined_items(
+            state,
+            update,
+            "answer_candidates",
+        )
+        if answer_candidates:
+            current_candidate = answer_candidates[-1]
+            pins["answer_candidates"].add(_item_key(current_candidate))
+            evidence_refs.extend(
+                getattr(current_candidate, "evidence_refs", []) or []
+            )
+        for observation in self._combined_items(
+            state,
+            update,
+            "structured_observations",
+        ):
+            if getattr(observation, "tool_call_id", None) not in (
+                active_tool_call_ids
+            ):
+                continue
+            evidence_refs.extend(
+                getattr(observation, "evidence_refs", []) or []
+            )
+        for ref in evidence_refs:
+            pins["evidence_refs"].add(_item_key(ref))
+            evidence_id = getattr(ref, "evidence_id", None)
+            if evidence_id:
+                pins["evidence"].add(f"evidence_id:{evidence_id}")
+            citation_id = getattr(ref, "citation_id", None)
+            if citation_id:
+                pins["citations"].add(f"citation_id:{citation_id}")
+
+        for unit in self._combined_items(state, update, "context_units"):
+            content_ref = getattr(unit, "content_ref", None)
+            if isinstance(content_ref, str) and content_ref in active_tool_call_ids:
+                pins["context_units"].add(_item_key(unit))
+        for ref_id in self._referenced_memory_ref_ids(
+            state,
+            update,
+            new_memory_refs,
+        ):
             pins["memory_refs"].add(ref_id)
         return pins
 
@@ -1167,6 +1268,110 @@ class MemoryCompactor:
         return " ".join(text.split())
 
 
+@dataclass(frozen=True, slots=True)
+class LoopCompactionResult:
+    changed: bool
+    channels: tuple[str, ...] = ()
+    warnings: tuple[str, ...] = ()
+
+
+class LoopContextCompactor:
+    """Prepare bounded loop state before a model invocation."""
+
+    _MESSAGE_CHANNELS = (
+        "messages",
+        "working_summary",
+        "extracted_facts",
+        "memory_refs",
+        "memory_warnings",
+    )
+
+    def __init__(
+        self,
+        *,
+        store: ToolOutputMemoryStore | None = None,
+    ) -> None:
+        self._store = store
+
+    def prepare(self, state: LoopState) -> LoopCompactionResult:
+        from rag.agent.loop.state import (
+            LoopTransition,
+            replace_latest_transition,
+        )
+
+        state_dict = cast(dict[str, Any], state)
+        policy = state["run_config"].memory_policy
+        initial_warnings = list(state["memory_warnings"])
+        changed_channels: list[str] = []
+
+        compacted_messages = MessageCompactor(
+            policy=policy,
+            store=self._store,
+        ).compact_initial_state(dict(state_dict))
+        message_update = {
+            channel: compacted_messages.get(channel)
+            for channel in self._MESSAGE_CHANNELS
+            if compacted_messages.get(channel) != state_dict.get(channel)
+        }
+        if message_update:
+            changed_channels.extend(message_update)
+            self._apply_update(state_dict, message_update)
+
+        memory_update = MemoryCompactor(
+            policy=policy,
+            store=self._store,
+            loop_mode=True,
+        ).compact_update(state_dict, {})
+        meaningful_memory_update = {
+            key: value
+            for key, value in memory_update.items()
+            if key != "memory_budget"
+        }
+        if meaningful_memory_update:
+            changed_channels.extend(meaningful_memory_update)
+        self._apply_update(state_dict, memory_update)
+
+        changed = bool(changed_channels)
+        warnings = tuple(
+            warning
+            for warning in state["memory_warnings"]
+            if warning not in initial_warnings
+        )
+        channels = tuple(dict.fromkeys(changed_channels))
+        if changed:
+            replace_latest_transition(
+                state,
+                LoopTransition(
+                    reason="compaction",
+                    iteration=state["iteration"],
+                    detail={
+                        "channels": list(channels),
+                        "warnings": list(warnings),
+                    },
+                ),
+            )
+        return LoopCompactionResult(
+            changed=changed,
+            channels=channels,
+            warnings=warnings,
+        )
+
+    @staticmethod
+    def _apply_update(
+        state: dict[str, Any],
+        update: dict[str, Any],
+    ) -> None:
+        for key, value in update.items():
+            if (
+                isinstance(value, list)
+                and len(value) == 1
+                and isinstance(value[0], StateChannelReplacement)
+            ):
+                state[key] = list(value[0].items)
+                continue
+            state[key] = value
+
+
 def _bounded_recent(items: list[Any], *, limit: int) -> list[Any]:
     if len(items) <= limit:
         return list(items)
@@ -1248,21 +1453,13 @@ def _active_plan_step(plan: Any) -> Any | None:
     return None
 
 
-def _observation_matches_active_gap(observation: Any, active_gap_ids: set[str]) -> bool:
-    if not active_gap_ids:
-        return False
-    values = [
-        *list(getattr(observation, "resolved_gaps", []) or []),
-        *list(getattr(observation, "related_gap_ids", []) or []),
-    ]
-    return bool({str(value) for value in values if str(value)} & active_gap_ids)
-
-
 def _model_path(model: BaseModel) -> str:
     return f"{model.__class__.__module__}.{model.__class__.__name__}"
 
 
 __all__ = [
+    "LoopCompactionResult",
+    "LoopContextCompactor",
     "MemoryCompactor",
     "MessageCompactor",
     "ToolOutputMemoryStore",

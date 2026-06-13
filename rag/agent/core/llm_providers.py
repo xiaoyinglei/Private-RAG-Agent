@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Awaitable
-from typing import Any
+from collections.abc import Awaitable, Mapping
+from inspect import isawaitable
+from typing import Any, Literal
 from uuid import uuid4
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from rag.agent.core.context import RunRegistry
 from rag.agent.core.definition import AgentDefinition, ModelSelectionPolicy
@@ -14,11 +15,20 @@ from rag.agent.core.llm_context import (
     AgentLLMContextOverflowError,
 )
 from rag.agent.core.llm_registry import ModelRegistry
-from rag.agent.goal_runtime import GoalContractHint
-from rag.agent.graphs.nodes.llm_decide import ToolDecisionProvider
-from rag.agent.graphs.nodes.retrieval_hint import RetrievalHintProvider
-from rag.agent.memory.models import InjectedContext
-from rag.agent.state import AgentState, ThinkOutput
+from rag.agent.core.runtime_diagnostics import RuntimeDiagnostic
+from rag.agent.core.runtime_ports import (
+    RetrievalHintProvider,
+    RetrievalHintUpdate,
+    ToolDecisionProvider,
+)
+from rag.agent.core.turn_contracts import ThinkOutput, ToolCallPlan
+from rag.agent.loop.state import (
+    LoopState,
+    ModelTurnDraft,
+    append_loop_diagnostic,
+)
+from rag.agent.memory.injector import ContextBuilder
+from rag.agent.memory.models import ContextBudgetSnapshot, InjectedContext
 from rag.assembly.tokenizer import TokenAccountingService, TokenizerContract
 from rag.providers.llm_gateway import LLMGateway
 from rag.schema.llm import DEFAULT_LLM_STAGE_BUDGETS, LLMCallStage
@@ -102,67 +112,6 @@ def _validate_retrieval_signals(
 # ── Retrieval hints ──
 
 
-class LLMGoalContractProvider:
-    """Model-backed, schema-validated goal contract inference."""
-
-    def __init__(
-        self,
-        generator: Any,
-        *,
-        kwargs: dict[str, Any] | None = None,
-        gateway: LLMGateway | None = None,
-        context_assembler: AgentLLMContextAssembler | None = None,
-        definition: AgentDefinition | None = None,
-    ) -> None:
-        self._kwargs = kwargs or {}
-        self._gateway = gateway or _fallback_gateway(
-            generator,
-            LLMCallStage.GOAL_CONTRACT,
-        )
-        _validate_shared_token_accounting(
-            gateway=self._gateway,
-            context_assembler=context_assembler,
-        )
-        self._context_assembler = context_assembler or _assembler_from_gateway(
-            self._gateway,
-            LLMCallStage.GOAL_CONTRACT,
-            kwargs=self._kwargs,
-        )
-        self._definition = definition or AgentDefinition(
-            agent_type="goal_contract",
-            description="Goal contract context",
-            system_prompt="",
-            allowed_tools=[],
-        )
-
-    async def infer(self, state: AgentState) -> GoalContractHint:
-        try:
-            ledger = RunRegistry.get(
-                state["run_config"].run_id
-            ).budget_ledger
-        except KeyError:
-            ledger = None
-        assembler = self._context_assembler
-        if assembler is None:
-            raise RuntimeError("goal contract context assembler is not configured")
-        assembled = assembler.assemble_goal_contract(
-            definition=self._definition,
-            state=state,
-            output_schema=GoalContractHint,
-        )
-        result = await self._gateway.agenerate_structured(
-            stage=LLMCallStage.GOAL_CONTRACT,
-            prompt=assembled.prompt,
-            schema=GoalContractHint,
-            ledger=ledger,
-            lease_id=(
-                f"{state['run_config'].run_id}:goal_contract:{uuid4().hex}"
-            ),
-            kwargs=self._kwargs,
-        )
-        return result.value
-
-
 class RetrievalHintDecision(BaseModel):
     reason: str
     retrieval_signals: dict[str, object] | None = None
@@ -204,8 +153,8 @@ class LLMRetrievalHintProvider(RetrievalHintProvider):
 
     def hint(
         self,
-        state: AgentState,
-    ) -> dict[Any, Any] | Awaitable[dict[Any, Any]]:
+        state: LoopState,
+    ) -> RetrievalHintUpdate | Awaitable[RetrievalHintUpdate]:
         if self._uses_async_gateway:
             return self._hint_with_gateway(state)
         assembler = self._context_assembler
@@ -229,7 +178,10 @@ class LLMRetrievalHintProvider(RetrievalHintProvider):
             decision = None
         return self._build_hint_update(state, decision)
 
-    async def _hint_with_gateway(self, state: AgentState) -> dict[Any, Any]:
+    async def _hint_with_gateway(
+        self,
+        state: LoopState,
+    ) -> RetrievalHintUpdate:
         gateway = self._gateway
         if gateway is None:
             raise RuntimeError("retrieval hint gateway is not configured")
@@ -269,9 +221,9 @@ class LLMRetrievalHintProvider(RetrievalHintProvider):
 
     def _build_hint_update(
         self,
-        state: AgentState,
+        state: LoopState,
         decision: RetrievalHintDecision | None,
-    ) -> dict[Any, Any]:
+    ) -> RetrievalHintUpdate:
         task = state.get("task", "")
 
         # 规则提取 quoted_terms（从原始 query），过滤空字符串
@@ -306,7 +258,7 @@ class LLMRetrievalHintProvider(RetrievalHintProvider):
 
         reason = decision.reason if decision is not None else "agent_research"
 
-        update: dict[str, Any] = {
+        update: RetrievalHintUpdate = {
             "decision_reason": reason,
             "retrieval_signals": signals,
             "retrieval_signals_debug": signals_debug,
@@ -316,6 +268,224 @@ class LLMRetrievalHintProvider(RetrievalHintProvider):
 
 
 # ── Tool decisions ──
+
+
+class LoopModelDecision(BaseModel):
+    """Provider payload accepting both the new and legacy decision vocabulary."""
+
+    action: Literal["execute", "finish", "synthesize", "pause"]
+    tool_calls: list[ToolCallPlan] = Field(default_factory=list)
+    final_answer: str | None = None
+    pause_reason: str | None = None
+    needs_user_input: str | None = None
+    stop_reason: str | None = None
+    thought: str | None = None
+
+
+def parse_loop_model_turn(
+    value: ModelTurnDraft | LoopModelDecision | ThinkOutput | Mapping[str, object],
+) -> ModelTurnDraft:
+    """Normalize legacy model output without giving labels routing authority."""
+
+    if isinstance(value, ModelTurnDraft):
+        return value
+    if isinstance(value, ThinkOutput):
+        decision = LoopModelDecision(
+            action=value.action,
+            tool_calls=value.tool_calls,
+            needs_user_input=value.needs_user_input,
+            stop_reason=value.stop_reason,
+            thought=value.thought,
+        )
+    elif isinstance(value, LoopModelDecision):
+        decision = value
+    else:
+        decision = LoopModelDecision.model_validate(value)
+
+    calls = tuple(decision.tool_calls)
+    if calls:
+        return ModelTurnDraft(action="execute", tool_calls=calls)
+    if decision.action in {"finish", "synthesize"}:
+        return ModelTurnDraft(
+            action="finish",
+            final_answer=decision.final_answer,
+        )
+    if decision.action == "pause":
+        return ModelTurnDraft(
+            action="pause",
+            pause_reason=(
+                decision.pause_reason
+                or decision.needs_user_input
+                or decision.stop_reason
+                or decision.thought
+            ),
+        )
+    return ModelTurnDraft(action="execute")
+
+
+class LLMLoopModelTurnProvider:
+    """Loop-specific provider returning a focused draft with no goal routing."""
+
+    manages_llm_context = True
+
+    def __init__(
+        self,
+        generator: Any,
+        *,
+        kwargs: dict[str, Any] | None = None,
+        gateway: LLMGateway | None = None,
+        context_assembler: AgentLLMContextAssembler | None = None,
+    ) -> None:
+        self._kwargs = kwargs or {}
+        self._gateway = gateway or _fallback_gateway(
+            generator,
+            LLMCallStage.TOOL_DECISION,
+        )
+        _validate_shared_token_accounting(
+            gateway=self._gateway,
+            context_assembler=context_assembler,
+        )
+        self._context_assembler = context_assembler or _assembler_from_gateway(
+            self._gateway,
+            LLMCallStage.TOOL_DECISION,
+            kwargs=self._kwargs,
+        )
+
+    async def next_turn(
+        self,
+        state: LoopState,
+        *,
+        definition: AgentDefinition,
+        budget_remaining: int,
+    ) -> ModelTurnDraft:
+        assembler = self._context_assembler
+        if assembler is None:
+            raise RuntimeError("loop model context assembler is not configured")
+        assembled = assembler.assemble_loop_turn(
+            definition=definition,
+            state=state,
+            budget_remaining=budget_remaining,
+            output_schema=LoopModelDecision,
+        )
+        run_id = state["run_config"].run_id
+        try:
+            ledger = RunRegistry.get(run_id).budget_ledger
+        except KeyError:
+            ledger = None
+        result = await self._gateway.agenerate_structured(
+            stage=LLMCallStage.TOOL_DECISION,
+            prompt=assembled.prompt,
+            schema=LoopModelDecision,
+            ledger=ledger,
+            lease_id=(
+                f"{run_id}:loop_turn:{state.get('iteration', 0)}:"
+                f"{uuid4().hex}"
+            ),
+            kwargs=self._kwargs,
+        )
+        if result.value.action == "synthesize":
+            append_loop_diagnostic(
+                state,
+                RuntimeDiagnostic(
+                    code="legacy_synthesize_normalized",
+                    component="loop_model_provider",
+                    message=(
+                        "Normalized legacy synthesize action to finish intent."
+                    ),
+                    degraded=False,
+                ),
+            )
+        return parse_loop_model_turn(result.value)
+
+
+class LegacyToolDecisionModelTurnProvider:
+    """Adapt an explicit legacy decision provider at the service boundary."""
+
+    def __init__(
+        self,
+        provider: ToolDecisionProvider,
+        *,
+        use_synthesis_builder: bool,
+    ) -> None:
+        self._provider = provider
+        self._use_synthesis_builder = use_synthesis_builder
+
+    async def next_turn(
+        self,
+        state: LoopState,
+        *,
+        definition: AgentDefinition,
+        budget_remaining: int,
+    ) -> ModelTurnDraft:
+        if bool(getattr(self._provider, "manages_llm_context", False)):
+            context = InjectedContext(
+                sections=[],
+                context_budget=ContextBudgetSnapshot(
+                    max_context_tokens=0
+                ),
+            )
+        else:
+            context = ContextBuilder(
+                max_context_tokens=(
+                    state["run_config"].max_context_tokens
+                    or DEFAULT_LLM_STAGE_BUDGETS[
+                        LLMCallStage.TOOL_DECISION
+                    ].max_input_tokens
+                ),
+            ).assemble_loop(
+                definition=definition,
+                state=state,
+            )
+            state["context_budget"] = context.context_budget
+        raw = self._provider.decide(
+            state,
+            definition=definition,
+            budget_remaining=budget_remaining,
+            context=context,
+        )
+        if isawaitable(raw):
+            raw = await raw
+        draft = parse_loop_model_turn(raw)
+        if (
+            draft.action == "finish"
+            and not draft.final_answer
+            and not self._use_synthesis_builder
+            and state["answer_candidates"]
+        ):
+            return draft.model_copy(
+                update={
+                    "final_answer": state["answer_candidates"][-1].text
+                }
+            )
+        return draft
+
+
+def create_loop_model_turn_provider(
+    registry: ModelRegistry,
+    selection: ModelSelectionPolicy,
+) -> LLMLoopModelTurnProvider:
+    resolved = registry.resolve_for_node(
+        node_model=selection.tool_decision_model,
+        node_name="tool_decision",
+    )
+    kwargs = dict(resolved.kwargs)
+    kwargs.setdefault(
+        "temperature",
+        selection.tool_decision_temperature,
+    )
+    if selection.tool_decision_max_tokens is not None:
+        kwargs["max_tokens"] = selection.tool_decision_max_tokens
+    gateway = getattr(resolved, "gateway", None)
+    return LLMLoopModelTurnProvider(
+        resolved.generator,
+        kwargs=kwargs,
+        gateway=gateway,
+        context_assembler=_assembler_from_gateway(
+            gateway,
+            LLMCallStage.TOOL_DECISION,
+            kwargs=kwargs,
+        ),
+    )
 
 
 class LLMToolDecisionProvider(ToolDecisionProvider):
@@ -349,7 +519,7 @@ class LLMToolDecisionProvider(ToolDecisionProvider):
 
     def decide(
         self,
-        state: AgentState,
+        state: LoopState,
         *,
         definition: AgentDefinition,
         budget_remaining: int,
@@ -393,7 +563,7 @@ class LLMToolDecisionProvider(ToolDecisionProvider):
 
     async def _decide_with_gateway(
         self,
-        state: AgentState,
+        state: LoopState,
         *,
         definition: AgentDefinition,
         budget_remaining: int,
@@ -504,39 +674,6 @@ def create_default_providers(
                 kwargs=decision_kwargs,
             ),
         ),
-    )
-
-
-def create_goal_contract_provider(
-    registry: ModelRegistry,
-    definition: AgentDefinition,
-) -> LLMGoalContractProvider:
-    resolved = registry.resolve_for_node(
-        node_model=None,
-        node_name="goal_contract",
-    )
-    kwargs = dict(resolved.kwargs)
-    kwargs.setdefault("temperature", 0.0)
-    kwargs["max_tokens"] = min(
-        int(kwargs.get("max_tokens", 512)),
-        DEFAULT_LLM_STAGE_BUDGETS[
-            LLMCallStage.GOAL_CONTRACT
-        ].max_output_tokens,
-    )
-    gateway = resolved.gateway or _fallback_gateway(
-        resolved.generator,
-        LLMCallStage.GOAL_CONTRACT,
-    )
-    return LLMGoalContractProvider(
-        resolved.generator,
-        kwargs=kwargs,
-        gateway=gateway,
-        context_assembler=_assembler_from_gateway(
-            gateway,
-            LLMCallStage.GOAL_CONTRACT,
-            kwargs=kwargs,
-        ),
-        definition=definition,
     )
 
 

@@ -1,3 +1,9 @@
-from rag.agent.loop.controller import TurnController
+__all__ = ["AgentLoop"]
 
-__all__ = ["TurnController"]
+
+def __getattr__(name: str) -> object:
+    if name == "AgentLoop":
+        from rag.agent.loop.runtime import AgentLoop
+
+        return AgentLoop
+    raise AttributeError(name)

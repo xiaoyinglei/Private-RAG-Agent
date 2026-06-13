@@ -4,7 +4,8 @@ import re
 from collections.abc import Sequence
 from typing import Any
 
-from rag.agent.goal_runtime import ContextBinding, ContextUnit, GoalConstraint
+from rag.agent.compat.goal_contract import GoalConstraint
+from rag.agent.core.observations import ContextBinding, ContextUnit
 
 
 class AssetContextBindingProvider:

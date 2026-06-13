@@ -73,6 +73,25 @@ class TestHumanInputRequest:
         assert req.kind == "choice"
         assert len(req.tool_calls) == 0
 
+    def test_tool_reconciliation_request(self) -> None:
+        req = HumanInputRequest(
+            request_id="hir_reconcile",
+            kind="tool_reconciliation",
+            question="工具状态不明确，请选择恢复方式。",
+            context={
+                "tool_call_id": "tc_001",
+                "operation_id": "op_001",
+            },
+            options=[
+                "mark_completed",
+                "mark_failed",
+                "retry_new_operation",
+            ],
+        )
+
+        assert req.kind == "tool_reconciliation"
+        assert req.context["operation_id"] == "op_001"
+
 
 class TestHumanInputResponse:
     def test_allow_once_response(self) -> None:
@@ -110,3 +129,15 @@ class TestHumanInputResponse:
                 request_id="hir_001",
                 decision="invalid_choice",
             )
+
+    @pytest.mark.parametrize(
+        "decision",
+        ["mark_completed", "mark_failed", "retry_new_operation"],
+    )
+    def test_tool_reconciliation_decisions(self, decision: str) -> None:
+        response = HumanInputResponse(
+            request_id="hir_reconcile",
+            decision=decision,
+        )
+
+        assert response.decision == decision

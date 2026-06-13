@@ -4,26 +4,19 @@ import tempfile
 from pathlib import Path
 
 import pandas as pd
-import pytest
 
 from rag.agent.builtin.research import RESEARCH_AGENT
 from rag.agent.builtin_registry import create_builtin_tool_registry
-from rag.agent.core.context import AgentRunConfig, RunRegistry
-from rag.agent.graphs.nodes.execute import run_tools_raw
-from rag.agent.state import AgentState, ToolCallPlan
 from rag.agent.tools.asset_tools import (
     AssetAnalyzeInput,
-    AssetAnalyzeOutput,
     AssetInspectInput,
     AssetListInput,
     AssetReadSliceInput,
-    AssetReadSliceOutput,
     AssetToolRunner,
 )
 from rag.agent.tools.rag_tool_runner import _evidence_to_output
 from rag.schema.core import AssetRecord
-from rag.schema.query import EvidenceItem, GroundingTarget, RetrievalSignals
-from rag.schema.runtime import AccessPolicy
+from rag.schema.query import EvidenceItem, GroundingTarget
 
 
 class _FakeObjectStore:
@@ -272,159 +265,3 @@ def test_rag_search_output_preserves_asset_ids_for_followup_asset_tools() -> Non
     assert output.items[0]["asset_id"] == 14
     assert output.items[0]["section_id"] == 5
     assert output.items[0]["page_start"] == 4
-
-
-@pytest.mark.anyio
-async def test_run_tools_raw_runs_generic_asset_analysis_tool() -> None:
-    parquet = _create_parquet(
-        {
-            "区域公司": ["总计（不含一体化）", "北方", "东北"],
-            "日_日提货": ["131.074462", "19.22484", "6.307968"],
-        }
-    )
-    repo = _FakeMetadataRepo([_asset(14)])
-    runner = AssetToolRunner(
-        metadata_repo=repo,
-        object_store=_FakeObjectStore({"daily.parquet": parquet}),
-    )
-    run_config = AgentRunConfig(
-        run_id="asset-tool-execute",
-        thread_id="asset-tool-execute",
-        budget_total=10000,
-        max_depth=2,
-        access_policy=AccessPolicy.default(),
-    )
-    RunRegistry.remove(run_config.run_id)
-    RunRegistry.get_or_create(run_config)
-    state: AgentState = {
-        "messages": [],
-        "evidence": [],
-        "citations": [],
-        "tool_results": [],
-        "task": "北方和东北日提货合计是多少",
-        "retrieval_signals": RetrievalSignals(),
-        "retrieval_signals_debug": None,
-        "run_config": run_config,
-        "iteration": 0,
-        "status": "running",
-        "decision_reason": None,
-        "stop_reason": None,
-        "needs_user_input": None,
-        "pending_tool_calls": [
-            ToolCallPlan.create(
-                "asset_analyze",
-                {
-                    "asset_id": 14,
-                    "operation": "dataframe_sql",
-                    "query": (
-                        'SELECT SUM("日_日提货") AS total '
-                        "FROM sheet WHERE \"区域公司\" IN ('北方', '东北')"
-                    ),
-                },
-            )
-        ],
-        "approved_tool_call_ids": [],
-        "denied_tool_call_ids": [],
-        "user_decision": None,
-        "user_message": None,
-        "human_input_request": None,
-        "human_input_response": None,
-        "working_summary": None,
-        "extracted_facts": [],
-        "context_budget": None,
-        "final_answer": None,
-        "groundedness_flag": False,
-        "insufficient_evidence_flag": False,
-    }
-    registry = create_builtin_tool_registry(runners={"asset_analyze": runner.analyze_asset})
-
-    update = await run_tools_raw(
-        state,
-        tool_registry=registry,
-        allowed_tools=frozenset({"asset_analyze"}),
-    )
-
-    [tool_result] = update["tool_results"]
-    assert tool_result.status == "ok"
-    assert tool_result.tool_name == "asset_analyze"
-    output = tool_result.output
-    assert isinstance(output, AssetAnalyzeOutput)
-    assert output.rows == [["25.532808"]]
-    RunRegistry.remove(run_config.run_id)
-
-
-@pytest.mark.anyio
-async def test_run_tools_raw_runs_generic_asset_read_slice_tool() -> None:
-    parquet = _create_parquet(
-        {
-            "区域公司": ["总计（不含一体化）", "北方", "东北"],
-            "日_日提货": ["131.074462", "19.22484", "6.307968"],
-        }
-    )
-    repo = _FakeMetadataRepo([_asset(14)])
-    runner = AssetToolRunner(
-        metadata_repo=repo,
-        object_store=_FakeObjectStore({"daily.parquet": parquet}),
-    )
-    run_config = AgentRunConfig(
-        run_id="asset-read-slice-execute",
-        thread_id="asset-read-slice-execute",
-        budget_total=10000,
-        max_depth=2,
-        access_policy=AccessPolicy.default(),
-    )
-    RunRegistry.remove(run_config.run_id)
-    RunRegistry.get_or_create(run_config)
-    state: AgentState = {
-        "messages": [],
-        "evidence": [],
-        "citations": [],
-        "tool_results": [],
-        "task": "读取日报局部内容",
-        "retrieval_signals": RetrievalSignals(),
-        "retrieval_signals_debug": None,
-        "run_config": run_config,
-        "iteration": 0,
-        "status": "running",
-        "decision_reason": None,
-        "stop_reason": None,
-        "needs_user_input": None,
-        "pending_tool_calls": [
-            ToolCallPlan.create(
-                "asset_read_slice",
-                {
-                    "asset_id": 14,
-                    "row_start": 1,
-                    "row_count": 1,
-                    "columns": ["区域公司"],
-                },
-            )
-        ],
-        "approved_tool_call_ids": [],
-        "denied_tool_call_ids": [],
-        "user_decision": None,
-        "user_message": None,
-        "human_input_request": None,
-        "human_input_response": None,
-        "working_summary": None,
-        "extracted_facts": [],
-        "context_budget": None,
-        "final_answer": None,
-        "groundedness_flag": False,
-        "insufficient_evidence_flag": False,
-    }
-    registry = create_builtin_tool_registry(runners={"asset_read_slice": runner.read_slice})
-
-    update = await run_tools_raw(
-        state,
-        tool_registry=registry,
-        allowed_tools=frozenset({"asset_read_slice"}),
-    )
-
-    [tool_result] = update["tool_results"]
-    assert tool_result.status == "ok"
-    assert tool_result.tool_name == "asset_read_slice"
-    output = tool_result.output
-    assert isinstance(output, AssetReadSliceOutput)
-    assert output.rows == [{"区域公司": "北方"}]
-    RunRegistry.remove(run_config.run_id)

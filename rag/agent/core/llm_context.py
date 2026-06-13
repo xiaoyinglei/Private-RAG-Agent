@@ -2,14 +2,14 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from pydantic import BaseModel
 
 from rag.agent.core.definition import AgentDefinition
 from rag.agent.core.llm_prompts import (
-    build_goal_contract_prompt,
+    build_loop_turn_prompt,
     build_retrieval_hint_prompt,
-    build_tool_decision_prompt,
 )
 from rag.agent.memory.injector import ContextBuilder, ContextTokenAccounting
 from rag.agent.memory.models import (
@@ -18,9 +18,11 @@ from rag.agent.memory.models import (
     ContextSectionName,
     InjectedContext,
 )
-from rag.agent.state import AgentState
 from rag.providers.llm_gateway import structured_accounted_prompt
 from rag.schema.llm import LLMCallStage, LLMStageBudget
+
+if TYPE_CHECKING:
+    from rag.agent.loop.state import LoopState
 
 _OPTIONAL_STATE_SECTIONS: frozenset[ContextSectionName] = frozenset(
     {
@@ -77,7 +79,7 @@ class AgentLLMContextAssembler:
         self,
         *,
         definition: AgentDefinition,
-        state: AgentState,
+        state: LoopState,
         output_schema: type[BaseModel] | None = None,
     ) -> AssembledAgentLLMContext:
         del definition
@@ -95,33 +97,11 @@ class AgentLLMContextAssembler:
             output_schema=output_schema,
         )
 
-    def assemble_goal_contract(
-        self,
-        *,
-        definition: AgentDefinition,
-        state: AgentState,
-        output_schema: type[BaseModel] | None = None,
-    ) -> AssembledAgentLLMContext:
-        del definition
-        return self._assemble(
-            stage=LLMCallStage.GOAL_CONTRACT,
-            state=state,
-            prefix_sections=[
-                self._required_section(
-                    "instructions",
-                    build_goal_contract_prompt(state),
-                )
-            ],
-            included_state_sections=frozenset(),
-            required_state_sections=frozenset(),
-            output_schema=output_schema,
-        )
-
     def assemble_tool_decision(
         self,
         *,
         definition: AgentDefinition,
-        state: AgentState,
+        state: LoopState,
         budget_remaining: int,
         output_schema: type[BaseModel] | None = None,
     ) -> AssembledAgentLLMContext:
@@ -132,10 +112,36 @@ class AgentLLMContextAssembler:
                 self._required_section("system", definition.system_prompt),
                 self._required_section(
                     "instructions",
-                    build_tool_decision_prompt(
+                    build_loop_turn_prompt(
                         state,
                         budget_remaining=budget_remaining,
-                        context_text="",
+                        allowed_tools=definition.allowed_tools,
+                    ),
+                ),
+            ],
+            included_state_sections=_DECISION_STATE_SECTIONS,
+            required_state_sections=frozenset({"open_decisions", "plan"}),
+            output_schema=output_schema,
+        )
+
+    def assemble_loop_turn(
+        self,
+        *,
+        definition: AgentDefinition,
+        state: LoopState,
+        budget_remaining: int,
+        output_schema: type[BaseModel] | None = None,
+    ) -> AssembledAgentLLMContext:
+        return self._assemble(
+            stage=LLMCallStage.TOOL_DECISION,
+            state=state,
+            prefix_sections=[
+                self._required_section("system", definition.system_prompt),
+                self._required_section(
+                    "instructions",
+                    build_loop_turn_prompt(
+                        state,
+                        budget_remaining=budget_remaining,
                         allowed_tools=definition.allowed_tools,
                     ),
                 ),
@@ -149,7 +155,7 @@ class AgentLLMContextAssembler:
         self,
         *,
         definition: AgentDefinition,
-        state: AgentState,
+        state: LoopState,
         prompt: str,
         context_sections: Sequence[str],
         stage: LLMCallStage = LLMCallStage.LLM_GENERATE,
@@ -172,7 +178,7 @@ class AgentLLMContextAssembler:
         self,
         *,
         definition: AgentDefinition,
-        state: AgentState,
+        state: LoopState,
         task: str,
         context_sections: Sequence[str],
     ) -> AssembledAgentLLMContext:
@@ -202,7 +208,7 @@ class AgentLLMContextAssembler:
         self,
         *,
         definition: AgentDefinition,
-        state: AgentState,
+        state: LoopState,
         question: str,
         left_context_sections: Sequence[str],
         right_context_sections: Sequence[str],
@@ -235,7 +241,7 @@ class AgentLLMContextAssembler:
         self,
         *,
         definition: AgentDefinition,
-        state: AgentState,
+        state: LoopState,
         candidate_text: str,
         validation_feedback: str | None,
         output_schema: type[BaseModel],
@@ -285,7 +291,7 @@ class AgentLLMContextAssembler:
         self,
         *,
         stage: LLMCallStage,
-        state: AgentState,
+        state: LoopState,
         prefix_sections: Sequence[ContextSection],
         included_state_sections: frozenset[ContextSectionName],
         required_state_sections: frozenset[ContextSectionName],
@@ -367,17 +373,18 @@ class AgentLLMContextAssembler:
     def _assemble_state_context(
         self,
         *,
-        state: AgentState,
+        state: LoopState,
         max_context_tokens: int,
         included_sections: frozenset[ContextSectionName],
         required_sections: frozenset[ContextSectionName],
     ) -> InjectedContext:
         if max_context_tokens <= 0:
             if required_sections:
-                required_probe = ContextBuilder(
+                builder = ContextBuilder(
                     max_context_tokens=1,
                     token_accounting=self._token_accounting,
-                ).assemble(
+                )
+                required_probe = builder.assemble_loop(
                     definition=self._empty_definition(),
                     state=state,
                     included_sections=required_sections,
@@ -423,10 +430,11 @@ class AgentLLMContextAssembler:
                 context_budget=ContextBudgetSnapshot(max_context_tokens=0),
             )
 
-        return ContextBuilder(
+        builder = ContextBuilder(
             max_context_tokens=max_context_tokens,
             token_accounting=self._token_accounting,
-        ).assemble(
+        )
+        return builder.assemble_loop(
             definition=self._empty_definition(),
             state=state,
             included_sections=included_sections,

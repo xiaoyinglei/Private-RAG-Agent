@@ -23,9 +23,9 @@ from rag.agent.core.definition import AgentDefinition
 from rag.agent.core.delegation import AgentDelegationRequest
 from rag.agent.core.registry import AgentRegistry
 from rag.agent.core.subagent_runner import BuiltinSubAgentRunner
-from rag.agent.graphs.nodes.execute import run_tools_raw
+from rag.agent.core.turn_contracts import ThinkOutput, ToolCallPlan
+from rag.agent.loop.state import LoopState, create_loop_state
 from rag.agent.service import AgentRunRequest, AgentRunResult
-from rag.agent.state import AgentState, ThinkOutput, ToolCallPlan
 from rag.agent.tools.llm_tools import LLMTextOutput
 from rag.schema.query import RetrievalSignals
 from rag.schema.runtime import AccessPolicy
@@ -49,7 +49,7 @@ class _ChildDecisionProvider:
 
     async def decide(
         self,
-        state: AgentState,
+        state: LoopState,
         *,
         definition: AgentDefinition,
         budget_remaining: int,
@@ -80,7 +80,7 @@ class _ChildDecisionProvider:
         )
 
 
-def _parent_state(run_id: str = "parent-run", *, max_depth: int = 2) -> AgentState:
+def _parent_state(run_id: str = "parent-run", *, max_depth: int = 2) -> LoopState:
     config = AgentRunConfig(
         run_id=run_id,
         thread_id=f"{run_id}-thread",
@@ -92,29 +92,7 @@ def _parent_state(run_id: str = "parent-run", *, max_depth: int = 2) -> AgentSta
     )
     RunRegistry.remove(run_id)
     RunRegistry.get_or_create(config)
-    return {
-        "messages": [],
-        "evidence": [],
-        "citations": [],
-        "tool_results": [],
-        "task": "Parent task",
-        "run_config": config,
-        "iteration": 0,
-        "status": "running",
-        "decision_reason": None,
-        "stop_reason": None,
-        "needs_user_input": None,
-        "pending_tool_calls": [],
-        "approved_tool_call_ids": [],
-        "denied_tool_call_ids": [],
-        "user_decision": None,
-        "working_summary": None,
-        "extracted_facts": [],
-        "context_budget": None,
-        "final_answer": None,
-        "groundedness_flag": False,
-        "insufficient_evidence_flag": False,
-    }
+    return create_loop_state(task="Parent task", run_config=config)
 
 
 @pytest.mark.anyio
@@ -414,7 +392,7 @@ class TestAgentAsToolAdapter:
 
     @pytest.mark.anyio
     async def test_adapter_raises_on_unregistered_agent_type(self) -> None:
-        """adapter 失败时抛错，由 run_tools_raw 转成 ToolResult(error)。"""
+        """Adapter failures remain typed for ToolExecutionService conversion."""
         from rag.agent.core.agent_as_tool import AgentAsToolRunner
 
         runner = AgentAsToolRunner(
@@ -441,7 +419,7 @@ class TestAgentAsToolAdapter:
                 self,
                 *,
                 request: AgentDelegationRequest,
-                parent_state: AgentState,
+                parent_state: LoopState,
             ) -> AgentRunResult:
                 del request, parent_state
                 return AgentRunResult(
@@ -467,54 +445,6 @@ class TestAgentAsToolAdapter:
         assert isinstance(result, AgentToolOutput)
         assert result.agent_name == "research"
         assert result.conclusion == "Completed child output"
-
-    @pytest.mark.anyio
-    async def test_adapter_failure_becomes_tool_error(self) -> None:
-        class _FailingSubAgentRunner:
-            async def run_delegated_task(
-                self,
-                *,
-                request: AgentDelegationRequest,
-                parent_state: AgentState,
-            ) -> AgentRunResult:
-                del request, parent_state
-                raise RuntimeError("child failed")
-
-        run_config = AgentRunConfig(
-            run_id="agent-tool-failure",
-            thread_id="agent-tool-failure",
-            budget_total=20000,
-            max_depth=2,
-            access_policy=AccessPolicy.default(),
-        )
-        RunRegistry.remove(run_config.run_id)
-        RunRegistry.get_or_create(run_config)
-        registry = create_builtin_tool_registry()
-        registry.register_runner(
-            "agent_research",
-            AgentAsToolAdapter(
-                runner=_FailingSubAgentRunner(),
-                agent_type="research",
-                run_config=run_config,
-            ),
-        )
-        call = ToolCallPlan.create("agent_research", {"task": "delegate research"})
-
-        update = await run_tools_raw(
-            {
-                **_parent_state("agent-tool-failure", max_depth=2),
-                "run_config": run_config,
-                "pending_tool_calls": [call],
-            },
-            tool_registry=registry,
-            allowed_tools=frozenset({"agent_research"}),
-        )
-
-        result = update["tool_results"][0]
-        assert result.status == "error"
-        assert result.error is not None
-        assert result.error.code == "subagent_failed"
-        RunRegistry.remove(run_config.run_id)
 
     def test_depth_exhaust_returns_error_not_exception(self) -> None:
         """depth=0 时不抛异常，返回结构化错误结果（通过 run_config 的 depth 控制）"""

@@ -39,7 +39,6 @@ class PlanStep(BaseModel):
     step_id: str
     title: str
     status: PlanStepStatus = "pending"
-    related_gap_ids: list[str] = Field(default_factory=list)
     expected_tool_names: list[str] = Field(default_factory=list)
     tool_call_ids: list[str] = Field(default_factory=list)
     evidence_refs: list[str] = Field(default_factory=list)
@@ -53,7 +52,6 @@ class PlanStep(BaseModel):
     def bound_fields(self) -> Self:
         self.step_id = _safe_identifier(self.step_id, prefix="step")
         self.title = _bounded_text(self.title, MAX_STEP_TITLE_CHARS) or "Untitled step"
-        self.related_gap_ids = _dedupe_texts(self.related_gap_ids, limit=MAX_STEP_REFS)
         self.expected_tool_names = _dedupe_texts(self.expected_tool_names, limit=MAX_STEP_REFS)
         self.tool_call_ids = _dedupe_texts(self.tool_call_ids, limit=MAX_STEP_REFS)
         self.evidence_refs = _dedupe_texts(self.evidence_refs, limit=MAX_STEP_REFS)
@@ -66,7 +64,6 @@ class PlanStepPatch(BaseModel):
     step_id: str
     title: str | None = None
     status: PlanStepStatus | None = None
-    related_gap_ids: list[str] | None = None
     expected_tool_names: list[str] | None = None
     tool_call_ids: list[str] | None = None
     evidence_refs: list[str] | None = None
@@ -77,8 +74,6 @@ class PlanStepPatch(BaseModel):
         self.step_id = _safe_identifier(self.step_id, prefix="step")
         if self.title is not None:
             self.title = _bounded_text(self.title, MAX_STEP_TITLE_CHARS) or None
-        if self.related_gap_ids is not None:
-            self.related_gap_ids = _dedupe_texts(self.related_gap_ids, limit=MAX_STEP_REFS)
         if self.expected_tool_names is not None:
             self.expected_tool_names = _dedupe_texts(self.expected_tool_names, limit=MAX_STEP_REFS)
         if self.tool_call_ids is not None:
@@ -160,29 +155,26 @@ class PlanEvent(BaseModel):
 class PlanTracker:
     max_steps: int = MAX_PLAN_STEPS
 
-    def initialize(self, *, task: str, open_gaps: Sequence[object]) -> tuple[AgentPlan, list[PlanEvent]]:
-        steps = [
-            PlanStep(
-                step_id=_step_id_for_gap(gap, index=index),
-                title=_gap_description(gap),
-                related_gap_ids=[_gap_id(gap)] if _gap_id(gap) else [],
-            )
-            for index, gap in enumerate(open_gaps[: self.max_steps], start=1)
-        ]
-        if not steps:
-            steps = [
-                PlanStep(
-                    step_id="step_answer",
-                    title="Decide whether the goal is already satisfied.",
-                )
-            ]
+    def initialize_task(self, *, task: str) -> tuple[AgentPlan, list[PlanEvent]]:
+        """Create an advisory task plan without deriving completion gaps."""
+
+        step = PlanStep(
+            step_id="step_task",
+            title="Work on the current task.",
+        )
         plan = AgentPlan(
             objective=task,
             status="active",
-            active_step_id=steps[0].step_id,
-            steps=steps,
+            active_step_id=step.step_id,
+            steps=[step],
         )
-        return plan, [self._event("initialized", plan, message="Initialized autonomous plan.")]
+        return plan, [
+            self._event(
+                "initialized",
+                plan,
+                message="Initialized advisory task plan.",
+            )
+        ]
 
     def apply_llm_update(
         self,
@@ -190,7 +182,6 @@ class PlanTracker:
         update: PlanUpdate,
         *,
         allowed_tool_names: frozenset[str],
-        open_gap_ids: frozenset[str],
     ) -> tuple[AgentPlan, list[PlanEvent]]:
         warnings: list[str] = []
         plan_status = update.status
@@ -204,7 +195,6 @@ class PlanTracker:
                 self._normalize_step(
                     _without_llm_step_completion(step, warnings=warnings),
                     allowed_tool_names=allowed_tool_names,
-                    open_gap_ids=open_gap_ids,
                     warnings=warnings,
                 )
                 for step in update.steps[: self.max_steps]
@@ -214,7 +204,6 @@ class PlanTracker:
                 self._normalize_step(
                     step,
                     allowed_tool_names=allowed_tool_names,
-                    open_gap_ids=open_gap_ids,
                     warnings=warnings,
                 )
                 for step in plan.steps
@@ -226,7 +215,6 @@ class PlanTracker:
                     for patch in update.step_updates
                 ],
                 allowed_tool_names=allowed_tool_names,
-                open_gap_ids=open_gap_ids,
                 warnings=warnings,
             )
 
@@ -250,6 +238,21 @@ class PlanTracker:
                 warnings=warnings,
             )
         ]
+
+    def apply_advisory_update(
+        self,
+        plan: AgentPlan,
+        update: PlanUpdate,
+        *,
+        allowed_tool_names: frozenset[str],
+    ) -> tuple[AgentPlan, list[PlanEvent]]:
+        """Apply a bounded task-plan update without granting execution authority."""
+
+        return self.apply_llm_update(
+            plan,
+            update,
+            allowed_tool_names=allowed_tool_names,
+        )
 
     def record_decision_progress(
         self,
@@ -305,7 +308,6 @@ class PlanTracker:
         plan: AgentPlan | None,
         *,
         observations: Sequence[object],
-        satisfied_requirement_ids: Sequence[str],
     ) -> tuple[AgentPlan | None, list[PlanEvent]]:
         if plan is None or not observations:
             return plan, []
@@ -400,7 +402,6 @@ class PlanTracker:
         patches: Sequence[PlanStepPatch],
         *,
         allowed_tool_names: frozenset[str],
-        open_gap_ids: frozenset[str],
         warnings: list[str],
     ) -> list[PlanStep]:
         by_id = {step.step_id: step for step in steps}
@@ -419,7 +420,6 @@ class PlanTracker:
             by_id[patch.step_id] = self._normalize_step(
                 updated,
                 allowed_tool_names=allowed_tool_names,
-                open_gap_ids=open_gap_ids,
                 warnings=warnings,
             )
         return [by_id[step_id] for step_id in ordered_ids[: self.max_steps]]
@@ -429,7 +429,6 @@ class PlanTracker:
         step: PlanStep,
         *,
         allowed_tool_names: frozenset[str],
-        open_gap_ids: frozenset[str],
         warnings: list[str],
     ) -> PlanStep:
         expected_tools = list(step.expected_tool_names)
@@ -439,16 +438,8 @@ class PlanTracker:
                 warnings.append("unsupported_tool_names")
             expected_tools = filtered_tools
 
-        related_gap_ids = list(step.related_gap_ids)
-        if open_gap_ids:
-            filtered_gap_ids = [gap_id for gap_id in related_gap_ids if gap_id in open_gap_ids]
-            if len(filtered_gap_ids) != len(related_gap_ids):
-                warnings.append("unknown_gap_ids")
-            related_gap_ids = filtered_gap_ids
-
         return step.model_copy(
             update={
-                "related_gap_ids": related_gap_ids,
                 "expected_tool_names": expected_tools,
             }
         )
@@ -480,8 +471,6 @@ def _patch_step(step: PlanStep, patch: PlanStepPatch) -> PlanStep:
         update["title"] = patch.title
     if patch.status is not None:
         update["status"] = patch.status
-    if patch.related_gap_ids is not None:
-        update["related_gap_ids"] = patch.related_gap_ids
     if patch.expected_tool_names is not None:
         update["expected_tool_names"] = patch.expected_tool_names
     if patch.tool_call_ids is not None:
@@ -532,19 +521,6 @@ def _step_observation_bound(step: PlanStep, observations: Sequence[object]) -> b
             continue
         tool_call_id = getattr(observation, "tool_call_id", None)
         if isinstance(tool_call_id, str) and tool_call_id in step.tool_call_ids:
-            return True
-
-        resolved_gaps = {
-            str(gap)
-            for gap in (
-                [
-                    *list(getattr(observation, "resolved_gaps", []) or []),
-                    *list(getattr(observation, "related_gap_ids", []) or []),
-                ]
-            )
-            if str(gap)
-        }
-        if step.related_gap_ids and resolved_gaps.intersection(step.related_gap_ids):
             return True
 
         related_step_ids = {
