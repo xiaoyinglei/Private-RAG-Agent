@@ -6,6 +6,7 @@ import pytest
 from langgraph.checkpoint.memory import MemorySaver
 from pydantic import BaseModel
 
+from rag.agent.compat.goal_contract import GoalCompatibilityConfig, GoalSpec
 from rag.agent.core.checkpointing import (
     CheckpointPersistenceError,
     LangGraphCheckpointStore,
@@ -105,6 +106,43 @@ async def test_memory_store_round_trips_loop_snapshot_in_dedicated_namespace() -
         "loop_state"
     }
     assert checkpoint_tuple.metadata["reason"] == "compaction"
+    RunRegistry.remove(config.run_id)
+
+
+@pytest.mark.anyio
+async def test_goal_hook_config_round_trips_in_separate_checkpoint_channel() -> None:
+    config = _config("loop-checkpoint-goal-compatibility")
+    saver = MemorySaver(serde=agent_checkpoint_serde())
+    goal_spec = GoalSpec(original_query="Answer with evidence.")
+    store = LangGraphCheckpointStore(
+        saver,
+        run_config=config,
+        compatibility_config=GoalCompatibilityConfig(
+            goal_spec=goal_spec
+        ),
+    )
+    state = create_loop_state(task="Checkpoint loop", run_config=config)
+
+    await store.save_snapshot(state, reason="approval_pause")
+    restored_store = LangGraphCheckpointStore(saver, run_config=config)
+    restored = await restored_store.load_latest()
+    checkpoint_tuple = await saver.aget_tuple(
+        {
+            "configurable": {
+                "thread_id": config.thread_id,
+                "checkpoint_ns": "agent_loop",
+            }
+        }
+    )
+
+    assert restored == state
+    assert "goal_spec" not in restored
+    assert restored_store.compatibility_config.goal_spec == goal_spec
+    assert checkpoint_tuple is not None
+    assert set(checkpoint_tuple.checkpoint["channel_values"]) == {
+        "loop_compatibility",
+        "loop_state",
+    }
     RunRegistry.remove(config.run_id)
 
 

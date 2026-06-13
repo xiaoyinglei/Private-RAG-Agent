@@ -7,9 +7,12 @@ from pydantic import BaseModel
 
 from rag.agent.builtin.research import RESEARCH_AGENT
 from rag.agent.builtin_registry import create_builtin_tool_registry
+from rag.agent.compat.goal_contract import GoalDeliverable, GoalSpec
+from rag.agent.core.checkpointing import agent_checkpoint_serde
 from rag.agent.core.context import RunRegistry
 from rag.agent.core.definition import AgentDefinition
 from rag.agent.core.human_input import HumanInputResponse
+from rag.agent.loop.state import LoopState, ModelTurnDraft
 from rag.agent.service import AgentRunRequest, AgentService
 from rag.agent.state import ToolCallPlan
 from rag.agent.tools.registry import ToolRegistry
@@ -50,6 +53,26 @@ class _FinishProvider:
             "tool_calls": [],
             "thought": "done",
         }
+
+
+class _PauseAfterGoalFeedbackProvider:
+    async def next_turn(
+        self,
+        state: LoopState,
+        *,
+        definition: AgentDefinition,
+        budget_remaining: int,
+    ) -> ModelTurnDraft:
+        del definition, budget_remaining
+        if state["stop_hook_feedback"]:
+            return ModelTurnDraft(
+                action="pause",
+                pause_reason="Explicit goal still needs evidence.",
+            )
+        return ModelTurnDraft(
+            action="finish",
+            final_answer="unsupported answer",
+        )
 
 
 def _write_spec() -> ToolSpec:
@@ -172,6 +195,60 @@ async def test_resume_restores_runtime_handles_from_checkpoint_after_process_bou
     assert tool_result.output == _WriteOutput(result="wrote:persisted")
     with pytest.raises(KeyError):
         RunRegistry.get("resume-cross-process")
+
+
+@pytest.mark.anyio
+async def test_resume_restores_explicit_goal_hook_after_process_boundary() -> None:
+    checkpointer = MemorySaver(serde=agent_checkpoint_serde())
+    calls: list[str] = []
+    provider = _PauseAfterGoalFeedbackProvider()
+    service = _service(checkpointer=checkpointer, calls=calls)
+    service._model_turn_provider = provider
+    call = ToolCallPlan.create("write_tool", {"data": "goal-bound"})
+    goal = GoalSpec(
+        original_query="Answer with evidence.",
+        deliverables=[
+            GoalDeliverable(
+                deliverable_id="answer",
+                kind="answer",
+                acceptance_rule="non_empty_answer",
+            ),
+            GoalDeliverable(
+                deliverable_id="evidence",
+                kind="evidence",
+                acceptance_rule="traceable_evidence",
+            ),
+        ],
+    )
+
+    paused = await service.run(
+        AgentRunRequest(
+            task="Answer with evidence.",
+            run_id="resume-goal-hook",
+            thread_id="resume-goal-hook",
+            pending_tool_calls=[call],
+            goal_spec=goal,
+        )
+    )
+
+    assert paused.status == "paused"
+    assert paused.human_input_request is not None
+    RunRegistry.remove("resume-goal-hook")
+
+    resumed_service = _service(checkpointer=checkpointer, calls=calls)
+    resumed_service._model_turn_provider = provider
+    resumed = await resumed_service.resume(
+        run_id="resume-goal-hook",
+        response=HumanInputResponse(
+            request_id=paused.human_input_request.request_id,
+            decision="allow_once",
+            approved_tool_call_ids=[call.tool_call_id],
+        ),
+    )
+
+    assert resumed.status == "paused"
+    assert resumed.needs_user_input == "Explicit goal still needs evidence."
+    assert calls == ["goal-bound"]
 
 
 @pytest.mark.anyio

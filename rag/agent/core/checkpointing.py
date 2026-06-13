@@ -10,7 +10,9 @@ import aiosqlite
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.base import (
     BaseCheckpointSaver,
+    ChannelVersions,
     CheckpointMetadata,
+    CheckpointTuple,
     empty_checkpoint,
 )
 from langgraph.checkpoint.memory import MemorySaver
@@ -18,6 +20,7 @@ from langgraph.checkpoint.serde.base import SerializerProtocol
 from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
+from rag.agent.compat.goal_contract import GoalCompatibilityConfig
 from rag.agent.core.context import AgentRunConfig
 from rag.agent.core.human_input import (
     HumanInputRequest,
@@ -36,6 +39,7 @@ from rag.agent.loop.state import (
 )
 
 LOOP_CHECKPOINT_NAMESPACE = "agent_loop"
+LOOP_COMPATIBILITY_CHANNEL = "loop_compatibility"
 LOOP_STATE_CHANNEL = "loop_state"
 
 AGENT_CHECKPOINT_MSGPACK_ALLOWLIST: tuple[tuple[str, ...], ...] = (
@@ -62,6 +66,7 @@ AGENT_CHECKPOINT_MSGPACK_ALLOWLIST: tuple[tuple[str, ...], ...] = (
     ("rag.agent.core.turn_contracts", "ToolCallPlan"),
     ("rag.agent.core.finalization", "FinalizationEvent"),
     ("rag.agent.compat.goal_contract", "GoalConstraint"),
+    ("rag.agent.compat.goal_contract", "GoalCompatibilityConfig"),
     ("rag.agent.compat.goal_contract", "GoalContractEvaluation"),
     ("rag.agent.compat.goal_contract", "GoalContractIssue"),
     ("rag.agent.compat.goal_contract", "GoalDeliverable"),
@@ -142,11 +147,19 @@ class LangGraphCheckpointStore:
         checkpointer: BaseCheckpointSaver[str],
         *,
         run_config: AgentRunConfig,
+        compatibility_config: GoalCompatibilityConfig | None = None,
     ) -> None:
         self._checkpointer = checkpointer
         self._run_config = run_config
+        self._compatibility_config = (
+            compatibility_config or GoalCompatibilityConfig()
+        )
         self._state: LoopState | None = None
         self._lock = asyncio.Lock()
+
+    @property
+    def compatibility_config(self) -> GoalCompatibilityConfig:
+        return self._compatibility_config.model_copy(deep=True)
 
     def load_latest_sync(self) -> LoopState | None:
         try:
@@ -160,16 +173,7 @@ class LangGraphCheckpointStore:
         if checkpoint_tuple is None:
             self._state = None
             return None
-        raw_state = checkpoint_tuple.checkpoint["channel_values"].get(
-            LOOP_STATE_CHANNEL
-        )
-        if not isinstance(raw_state, dict):
-            raise CheckpointPersistenceError(
-                "loop checkpoint is missing the loop_state channel"
-            )
-        self._state = _normalize_loaded_state(
-            cast(LoopState, deepcopy(raw_state))
-        )
+        self._state = self._restore_checkpoint_tuple(checkpoint_tuple)
         return deepcopy(self._state)
 
     async def load_latest(self) -> LoopState | None:
@@ -184,16 +188,7 @@ class LangGraphCheckpointStore:
         if checkpoint_tuple is None:
             self._state = None
             return None
-        raw_state = checkpoint_tuple.checkpoint["channel_values"].get(
-            LOOP_STATE_CHANNEL
-        )
-        if not isinstance(raw_state, dict):
-            raise CheckpointPersistenceError(
-                "loop checkpoint is missing the loop_state channel"
-            )
-        self._state = _normalize_loaded_state(
-            cast(LoopState, deepcopy(raw_state))
-        )
+        self._state = self._restore_checkpoint_tuple(checkpoint_tuple)
         return deepcopy(self._state)
 
     async def load_for_resume(self) -> LoopState | None:
@@ -373,16 +368,7 @@ class LangGraphCheckpointStore:
         if checkpoint_tuple is None:
             self._state = None
             return None
-        raw_state = checkpoint_tuple.checkpoint["channel_values"].get(
-            LOOP_STATE_CHANNEL
-        )
-        if not isinstance(raw_state, dict):
-            raise CheckpointPersistenceError(
-                "loop checkpoint is missing the loop_state channel"
-            )
-        self._state = _normalize_loaded_state(
-            cast(LoopState, deepcopy(raw_state))
-        )
+        self._state = self._restore_checkpoint_tuple(checkpoint_tuple)
         return deepcopy(self._state)
 
     async def _save_snapshot_unlocked(
@@ -410,6 +396,16 @@ class LangGraphCheckpointStore:
                 current_version,
                 None,
             )
+            compatibility = self._compatibility_config
+            if previous is not None and compatibility.goal_spec is None:
+                raw_compatibility = previous.checkpoint[
+                    "channel_values"
+                ].get(LOOP_COMPATIBILITY_CHANNEL)
+                if raw_compatibility is not None:
+                    compatibility = _normalize_compatibility_config(
+                        raw_compatibility
+                    )
+                    self._compatibility_config = compatibility
             checkpoint = empty_checkpoint()
             checkpoint["channel_values"] = {
                 LOOP_STATE_CHANNEL: snapshot,
@@ -417,7 +413,35 @@ class LangGraphCheckpointStore:
             checkpoint["channel_versions"] = {
                 LOOP_STATE_CHANNEL: version,
             }
-            checkpoint["updated_channels"] = [LOOP_STATE_CHANNEL]
+            updated_channels = [LOOP_STATE_CHANNEL]
+            checkpoint["updated_channels"] = updated_channels
+            new_versions: ChannelVersions = {
+                LOOP_STATE_CHANNEL: version
+            }
+            if compatibility.goal_spec is not None:
+                compatibility_version = self._checkpointer.get_next_version(
+                    cast(
+                        str | None,
+                        (
+                            None
+                            if previous is None
+                            else previous.checkpoint[
+                                "channel_versions"
+                            ].get(LOOP_COMPATIBILITY_CHANNEL)
+                        ),
+                    ),
+                    None,
+                )
+                checkpoint["channel_values"][
+                    LOOP_COMPATIBILITY_CHANNEL
+                ] = compatibility
+                checkpoint["channel_versions"][
+                    LOOP_COMPATIBILITY_CHANNEL
+                ] = compatibility_version
+                updated_channels.append(LOOP_COMPATIBILITY_CHANNEL)
+                new_versions[
+                    LOOP_COMPATIBILITY_CHANNEL
+                ] = compatibility_version
             config = (
                 previous.config
                 if previous is not None
@@ -436,13 +460,30 @@ class LangGraphCheckpointStore:
                 config,
                 checkpoint,
                 metadata,
-                {LOOP_STATE_CHANNEL: version},
+                new_versions,
             )
         except Exception as exc:
             raise CheckpointPersistenceError(
                 f"failed to persist loop checkpoint: {exc}"
             ) from exc
         self._state = snapshot
+
+    def _restore_checkpoint_tuple(
+        self,
+        checkpoint_tuple: CheckpointTuple,
+    ) -> LoopState:
+        channel_values = checkpoint_tuple.checkpoint["channel_values"]
+        raw_state = channel_values.get(LOOP_STATE_CHANNEL)
+        if not isinstance(raw_state, dict):
+            raise CheckpointPersistenceError(
+                "loop checkpoint is missing the loop_state channel"
+            )
+        self._compatibility_config = _normalize_compatibility_config(
+            channel_values.get(LOOP_COMPATIBILITY_CHANNEL)
+        )
+        return _normalize_loaded_state(
+            cast(LoopState, deepcopy(raw_state))
+        )
 
     def _base_config(self) -> RunnableConfig:
         return cast(
@@ -470,6 +511,21 @@ def _normalize_loaded_state(state: LoopState) -> LoopState:
             source_scope=tuple(run_config.source_scope),
         )
     return state
+
+
+def _normalize_compatibility_config(
+    value: object,
+) -> GoalCompatibilityConfig:
+    if value is None:
+        return GoalCompatibilityConfig()
+    if isinstance(value, GoalCompatibilityConfig):
+        return value.model_copy(deep=True)
+    try:
+        return GoalCompatibilityConfig.model_validate(value)
+    except Exception as exc:
+        raise CheckpointPersistenceError(
+            "loop checkpoint has invalid compatibility metadata"
+        ) from exc
 
 
 def create_agent_checkpointer(checkpoint_db: Path | str | None) -> BaseCheckpointSaver[str]:

@@ -3,6 +3,7 @@
 from rag.agent.compat.goal_contract import (
     AcceptanceRule,
     DeliverableKind,
+    GoalCompatibilityConfig,
     GoalConstraint,
     GoalContractEvaluation,
     GoalContractEvaluator,
@@ -14,6 +15,7 @@ from rag.agent.compat.goal_contract import (
 __all__ = [
     "AcceptanceRule",
     "DeliverableKind",
+    "GoalCompatibilityConfig",
     "GoalConstraint",
     "GoalContractEvaluation",
     "GoalContractEvaluator",

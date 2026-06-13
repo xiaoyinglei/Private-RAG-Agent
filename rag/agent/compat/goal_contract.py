@@ -91,6 +91,14 @@ class GoalSpec(BaseModel):
         return self
 
 
+class GoalCompatibilityConfig(BaseModel):
+    """Persisted opt-in stop-hook configuration kept outside LoopState."""
+
+    model_config = ConfigDict(frozen=True)
+
+    goal_spec: GoalSpec | None = None
+
+
 class GoalContractIssue(BaseModel):
     model_config = ConfigDict(frozen=True)
 
@@ -223,6 +231,7 @@ def _issue_description(kind: DeliverableKind) -> str:
 __all__ = [
     "AcceptanceRule",
     "DeliverableKind",
+    "GoalCompatibilityConfig",
     "GoalConstraint",
     "GoalContractEvaluation",
     "GoalContractEvaluator",

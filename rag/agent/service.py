@@ -10,7 +10,7 @@ from langchain_core.messages import BaseMessage
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from pydantic import BaseModel, ConfigDict, Field
 
-from rag.agent.compat.goal_contract import GoalSpec
+from rag.agent.compat.goal_contract import GoalCompatibilityConfig, GoalSpec
 from rag.agent.core.checkpointing import (
     LangGraphCheckpointStore,
     create_agent_checkpointer,
@@ -275,7 +275,6 @@ class AgentService:
             merge_runtime_diagnostics([], runtime_diagnostics)
         )
         self._checkpointer = checkpointer or create_agent_checkpointer(None)
-        self._goal_specs_by_run_id: dict[str, GoalSpec] = {}
 
     def initial_state(self, request: AgentRunRequest) -> LoopState:
         run_config = request.to_run_config(self._definition)
@@ -384,12 +383,13 @@ class AgentService:
             messages=messages,
             memory_store=memory_store,
         )
-        if goal_spec is not None:
-            self._goal_specs_by_run_id[run_config.run_id] = goal_spec
         await self._apply_retrieval_hint(state)
         checkpoint_store = LangGraphCheckpointStore(
             self._checkpointer,
             run_config=run_config,
+            compatibility_config=GoalCompatibilityConfig(
+                goal_spec=goal_spec
+            ),
         )
         loop = self._build_loop(
             runtime_registry=runtime_registry,
@@ -405,7 +405,6 @@ class AgentService:
             raise
         if result_state["status"] in {"completed", "failed"}:
             RunRegistry.remove(run_config.run_id)
-            self._goal_specs_by_run_id.pop(run_config.run_id, None)
         return AgentRunResult.from_loop_result(
             result_state,
             definition=self._definition,
@@ -679,13 +678,12 @@ class AgentService:
             runtime_registry=runtime_registry,
             checkpoint_store=checkpoint_store,
             memory_store=memory_store,
-            goal_spec=self._goal_specs_by_run_id.get(run_config.run_id),
+            goal_spec=checkpoint_store.compatibility_config.goal_spec,
             state=state,
         )
         result_state = await loop.run(state)
         if result_state["status"] in {"completed", "failed"}:
             RunRegistry.remove(run_config.run_id)
-            self._goal_specs_by_run_id.pop(run_config.run_id, None)
         return AgentRunResult.from_loop_result(
             result_state,
             definition=self._definition,
