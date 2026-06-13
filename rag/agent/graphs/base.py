@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
-from typing import Any
+from collections.abc import Awaitable, Callable, Sequence
+from typing import Any, NotRequired
 
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
+from typing_extensions import TypedDict
 
 from rag.agent.core.definition import AgentDefinition
 from rag.agent.core.output_finalizer import StructuredOutputFinalizer
@@ -16,12 +17,46 @@ from rag.agent.graphs.nodes.llm_decide import ToolDecisionProvider, decide_next
 from rag.agent.graphs.nodes.pause import pause_node
 from rag.agent.graphs.nodes.retrieval_hint import RetrievalHintProvider
 from rag.agent.graphs.nodes.synthesize import SynthesisRunner, build_answer
+from rag.agent.service import AgentRunRequest, AgentRunResult
 from rag.agent.state import AgentState
 from rag.agent.tools.registry import ToolRegistry
 
 init_goal = graph_goal_nodes.init_goal
 control_turn = graph_goal_nodes.control_turn
 route_after_control = graph_goal_nodes.route_after_control
+
+
+class AgentKernelGraphState(TypedDict):
+    """Small outer-orchestration state around one complete kernel run."""
+
+    request: AgentRunRequest
+    run_id: str
+    result: NotRequired[AgentRunResult]
+
+
+def build_outer_agent_graph(
+    *,
+    run_kernel: Callable[
+        [AgentRunRequest],
+        Awaitable[AgentRunResult],
+    ],
+    checkpointer: BaseCheckpointSaver[str] | MemorySaver | None = None,
+) -> Any:
+    graph = StateGraph(AgentKernelGraphState)
+
+    async def invoke_agent_loop(
+        state: AgentKernelGraphState,
+    ) -> dict[str, object]:
+        result = await run_kernel(state["request"])
+        return {
+            "run_id": result.run_id,
+            "result": result,
+        }
+
+    graph.add_node("agent_loop", invoke_agent_loop)
+    graph.add_edge(START, "agent_loop")
+    graph.add_edge("agent_loop", END)
+    return graph.compile(checkpointer=checkpointer)
 
 
 def build_agent_graph(

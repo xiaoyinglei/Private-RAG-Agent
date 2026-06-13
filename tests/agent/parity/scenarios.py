@@ -21,12 +21,20 @@ from rag.agent.core.checkpointing import agent_checkpoint_serde
 from rag.agent.core.context import AgentRunConfig, RunRegistry
 from rag.agent.core.definition import AgentDefinition, ModelSelectionPolicy, ToolPolicy
 from rag.agent.core.human_input import HumanInputResponse
+from rag.agent.core.llm_providers import (
+    create_default_providers,
+    create_goal_contract_provider,
+)
 from rag.agent.core.llm_registry import (
     ModelRegistry,
     ResolvedModel,
     UnknownModelAliasError,
 )
+from rag.agent.core.output_finalizer import (
+    create_model_structured_output_finalizer,
+)
 from rag.agent.core.output_models import ValidatedFinalOutput
+from rag.agent.core.runtime_diagnostics import RuntimeDiagnostic
 from rag.agent.goal_runtime import GoalDeliverable, GoalSpec
 from rag.agent.graphs.base import build_agent_graph
 from rag.agent.memory.models import MemoryPolicy
@@ -307,8 +315,6 @@ async def _run_graph(
     output_finalizer: object | None = None,
     model_registry: ModelRegistry | None = None,
 ) -> AgentState:
-    from rag.agent.core.compiler import GraphCompiler
-
     if model_registry is None:
         graph = build_agent_graph(
             definition=definition,
@@ -317,11 +323,68 @@ async def _run_graph(
             checkpointer=checkpointer,
         )
     else:
-        graph = GraphCompiler(
+        runtime_diagnostics: list[RuntimeDiagnostic] = []
+        retrieval_hint_provider = None
+        tool_decision_provider = None
+        goal_contract_provider = None
+        try:
+            (
+                retrieval_hint_provider,
+                tool_decision_provider,
+            ) = create_default_providers(
+                model_registry,
+                definition.model_selection,
+                definition,
+            )
+        except Exception as exc:
+            runtime_diagnostics.append(
+                RuntimeDiagnostic.from_exception(
+                    code="default_providers_initialization_failed",
+                    component="model_providers",
+                    error=exc,
+                )
+            )
+        if output_finalizer is None and definition.output_model is not None:
+            try:
+                output_finalizer = (
+                    create_model_structured_output_finalizer(
+                        model_registry
+                    )
+                )
+            except Exception as exc:
+                runtime_diagnostics.append(
+                    RuntimeDiagnostic.from_exception(
+                        code=(
+                            "structured_output_finalizer_"
+                            "initialization_failed"
+                        ),
+                        component="structured_output_finalizer",
+                        error=exc,
+                    )
+                )
+        try:
+            goal_contract_provider = create_goal_contract_provider(
+                model_registry,
+                definition,
+            )
+        except Exception as exc:
+            runtime_diagnostics.append(
+                RuntimeDiagnostic.from_exception(
+                    code="goal_contract_provider_initialization_failed",
+                    component="goal_contract_provider",
+                    error=exc,
+                )
+            )
+        graph = build_agent_graph(
+            definition=definition,
             tool_registry=registry,
-            model_registry=model_registry,
+            retrieval_hint_provider=retrieval_hint_provider,
+            tool_decision_provider=tool_decision_provider,
+            goal_contract_provider=goal_contract_provider,
+            output_finalizer=output_finalizer,  # type: ignore[arg-type]
             checkpointer=checkpointer,
-        ).compile(definition)
+            runtime_diagnostics=runtime_diagnostics,
+        )
     return await graph.ainvoke(
         state,
         config={"configurable": {"thread_id": state["run_config"].thread_id}},

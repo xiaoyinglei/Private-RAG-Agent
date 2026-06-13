@@ -1,142 +1,90 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 from langgraph.checkpoint.base import BaseCheckpointSaver
 
 from rag.agent.core.checkpointing import create_agent_checkpointer
 from rag.agent.core.definition import AgentDefinition
-from rag.agent.core.llm_providers import (
-    create_default_providers,
-    create_goal_contract_provider,
-)
+from rag.agent.core.delegation import DelegatedAgentRunner
 from rag.agent.core.llm_registry import ModelRegistry
-from rag.agent.core.output_finalizer import (
-    StructuredOutputFinalizer,
-    create_model_structured_output_finalizer,
-)
+from rag.agent.core.output_finalizer import StructuredOutputFinalizer
 from rag.agent.core.runtime_diagnostics import RuntimeDiagnostic
-from rag.agent.graphs.base import build_agent_graph
+from rag.agent.graphs.base import build_outer_agent_graph
 from rag.agent.graphs.nodes.goal_runtime import GoalContractProvider
 from rag.agent.graphs.nodes.llm_decide import ToolDecisionProvider
 from rag.agent.graphs.nodes.retrieval_hint import RetrievalHintProvider
 from rag.agent.graphs.nodes.synthesize import SynthesisRunner
+from rag.agent.loop.runtime import ModelTurnProvider
+from rag.agent.service import AgentService
 from rag.agent.tools.registry import ToolRegistry
 
 
 class GraphCompiler:
-    """Compile an AgentDefinition into a LangGraph runnable."""
+    """Compile one AgentLoop invocation as a coarse outer LangGraph node."""
 
     def __init__(
         self,
         *,
         tool_registry: ToolRegistry,
+        model_turn_provider: ModelTurnProvider | None = None,
         tool_decision_provider: ToolDecisionProvider | None = None,
         goal_contract_provider: GoalContractProvider | None = None,
         retrieval_hint_provider: RetrievalHintProvider | None = None,
+        subagent_runner: DelegatedAgentRunner | None = None,
         synthesis_runner: SynthesisRunner | None = None,
         output_finalizer: StructuredOutputFinalizer | None = None,
         model_registry: ModelRegistry | None = None,
         checkpointer: BaseCheckpointSaver[str] | None = None,
+        runtime_diagnostics: Sequence[RuntimeDiagnostic] = (),
     ) -> None:
         self._tool_registry = tool_registry
+        self._model_turn_provider = model_turn_provider
         self._tool_decision_provider = tool_decision_provider
         self._goal_contract_provider = goal_contract_provider
         self._retrieval_hint_provider = retrieval_hint_provider
+        self._subagent_runner = subagent_runner
         self._synthesis_runner = synthesis_runner
         self._output_finalizer = output_finalizer
         self._model_registry = model_registry
-        self._checkpointer = checkpointer or create_agent_checkpointer(None)
+        self._checkpointer = (
+            checkpointer or create_agent_checkpointer(None)
+        )
+        self._runtime_diagnostics = tuple(runtime_diagnostics)
 
     def compile(self, definition: AgentDefinition) -> object:
         missing_tools = self._missing_allowed_tools(definition)
         if missing_tools:
-            raise ValueError(f"unregistered tools: {', '.join(missing_tools)}")
+            raise ValueError(
+                f"unregistered tools: {', '.join(missing_tools)}"
+            )
 
-        retrieval_hint_provider = self._retrieval_hint_provider
-        tool_decision_provider = self._tool_decision_provider
-        goal_contract_provider = self._goal_contract_provider
-        output_finalizer = self._output_finalizer
-        runtime_diagnostics: list[RuntimeDiagnostic] = []
-        needs_default_retrieval_hint_provider = (
-            retrieval_hint_provider is None
-            and definition.model_selection.retrieval_hint_model is not None
-        )
-
-        if self._model_registry is not None and (
-            needs_default_retrieval_hint_provider
-            or tool_decision_provider is None
-        ):
-            try:
-                hint_provider, decision_provider = create_default_providers(
-                    self._model_registry,
-                    definition.model_selection,
-                    definition,
-                )
-            except Exception as exc:
-                runtime_diagnostics.append(
-                    RuntimeDiagnostic.from_exception(
-                        code="default_providers_initialization_failed",
-                        component="model_providers",
-                        error=exc,
-                    )
-                )
-            else:
-                if needs_default_retrieval_hint_provider:
-                    retrieval_hint_provider = hint_provider
-                if tool_decision_provider is None:
-                    tool_decision_provider = decision_provider
-
-        if (
-            output_finalizer is None
-            and definition.output_model is not None
-            and self._model_registry is not None
-        ):
-            try:
-                output_finalizer = create_model_structured_output_finalizer(
-                    self._model_registry
-                )
-            except Exception as exc:
-                runtime_diagnostics.append(
-                    RuntimeDiagnostic.from_exception(
-                        code="structured_output_finalizer_initialization_failed",
-                        component="structured_output_finalizer",
-                        error=exc,
-                    )
-                )
-                output_finalizer = None
-
-        if (
-            goal_contract_provider is None
-            and self._model_registry is not None
-        ):
-            try:
-                goal_contract_provider = create_goal_contract_provider(
-                    self._model_registry,
-                    definition,
-                )
-            except Exception as exc:
-                runtime_diagnostics.append(
-                    RuntimeDiagnostic.from_exception(
-                        code="goal_contract_provider_initialization_failed",
-                        component="goal_contract_provider",
-                        error=exc,
-                    )
-                )
-                goal_contract_provider = None
-
-        return build_agent_graph(
+        service = AgentService(
             definition=definition,
             tool_registry=self._tool_registry,
-            tool_decision_provider=tool_decision_provider,
-            goal_contract_provider=goal_contract_provider,
-            retrieval_hint_provider=retrieval_hint_provider,
+            model_turn_provider=self._model_turn_provider,
+            tool_decision_provider=self._tool_decision_provider,
+            goal_contract_provider=self._goal_contract_provider,
+            retrieval_hint_provider=self._retrieval_hint_provider,
+            subagent_runner=self._subagent_runner,
             synthesis_runner=self._synthesis_runner,
-            output_finalizer=output_finalizer,
+            output_finalizer=self._output_finalizer,
+            model_registry=self._model_registry,
             checkpointer=self._checkpointer,
-            runtime_diagnostics=tuple(runtime_diagnostics),
+            runtime_diagnostics=self._runtime_diagnostics,
+        )
+        return build_outer_agent_graph(
+            run_kernel=service.run,
+            checkpointer=self._checkpointer,
         )
 
-    def _missing_allowed_tools(self, definition: AgentDefinition) -> list[str]:
-        registered_tools = {tool.name for tool in self._tool_registry.list_all()}
+    def _missing_allowed_tools(
+        self,
+        definition: AgentDefinition,
+    ) -> list[str]:
+        registered_tools = {
+            tool.name for tool in self._tool_registry.list_all()
+        }
         missing: list[str] = []
         seen: set[str] = set()
         for tool_name in definition.allowed_tools:
