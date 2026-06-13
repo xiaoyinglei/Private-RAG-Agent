@@ -4,12 +4,19 @@ from collections.abc import Awaitable
 from typing import Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
+from typing_extensions import TypedDict
 
-from rag.agent.state import AgentState
+from rag.agent.core.context import AgentRunConfig
 from rag.agent.tools.spec import ToolResult
 from rag.schema.query import AnswerCitation, EvidenceItem
 
 DEFAULT_DELEGATION_TOKEN_BUDGET = 10000
+
+
+class ParentAgentContext(TypedDict):
+    """Minimal parent data required to derive a bounded child run."""
+
+    run_config: AgentRunConfig
 
 
 class AgentDelegationRequest(BaseModel):
@@ -37,7 +44,7 @@ class DelegatedAgentRunner(Protocol):
         self,
         *,
         request: AgentDelegationRequest,
-        parent_state: AgentState,
+        parent_state: ParentAgentContext,
     ) -> DelegatedAgentResult | Awaitable[DelegatedAgentResult]: ...
 
 
@@ -46,4 +53,5 @@ __all__ = [
     "DEFAULT_DELEGATION_TOKEN_BUDGET",
     "DelegatedAgentResult",
     "DelegatedAgentRunner",
+    "ParentAgentContext",
 ]

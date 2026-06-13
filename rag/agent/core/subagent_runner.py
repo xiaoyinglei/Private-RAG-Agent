@@ -4,7 +4,10 @@ from dataclasses import replace
 
 from rag.agent.core.agent_service_factory import AgentServiceFactory
 from rag.agent.core.context import derive_child_config
-from rag.agent.core.delegation import AgentDelegationRequest
+from rag.agent.core.delegation import (
+    AgentDelegationRequest,
+    ParentAgentContext,
+)
 from rag.agent.core.registry import AgentRegistry
 from rag.agent.service import AgentRunResult
 from rag.agent.state import AgentState, ToolCallPlan
@@ -27,7 +30,7 @@ class BuiltinSubAgentRunner:
         self,
         *,
         request: AgentDelegationRequest,
-        parent_state: AgentState,
+        parent_state: ParentAgentContext,
     ) -> AgentRunResult:
         child_definition = self._agent_registry.get(request.agent_type)
         child_config = derive_child_config(parent_state["run_config"], child_definition)

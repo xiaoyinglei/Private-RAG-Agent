@@ -6,6 +6,7 @@ from pydantic import BaseModel
 from rag.agent.core.compiler import GraphCompiler
 from rag.agent.core.definition import AgentDefinition
 from rag.agent.core.runtime_diagnostics import RuntimeDiagnostic
+from rag.agent.loop.state import LoopState, ModelTurnDraft
 from rag.agent.service import AgentRunRequest, AgentService
 from rag.agent.state import AgentState, ThinkOutput
 from rag.agent.tools.registry import ToolRegistry
@@ -270,24 +271,16 @@ def test_compiler_records_optional_provider_initialization_failures(
 
 
 @pytest.mark.anyio
-async def test_compiler_degradation_reaches_agent_run_result(
+async def test_loop_provider_degradation_reaches_agent_run_result(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     def fail_default_providers(*args: object, **kwargs: object) -> object:
         del args, kwargs
         raise RuntimeError("decision model unavailable")
 
-    def fail_goal_contract(*args: object, **kwargs: object) -> object:
-        del args, kwargs
-        raise LookupError("goal model unavailable")
-
     monkeypatch.setattr(
-        "rag.agent.core.compiler.create_default_providers",
+        "rag.agent.service.create_loop_model_turn_provider",
         fail_default_providers,
-    )
-    monkeypatch.setattr(
-        "rag.agent.core.compiler.create_goal_contract_provider",
-        fail_goal_contract,
     )
     service = AgentService(
         definition=_definition(allowed_tools=["vector_search"]),
@@ -306,41 +299,40 @@ async def test_compiler_degradation_reaches_agent_run_result(
     assert result.status == "paused"
     assert [diagnostic.code for diagnostic in result.runtime_diagnostics] == [
         "default_providers_initialization_failed",
-        "goal_contract_provider_initialization_failed",
     ]
     assert result.runtime_diagnostics[0].message == "decision model unavailable"
 
 
 @pytest.mark.anyio
-async def test_model_cannot_finalize_while_required_goal_gaps_are_open(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    def fake_create_default_providers(
-        registry: object,
-        selection: object,
-        definition: AgentDefinition,
-    ) -> tuple[_RaisingHintProvider, _ToolDecisionProvider]:
-        del registry, selection, definition
-        return _RaisingHintProvider(), _ToolDecisionProvider()
+async def test_model_can_finalize_without_explicit_goal_contract() -> None:
+    class _DirectLoopProvider:
+        async def next_turn(
+            self,
+            state: LoopState,
+            *,
+            definition: AgentDefinition,
+            budget_remaining: int,
+        ) -> ModelTurnDraft:
+            del state, definition, budget_remaining
+            return ModelTurnDraft(
+                action="finish",
+                final_answer="Direct answer.",
+            )
 
-    monkeypatch.setattr(
-        "rag.agent.core.compiler.create_default_providers",
-        fake_create_default_providers,
-    )
     service = AgentService(
         definition=_definition(allowed_tools=["vector_search"]),
         tool_registry=_registry(),
-        model_registry=object(),  # type: ignore[arg-type]
+        model_turn_provider=_DirectLoopProvider(),
     )
 
     result = await service.run(
         AgentRunRequest(
             task="Explain policy",
-            run_id="default-route-disabled",
-            thread_id="default-route-disabled",
+            run_id="default-goal-controller-disabled",
+            thread_id="default-goal-controller-disabled",
         )
     )
 
-    assert result.status == "paused"
-    assert result.stop_reason == "premature_synthesis"
-    assert result.insufficient_evidence_flag is True
+    assert result.status == "done"
+    assert result.stop_reason == "accepted"
+    assert result.final_answer == "Direct answer."

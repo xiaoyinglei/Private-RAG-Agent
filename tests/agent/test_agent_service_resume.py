@@ -42,6 +42,16 @@ class _FakeModelRegistry:
         return _ResolvedFakeModel()
 
 
+class _FinishProvider:
+    def decide(self, *args: object, **kwargs: object) -> dict[str, object]:
+        del args, kwargs
+        return {
+            "action": "synthesize",
+            "tool_calls": [],
+            "thought": "done",
+        }
+
+
 def _write_spec() -> ToolSpec:
     return ToolSpec(
         name="write_tool",
@@ -169,6 +179,7 @@ async def test_resume_preserves_model_backed_llm_tool_runners() -> None:
     service = AgentService(
         definition=RESEARCH_AGENT,
         tool_registry=create_builtin_tool_registry(runners={}),
+        tool_decision_provider=_FinishProvider(),
         model_registry=_FakeModelRegistry(),  # type: ignore[arg-type]
     )
     write_call = ToolCallPlan.create(

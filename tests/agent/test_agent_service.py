@@ -60,28 +60,10 @@ class _ResearchUnderstandingService:
 
 
 class _NullToolDecisionProvider:
-    """Minimal provider: after PrimitiveOps tools run, call llm_generate to produce an answer."""
-
-    def __init__(self) -> None:
-        self._call_count = 0
+    """Minimal compatibility provider that finishes from existing results."""
 
     def decide(self, state: object, **kwargs: object) -> dict[str, object]:
-        self._call_count += 1
-        if self._call_count <= 1:
-            # First call: execute llm_generate to produce an answer_candidate
-            from rag.agent.state import ToolCallPlan
-
-            call = ToolCallPlan.create(
-                "llm_summarize",
-                {"task": "Summarize the tool execution results", "evidence_ids": [], "citation_ids": []},
-            )
-            return {
-                "action": "execute",
-                "tool_calls": [call.model_dump()],
-                "thought": "Generating answer from tool results",
-                "confidence": 1.0,
-            }
-        # Second call: synthesize
+        del state, kwargs
         return {"action": "synthesize", "tool_calls": [], "thought": "done", "confidence": 1.0}
 
 
@@ -278,6 +260,7 @@ async def test_agent_service_injects_model_backed_llm_tool_runners() -> None:
     service = AgentService(
         definition=RESEARCH_AGENT,
         tool_registry=create_builtin_tool_registry(runners={}),
+        tool_decision_provider=_NullToolDecisionProvider(),
         model_registry=_FakeModelRegistry(generator),  # type: ignore[arg-type]
     )
 

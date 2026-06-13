@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Awaitable, Mapping
+from inspect import isawaitable
 from typing import Any, Literal
 from uuid import uuid4
 
@@ -23,7 +24,8 @@ from rag.agent.loop.state import (
     ModelTurnDraft,
     append_loop_diagnostic,
 )
-from rag.agent.memory.models import InjectedContext
+from rag.agent.memory.injector import ContextBuilder
+from rag.agent.memory.models import ContextBudgetSnapshot, InjectedContext
 from rag.agent.state import AgentState, ThinkOutput, ToolCallPlan
 from rag.assembly.tokenizer import TokenAccountingService, TokenizerContract
 from rag.providers.llm_gateway import LLMGateway
@@ -450,6 +452,96 @@ class LLMLoopModelTurnProvider:
                 ),
             )
         return parse_loop_model_turn(result.value)
+
+
+class LegacyToolDecisionModelTurnProvider:
+    """Adapt an explicit legacy decision provider at the service boundary."""
+
+    def __init__(
+        self,
+        provider: ToolDecisionProvider,
+        *,
+        use_synthesis_builder: bool,
+    ) -> None:
+        self._provider = provider
+        self._use_synthesis_builder = use_synthesis_builder
+
+    async def next_turn(
+        self,
+        state: LoopState,
+        *,
+        definition: AgentDefinition,
+        budget_remaining: int,
+    ) -> ModelTurnDraft:
+        if bool(getattr(self._provider, "manages_llm_context", False)):
+            context = InjectedContext(
+                sections=[],
+                context_budget=ContextBudgetSnapshot(
+                    max_context_tokens=0
+                ),
+            )
+        else:
+            context = ContextBuilder(
+                max_context_tokens=(
+                    state["run_config"].max_context_tokens
+                    or DEFAULT_LLM_STAGE_BUDGETS[
+                        LLMCallStage.TOOL_DECISION
+                    ].max_input_tokens
+                ),
+            ).assemble_loop(
+                definition=definition,
+                state=state,
+            )
+            state["context_budget"] = context.context_budget
+        raw = self._provider.decide(
+            state,  # type: ignore[arg-type]
+            definition=definition,
+            budget_remaining=budget_remaining,
+            context=context,
+        )
+        if isawaitable(raw):
+            raw = await raw
+        draft = parse_loop_model_turn(raw)
+        if (
+            draft.action == "finish"
+            and not draft.final_answer
+            and not self._use_synthesis_builder
+            and state["answer_candidates"]
+        ):
+            return draft.model_copy(
+                update={
+                    "final_answer": state["answer_candidates"][-1].text
+                }
+            )
+        return draft
+
+
+def create_loop_model_turn_provider(
+    registry: ModelRegistry,
+    selection: ModelSelectionPolicy,
+) -> LLMLoopModelTurnProvider:
+    resolved = registry.resolve_for_node(
+        node_model=selection.tool_decision_model,
+        node_name="tool_decision",
+    )
+    kwargs = dict(resolved.kwargs)
+    kwargs.setdefault(
+        "temperature",
+        selection.tool_decision_temperature,
+    )
+    if selection.tool_decision_max_tokens is not None:
+        kwargs["max_tokens"] = selection.tool_decision_max_tokens
+    gateway = getattr(resolved, "gateway", None)
+    return LLMLoopModelTurnProvider(
+        resolved.generator,
+        kwargs=kwargs,
+        gateway=gateway,
+        context_assembler=_assembler_from_gateway(
+            gateway,
+            LLMCallStage.TOOL_DECISION,
+            kwargs=kwargs,
+        ),
+    )
 
 
 class LLMToolDecisionProvider(ToolDecisionProvider):

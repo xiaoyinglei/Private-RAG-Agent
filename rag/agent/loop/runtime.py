@@ -220,6 +220,28 @@ class AgentLoop:
                     state=state,
                 )
             except (FinishCandidateBuildError, ValidationError, ValueError) as exc:
+                if (
+                    isinstance(exc, FinishCandidateBuildError)
+                    and _has_tool_error(state)
+                ):
+                    append_loop_diagnostic(
+                        state,
+                        RuntimeDiagnostic.from_exception(
+                            code="tool_error",
+                            component="agent_loop",
+                            error=exc,
+                            severity="error",
+                        ),
+                    )
+                    state["insufficient_evidence_flag"] = True
+                    await self._fail(
+                        state,
+                        stop_reason="tool_error",
+                        error=_latest_tool_error_message(state),
+                        transition_reason="failed",
+                        checkpoint_reason="tool_error",
+                    )
+                    return state
                 append_loop_diagnostic(
                     state,
                     RuntimeDiagnostic.from_exception(
@@ -363,6 +385,8 @@ class AgentLoop:
             has_traceable_evidence = bool(
                 getattr(output, "evidence_refs", ())
                 or getattr(output, "citations", ())
+                or getattr(output, "evidence_ids", ())
+                or getattr(output, "citation_ids", ())
             )
             state["groundedness_flag"] = (
                 state["groundedness_flag"]
@@ -729,6 +753,20 @@ def _item_key(item: object) -> str:
     if isinstance(item, dict):
         return repr(sorted(item.items()))
     return repr(item)
+
+
+def _has_tool_error(state: LoopState) -> bool:
+    return any(result.status == "error" for result in state["tool_results"])
+
+
+def _latest_tool_error_message(state: LoopState) -> str:
+    for result in reversed(state["tool_results"]):
+        if result.status != "error":
+            continue
+        if result.error is not None:
+            return result.error.message
+        return f"Tool {result.tool_name} failed."
+    return "Tool execution failed."
 
 
 __all__ = [

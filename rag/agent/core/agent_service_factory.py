@@ -12,6 +12,7 @@ from rag.agent.graphs.nodes.goal_runtime import GoalContractProvider
 from rag.agent.graphs.nodes.llm_decide import ToolDecisionProvider
 from rag.agent.graphs.nodes.retrieval_hint import RetrievalHintProvider
 from rag.agent.graphs.nodes.synthesize import SynthesisRunner
+from rag.agent.loop.runtime import ModelTurnProvider
 from rag.agent.service import AgentService
 from rag.agent.tools.registry import ToolRegistry
 
@@ -21,6 +22,7 @@ class AgentServiceFactory:
         self,
         *,
         tool_registry: ToolRegistry,
+        model_turn_provider: ModelTurnProvider | None = None,
         model_registry: ModelRegistry | None = None,
         retrieval_hint_provider: RetrievalHintProvider | None = None,
         tool_decision_provider: ToolDecisionProvider | None = None,
@@ -29,6 +31,7 @@ class AgentServiceFactory:
         runtime_diagnostics: Sequence[RuntimeDiagnostic] = (),
     ) -> None:
         self._tool_registry = tool_registry
+        self._model_turn_provider = model_turn_provider
         self._model_registry = model_registry
         self._retrieval_hint_provider = retrieval_hint_provider
         self._tool_decision_provider = tool_decision_provider
@@ -49,6 +52,7 @@ class AgentServiceFactory:
             return AgentService(
                 definition=definition,
                 tool_registry=self._tool_registry,
+                model_turn_provider=self._model_turn_provider,
                 tool_decision_provider=None,
                 goal_contract_provider=self._goal_contract_provider,
                 retrieval_hint_provider=None,
@@ -61,6 +65,7 @@ class AgentServiceFactory:
         return AgentService(
             definition=definition,
             tool_registry=self._tool_registry,
+            model_turn_provider=self._model_turn_provider,
             tool_decision_provider=self._tool_decision_provider,
             goal_contract_provider=self._goal_contract_provider,
             retrieval_hint_provider=self._retrieval_hint_provider,

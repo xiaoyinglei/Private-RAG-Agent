@@ -53,6 +53,7 @@ AGENT_CHECKPOINT_MSGPACK_ALLOWLIST: tuple[tuple[str, ...], ...] = (
     ("rag.agent.core.observations", "ObservationBatch"),
     ("rag.agent.core.observations", "ObservationError"),
     ("rag.agent.core.observations", "StructuredObservation"),
+    ("rag.agent.core.runtime_diagnostics", "RuntimeDiagnostic"),
     ("rag.agent.core.tool_execution", "ToolBatchRequest"),
     ("rag.agent.core.tool_execution", "ToolBatchResult"),
     ("rag.agent.core.tool_execution", "ToolExecutionRecord"),
@@ -156,6 +157,30 @@ class LangGraphCheckpointStore:
         self._run_config = run_config
         self._state: LoopState | None = None
         self._lock = asyncio.Lock()
+
+    def load_latest_sync(self) -> LoopState | None:
+        try:
+            checkpoint_tuple = self._checkpointer.get_tuple(
+                self._base_config()
+            )
+        except Exception as exc:
+            raise CheckpointPersistenceError(
+                f"failed to load loop checkpoint: {exc}"
+            ) from exc
+        if checkpoint_tuple is None:
+            self._state = None
+            return None
+        raw_state = checkpoint_tuple.checkpoint["channel_values"].get(
+            LOOP_STATE_CHANNEL
+        )
+        if not isinstance(raw_state, dict):
+            raise CheckpointPersistenceError(
+                "loop checkpoint is missing the loop_state channel"
+            )
+        self._state = _normalize_loaded_state(
+            cast(LoopState, deepcopy(raw_state))
+        )
+        return deepcopy(self._state)
 
     async def load_latest(self) -> LoopState | None:
         try:

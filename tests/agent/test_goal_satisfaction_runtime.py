@@ -86,7 +86,10 @@ def _goal_with_evidence(
     )
 
 
-class _FailingDecisionProvider:
+class _FinishDecisionProvider:
+    def __init__(self) -> None:
+        self.calls = 0
+
     def decide(
         self,
         state: AgentState,
@@ -96,11 +99,15 @@ class _FailingDecisionProvider:
         context: object,
     ) -> ThinkOutput:
         del state, definition, budget_remaining, context
-        raise AssertionError("ToolDecisionProvider must not run after goal is satisfied")
+        self.calls += 1
+        return ThinkOutput(
+            action="synthesize",
+            thought="finish from the observed tool result",
+        )
 
 
 @pytest.mark.anyio
-async def test_runtime_finalizes_satisfied_goal_without_llm_decision() -> None:
+async def test_runtime_continues_to_model_after_tool_result() -> None:
     call = ToolCallPlan.create(
         "llm_summarize",
         {
@@ -108,12 +115,13 @@ async def test_runtime_finalizes_satisfied_goal_without_llm_decision() -> None:
             "context_sections": ["tool-computed result with source"],
         },
     )
+    provider = _FinishDecisionProvider()
     service = AgentService(
         definition=RESEARCH_AGENT,
         tool_registry=create_builtin_tool_registry(
             runners={"llm_summarize": _SummarizeRunner()}
         ),
-        tool_decision_provider=_FailingDecisionProvider(),
+        tool_decision_provider=provider,
     )
 
     result = await service.run(
@@ -127,8 +135,9 @@ async def test_runtime_finalizes_satisfied_goal_without_llm_decision() -> None:
 
     assert result.status == "done"
     assert result.final_answer == "北方和东北日提货合计为 15.491928，出处为 table@p4。"
-    assert result.stop_reason == "goal_satisfied"
+    assert result.stop_reason == "accepted"
     assert result.tool_results[0].tool_name == "llm_summarize"
+    assert provider.calls == 1
 
 
 @pytest.mark.anyio
@@ -190,7 +199,7 @@ async def test_explicit_evidence_goal_still_waits_for_evidence_with_same_agent_d
     assert result.status == "paused"
     assert result.final_answer is None
     assert result.needs_user_input == (
-        "No tool decision provider is available to close the remaining goal gaps."
+        "No model turn provider is available to address stop-hook feedback."
     )
 
 
