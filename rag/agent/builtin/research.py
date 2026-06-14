@@ -9,10 +9,8 @@ from rag.agent.core.definition import AgentDefinition, ModelSelectionPolicy, Too
 from rag.agent.core.delegation import DelegatedAgentRunner
 from rag.agent.core.llm_registry import ModelRegistry
 from rag.agent.core.runtime_diagnostics import RuntimeDiagnostic
-from rag.agent.core.runtime_ports import (
-    RetrievalHintProvider,
-    ToolDecisionProvider,
-)
+from rag.agent.core.runtime_ports import RetrievalHintProvider
+from rag.agent.loop.runtime import ModelTurnProvider
 from rag.agent.service import AgentService
 from rag.agent.tools.registry import ToolRunner
 
@@ -91,7 +89,7 @@ RESEARCH_AGENT = AgentDefinition(
 def create_research_agent_service(
     *,
     runners: Mapping[str, ToolRunner] | None = None,
-    tool_decision_provider: ToolDecisionProvider | None = None,
+    model_turn_provider: ModelTurnProvider | None = None,
     retrieval_hint_provider: RetrievalHintProvider | None = None,
     subagent_runner: DelegatedAgentRunner | None = None,
     model_registry: ModelRegistry | None | object = _SENTINEL,
@@ -117,7 +115,7 @@ def create_research_agent_service(
     return AgentService(
         definition=RESEARCH_AGENT,
         tool_registry=create_builtin_tool_registry(runners=runners),
-        tool_decision_provider=tool_decision_provider,
+        model_turn_provider=model_turn_provider,
         retrieval_hint_provider=retrieval_hint_provider,
         subagent_runner=subagent_runner,
         model_registry=registry,

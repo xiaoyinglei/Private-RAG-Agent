@@ -18,15 +18,9 @@ from rag.agent.core.checkpointing import (
 from rag.agent.core.context import AgentRunConfig, RunRegistry
 from rag.agent.core.definition import AgentDefinition
 from rag.agent.core.delegation import DelegatedAgentRunner
-from rag.agent.core.finalization import (
-    CompatibilitySynthesisRunner,
-    FinishCandidateBuilder,
-)
+from rag.agent.core.finalization import FinishCandidateBuilder
 from rag.agent.core.human_input import HumanInputRequest, HumanInputResponse
-from rag.agent.core.llm_providers import (
-    LegacyToolDecisionModelTurnProvider,
-    create_loop_model_turn_provider,
-)
+from rag.agent.core.llm_providers import create_loop_model_turn_provider
 from rag.agent.core.llm_registry import ModelRegistry
 from rag.agent.core.output_finalizer import (
     StructuredOutputFinalizer,
@@ -40,10 +34,7 @@ from rag.agent.core.runtime_diagnostics import (
     RuntimeDiagnostic,
     merge_runtime_diagnostics,
 )
-from rag.agent.core.runtime_ports import (
-    RetrievalHintProvider,
-    ToolDecisionProvider,
-)
+from rag.agent.core.runtime_ports import RetrievalHintProvider
 from rag.agent.core.tool_execution import ToolExecutionService
 from rag.agent.core.turn_contracts import ToolCallPlan
 from rag.agent.loop.runtime import AgentLoop, ModelTurnProvider
@@ -203,9 +194,6 @@ class AgentRunResult(BaseModel):
 
 
 class _ResultDrivenModelTurnProvider:
-    def __init__(self, *, use_synthesis_builder: bool) -> None:
-        self._use_synthesis_builder = use_synthesis_builder
-
     async def next_turn(
         self,
         state: LoopState,
@@ -222,19 +210,17 @@ class _ResultDrivenModelTurnProvider:
                     "stop-hook feedback."
                 ),
             )
-        if state["answer_candidates"] and not self._use_synthesis_builder:
+        if state["answer_candidates"]:
             return ModelTurnDraft(
                 action="finish",
                 final_answer=state["answer_candidates"][-1].text,
             )
-        if state["tool_results"] and self._use_synthesis_builder:
-            return ModelTurnDraft(action="finish")
         if state["tool_results"]:
             latest = state["tool_results"][-1]
+            if latest.error is not None:
+                return ModelTurnDraft(action="finish")
             reason = (
-                latest.error.message
-                if latest.error is not None
-                else "Tool execution produced no answer candidate."
+                "Tool execution produced no answer candidate."
             )
             return ModelTurnDraft(
                 action="pause",
@@ -253,10 +239,8 @@ class AgentService:
         definition: AgentDefinition,
         tool_registry: ToolRegistry,
         model_turn_provider: ModelTurnProvider | None = None,
-        tool_decision_provider: ToolDecisionProvider | None = None,
         retrieval_hint_provider: RetrievalHintProvider | None = None,
         subagent_runner: DelegatedAgentRunner | None = None,
-        synthesis_runner: CompatibilitySynthesisRunner | None = None,
         output_finalizer: StructuredOutputFinalizer | None = None,
         model_registry: ModelRegistry | None = None,
         checkpointer: BaseCheckpointSaver[str] | None = None,
@@ -265,10 +249,8 @@ class AgentService:
         self._definition = definition
         self._base_tool_registry = tool_registry
         self._model_turn_provider = model_turn_provider
-        self._tool_decision_provider = tool_decision_provider
         self._retrieval_hint_provider = retrieval_hint_provider
         self._subagent_runner = subagent_runner
-        self._synthesis_runner = synthesis_runner
         self._output_finalizer = output_finalizer
         self._model_registry = model_registry
         self._runtime_diagnostics = tuple(
@@ -469,9 +451,7 @@ class AgentService:
                 ),
                 max_blocks=self._definition.max_stop_hook_blocks,
             ),
-            finish_candidate_builder=FinishCandidateBuilder(
-                synthesis_runner=self._synthesis_runner,
-            ),
+            finish_candidate_builder=FinishCandidateBuilder(),
         )
 
     def _resolve_model_turn_provider(
@@ -480,11 +460,6 @@ class AgentService:
     ) -> ModelTurnProvider:
         if self._model_turn_provider is not None:
             return self._model_turn_provider
-        if self._tool_decision_provider is not None:
-            return LegacyToolDecisionModelTurnProvider(
-                self._tool_decision_provider,
-                use_synthesis_builder=self._synthesis_runner is not None,
-            )
         if self._model_registry is not None:
             try:
                 return create_loop_model_turn_provider(
@@ -503,9 +478,7 @@ class AgentService:
                             error=exc,
                         ),
                     )
-        return _ResultDrivenModelTurnProvider(
-            use_synthesis_builder=self._synthesis_runner is not None,
-        )
+        return _ResultDrivenModelTurnProvider()
 
     def _resolve_output_finalizer(
         self,

@@ -1,11 +1,8 @@
 from __future__ import annotations
 
-from typing import Literal
 from uuid import uuid4
 
-from pydantic import BaseModel, Field
-
-from rag.agent.planning import PlanUpdate
+from pydantic import BaseModel
 
 
 class ToolCallPlan(BaseModel):
@@ -26,16 +23,4 @@ class ToolCallPlan(BaseModel):
         )
 
 
-class ThinkOutput(BaseModel):
-    """Compatibility model normalized into ModelTurnDraft at the loop boundary."""
-
-    action: Literal["execute", "synthesize", "pause"]
-    tool_calls: list[ToolCallPlan] = Field(default_factory=list)
-    thought: str
-    confidence: float = Field(default=1.0, ge=0.0, le=1.0)
-    stop_reason: str | None = None
-    needs_user_input: str | None = None
-    plan_update: PlanUpdate | None = None
-
-
-__all__ = ["ThinkOutput", "ToolCallPlan"]
+__all__ = ["ToolCallPlan"]

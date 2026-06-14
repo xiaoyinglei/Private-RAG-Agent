@@ -18,10 +18,8 @@ from rag.agent.core.delegation import (
     ParentAgentContext,
 )
 from rag.agent.core.registry import AgentRegistry
-from rag.agent.core.runtime_ports import (
-    RetrievalHintProvider,
-    ToolDecisionProvider,
-)
+from rag.agent.core.runtime_ports import RetrievalHintProvider
+from rag.agent.loop.runtime import ModelTurnProvider
 from rag.agent.tools.registry import ToolRegistry
 from rag.agent.tools.spec import ToolError, ToolPermissions, ToolSpec
 from rag.schema.query import AnswerCitation
@@ -322,12 +320,12 @@ class AgentAsToolRunner:
         *,
         tool_registry: ToolRegistry,
         agent_registry: AgentRegistry,
-        tool_decision_provider: ToolDecisionProvider | None = None,
+        model_turn_provider: ModelTurnProvider | None = None,
         retrieval_hint_provider: RetrievalHintProvider | None = None,
     ) -> None:
         self._tool_registry = tool_registry
         self._agent_registry = agent_registry
-        self._tool_decision_provider = tool_decision_provider
+        self._model_turn_provider = model_turn_provider
         self._retrieval_hint_provider = retrieval_hint_provider
 
     async def run_delegated_task(
@@ -347,7 +345,7 @@ class AgentAsToolRunner:
         service = AgentService(
             definition=child_definition,
             tool_registry=self._tool_registry,
-            tool_decision_provider=self._tool_decision_provider,
+            model_turn_provider=self._model_turn_provider,
             retrieval_hint_provider=self._retrieval_hint_provider,
             subagent_runner=self,
         )

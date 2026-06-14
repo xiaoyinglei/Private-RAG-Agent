@@ -8,6 +8,7 @@ from rag.agent.builtin_registry import create_builtin_tool_registry
 from rag.agent.compat.goal_contract import GoalDeliverable, GoalSpec
 from rag.agent.core.context import AgentRunConfig, RunRegistry
 from rag.agent.core.definition import AgentDefinition
+from rag.agent.loop.state import LoopState, ModelTurnDraft
 from rag.agent.service import AgentRunRequest, AgentRunResult, AgentService
 from rag.agent.state import ToolCallPlan
 from rag.agent.tools.llm_tools import LLMTextOutput
@@ -59,12 +60,36 @@ class _ResearchUnderstandingService:
         return RetrievalSignals()
 
 
-class _NullToolDecisionProvider:
-    """Minimal compatibility provider that finishes from existing results."""
-
-    def decide(self, state: object, **kwargs: object) -> dict[str, object]:
-        del state, kwargs
-        return {"action": "synthesize", "tool_calls": [], "thought": "done", "confidence": 1.0}
+class _FinishFromResultsProvider:
+    async def next_turn(
+        self,
+        state: LoopState,
+        *,
+        definition: AgentDefinition,
+        budget_remaining: int,
+    ) -> ModelTurnDraft:
+        del definition, budget_remaining
+        if state["answer_candidates"]:
+            return ModelTurnDraft(
+                action="finish",
+                final_answer=state["answer_candidates"][-1].text,
+            )
+        if state["tool_results"]:
+            latest = state["tool_results"][-1]
+            if latest.error is not None:
+                return ModelTurnDraft(action="finish")
+            summary = ", ".join(
+                f"{result.tool_name}:{result.status}"
+                for result in state["tool_results"]
+            )
+            return ModelTurnDraft(
+                action="finish",
+                final_answer=f"Completed: {summary}",
+            )
+        return ModelTurnDraft(
+            action="pause",
+            pause_reason="No result is available.",
+        )
 
 
 def _service_with_registry(runners: dict | None = None) -> AgentService:
@@ -80,7 +105,7 @@ def _service_with_registry(runners: dict | None = None) -> AgentService:
     return AgentService(
         definition=RESEARCH_AGENT,
         tool_registry=create_builtin_tool_registry(runners=extra),
-        tool_decision_provider=_NullToolDecisionProvider(),
+        model_turn_provider=_FinishFromResultsProvider(),
     )
 
 
@@ -226,7 +251,7 @@ async def test_agent_service_run_without_runner_fails_closed() -> None:
     service = AgentService(
         definition=RESEARCH_AGENT,
         tool_registry=create_builtin_tool_registry(runners={}),
-        tool_decision_provider=_NullToolDecisionProvider(),
+        model_turn_provider=_FinishFromResultsProvider(),
     )
 
     result = await service.run(
@@ -260,7 +285,7 @@ async def test_agent_service_injects_model_backed_llm_tool_runners() -> None:
     service = AgentService(
         definition=RESEARCH_AGENT,
         tool_registry=create_builtin_tool_registry(runners={}),
-        tool_decision_provider=_NullToolDecisionProvider(),
+        model_turn_provider=_FinishFromResultsProvider(),
         model_registry=_FakeModelRegistry(generator),  # type: ignore[arg-type]
     )
 
@@ -350,28 +375,11 @@ async def test_agent_service_run_creates_workspace_and_injects_primitive_ops() -
 async def test_agent_service_run_with_primitive_ops_through_agent_loop() -> None:
     """Verify write_file works through the full agent loop with workspace_path returned."""
 
-    class _SimpleSynthesisRunner:
-        def run_synthesis(self, *, parent_state: object) -> object:
-            from rag.agent.service import AgentRunResult
-
-            tool_results = getattr(parent_state, "get", lambda k, d=None: d)("tool_results", [])
-            summary = ", ".join(
-                f"{r.tool_name}:{r.status}" for r in tool_results if hasattr(r, "tool_name")
-            )
-            return AgentRunResult(
-                run_id="synth",
-                thread_id="synth",
-                status="done",
-                final_answer=f"Completed: {summary}",
-                tool_results=list(tool_results),
-            )
-
     write_call = ToolCallPlan.create(
         "write_file",
         {"path": "scratch/hello.py", "content": "print('hello')"},
     )
     service = _service_with_registry()
-    service._synthesis_runner = _SimpleSynthesisRunner()  # type: ignore[assignment]
 
     result = await service.run(
         AgentRunRequest(

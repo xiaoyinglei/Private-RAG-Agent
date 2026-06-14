@@ -46,13 +46,23 @@ class _FakeModelRegistry:
 
 
 class _FinishProvider:
-    def decide(self, *args: object, **kwargs: object) -> dict[str, object]:
-        del args, kwargs
-        return {
-            "action": "synthesize",
-            "tool_calls": [],
-            "thought": "done",
-        }
+    async def next_turn(
+        self,
+        state: LoopState,
+        *,
+        definition: AgentDefinition,
+        budget_remaining: int,
+    ) -> ModelTurnDraft:
+        del definition, budget_remaining
+        if state["answer_candidates"]:
+            return ModelTurnDraft(
+                action="finish",
+                final_answer=state["answer_candidates"][-1].text,
+            )
+        return ModelTurnDraft(
+            action="pause",
+            pause_reason="No answer candidate is available.",
+        )
 
 
 class _PauseAfterGoalFeedbackProvider:
@@ -256,7 +266,7 @@ async def test_resume_preserves_model_backed_llm_tool_runners() -> None:
     service = AgentService(
         definition=RESEARCH_AGENT,
         tool_registry=create_builtin_tool_registry(runners={}),
-        tool_decision_provider=_FinishProvider(),
+        model_turn_provider=_FinishProvider(),
         model_registry=_FakeModelRegistry(),  # type: ignore[arg-type]
     )
     write_call = ToolCallPlan.create(

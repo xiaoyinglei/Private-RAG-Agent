@@ -170,8 +170,10 @@ outcomes:
 The runtime continues because actual tool calls are present, not merely because
 a provider supplied a nominal stop reason.
 
-The current `synthesize` action is accepted as a compatibility alias for
-`finish` during migration. New internal contracts use `finish`.
+The model contract accepts only `execute`, `finish`, and `pause`. A `finish`
+outcome must include a non-empty candidate answer before the kernel accepts it.
+Specialized synthesis remains available only as an explicit `agent_synthesize`
+tool call.
 
 ### Tool Runner
 
@@ -346,6 +348,9 @@ fallback, compaction, and terminal results.
 ### Increment 4: Cleanup
 
 - Remove obsolete graph nodes used only by the old single-agent loop.
+- Remove the legacy `ToolDecisionProvider` adapter and `ThinkOutput` contract.
+- Remove automatic synthesis-runner finalization and the `synthesize` action
+  alias.
 - Delete compatibility-only goal runtime code after downstream imports move.
 - Preserve specialized LangGraph workflows and their tests.
 

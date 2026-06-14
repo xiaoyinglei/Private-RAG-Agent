@@ -29,7 +29,7 @@ from rag.agent.memory.compactor import LoopContextCompactor, MemoryCompactor
 from rag.agent.memory.injector import ContextBuilder
 from rag.agent.memory.models import MemoryPolicy, StateChannelReplacement
 from rag.agent.planning import PlanStep, PlanTracker, PlanUpdate
-from rag.agent.state import ThinkOutput, ToolCallPlan
+from rag.agent.state import ToolCallPlan
 from rag.assembly.tokenizer import TokenAccountingService, TokenizerContract
 from rag.schema.llm import LLMCallStage, LLMStageBudget
 from rag.schema.runtime import AccessPolicy
@@ -120,25 +120,27 @@ def test_loop_prompt_has_no_goal_gap_completion_authority() -> None:
     assert "must call llm_summarize" not in prompt
 
 
-def test_legacy_turn_parser_normalizes_finish_and_prefers_actual_calls() -> None:
+def test_turn_parser_prefers_actual_calls_over_finish_label() -> None:
     call = ToolCallPlan.create("vector_search", {"query": "policy"})
 
     finish = parse_loop_model_turn(
-        ThinkOutput(
-            action="synthesize",
-            thought="Enough evidence.",
-            stop_reason="ready",
-        )
+        {
+            "action": "finish",
+            "final_answer": "Enough evidence.",
+        }
     )
     execute = parse_loop_model_turn(
-        ThinkOutput(
-            action="synthesize",
-            tool_calls=[call],
-            thought="The call still needs to run.",
-        )
+        {
+            "action": "finish",
+            "final_answer": "Too early.",
+            "tool_calls": [call.model_dump()],
+        }
     )
 
-    assert finish == ModelTurnDraft(action="finish")
+    assert finish == ModelTurnDraft(
+        action="finish",
+        final_answer="Enough evidence.",
+    )
     assert execute == ModelTurnDraft(action="execute", tool_calls=(call,))
 
 
@@ -169,36 +171,6 @@ async def test_loop_provider_returns_finish_without_satisfaction_authorization()
     prompt = generator.calls[0][0]
     assert "open_gaps" not in prompt
     assert "goal checker" not in prompt
-
-
-@pytest.mark.anyio
-async def test_loop_provider_records_legacy_synthesize_compatibility() -> None:
-    generator = _StubGenerator(
-        [
-            {
-                "action": "synthesize",
-                "final_answer": "Compatibility answer.",
-                "thought": "Legacy provider action.",
-            }
-        ]
-    )
-    state = _state()
-    provider = LLMLoopModelTurnProvider(generator)
-
-    draft = await provider.next_turn(
-        state,
-        definition=_definition(),
-        budget_remaining=5_000,
-    )
-
-    assert draft == ModelTurnDraft(
-        action="finish",
-        final_answer="Compatibility answer.",
-    )
-    assert any(
-        diagnostic.code == "legacy_synthesize_normalized"
-        for diagnostic in state["runtime_diagnostics"]
-    )
 
 
 def test_loop_context_keeps_approval_and_feedback_without_goal_fields() -> None:

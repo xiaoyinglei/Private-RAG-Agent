@@ -8,7 +8,10 @@ from pydantic import BaseModel
 from rag.agent.compat.goal_contract import GoalDeliverable, GoalSpec
 from rag.agent.core.context import AgentRunConfig
 from rag.agent.core.definition import AgentDefinition
-from rag.agent.core.finalization import FinishCandidateBuilder
+from rag.agent.core.finalization import (
+    FinishCandidateBuilder,
+    FinishCandidateBuildError,
+)
 from rag.agent.core.observations import EvidenceRef
 from rag.agent.core.output_finalizer import OutputValidationExhaustedError
 from rag.agent.loop.state import ModelTurnDraft, create_loop_state
@@ -383,25 +386,15 @@ def test_stop_hook_factory_installs_goal_hook_only_when_explicitly_supplied() ->
     assert [binding.name for binding in explicit] == ["goal_contract"]
 
 
-class _SynthesisResult:
-    final_answer = "Compatibility answer"
-
-
-class _SynthesisRunner:
-    async def run_synthesis(self, *, parent_state: object) -> _SynthesisResult:
-        del parent_state
-        return _SynthesisResult()
-
-
 @pytest.mark.anyio
-async def test_finish_candidate_builder_runs_before_strict_model_turn_validation() -> None:
-    builder = FinishCandidateBuilder(synthesis_runner=_SynthesisRunner())
+async def test_finish_candidate_builder_rejects_missing_final_answer() -> None:
+    builder = FinishCandidateBuilder()
 
-    turn = await builder.build(
-        ModelTurnDraft.model_validate({"action": "synthesize"}),
-        state=_state(),
-    )
-
-    assert turn.action == "finish"
-    assert turn.final_answer == "Compatibility answer"
-    assert builder.events[-1].code == "finish_candidate_builder_used"
+    with pytest.raises(
+        FinishCandidateBuildError,
+        match="model turn is incomplete",
+    ):
+        await builder.build(
+            ModelTurnDraft(action="finish"),
+            state=_state(),
+        )

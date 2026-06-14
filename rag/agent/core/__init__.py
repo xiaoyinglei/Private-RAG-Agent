@@ -13,7 +13,7 @@ from rag.agent.core.context import (
 from rag.agent.core.definition import AgentDefinition, ModelSelectionPolicy, ToolPolicy
 from rag.agent.core.delegation import AgentDelegationRequest, DelegatedAgentRunner
 from rag.agent.core.registry import AgentRegistry
-from rag.agent.core.subagent_runner import BuiltinSubAgentRunner, BuiltinSynthesisRunner
+from rag.agent.core.subagent_runner import BuiltinSubAgentRunner
 
 __all__ = [
     "AgentDefinition",
@@ -25,7 +25,6 @@ __all__ = [
     "AgentDelegationRequest",
     "AgentToolSpec",
     "BuiltinSubAgentRunner",
-    "BuiltinSynthesisRunner",
     "BudgetLedger",
     "aclose_agent_checkpointer",
     "create_agent_checkpointer",
