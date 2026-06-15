@@ -16,7 +16,7 @@ from rag.agent.core.llm_context import (
     AgentLLMContextOverflowError,
 )
 from rag.agent.core.llm_registry import ModelRegistry
-from rag.agent.core.messages import ModelMessage, ToolCall, ToolUseResult
+from rag.agent.core.messages import ModelMessage, StopReason, ToolCall, ToolUseResult
 from rag.agent.core.runtime_diagnostics import RuntimeDiagnostic
 from rag.agent.core.runtime_ports import (
     RetrievalHintProvider,
@@ -379,25 +379,29 @@ class LLMLoopModelTurnProvider:
         budget_remaining: int,
     ) -> ModelTurnDraft:
         """OpenAI-compatible native tool calling path."""
-        # 1. Build system message
+        # 1. Flush completed tool call/result pairs into loop_messages
+        #    so the model sees its own tool history on subsequent turns.
+        _flush_tool_results_to_loop_messages(state)
+
+        # 2. Build system message
         system_msg = self._assembler.build_system_message(
             definition=definition,
             state=state,
             budget_remaining=budget_remaining,
         )
 
-        # 2. Convert conversation history, merging typed loop_messages
+        # 3. Convert conversation history + loop_messages
         conversation_msgs = _base_messages_to_model_messages(
             state.get("messages", [])
         )
         conversation_msgs.extend(state.get("loop_messages", []))
         all_messages = [system_msg, *conversation_msgs]
 
-        # 3. Convert to OpenAI format
+        # 4. Convert to OpenAI format
         openai_messages = OpenAIAdapter.messages(all_messages)
         openai_tools = OpenAIAdapter.tools(self._tool_specs)
 
-        # 4. Call gateway
+        # 5. Call gateway
         run_id = state["run_config"].run_id
         try:
             ledger = RunRegistry.get(run_id).budget_ledger
@@ -416,10 +420,10 @@ class LLMLoopModelTurnProvider:
             kwargs=self._kwargs,
         )
 
-        # 5. Parse response
+        # 6. Parse response
         tool_result = OpenAIAdapter.parse_tool_calls(result.value)
 
-        # 6. Convert to ModelTurnDraft
+        # 7. Convert to ModelTurnDraft
         return _tool_use_result_to_draft(tool_result, state)
 
     async def _next_turn_legacy(
@@ -530,6 +534,58 @@ def _tool_use_result_to_draft(
         action="pause",
         pause_reason="Model produced no text or tool calls.",
     )
+
+
+def _flush_tool_results_to_loop_messages(state: LoopState) -> None:
+    """Convert completed tool call/result pairs into loop_messages.
+
+    Uses pending_tool_calls (ToolCallPlan) for original arguments and
+    tool_results (ToolResult) for outputs.  Writes assistant(tool_calls)
+    + tool(result) pairs into state["loop_messages"].  Deduplicates by
+    tool_call_id so repeated calls are idempotent.
+    """
+    loop_messages: list[ModelMessage] = state.setdefault("loop_messages", [])
+    existing_ids = {
+        m.tool_call_id
+        for m in loop_messages
+        if m.role == "tool" and m.tool_call_id
+    }
+
+    # Index pending plans by id for argument lookup
+    plan_by_id: dict[str, Any] = {}
+    for plan in state.get("pending_tool_calls", []):
+        tc_id = getattr(plan, "tool_call_id", None)
+        if tc_id:
+            plan_by_id[tc_id] = plan
+
+    for tr in state.get("tool_results", []):
+        tc_id = tr.tool_call_id
+        if tc_id in existing_ids:
+            continue
+
+        plan = plan_by_id.get(tc_id)
+        arguments = dict(plan.arguments) if plan is not None else {}
+
+        # assistant message with tool_call
+        loop_messages.append(
+            ModelMessage(
+                role="assistant",
+                content="",
+                tool_calls=(ToolCall(id=tc_id, name=tr.tool_name, input=arguments),),
+            )
+        )
+
+        # tool result message
+        if tr.status == "ok" and tr.output is not None:
+            content = tr.output.model_dump_json(exclude_none=True)[:2000]
+        elif tr.error is not None:
+            content = f"Error: {tr.error.message}"
+        else:
+            content = f"Tool {tr.tool_name} returned no output."
+
+        loop_messages.append(
+            ModelMessage(role="tool", content=content, tool_call_id=tc_id)
+        )
 
 
 def create_loop_model_turn_provider(

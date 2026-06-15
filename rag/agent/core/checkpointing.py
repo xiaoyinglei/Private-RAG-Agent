@@ -43,6 +43,11 @@ LOOP_COMPATIBILITY_CHANNEL = "loop_compatibility"
 LOOP_STATE_CHANNEL = "loop_state"
 
 AGENT_CHECKPOINT_MSGPACK_ALLOWLIST: tuple[tuple[str, ...], ...] = (
+    ("rag.agent.core.messages", "ModelMessage"),
+    ("rag.agent.core.messages", "ToolCall"),
+    ("rag.agent.core.messages", "PendingToolCall"),
+    ("rag.agent.core.messages", "StopReason"),
+    ("rag.agent.core.messages", "ToolUseResult"),
     ("rag.agent.core.context", "AgentRunConfig"),
     ("rag.agent.core.definition", "ToolPolicy"),
     ("rag.agent.core.human_input", "HumanInputRequest"),
