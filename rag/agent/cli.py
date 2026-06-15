@@ -16,7 +16,7 @@ from rag.agent.core.llm_registry import ModelRegistry, ResolvedModel
 from rag.agent.core.llm_tool_runners import create_model_llm_tool_runners
 from rag.agent.core.registry import AgentRegistry
 from rag.agent.core.runtime_diagnostics import RuntimeDiagnostic
-from rag.agent.core.subagent_runner import BuiltinSubAgentRunner, BuiltinSynthesisRunner
+from rag.agent.core.subagent_runner import BuiltinSubAgentRunner
 from rag.agent.service import AgentRunRequest, AgentRunResult, AgentService
 from rag.agent.tools.rag_answer_tools import RAGSearchAnswerRunner
 from rag.agent.tools.registry import ContextualToolRunner, ToolRunner
@@ -192,12 +192,7 @@ def _build_agent_service(
         agent_registry=agent_registry,
         service_factory=service_factory,
     )
-    synthesis_runner = BuiltinSynthesisRunner(
-        agent_registry=agent_registry,
-        service_factory=service_factory,
-    )
     service_factory.bind_subagent_runner(subagent_runner)
-    service_factory.bind_synthesis_runner(synthesis_runner)
     return service_factory.create(definition)
 
 

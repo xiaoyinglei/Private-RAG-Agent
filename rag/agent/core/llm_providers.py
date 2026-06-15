@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import re
 from collections.abc import Awaitable, Mapping
-from inspect import isawaitable
 from typing import Any, Literal
 from uuid import uuid4
 
@@ -22,17 +21,14 @@ from rag.agent.core.runtime_diagnostics import RuntimeDiagnostic
 from rag.agent.core.runtime_ports import (
     RetrievalHintProvider,
     RetrievalHintUpdate,
-    ToolDecisionProvider,
 )
 from rag.agent.core.tool_schema import AgentMessageAssembler, OpenAIAdapter
-from rag.agent.core.turn_contracts import ThinkOutput, ToolCallPlan
+from rag.agent.core.turn_contracts import ToolCallPlan
 from rag.agent.loop.state import (
     LoopState,
     ModelTurnDraft,
     append_loop_diagnostic,
 )
-from rag.agent.memory.injector import ContextBuilder
-from rag.agent.memory.models import ContextBudgetSnapshot, InjectedContext
 from rag.agent.tools.spec import ToolSpec
 from rag.assembly.tokenizer import TokenAccountingService, TokenizerContract
 from rag.providers.llm_gateway import LLMGateway
@@ -276,9 +272,9 @@ class LLMRetrievalHintProvider(RetrievalHintProvider):
 
 
 class LoopModelDecision(BaseModel):
-    """Provider payload accepting both the new and legacy decision vocabulary."""
+    """Structured model outcome for one loop turn."""
 
-    action: Literal["execute", "finish", "synthesize", "pause"]
+    action: Literal["execute", "finish", "pause"]
     tool_calls: list[ToolCallPlan] = Field(default_factory=list)
     final_answer: str | None = None
     pause_reason: str | None = None
@@ -288,21 +284,13 @@ class LoopModelDecision(BaseModel):
 
 
 def parse_loop_model_turn(
-    value: ModelTurnDraft | LoopModelDecision | ThinkOutput | Mapping[str, object],
+    value: ModelTurnDraft | LoopModelDecision | Mapping[str, object],
 ) -> ModelTurnDraft:
-    """Normalize legacy model output without giving labels routing authority."""
+    """Normalize structured model output without giving labels routing authority."""
 
     if isinstance(value, ModelTurnDraft):
         return value
-    if isinstance(value, ThinkOutput):
-        decision = LoopModelDecision(
-            action=value.action,
-            tool_calls=value.tool_calls,
-            needs_user_input=value.needs_user_input,
-            stop_reason=value.stop_reason,
-            thought=value.thought,
-        )
-    elif isinstance(value, LoopModelDecision):
+    if isinstance(value, LoopModelDecision):
         decision = value
     else:
         decision = LoopModelDecision.model_validate(value)
@@ -310,7 +298,7 @@ def parse_loop_model_turn(
     calls = tuple(decision.tool_calls)
     if calls:
         return ModelTurnDraft(action="execute", tool_calls=calls)
-    if decision.action in {"finish", "synthesize"}:
+    if decision.action == "finish":
         return ModelTurnDraft(
             action="finish",
             final_answer=decision.final_answer,
@@ -467,18 +455,6 @@ class LLMLoopModelTurnProvider:
             ),
             kwargs=self._kwargs,
         )
-        if result.value.action == "synthesize":
-            append_loop_diagnostic(
-                state,
-                RuntimeDiagnostic(
-                    code="legacy_synthesize_normalized",
-                    component="loop_model_provider",
-                    message=(
-                        "Normalized legacy synthesize action to finish intent."
-                    ),
-                    degraded=False,
-                ),
-            )
         return parse_loop_model_turn(result.value)
 
 
@@ -535,18 +511,15 @@ def _tool_use_result_to_draft(
         return ModelTurnDraft(action="execute", tool_calls=calls)
 
     if tool_result.stop_reason == StopReason.TOOL_USE:
-        # Model wanted tools but none were parsed — treat as pause
         return ModelTurnDraft(
             action="pause",
             pause_reason="Model requested tool use but no tool calls were parsed.",
         )
 
-    # END_TURN or MAX_TOKENS — finish with whatever text we got
     text = tool_result.text.strip()
     if text:
         return ModelTurnDraft(action="finish", final_answer=text)
 
-    # No text — check if we have answer candidates
     if state.get("answer_candidates"):
         return ModelTurnDraft(
             action="finish",
@@ -557,68 +530,6 @@ def _tool_use_result_to_draft(
         action="pause",
         pause_reason="Model produced no text or tool calls.",
     )
-
-
-class LegacyToolDecisionModelTurnProvider:
-    """Adapt an explicit legacy decision provider at the service boundary."""
-
-    def __init__(
-        self,
-        provider: ToolDecisionProvider,
-        *,
-        use_synthesis_builder: bool,
-    ) -> None:
-        self._provider = provider
-        self._use_synthesis_builder = use_synthesis_builder
-
-    async def next_turn(
-        self,
-        state: LoopState,
-        *,
-        definition: AgentDefinition,
-        budget_remaining: int,
-    ) -> ModelTurnDraft:
-        if bool(getattr(self._provider, "manages_llm_context", False)):
-            context = InjectedContext(
-                sections=[],
-                context_budget=ContextBudgetSnapshot(
-                    max_context_tokens=0
-                ),
-            )
-        else:
-            context = ContextBuilder(
-                max_context_tokens=(
-                    state["run_config"].max_context_tokens
-                    or DEFAULT_LLM_STAGE_BUDGETS[
-                        LLMCallStage.TOOL_DECISION
-                    ].max_input_tokens
-                ),
-            ).assemble_loop(
-                definition=definition,
-                state=state,
-            )
-            state["context_budget"] = context.context_budget
-        raw = self._provider.decide(
-            state,
-            definition=definition,
-            budget_remaining=budget_remaining,
-            context=context,
-        )
-        if isawaitable(raw):
-            raw = await raw
-        draft = parse_loop_model_turn(raw)
-        if (
-            draft.action == "finish"
-            and not draft.final_answer
-            and not self._use_synthesis_builder
-            and state["answer_candidates"]
-        ):
-            return draft.model_copy(
-                update={
-                    "final_answer": state["answer_candidates"][-1].text
-                }
-            )
-        return draft
 
 
 def create_loop_model_turn_provider(
@@ -675,127 +586,6 @@ def _resolve_tool_specs(
     return specs
 
 
-class LLMToolDecisionProvider(ToolDecisionProvider):
-    """Model tool-choice decision provider. Invalid output pauses visibly."""
-
-    manages_llm_context = True
-
-    def __init__(
-        self,
-        generator: Any,
-        *,
-        kwargs: dict[str, Any] | None = None,
-        gateway: LLMGateway | None = None,
-        context_assembler: AgentLLMContextAssembler | None = None,
-    ) -> None:
-        self._kwargs = kwargs or {}
-        self._uses_async_gateway = gateway is not None
-        self._gateway = gateway or _fallback_gateway(
-            generator,
-            LLMCallStage.TOOL_DECISION,
-        )
-        _validate_shared_token_accounting(
-            gateway=self._gateway,
-            context_assembler=context_assembler,
-        )
-        self._context_assembler = context_assembler or _assembler_from_gateway(
-            self._gateway,
-            LLMCallStage.TOOL_DECISION,
-            kwargs=self._kwargs,
-        )
-
-    def decide(
-        self,
-        state: LoopState,
-        *,
-        definition: AgentDefinition,
-        budget_remaining: int,
-        context: InjectedContext,
-    ) -> ThinkOutput | dict[str, object] | Awaitable[ThinkOutput | dict[str, object]]:
-        del context
-        if self._uses_async_gateway:
-            return self._decide_with_gateway(
-                state,
-                definition=definition,
-                budget_remaining=budget_remaining,
-            )
-        assembler = self._context_assembler
-        if assembler is None:
-            raise RuntimeError("tool decision context assembler is not configured")
-        try:
-            assembled = assembler.assemble_tool_decision(
-                definition=definition,
-                state=state,
-                budget_remaining=budget_remaining,
-                output_schema=ThinkOutput,
-            )
-            decision = self._gateway.generate_structured(
-                stage=LLMCallStage.TOOL_DECISION,
-                prompt=assembled.prompt,
-                schema=ThinkOutput,
-                kwargs=self._kwargs,
-            ).value
-        except AgentLLMContextOverflowError:
-            raise
-        except Exception:
-            decision = None
-        if decision is None:
-            return ThinkOutput(
-                action="pause",
-                thought="LLM tool-decision response could not be parsed",
-                needs_user_input="Tool-decision provider failed to produce a valid decision",
-                confidence=0.0,
-            )
-        return decision
-
-    async def _decide_with_gateway(
-        self,
-        state: LoopState,
-        *,
-        definition: AgentDefinition,
-        budget_remaining: int,
-    ) -> ThinkOutput:
-        gateway = self._gateway
-        if gateway is None:
-            raise RuntimeError("tool decision gateway is not configured")
-        run_id = state["run_config"].run_id
-        try:
-            ledger = RunRegistry.get(run_id).budget_ledger
-        except KeyError:
-            ledger = None
-        try:
-            assembler = self._context_assembler
-            if assembler is None:
-                raise RuntimeError("tool decision context assembler is not configured")
-            assembled = assembler.assemble_tool_decision(
-                definition=definition,
-                state=state,
-                budget_remaining=budget_remaining,
-                output_schema=ThinkOutput,
-            )
-            result = await gateway.agenerate_structured(
-                stage=LLMCallStage.TOOL_DECISION,
-                prompt=assembled.prompt,
-                schema=ThinkOutput,
-                ledger=ledger,
-                lease_id=(
-                    f"{run_id}:tool_decision:{state.get('iteration', 0)}:"
-                    f"{uuid4().hex}"
-                ),
-                kwargs=self._kwargs,
-            )
-        except AgentLLMContextOverflowError:
-            raise
-        except Exception as exc:
-            return ThinkOutput(
-                action="pause",
-                thought="LLM gateway rejected or failed the tool decision call",
-                needs_user_input=f"Tool-decision LLM call failed: {exc}",
-                confidence=0.0,
-            )
-        return result.value
-
-
 # ── 从 ModelRegistry 批量创建 ──
 
 
@@ -803,8 +593,8 @@ def create_default_providers(
     registry: ModelRegistry,
     selection: ModelSelectionPolicy,
     definition: AgentDefinition | None = None,
-) -> tuple[LLMRetrievalHintProvider, LLMToolDecisionProvider]:
-    """Create retrieval-hint and tool-decision providers for an agent loop."""
+) -> tuple[LLMRetrievalHintProvider, LLMLoopModelTurnProvider]:
+    """Create retrieval-hint and model-turn providers for an agent loop."""
 
     def _resolve(
         node_model: str | None,
@@ -851,7 +641,7 @@ def create_default_providers(
             ),
             definition=definition,
         ),
-        LLMToolDecisionProvider(
+        LLMLoopModelTurnProvider(
             decision_gen,
             kwargs=decision_kwargs,
             gateway=decision_resolved.gateway,

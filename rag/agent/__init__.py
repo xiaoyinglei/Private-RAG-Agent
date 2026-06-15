@@ -12,7 +12,7 @@ from rag.agent.core.context import (
 from rag.agent.core.definition import AgentDefinition, ModelSelectionPolicy, ToolPolicy
 from rag.agent.core.delegation import AgentDelegationRequest, DelegatedAgentRunner
 from rag.agent.core.registry import AgentRegistry
-from rag.agent.core.subagent_runner import BuiltinSubAgentRunner, BuiltinSynthesisRunner
+from rag.agent.core.subagent_runner import BuiltinSubAgentRunner
 from rag.agent.memory.models import (
     ContextBudgetSnapshot,
     ExtractedFact,
@@ -30,7 +30,6 @@ from rag.agent.planning import (
 from rag.agent.service import AgentRunRequest, AgentRunResult, AgentService
 from rag.agent.state import (
     AgentState,
-    ThinkOutput,
     ToolCallPlan,
 )
 from rag.agent.tools.registry import ToolRegistry
@@ -51,7 +50,6 @@ __all__ = [
     "AgentDelegationRequest",
     "AgentToolSpec",
     "BuiltinSubAgentRunner",
-    "BuiltinSynthesisRunner",
     "BudgetLedger",
     "ContextBudgetSnapshot",
     "ExtractedFact",
@@ -64,7 +62,6 @@ __all__ = [
     "PlanUpdate",
     "RunRegistry",
     "DelegatedAgentRunner",
-    "ThinkOutput",
     "ToolCallPlan",
     "ToolError",
     "ToolPermissions",

@@ -13,15 +13,13 @@ from rag.agent.core.llm_context import (
     AgentLLMContextOverflowError,
 )
 from rag.agent.core.llm_providers import (
+    LLMLoopModelTurnProvider,
     LLMRetrievalHintProvider,
-    LLMToolDecisionProvider,
     RetrievalHintDecision,
     create_default_providers,
 )
 from rag.agent.core.llm_registry import ModelRegistry, ResolvedModel
 from rag.agent.loop.state import create_loop_state
-from rag.agent.memory.models import ContextBudgetSnapshot, ContextSection, InjectedContext
-from rag.agent.state import ThinkOutput
 from rag.providers.llm_gateway import LLMGateway, structured_accounted_prompt
 from rag.schema.llm import LLMCallStage, LLMProviderResult, LLMStageBudget, LLMUsage
 from rag.schema.runtime import AccessPolicy
@@ -161,15 +159,6 @@ def _make_state(**overrides: Any) -> dict:
     )
     state.update(overrides)
     return state
-
-
-def _make_context() -> InjectedContext:
-    return InjectedContext(
-        sections=[
-            ContextSection(name="task", content="test task", token_count=10, required=True),
-        ],
-        context_budget=ContextBudgetSnapshot(max_context_tokens=4096),
-    )
 
 
 # ── LLMRetrievalHintProvider ──
@@ -336,191 +325,6 @@ class TestLLMRetrievalHintProvider:
 
         assert generator.calls == 0
 
-# ── LLMToolDecisionProvider ──
-
-
-class TestLLMToolDecisionProvider:
-    def test_decide_execute(self) -> None:
-        gen = _StubGenerator([
-            {
-                "action": "execute",
-                "tool_calls": [
-                    {
-                        "tool_call_id": "tc_abc123def456",
-                        "tool_name": "vector_search",
-                        "arguments": {"query": "test", "top_k": 8},
-                    }
-                ],
-                "thought": "need more evidence",
-                "confidence": 0.8,
-            }
-        ])
-        provider = LLMToolDecisionProvider(gen)
-        result = provider.decide(
-            _make_state(),
-            definition=AgentDefinition(
-                agent_type="research",
-                description="test",
-                system_prompt="test",
-                allowed_tools=["vector_search"],
-            ),
-            budget_remaining=5000,
-            context=_make_context(),
-        )
-        assert isinstance(result, ThinkOutput)
-        assert result.action == "execute"
-        assert len(result.tool_calls) == 1
-        assert result.tool_calls[0].tool_name == "vector_search"
-
-    def test_decide_synthesize(self) -> None:
-        gen = _StubGenerator([
-            {
-                "action": "synthesize",
-                "tool_calls": [],
-                "thought": "evidence is sufficient",
-                "confidence": 0.95,
-                "stop_reason": "sufficient_evidence",
-            }
-        ])
-        provider = LLMToolDecisionProvider(gen)
-        result = provider.decide(
-            _make_state(),
-            definition=AgentDefinition(
-                agent_type="research",
-                description="test",
-                system_prompt="test",
-                allowed_tools=[],
-            ),
-            budget_remaining=5000,
-            context=_make_context(),
-        )
-        assert isinstance(result, ThinkOutput)
-        assert result.action == "synthesize"
-
-    def test_decide_pause(self) -> None:
-        gen = _StubGenerator([
-            {
-                "action": "pause",
-                "tool_calls": [],
-                "thought": "need user input",
-                "confidence": 0.5,
-                "needs_user_input": "choose data source",
-            }
-        ])
-        provider = LLMToolDecisionProvider(gen)
-        result = provider.decide(
-            _make_state(),
-            definition=AgentDefinition(
-                agent_type="research",
-                description="test",
-                system_prompt="test",
-                allowed_tools=[],
-            ),
-            budget_remaining=5000,
-            context=_make_context(),
-        )
-        assert isinstance(result, ThinkOutput)
-        assert result.action == "pause"
-        assert result.needs_user_input == "choose data source"
-
-    def test_unparseable_pauses(self) -> None:
-        gen = _FailingGenerator()
-        provider = LLMToolDecisionProvider(gen)
-        result = provider.decide(
-            _make_state(),
-            definition=AgentDefinition(
-                agent_type="research",
-                description="test",
-                system_prompt="test",
-                allowed_tools=[],
-            ),
-            budget_remaining=5000,
-            context=_make_context(),
-        )
-        assert isinstance(result, ThinkOutput)
-        assert result.action == "pause"
-        assert result.confidence == 0.0
-
-    @pytest.mark.anyio
-    async def test_gateway_call_commits_tool_decision_usage(self) -> None:
-        state = _make_state()
-        RunRegistry.remove("test")
-        handles = RunRegistry.get_or_create(state["run_config"])
-        generator = _GatewayStructuredGenerator(
-            {
-                "action": "synthesize",
-                "thought": "enough",
-                "confidence": 0.9,
-            }
-        )
-        provider = LLMToolDecisionProvider(
-            generator,
-            gateway=_gateway(generator, LLMCallStage.TOOL_DECISION),
-        )
-
-        result = await provider.decide(
-            state,
-            definition=AgentDefinition(
-                agent_type="research",
-                description="test",
-                system_prompt="test",
-                allowed_tools=[],
-            ),
-            budget_remaining=5000,
-            context=_make_context(),
-        )
-
-        assert isinstance(result, ThinkOutput)
-        assert result.action == "synthesize"
-        assert await handles.budget_ledger.committed() == 14
-        RunRegistry.remove("test")
-
-    @pytest.mark.anyio
-    async def test_required_context_overflow_does_not_call_decision_model(self) -> None:
-        generator = _GatewayStructuredGenerator(
-            {
-                "action": "synthesize",
-                "thought": "unused",
-                "confidence": 1.0,
-            }
-        )
-        gateway = LLMGateway(
-            generator=generator,
-            token_accounting=_WordTokenAccounting(),  # type: ignore[arg-type]
-            model_context_tokens=100,
-            stage_budgets={
-                LLMCallStage.TOOL_DECISION: LLMStageBudget(
-                    max_input_tokens=5,
-                    max_output_tokens=10,
-                    safety_margin_tokens=0,
-                )
-            },
-        )
-        provider = LLMToolDecisionProvider(
-            generator,
-            gateway=gateway,
-            context_assembler=_context_assembler(
-                gateway,
-                LLMCallStage.TOOL_DECISION,
-            ),
-        )
-
-        with pytest.raises(AgentLLMContextOverflowError):
-            await provider.decide(
-                _make_state(task="large decision task " * 20),
-                definition=AgentDefinition(
-                    agent_type="research",
-                    description="test",
-                    system_prompt="large system policy " * 20,
-                    allowed_tools=[],
-                ),
-                budget_remaining=5000,
-                context=_make_context(),
-            )
-
-        assert generator.calls == 0
-
-
 # ── create_default_providers ──
 
 
@@ -536,7 +340,7 @@ class TestCreateDefaultProviders:
 
         hint_provider, decision_provider = create_default_providers(reg, selection)
         assert isinstance(hint_provider, LLMRetrievalHintProvider)
-        assert isinstance(decision_provider, LLMToolDecisionProvider)
+        assert isinstance(decision_provider, LLMLoopModelTurnProvider)
 
     def test_creates_two_providers_with_per_node_models(self) -> None:
         main = ModelSpec(provider=ModelProvider.OLLAMA, model="main-model")
@@ -551,16 +355,16 @@ class TestCreateDefaultProviders:
 
         hint_provider, decision_provider = create_default_providers(reg, selection)
         assert isinstance(hint_provider, LLMRetrievalHintProvider)
-        assert isinstance(decision_provider, LLMToolDecisionProvider)
+        assert isinstance(decision_provider, LLMLoopModelTurnProvider)
         # hints use fast, decisions use main via default
 
-    def test_per_node_max_tokens_override_model_default(self) -> None:
+    @pytest.mark.anyio
+    async def test_per_node_max_tokens_override_model_default(self) -> None:
         gen = _StubGenerator([
             {"reason": "single lookup"},
             {
-                "action": "synthesize",
-                "thought": "enough evidence",
-                "confidence": 0.9,
+                "action": "finish",
+                "final_answer": "enough evidence",
             },
         ])
         reg = _FakeModelRegistry(gen)
@@ -574,7 +378,7 @@ class TestCreateDefaultProviders:
             selection,
         )
         hint_provider.hint(_make_state(task="查一个数"))
-        decision_provider.decide(
+        await decision_provider.next_turn(
             _make_state(task="查一个数"),
             definition=AgentDefinition(
                 agent_type="research",
@@ -583,10 +387,6 @@ class TestCreateDefaultProviders:
                 allowed_tools=[],
             ),
             budget_remaining=1000,
-            context=InjectedContext(
-                sections=[],
-                context_budget=ContextBudgetSnapshot(max_context_tokens=1000),
-            ),
         )
         assert gen.calls[0][2]["max_tokens"] == 128
         assert gen.calls[1][2]["max_tokens"] == 256

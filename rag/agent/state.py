@@ -6,7 +6,7 @@ from langchain_core.messages import BaseMessage
 
 from rag.agent.core.context import AgentRunConfig
 from rag.agent.core.runtime_diagnostics import RuntimeDiagnostic
-from rag.agent.core.turn_contracts import ThinkOutput, ToolCallPlan
+from rag.agent.core.turn_contracts import ToolCallPlan
 from rag.agent.loop.state import LoopState, create_loop_state
 from rag.agent.planning import AgentPlan, PlanEvent, PlanUpdate
 
@@ -48,7 +48,6 @@ __all__ = [
     "AgentState",
     "PlanEvent",
     "PlanUpdate",
-    "ThinkOutput",
     "ToolCallPlan",
     "agent_state_to_loop_state",
     "create_agent_state",

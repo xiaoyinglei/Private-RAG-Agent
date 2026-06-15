@@ -86,19 +86,16 @@ def test_loop_state_factory_copies_mutable_inputs() -> None:
     assert state["memory_warnings"] == ["initial"]
 
 
-def test_model_turn_draft_accepts_finish_intent_without_candidate() -> None:
-    draft = ModelTurnDraft.model_validate({"action": "synthesize"})
+def test_model_turn_draft_accepts_explicit_finish_candidate() -> None:
+    draft = ModelTurnDraft(
+        action="finish",
+        final_answer="Complete answer.",
+    )
 
-    assert draft.action == "finish"
-    assert draft.final_answer is None
-
-
-def test_materialize_model_turn_runs_candidate_compatibility_before_validation() -> None:
-    draft = ModelTurnDraft(action="finish")
-
-    turn = materialize_model_turn(draft, finish_candidate="Compatibility answer")
-
-    assert turn == ModelTurn(action="finish", final_answer="Compatibility answer")
+    assert materialize_model_turn(draft) == ModelTurn(
+        action="finish",
+        final_answer="Complete answer.",
+    )
 
 
 def test_tool_calls_take_precedence_over_finish_intent() -> None:

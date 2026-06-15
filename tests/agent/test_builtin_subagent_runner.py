@@ -2,20 +2,17 @@ from __future__ import annotations
 
 import pytest
 
-from rag.agent.builtin.synthesize import SYNTHESIZE_AGENT
 from rag.agent.builtin_registry import create_builtin_tool_registry
 from rag.agent.core.agent_service_factory import AgentServiceFactory
 from rag.agent.core.context import AgentRunConfig, RunRegistry
 from rag.agent.core.definition import AgentDefinition
 from rag.agent.core.delegation import AgentDelegationRequest
-from rag.agent.core.observations import AnswerCandidate, EvidenceRef
 from rag.agent.core.registry import AgentRegistry
-from rag.agent.core.subagent_runner import BuiltinSubAgentRunner, BuiltinSynthesisRunner
-from rag.agent.core.turn_contracts import ThinkOutput, ToolCallPlan
-from rag.agent.loop.state import LoopState, create_loop_state
+from rag.agent.core.subagent_runner import BuiltinSubAgentRunner
+from rag.agent.core.turn_contracts import ToolCallPlan
+from rag.agent.loop.state import LoopState, ModelTurnDraft, create_loop_state
 from rag.agent.service import AgentRunResult
 from rag.agent.tools.llm_tools import LLMTextOutput
-from rag.schema.query import AnswerCitation, EvidenceItem
 from rag.schema.runtime import AccessPolicy
 
 
@@ -24,22 +21,20 @@ class _ChildDecisionProvider:
         self.calls = 0
         self.seen_configs: list[AgentRunConfig] = []
 
-    async def decide(
+    async def next_turn(
         self,
         state: LoopState,
         *,
         definition: AgentDefinition,
         budget_remaining: int,
-        context: object,
-    ) -> ThinkOutput:
-        del definition, budget_remaining, context
+    ) -> ModelTurnDraft:
+        del definition, budget_remaining
         self.calls += 1
         self.seen_configs.append(state["run_config"])
         if self.calls == 1:
-            return ThinkOutput(
+            return ModelTurnDraft(
                 action="execute",
-                thought="summarize child task",
-                tool_calls=[
+                tool_calls=(
                     ToolCallPlan.create(
                         "llm_summarize",
                         {
@@ -47,13 +42,12 @@ class _ChildDecisionProvider:
                             "evidence_ids": ["ev1"],
                             "citation_ids": ["cit1"],
                         },
-                    )
-                ],
+                    ),
+                ),
             )
-        return ThinkOutput(
-            action="synthesize",
-            thought="child done",
-            stop_reason="child_complete",
+        return ModelTurnDraft(
+            action="finish",
+            final_answer=state["answer_candidates"][-1].text,
         )
 
 
@@ -95,7 +89,7 @@ async def test_builtin_subagent_runner_returns_agent_run_result_with_derived_con
             }
         ),
         model_registry=None,
-        tool_decision_provider=decision_provider,
+        model_turn_provider=decision_provider,
     )
     runner = BuiltinSubAgentRunner(agent_registry=agent_registry, service_factory=factory)
     factory.bind_subagent_runner(runner)
@@ -120,94 +114,6 @@ async def test_builtin_subagent_runner_returns_agent_run_result_with_derived_con
     assert first_child_config.budget_total == 2400
     with pytest.raises(KeyError):
         RunRegistry.get(result.run_id)
-
-
-@pytest.mark.anyio
-async def test_builtin_synthesis_runner_passes_bounded_grounding_to_child() -> None:
-    class _SynthesisService:
-        def __init__(self) -> None:
-            self.task = ""
-            self.config: AgentRunConfig | None = None
-            self.pending_tool_calls: list[ToolCallPlan] = []
-
-        async def run_with_config(
-            self,
-            *,
-            task: str,
-            run_config: AgentRunConfig,
-            pending_tool_calls: list[ToolCallPlan],
-        ) -> AgentRunResult:
-            self.task = task
-            self.config = run_config
-            self.pending_tool_calls = pending_tool_calls
-            return AgentRunResult(
-                run_id=run_config.run_id,
-                thread_id=run_config.thread_id,
-                status="done",
-                final_answer="grounded synthesis",
-            )
-
-    class _SynthesisFactory:
-        def __init__(self, service: _SynthesisService) -> None:
-            self.service = service
-
-        def create(self, definition: AgentDefinition) -> _SynthesisService:
-            assert definition == SYNTHESIZE_AGENT
-            return self.service
-
-    registry = AgentRegistry()
-    registry.register(SYNTHESIZE_AGENT)
-    service = _SynthesisService()
-    runner = BuiltinSynthesisRunner(
-        agent_registry=registry,
-        service_factory=_SynthesisFactory(service),  # type: ignore[arg-type]
-    )
-    state = _parent_state(run_id="synthesis-parent")
-    state["evidence"] = [
-        EvidenceItem(
-            evidence_id="ev-1",
-            doc_id=7,
-            citation_anchor="policy#3",
-            text="E" * 2_000,
-            score=0.9,
-        )
-    ]
-    state["citations"] = [
-        AnswerCitation(
-            citation_id="cit-1",
-            evidence_id="ev-1",
-            record_type="section",
-            citation_anchor="policy#3",
-            doc_id=7,
-        )
-    ]
-    state["answer_candidates"] = [
-        AnswerCandidate(
-            text="Candidate answer",
-            evidence_refs=[
-                EvidenceRef(
-                    evidence_id="ev-1",
-                    citation_id="cit-1",
-                    citation_anchor="policy#3",
-                )
-            ],
-        )
-    ]
-    state["evidence_refs"] = list(state["answer_candidates"][0].evidence_refs)
-
-    result = await runner.run_synthesis(parent_state=state)
-
-    assert result.final_answer == "grounded synthesis"
-    assert service.config is not None
-    assert service.config.parent_run_id == "synthesis-parent"
-    [call] = service.pending_tool_calls
-    assert call.tool_name == "llm_generate"
-    assert call.arguments["evidence_ids"] == ["ev-1"]
-    assert call.arguments["citation_ids"] == ["cit-1"]
-    assert all(
-        len(section) <= 1_600
-        for section in call.arguments["context_sections"]
-    )
 
 
 @pytest.mark.anyio

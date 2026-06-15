@@ -56,7 +56,7 @@ LoopTransitionReason = Literal[
 
 
 class ModelTurnDraft(BaseModel):
-    """Provider output before compatibility finalization and strict validation."""
+    """Provider output before strict kernel validation."""
 
     model_config = ConfigDict(frozen=True)
 
@@ -64,15 +64,6 @@ class ModelTurnDraft(BaseModel):
     tool_calls: tuple[ToolCallPlan, ...] = ()
     final_answer: str | None = None
     pause_reason: str | None = None
-
-    @model_validator(mode="before")
-    @classmethod
-    def normalize_legacy_action(cls, value: object) -> object:
-        if not isinstance(value, dict) or value.get("action") != "synthesize":
-            return value
-        normalized = dict(value)
-        normalized["action"] = "finish"
-        return normalized
 
 
 class ModelTurn(BaseModel):
@@ -251,16 +242,13 @@ def create_loop_state(
 
 def materialize_model_turn(
     draft: ModelTurnDraft,
-    *,
-    finish_candidate: str | None = None,
 ) -> ModelTurn:
-    """Apply compatibility precedence before the strict kernel contract."""
+    """Apply tool-call precedence before the strict kernel contract."""
 
     if draft.tool_calls:
         return ModelTurn(action="execute", tool_calls=draft.tool_calls)
     if draft.action == "finish":
-        candidate = draft.final_answer if _nonempty(draft.final_answer) else finish_candidate
-        return ModelTurn(action="finish", final_answer=candidate)
+        return ModelTurn(action="finish", final_answer=draft.final_answer)
     return ModelTurn(
         action=draft.action,
         final_answer=draft.final_answer,

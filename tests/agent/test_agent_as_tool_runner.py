@@ -23,8 +23,8 @@ from rag.agent.core.definition import AgentDefinition
 from rag.agent.core.delegation import AgentDelegationRequest
 from rag.agent.core.registry import AgentRegistry
 from rag.agent.core.subagent_runner import BuiltinSubAgentRunner
-from rag.agent.core.turn_contracts import ThinkOutput, ToolCallPlan
-from rag.agent.loop.state import LoopState, create_loop_state
+from rag.agent.core.turn_contracts import ToolCallPlan
+from rag.agent.loop.state import LoopState, ModelTurnDraft, create_loop_state
 from rag.agent.service import AgentRunRequest, AgentRunResult
 from rag.agent.tools.llm_tools import LLMTextOutput
 from rag.schema.query import RetrievalSignals
@@ -47,22 +47,20 @@ class _ChildDecisionProvider:
         self.calls = 0
         self.seen_configs: list[AgentRunConfig] = []
 
-    async def decide(
+    async def next_turn(
         self,
         state: LoopState,
         *,
         definition: AgentDefinition,
         budget_remaining: int,
-        context: object,
-    ) -> ThinkOutput:
-        del definition, budget_remaining, context
+    ) -> ModelTurnDraft:
+        del definition, budget_remaining
         self.calls += 1
         self.seen_configs.append(state["run_config"])
         if self.calls == 1:
-            return ThinkOutput(
+            return ModelTurnDraft(
                 action="execute",
-                thought="summarize child task",
-                tool_calls=[
+                tool_calls=(
                     ToolCallPlan.create(
                         "llm_summarize",
                         {
@@ -70,13 +68,12 @@ class _ChildDecisionProvider:
                             "evidence_ids": ["ev1"],
                             "citation_ids": ["cit1"],
                         },
-                    )
-                ],
+                    ),
+                ),
             )
-        return ThinkOutput(
-            action="synthesize",
-            thought="child done",
-            stop_reason="child_complete",
+        return ModelTurnDraft(
+            action="finish",
+            final_answer=state["answer_candidates"][-1].text,
         )
 
 
@@ -119,7 +116,7 @@ async def test_agent_as_tool_runner_executes_registered_child_with_derived_confi
             }
         ),
 
-        tool_decision_provider=decision_provider,
+        model_turn_provider=decision_provider,
     )
 
     result = await runner.run_delegated_task(
@@ -574,7 +571,7 @@ async def test_builtin_subagent_runner_is_injected_for_agent_tool_calls() -> Non
             }
         ),
         model_registry=None,
-        tool_decision_provider=decision_provider,
+        model_turn_provider=decision_provider,
     )
     runner = BuiltinSubAgentRunner(agent_registry=agent_registry, service_factory=factory)
     factory.bind_subagent_runner(runner)

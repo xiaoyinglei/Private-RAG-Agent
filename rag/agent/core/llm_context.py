@@ -97,33 +97,6 @@ class AgentLLMContextAssembler:
             output_schema=output_schema,
         )
 
-    def assemble_tool_decision(
-        self,
-        *,
-        definition: AgentDefinition,
-        state: LoopState,
-        budget_remaining: int,
-        output_schema: type[BaseModel] | None = None,
-    ) -> AssembledAgentLLMContext:
-        return self._assemble(
-            stage=LLMCallStage.TOOL_DECISION,
-            state=state,
-            prefix_sections=[
-                self._required_section("system", definition.system_prompt),
-                self._required_section(
-                    "instructions",
-                    build_loop_turn_prompt(
-                        state,
-                        budget_remaining=budget_remaining,
-                        allowed_tools=definition.allowed_tools,
-                    ),
-                ),
-            ],
-            included_state_sections=_DECISION_STATE_SECTIONS,
-            required_state_sections=frozenset({"open_decisions", "plan"}),
-            output_schema=output_schema,
-        )
-
     def assemble_loop_turn(
         self,
         *,
