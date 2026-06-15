@@ -28,6 +28,7 @@ list_files_spec = ToolSpec(
     max_retries=1,
     idempotent=True,
     concurrency_safe=True,
+    is_read_only=True,
     work_budget_cost=200,
 )
 
@@ -35,7 +36,8 @@ read_file_spec = ToolSpec(
     name="read_file",
     description=(
         "Read a bounded text file from the workspace. Binary or non-text files return "
-        "is_binary=True without body content."
+        "is_binary=True without body content. Supports offset/limit for reading "
+        "specific byte ranges of large files."
     ),
     input_model=ReadFileInput,
     output_model=ReadFileOutput,
@@ -45,6 +47,7 @@ read_file_spec = ToolSpec(
     max_retries=1,
     idempotent=True,
     concurrency_safe=True,
+    is_read_only=True,
     work_budget_cost=500,
 )
 
@@ -63,6 +66,7 @@ structured_probe_spec = ToolSpec(
     max_retries=0,
     idempotent=True,
     concurrency_safe=True,
+    is_read_only=True,
     work_budget_cost=700,
 )
 

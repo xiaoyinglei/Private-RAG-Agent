@@ -245,6 +245,64 @@ class LLMGateway:
             stage=stage,
         )
 
+    async def agenerate_with_tools(
+        self,
+        *,
+        stage: LLMCallStage,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        ledger: AsyncBudgetLedger | None = None,
+        lease_id: str | None = None,
+        kwargs: Mapping[str, Any] | None = None,
+    ) -> LLMCallResult[Any]:
+        """Native tool calling path with budget accounting.
+
+        ``messages`` and ``tools`` are in OpenAI wire format.  Returns the
+        raw provider response (caller parses via ``OpenAIAdapter``).
+        Falls back to ``generate_text`` when the generator lacks
+        ``generate_with_tools``.
+        """
+        effective_ledger = ledger or current_llm_budget_ledger()
+        accounted_prompt = _account_messages(messages, tools)
+        budget, call_kwargs, input_tokens, reservation = self._prepare_call(
+            stage=stage,
+            prompt=accounted_prompt,
+            kwargs=kwargs,
+        )
+        effective_lease_id = lease_id or f"{stage.value}:tools:{id(messages)}"
+        if effective_ledger is not None:
+            reserved = await effective_ledger.reserve(effective_lease_id, reservation)
+            if not reserved:
+                raise LLMBudgetExceededError(
+                    stage=stage,
+                    required_tokens=reservation,
+                )
+
+        try:
+            provider_result = await asyncio.to_thread(
+                self._invoke_with_tools,
+                messages,
+                tools,
+                call_kwargs,
+            )
+        except Exception:
+            if effective_ledger is not None:
+                await effective_ledger.refund(effective_lease_id)
+            raise
+
+        usage = provider_result.usage or LLMUsage(
+            input_tokens=input_tokens,
+            output_tokens=0,  # unknown for raw responses
+            source="tokenizer_estimate",
+        )
+        if effective_ledger is not None:
+            await effective_ledger.commit(effective_lease_id, usage.total_tokens)
+        return LLMCallResult(
+            value=provider_result.value,
+            usage=usage,
+            stage=stage,
+        )
+
     def generate_text(
         self,
         *,
@@ -393,6 +451,58 @@ class LLMGateway:
                 )
             )
         raise RuntimeError("Configured generator cannot generate structured output")
+
+    def _invoke_with_tools(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        kwargs: dict[str, Any],
+    ) -> LLMProviderResult[Any]:
+        generate_with_tools = getattr(
+            self._generator, "generate_with_tools", None
+        )
+        if callable(generate_with_tools):
+            result = generate_with_tools(
+                messages=messages, tools=tools, **kwargs
+            )
+            if isinstance(result, LLMProviderResult):
+                return result
+            raise TypeError("generate_with_tools must return LLMProviderResult")
+
+        # Fallback: render messages as prompt, call generate_text
+        prompt = _render_messages_as_prompt(messages)
+        return self._invoke_text(prompt, kwargs)
+
+
+def _render_messages_as_prompt(messages: list[dict[str, Any]]) -> str:
+    """Render OpenAI messages as a flat prompt for fallback path."""
+    parts: list[str] = []
+    for msg in messages:
+        role = msg.get("role", "unknown")
+        content = msg.get("content", "")
+        if role == "system":
+            parts.append(f"[System]\n{content}")
+        elif role == "user":
+            parts.append(f"[User]\n{content}")
+        elif role == "assistant":
+            parts.append(f"[Assistant]\n{content}")
+        elif role == "tool":
+            parts.append(f"[Tool Result: {msg.get('tool_call_id', '')}]\n{content}")
+    return "\n\n".join(parts)
+
+
+def _account_messages(
+    messages: list[dict[str, Any]],
+    tools: list[dict[str, Any]],
+) -> str:
+    """Approximate token-countable text from messages + tools."""
+    prompt = _render_messages_as_prompt(messages)
+    if tools:
+        tool_desc = "\n".join(
+            t.get("function", {}).get("name", "") for t in tools
+        )
+        prompt += f"\n\n[Tools]\n{tool_desc}"
+    return prompt
 
 
 def structured_accounted_prompt(

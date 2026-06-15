@@ -490,6 +490,8 @@ class AgentService:
                 return create_loop_model_turn_provider(
                     self._model_registry,
                     self._definition.model_selection,
+                    tool_registry=self._base_tool_registry,
+                    definition=self._definition,
                 )
             except Exception as exc:
                 if state is not None:

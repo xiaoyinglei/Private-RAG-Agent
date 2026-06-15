@@ -21,6 +21,7 @@ from rag.agent.core.tool_execution import (
     ToolBatchRequest,
     ToolBatchResult,
 )
+from rag.agent.core.turn_contracts import ToolCallPlan
 from rag.agent.loop.state import (
     LoopPause,
     LoopState,
@@ -135,6 +136,12 @@ class AgentLoop:
         while state["status"] == "running":
             if state["pending_tool_calls"]:
                 paused = await self._execute_pending_tools(state)
+                if paused:
+                    return state
+                continue
+
+            if state.get("pending_loop_tool_calls"):
+                paused = await self._execute_pending_loop_tools(state)
                 if paused:
                     return state
                 continue
@@ -462,6 +469,175 @@ class AgentLoop:
             checkpoint_reason="tool_results_recorded",
         )
         return False
+
+    async def _execute_pending_loop_tools(self, state: LoopState) -> bool:
+        """Execute pending loop tool calls (PR0 PendingToolCall state machine).
+
+        Converts PendingToolCall → ToolCallPlan, delegates to the existing
+        tool execution path, then converts results back to ModelMessage
+        and appends to loop_messages.
+        """
+        from rag.agent.core.messages import PendingToolCall
+
+        pending = list(state.get("pending_loop_tool_calls", []))
+        if not pending:
+            return False
+
+        denied_ids = set(state.get("denied_tool_call_ids", []))
+
+        # Mark pending as approved or denied
+        for ptc in pending:
+            if ptc.status == "pending":
+                if ptc.tool_call_id in denied_ids:
+                    ptc.status = "denied"
+                    ptc.summary = f"Tool {ptc.tool_name} denied by policy."
+                else:
+                    ptc.status = "approved"
+
+        # Convert to ToolCallPlan for existing execution path
+        tool_call_plans = [
+            ToolCallPlan(
+                tool_call_id=ptc.tool_call_id,
+                tool_name=ptc.tool_name,
+                arguments=ptc.arguments,
+            )
+            for ptc in pending
+            if ptc.status in ("approved", "running")
+        ]
+
+        if not tool_call_plans:
+            # All were denied — generate tool result messages
+            self._finalize_loop_tool_calls(state, pending)
+            return False
+
+        # Mark as running
+        for ptc in pending:
+            if ptc.status == "approved":
+                ptc.status = "running"
+
+        # Delegate to existing tool execution
+        result = await _await_value(
+            self._tool_runner.execute_batch(
+                ToolBatchRequest(
+                    calls=tuple(tool_call_plans),
+                    run_config=state["run_config"],
+                    allowed_tools=frozenset(
+                        self._definition.allowed_tools
+                    ),
+                    approved_tool_call_ids=tuple(
+                        state["approved_tool_call_ids"]
+                    ),
+                    denied_tool_call_ids=tuple(
+                        state["denied_tool_call_ids"]
+                    ),
+                    execution_records=state[
+                        "tool_execution_records"
+                    ],
+                    retrieval_signals=state["retrieval_signals"],
+                ),
+                state=state,
+                definition=self._definition,
+            )
+        )
+
+        # Update state from execution result
+        state["run_config"] = result.run_config
+        state["tool_execution_records"] = {
+            call_id: record.model_copy(deep=True)
+            for call_id, record in result.execution_records.items()
+        }
+        new_results = list(result.tool_results)
+        state["tool_results"] = _merge_keyed(
+            state["tool_results"],
+            new_results,
+        )
+
+        # Update PendingToolCall status from results
+        result_by_id = {r.tool_call_id: r for r in new_results}
+        for ptc in pending:
+            if ptc.tool_call_id in result_by_id:
+                tr = result_by_id[ptc.tool_call_id]
+                if tr.status == "ok":
+                    ptc.status = "completed"
+                    # Generate summary from output
+                    output = tr.output
+                    if output is not None:
+                        preview = output.model_dump_json(exclude_none=True)
+                        ptc.summary = preview[:500]
+                        if len(preview) > 500:
+                            store_key = f"result_{ptc.tool_call_id}"
+                            state["tool_result_store"][store_key] = output
+                            ptc.result_store_key = store_key
+                else:
+                    ptc.status = "failed"
+                    if tr.error is not None:
+                        ptc.summary = f"Error: {tr.error.message}"
+                    else:
+                        ptc.summary = f"Tool {ptc.tool_name} failed."
+
+        # Check if approval is needed (paused status from tool runner)
+        if result.status in {"paused", "reconciliation_required"}:
+            request = result.human_input_request
+            reason = (
+                request.question
+                if request is not None
+                else result.decision_reason or result.status
+            )
+            state["approval_request"] = request
+            await self._pause(
+                state,
+                reason=reason,
+                request=request,
+                checkpoint_reason="tool_pause",
+                transition_reason="approval_required",
+            )
+            return True
+
+        # Finalize: convert terminal PendingToolCalls to ModelMessages
+        self._finalize_loop_tool_calls(state, pending)
+
+        await self._transition(
+            state,
+            reason="tool_execution",
+            detail={
+                "phase": "loop_tool_completed",
+                "result_count": len(new_results),
+            },
+            checkpoint_reason="loop_tool_results_recorded",
+        )
+        return False
+
+    def _finalize_loop_tool_calls(
+        self,
+        state: LoopState,
+        pending: list[Any],
+    ) -> None:
+        """Convert terminal PendingToolCalls to ModelMessages and remove from pending."""
+        from rag.agent.core.messages import ModelMessage
+
+        terminal = []
+        remaining = []
+        for ptc in pending:
+            if ptc.status in ("completed", "failed", "denied"):
+                terminal.append(ptc)
+            else:
+                remaining.append(ptc)
+
+        # Add tool result messages to loop_messages
+        for ptc in terminal:
+            content = ptc.summary or ""
+            if ptc.result_store_key:
+                content += f"\n[Full result stored at: {ptc.result_store_key}]"
+            state["loop_messages"].append(
+                ModelMessage(
+                    role="tool",
+                    content=content,
+                    tool_call_id=ptc.tool_call_id,
+                )
+            )
+
+        # Update pending list
+        state["pending_loop_tool_calls"] = remaining
 
     async def _evaluate_finish(
         self,
