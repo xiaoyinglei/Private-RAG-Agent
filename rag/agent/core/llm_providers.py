@@ -8,6 +8,8 @@ from uuid import uuid4
 
 from pydantic import BaseModel, Field
 
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
+
 from rag.agent.core.context import RunRegistry
 from rag.agent.core.definition import AgentDefinition, ModelSelectionPolicy
 from rag.agent.core.llm_context import (
@@ -15,12 +17,14 @@ from rag.agent.core.llm_context import (
     AgentLLMContextOverflowError,
 )
 from rag.agent.core.llm_registry import ModelRegistry
+from rag.agent.core.messages import ModelMessage, ToolCall, ToolUseResult
 from rag.agent.core.runtime_diagnostics import RuntimeDiagnostic
 from rag.agent.core.runtime_ports import (
     RetrievalHintProvider,
     RetrievalHintUpdate,
     ToolDecisionProvider,
 )
+from rag.agent.core.tool_schema import AgentMessageAssembler, OpenAIAdapter
 from rag.agent.core.turn_contracts import ThinkOutput, ToolCallPlan
 from rag.agent.loop.state import (
     LoopState,
@@ -29,6 +33,7 @@ from rag.agent.loop.state import (
 )
 from rag.agent.memory.injector import ContextBuilder
 from rag.agent.memory.models import ContextBudgetSnapshot, InjectedContext
+from rag.agent.tools.spec import ToolSpec
 from rag.assembly.tokenizer import TokenAccountingService, TokenizerContract
 from rag.providers.llm_gateway import LLMGateway
 from rag.schema.llm import DEFAULT_LLM_STAGE_BUDGETS, LLMCallStage
@@ -324,7 +329,12 @@ def parse_loop_model_turn(
 
 
 class LLMLoopModelTurnProvider:
-    """Loop-specific provider returning a focused draft with no goal routing."""
+    """Loop-specific provider returning a focused draft with no goal routing.
+
+    When ``tool_specs`` is provided, uses the OpenAI-compatible native tool
+    calling path (``OpenAIAdapter`` + ``AgentMessageAssembler``).  Otherwise
+    falls back to the legacy ``AgentLLMContextAssembler`` path.
+    """
 
     manages_llm_context = True
 
@@ -335,6 +345,7 @@ class LLMLoopModelTurnProvider:
         kwargs: dict[str, Any] | None = None,
         gateway: LLMGateway | None = None,
         context_assembler: AgentLLMContextAssembler | None = None,
+        tool_specs: list[ToolSpec] | None = None,
     ) -> None:
         self._kwargs = kwargs or {}
         self._gateway = gateway or _fallback_gateway(
@@ -350,6 +361,8 @@ class LLMLoopModelTurnProvider:
             LLMCallStage.TOOL_DECISION,
             kwargs=self._kwargs,
         )
+        self._tool_specs = tool_specs or []
+        self._assembler = AgentMessageAssembler()
 
     async def next_turn(
         self,
@@ -358,6 +371,77 @@ class LLMLoopModelTurnProvider:
         definition: AgentDefinition,
         budget_remaining: int,
     ) -> ModelTurnDraft:
+        if self._tool_specs:
+            return await self._next_turn_with_tools(
+                state,
+                definition=definition,
+                budget_remaining=budget_remaining,
+            )
+        return await self._next_turn_legacy(
+            state,
+            definition=definition,
+            budget_remaining=budget_remaining,
+        )
+
+    async def _next_turn_with_tools(
+        self,
+        state: LoopState,
+        *,
+        definition: AgentDefinition,
+        budget_remaining: int,
+    ) -> ModelTurnDraft:
+        """OpenAI-compatible native tool calling path."""
+        # 1. Build system message
+        system_msg = self._assembler.build_system_message(
+            definition=definition,
+            state=state,
+            budget_remaining=budget_remaining,
+        )
+
+        # 2. Convert conversation history, merging typed loop_messages
+        conversation_msgs = _base_messages_to_model_messages(
+            state.get("messages", [])
+        )
+        conversation_msgs.extend(state.get("loop_messages", []))
+        all_messages = [system_msg, *conversation_msgs]
+
+        # 3. Convert to OpenAI format
+        openai_messages = OpenAIAdapter.messages(all_messages)
+        openai_tools = OpenAIAdapter.tools(self._tool_specs)
+
+        # 4. Call gateway
+        run_id = state["run_config"].run_id
+        try:
+            ledger = RunRegistry.get(run_id).budget_ledger
+        except KeyError:
+            ledger = None
+
+        result = await self._gateway.agenerate_with_tools(
+            stage=LLMCallStage.TOOL_DECISION,
+            messages=openai_messages,
+            tools=openai_tools,
+            ledger=ledger,
+            lease_id=(
+                f"{run_id}:loop_turn:{state.get('iteration', 0)}:"
+                f"{uuid4().hex}"
+            ),
+            kwargs=self._kwargs,
+        )
+
+        # 5. Parse response
+        tool_result = OpenAIAdapter.parse_tool_calls(result.value)
+
+        # 6. Convert to ModelTurnDraft
+        return _tool_use_result_to_draft(tool_result, state)
+
+    async def _next_turn_legacy(
+        self,
+        state: LoopState,
+        *,
+        definition: AgentDefinition,
+        budget_remaining: int,
+    ) -> ModelTurnDraft:
+        """Legacy structured-output path (no native tool calling)."""
         assembler = self._context_assembler
         if assembler is None:
             raise RuntimeError("loop model context assembler is not configured")
@@ -396,6 +480,83 @@ class LLMLoopModelTurnProvider:
                 ),
             )
         return parse_loop_model_turn(result.value)
+
+
+def _base_messages_to_model_messages(
+    messages: list[BaseMessage],
+) -> list[ModelMessage]:
+    """Convert langchain BaseMessage list to ModelMessage list."""
+    result: list[ModelMessage] = []
+    for msg in messages:
+        if isinstance(msg, HumanMessage):
+            result.append(ModelMessage(role="user", content=str(msg.content)))
+        elif isinstance(msg, AIMessage):
+            tool_calls: list[ToolCall] = []
+            for tc in getattr(msg, "tool_calls", []) or []:
+                tool_calls.append(
+                    ToolCall(
+                        id=tc.get("id", f"tc_{uuid4().hex[:12]}"),
+                        name=tc.get("name", ""),
+                        input=tc.get("args", {}),
+                    )
+                )
+            result.append(
+                ModelMessage(
+                    role="assistant",
+                    content=str(msg.content) if msg.content else "",
+                    tool_calls=tuple(tool_calls),
+                )
+            )
+        elif isinstance(msg, ToolMessage):
+            result.append(
+                ModelMessage(
+                    role="tool",
+                    content=str(msg.content),
+                    tool_call_id=getattr(msg, "tool_call_id", None),
+                )
+            )
+    return result
+
+
+def _tool_use_result_to_draft(
+    tool_result: ToolUseResult,
+    state: LoopState,
+) -> ModelTurnDraft:
+    """Convert ToolUseResult to ModelTurnDraft for the loop kernel."""
+    if tool_result.tool_calls:
+        calls = tuple(
+            ToolCallPlan(
+                tool_call_id=tc.id,
+                tool_name=tc.name,
+                arguments=tc.input,
+            )
+            for tc in tool_result.tool_calls
+        )
+        return ModelTurnDraft(action="execute", tool_calls=calls)
+
+    if tool_result.stop_reason == StopReason.TOOL_USE:
+        # Model wanted tools but none were parsed — treat as pause
+        return ModelTurnDraft(
+            action="pause",
+            pause_reason="Model requested tool use but no tool calls were parsed.",
+        )
+
+    # END_TURN or MAX_TOKENS — finish with whatever text we got
+    text = tool_result.text.strip()
+    if text:
+        return ModelTurnDraft(action="finish", final_answer=text)
+
+    # No text — check if we have answer candidates
+    if state.get("answer_candidates"):
+        return ModelTurnDraft(
+            action="finish",
+            final_answer=state["answer_candidates"][-1].text,
+        )
+
+    return ModelTurnDraft(
+        action="pause",
+        pause_reason="Model produced no text or tool calls.",
+    )
 
 
 class LegacyToolDecisionModelTurnProvider:
@@ -463,6 +624,9 @@ class LegacyToolDecisionModelTurnProvider:
 def create_loop_model_turn_provider(
     registry: ModelRegistry,
     selection: ModelSelectionPolicy,
+    *,
+    tool_registry: Any | None = None,
+    definition: AgentDefinition | None = None,
 ) -> LLMLoopModelTurnProvider:
     resolved = registry.resolve_for_node(
         node_model=selection.tool_decision_model,
@@ -476,6 +640,12 @@ def create_loop_model_turn_provider(
     if selection.tool_decision_max_tokens is not None:
         kwargs["max_tokens"] = selection.tool_decision_max_tokens
     gateway = getattr(resolved, "gateway", None)
+
+    # Resolve tool specs for native tool calling path
+    tool_specs: list[ToolSpec] | None = None
+    if tool_registry is not None and definition is not None:
+        tool_specs = _resolve_tool_specs(tool_registry, definition.allowed_tools)
+
     return LLMLoopModelTurnProvider(
         resolved.generator,
         kwargs=kwargs,
@@ -485,7 +655,24 @@ def create_loop_model_turn_provider(
             LLMCallStage.TOOL_DECISION,
             kwargs=kwargs,
         ),
+        tool_specs=tool_specs,
     )
+
+
+def _resolve_tool_specs(
+    tool_registry: Any,
+    allowed_tools: list[str],
+) -> list[ToolSpec]:
+    """Resolve allowed tool names to ToolSpec objects."""
+    specs: list[ToolSpec] = []
+    for name in allowed_tools:
+        try:
+            spec = tool_registry.get(name)
+            if isinstance(spec, ToolSpec):
+                specs.append(spec)
+        except (KeyError, Exception):
+            continue
+    return specs
 
 
 class LLMToolDecisionProvider(ToolDecisionProvider):

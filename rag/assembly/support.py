@@ -154,12 +154,27 @@ class _CompositeProvider:
 class _OpenAICompatibleChatGenerator:
     """OpenAI-compatible chat API wrapper.  Does not expose api_key in repr."""
 
-    def __init__(self, *, model: str, base_url: str, api_key: str | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        model: str,
+        base_url: str,
+        api_key: str | None = None,
+        supports_tools: bool | None = None,
+    ) -> None:
         from openai import OpenAI
 
         self.chat_model_name = model
         self._base_url = base_url
         self._client = OpenAI(base_url=base_url, api_key=api_key or "not-needed")
+        if supports_tools is None:
+            supports_tools = env_bool("RAG_NATIVE_TOOL_CALLING") is not False
+        self._supports_tools = supports_tools
+
+    @property
+    def supports_tools(self) -> bool:
+        """Whether this generator supports native OpenAI tool calling."""
+        return self._supports_tools
 
     def generate_text(
         self, *, prompt: str, system_prompt: str | None = None, **kwargs: object
@@ -236,6 +251,29 @@ User task:
         return LLMProviderResult(
             value=schema.model_validate(payload),  # type: ignore[attr-defined]
             usage=generated.usage,
+        )
+
+    def generate_with_tools(
+        self,
+        *,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        **kwargs: object,
+    ) -> LLMProviderResult[Any]:
+        """Native OpenAI tool calling.  Returns the raw response object.
+
+        ``messages`` and ``tools`` are already in OpenAI wire format
+        (caller used ``OpenAIAdapter.messages`` / ``OpenAIAdapter.tools``).
+        """
+        response = self._client.chat.completions.create(
+            model=self.chat_model_name,
+            messages=messages,
+            tools=tools or None,
+            **kwargs,
+        )
+        return LLMProviderResult(
+            value=response,
+            usage=_openai_response_usage(response),
         )
 
     def __repr__(self) -> str:

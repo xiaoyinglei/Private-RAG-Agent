@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
-from typing import Literal, Self
+from typing import Any, Literal, Self
 
 from langchain_core.messages import BaseMessage
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -9,6 +9,7 @@ from typing_extensions import TypedDict
 
 from rag.agent.core.context import AgentRunConfig
 from rag.agent.core.human_input import HumanInputRequest, HumanInputResponse
+from rag.agent.core.messages import ModelMessage, PendingToolCall
 from rag.agent.core.observations import (
     AnswerCandidate,
     ComputationResult,
@@ -177,6 +178,10 @@ class LoopState(TypedDict):
     pause: LoopPause | None
     terminal: LoopTerminal | None
     latest_transition: LoopTransition | None
+    # ── PR0: typed messages and tool call state machine ──
+    loop_messages: list[ModelMessage]
+    pending_loop_tool_calls: list[PendingToolCall]
+    tool_result_store: dict[str, Any]
 
 
 def create_loop_state(
@@ -237,6 +242,10 @@ def create_loop_state(
         "pause": None,
         "terminal": None,
         "latest_transition": None,
+        # ── PR0: typed messages and tool call state machine ──
+        "loop_messages": [],
+        "pending_loop_tool_calls": [],
+        "tool_result_store": {},
     }
 
 

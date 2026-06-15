@@ -61,6 +61,12 @@ class ReadFileInput(BaseModel):
     path: str
     encoding: str = "utf-8"
     max_bytes: int = Field(default=1_000_000, ge=1, le=MAX_READ_BYTES)
+    offset: int = Field(default=0, ge=0, description="Byte offset to start reading from")
+    limit: int | None = Field(
+        default=None,
+        ge=1,
+        description="Maximum number of bytes to read (overrides max_bytes if set)",
+    )
 
 
 class ReadFileOutput(BaseModel):
@@ -201,12 +207,20 @@ class PrimitiveOps:
             raise FileNotFoundError(f"File not found: {payload.path}")
 
         size = target.stat().st_size
-        # Bounded read: open and read max_bytes + 1 to detect truncation
+        # Effective byte limit: limit overrides max_bytes if set
+        effective_max = (
+            min(payload.limit, payload.max_bytes)
+            if payload.limit is not None
+            else payload.max_bytes
+        )
+        # Bounded read with offset support
         with target.open("rb") as f:
-            raw = f.read(payload.max_bytes + 1)
-        truncated = len(raw) > payload.max_bytes
+            if payload.offset > 0:
+                f.seek(payload.offset)
+            raw = f.read(effective_max + 1)
+        truncated = len(raw) > effective_max
         if truncated:
-            raw = raw[: payload.max_bytes]
+            raw = raw[: effective_max]
 
         if _is_binary_content(
             raw,
