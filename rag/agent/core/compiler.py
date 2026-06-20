@@ -66,6 +66,13 @@ class GraphCompiler:
             checkpointer=self._checkpointer,
         )
 
+    # Core tools registered dynamically by AgentService, not in static ToolRegistry.
+    _DYNAMICALLY_REGISTERED: frozenset[str] = frozenset({
+        "tool_search",
+        "activate_tools",
+        "task",
+    })
+
     def _missing_allowed_tools(
         self,
         definition: AgentDefinition,
@@ -77,6 +84,8 @@ class GraphCompiler:
         seen: set[str] = set()
         for tool_name in definition.allowed_tools:
             if tool_name in registered_tools or tool_name in seen:
+                continue
+            if tool_name in self._DYNAMICALLY_REGISTERED:
                 continue
             missing.append(tool_name)
             seen.add(tool_name)

@@ -10,13 +10,30 @@ from langchain_core.messages import BaseMessage
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from pydantic import BaseModel, ConfigDict, Field
 
+from rag.agent.capabilities.catalog import (
+    CORE_TOOLS,
+    DeferredToolStore,
+    DEFERRED_TOOLS,
+    ToolCatalog,
+    ToolCatalogEntry,
+    flatten_schema,
+)
+from rag.agent.capabilities.context import deferred_store_var, iteration_var
+from rag.agent.capabilities.tool_search import (
+    ActivateToolsInput,
+    ActivateToolsOutput,
+    ToolSearchInput,
+    ToolSearchOutput,
+    execute_activate_tools,
+    execute_tool_search,
+)
 from rag.agent.compat.goal_contract import GoalCompatibilityConfig, GoalSpec
 from rag.agent.core.checkpointing import (
     LangGraphCheckpointStore,
     create_agent_checkpointer,
 )
 from rag.agent.core.context import AgentRunConfig, RunRegistry
-from rag.agent.core.definition import AgentDefinition
+from rag.agent.core.definition import AgentDefinition, AgentRuntimePolicy
 from rag.agent.core.delegation import DelegatedAgentRunner
 from rag.agent.core.finalization import FinishCandidateBuilder
 from rag.agent.core.human_input import HumanInputRequest, HumanInputResponse
@@ -52,7 +69,7 @@ from rag.agent.memory.compactor import (
 from rag.agent.memory.models import MemoryPolicy
 from rag.agent.memory.store import WorkspaceMemoryStore
 from rag.agent.tools.registry import ToolRegistry, ToolRunner
-from rag.agent.tools.spec import ToolResult
+from rag.agent.tools.spec import ToolPermissions, ToolResult, ToolSpec
 from rag.schema.query import AnswerCitation, EvidenceItem
 from rag.schema.runtime import AccessPolicy
 
@@ -236,7 +253,8 @@ class AgentService:
     def __init__(
         self,
         *,
-        definition: AgentDefinition,
+        definition: AgentDefinition | None = None,
+        policy: AgentRuntimePolicy | None = None,
         tool_registry: ToolRegistry,
         model_turn_provider: ModelTurnProvider | None = None,
         retrieval_hint_provider: RetrievalHintProvider | None = None,
@@ -245,9 +263,37 @@ class AgentService:
         model_registry: ModelRegistry | None = None,
         checkpointer: BaseCheckpointSaver[str] | None = None,
         runtime_diagnostics: Sequence[RuntimeDiagnostic] = (),
+        catalog: ToolCatalog | None = None,
     ) -> None:
+        if definition is not None and policy is not None:
+            raise ValueError("Provide either 'definition' or 'policy', not both")
+        if policy is not None:
+            # Convert AgentRuntimePolicy → AgentDefinition for internal compat.
+            # Remove this when service internals migrate to AgentRuntimePolicy.
+            from rag.agent.capabilities.catalog import CORE_TOOLS, DEFERRED_TOOLS
+            core = [t for t in policy.core_tool_names]
+            deferred = [t for t in policy.deferred_tool_names]
+            definition = AgentDefinition(
+                agent_type=policy.agent_type,
+                description=policy.description,
+                system_prompt=policy.system_instructions,
+                allowed_tools=core + deferred,
+                access_policy=policy.access_policy_ceiling,
+                estimated_token_budget=policy.token_budget,
+                estimated_work_budget=policy.work_budget,
+                model_selection=policy.model_selection,
+                output_model=policy.output_model,
+                output_validation_max_retries=policy.output_validation_max_retries,
+                max_stop_hook_blocks=policy.max_stop_hook_blocks,
+                max_iterations=policy.max_iterations,
+                max_depth=policy.max_depth,
+                tool_policy=policy.tool_policy,
+            )
+        if definition is None:
+            raise ValueError("Provide either 'definition' or 'policy'")
         self._definition = definition
         self._base_tool_registry = tool_registry
+        self._catalog = catalog or self._build_catalog(tool_registry)
         self._model_turn_provider = model_turn_provider
         self._retrieval_hint_provider = retrieval_hint_provider
         self._subagent_runner = subagent_runner
@@ -257,6 +303,9 @@ class AgentService:
             merge_runtime_diagnostics([], runtime_diagnostics)
         )
         self._checkpointer = checkpointer or create_agent_checkpointer(None)
+        # Register core tools: tool_search, activate_tools, task
+        self._register_discovery_tools()
+        self._register_task_tool()
 
     def initial_state(self, request: AgentRunRequest) -> LoopState:
         run_config = request.to_run_config(self._definition)
@@ -432,6 +481,14 @@ class AgentService:
         goal_spec: GoalSpec | None,
         state: LoopState | None = None,
     ) -> AgentLoop:
+        # Create and bind DeferredToolStore BEFORE resolving provider
+        # (provider needs store for tool filtering)
+        store = DeferredToolStore(
+            max_active=self._definition.runtime_policy.max_active_deferred_tools,
+        )
+        deferred_store_var.set(store)
+        if state is not None:
+            store.sync_from_state(state)
         provider = self._resolve_model_turn_provider(state)
         output_finalizer = self._resolve_output_finalizer(state)
         return AgentLoop(
@@ -452,6 +509,8 @@ class AgentService:
                 max_blocks=self._definition.max_stop_hook_blocks,
             ),
             finish_candidate_builder=FinishCandidateBuilder(),
+            catalog=self._catalog,
+            deferred_store=store,
         )
 
     def _resolve_model_turn_provider(
@@ -462,11 +521,19 @@ class AgentService:
             return self._model_turn_provider
         if self._model_registry is not None:
             try:
+                store = deferred_store_var.get(None)
+                if store is None:
+                    raise RuntimeError(
+                        "DeferredToolStore is not bound — "
+                        "AgentLoop must set deferred_store_var before creating provider"
+                    )
                 return create_loop_model_turn_provider(
                     self._model_registry,
                     self._definition.model_selection,
                     tool_registry=self._base_tool_registry,
                     definition=self._definition,
+                    catalog=self._catalog,
+                    deferred_store=store,
                 )
             except Exception as exc:
                 if state is not None:
@@ -572,6 +639,24 @@ class AgentService:
                 except KeyError:
                     pass
 
+        # Wire generic 'task' tool with request-scoped parent_config
+        if runtime.has_runner("task") or "task" in {s.name for s in self._base_tool_registry.list_all()}:
+            from rag.agent.tools.task_tool import TaskOutput, TaskToolRunner
+
+            task_runner = TaskToolRunner(
+                policy=self._definition.to_runtime_policy(),
+                tool_registry=runtime,
+                model_turn_provider=self._model_turn_provider,
+                retrieval_hint_provider=self._retrieval_hint_provider,
+            )
+
+            async def _task_runner(payload: BaseModel) -> TaskOutput:
+                from rag.agent.tools.task_tool import TaskInput
+                input_data = TaskInput.model_validate(payload)
+                return await task_runner.run(input_data, parent_config=run_config)
+
+            runtime.register_runner("task", _task_runner)
+
         if self._subagent_runner is None:
             return runtime
 
@@ -604,6 +689,134 @@ class AgentService:
             except KeyError:
                 pass
 
+    def _build_catalog(self, registry: ToolRegistry) -> ToolCatalog:
+        """Build a ToolCatalog from all tools in the registry.
+
+        Categorizes each tool and builds search_text by flattening the
+        input schema.  Only deferred tools are indexed for search.
+        """
+        filt = self._definition.runtime_policy.tool_catalog_filter
+        catalog = ToolCatalog()
+        for spec in registry.list_all():
+            if spec.name in filt.deny:
+                continue
+            if spec.name in filt.promote_to_core or spec.name in CORE_TOOLS:
+                category: str = "core"
+            elif spec.name in DEFERRED_TOOLS:
+                category = "deferred"
+            else:
+                category = "internal"
+            # Build search_text for BM25 indexing
+            schema_text = ""
+            if category == "deferred" and hasattr(spec.input_model, "model_json_schema"):
+                schema_text = flatten_schema(spec.input_model.model_json_schema())
+            search_text = " ".join(filter(None, [
+                spec.name,
+                spec.name.replace("_", " "),
+                spec.description,
+                schema_text,
+            ]))
+            catalog.register(
+                ToolCatalogEntry(
+                    name=spec.name,
+                    description=spec.description,
+                    category=category,
+                    search_text=search_text,
+                    schema_text=schema_text,
+                ),
+            )
+        return catalog
+
+    def _register_discovery_tools(self) -> None:
+        """Register tool_search and activate_tools as core tools.
+
+        Runners read the per-run DeferredToolStore from a ContextVar,
+        ensuring concurrent runs each get their own store.
+        """
+        if self._base_tool_registry.has_runner("tool_search"):
+            return
+
+        catalog = self._catalog
+        definition = self._definition
+
+        # ── tool_search ──
+        search_spec = ToolSpec(
+            name="tool_search",
+            description=(
+                "Discover available tools by natural language query. "
+                "Returns candidate tools. Call activate_tools to load them."
+            ),
+            input_model=ToolSearchInput,
+            output_model=ToolSearchOutput,
+            error_model=ToolSearchOutput,
+            permissions=ToolPermissions(),
+            timeout_seconds=5,
+            idempotent=True,
+            is_read_only=True,
+            concurrency_safe=True,
+        )
+
+        def _search_runner(input_data: ToolSearchInput) -> ToolSearchOutput:
+            store = deferred_store_var.get(None)
+            if store is None:
+                raise RuntimeError(
+                    "DeferredToolStore is not bound — "
+                    "AgentLoop must set deferred_store_var before tool execution"
+                )
+            return execute_tool_search(
+                query=input_data.query,
+                catalog=catalog,
+                store=store,
+                max_results=input_data.max_results,
+            )
+
+        self._base_tool_registry.register(search_spec, runner=_search_runner)
+
+        # ── activate_tools ──
+        activate_spec = ToolSpec(
+            name="activate_tools",
+            description=(
+                "Activate tools found by tool_search. "
+                "Only tools from the most recent tool_search can be activated. "
+                "Activated tools become available on the next model turn."
+            ),
+            input_model=ActivateToolsInput,
+            output_model=ActivateToolsOutput,
+            error_model=ActivateToolsOutput,
+            permissions=ToolPermissions(),
+            timeout_seconds=5,
+            idempotent=True,
+            is_read_only=False,
+            concurrency_safe=True,
+        )
+
+        def _activate_runner(input_data: ActivateToolsInput) -> ActivateToolsOutput:
+            store = deferred_store_var.get(None)
+            if store is None:
+                raise RuntimeError(
+                    "DeferredToolStore is not bound — "
+                    "AgentLoop must set deferred_store_var before tool execution"
+                )
+            return execute_activate_tools(
+                names=input_data.names,
+                catalog=catalog,
+                store=store,
+                allowed_tools=list(definition.allowed_tools),
+                deny_tools=definition.tool_policy.deny_tools,
+                iteration=iteration_var.get(0),
+            )
+
+        self._base_tool_registry.register(activate_spec, runner=_activate_runner)
+
+    def _register_task_tool(self) -> None:
+        """Register the 'task' tool spec (runner injected per-request in _runtime_tool_registry)."""
+        if self._base_tool_registry.has_runner("task"):
+            return
+
+        from rag.agent.tools.task_tool import task_tool_spec
+
+        # Register spec only — runner is request-scoped (needs parent run_config)
+        self._base_tool_registry.register(task_tool_spec)
 
     async def resume(
         self,

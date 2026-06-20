@@ -540,6 +540,7 @@ class TestRunners:
             "structured_probe",
             "write_file",
             "run_python",
+            "run_python_inline",
         }
 
     def test_runners_are_callable(self, ops: PrimitiveOps) -> None:

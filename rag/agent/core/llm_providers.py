@@ -22,6 +22,11 @@ from rag.agent.core.runtime_ports import (
     RetrievalHintProvider,
     RetrievalHintUpdate,
 )
+from rag.agent.capabilities.catalog import (
+    DeferredToolStore,
+    ToolCatalog,
+    resolve_visible_tools,
+)
 from rag.agent.core.tool_schema import AgentMessageAssembler, OpenAIAdapter
 from rag.agent.core.turn_contracts import ToolCallPlan
 from rag.agent.loop.state import (
@@ -334,6 +339,8 @@ class LLMLoopModelTurnProvider:
         gateway: LLMGateway | None = None,
         context_assembler: AgentLLMContextAssembler | None = None,
         tool_specs: list[ToolSpec] | None = None,
+        catalog: ToolCatalog | None = None,
+        deferred_store: DeferredToolStore | None = None,
     ) -> None:
         self._kwargs = kwargs or {}
         self._gateway = gateway or _fallback_gateway(
@@ -350,6 +357,8 @@ class LLMLoopModelTurnProvider:
             kwargs=self._kwargs,
         )
         self._tool_specs = tool_specs or []
+        self._catalog = catalog
+        self._deferred_store = deferred_store
         self._assembler = AgentMessageAssembler()
 
     async def next_turn(
@@ -383,23 +392,27 @@ class LLMLoopModelTurnProvider:
         #    so the model sees its own tool history on subsequent turns.
         _flush_tool_results_to_loop_messages(state)
 
-        # 2. Build system message
+        # 2. Resolve visible tools BEFORE building system message
+        #    so the prompt shows only tools the model can actually call.
+        visible_specs = self._filter_visible_tools(definition)
+        visible_tool_names = [s.name for s in visible_specs]
+
+        # 3. Build system message with actual visible tools
         system_msg = self._assembler.build_system_message(
             definition=definition,
             state=state,
             budget_remaining=budget_remaining,
+            visible_tool_names=visible_tool_names,
         )
 
-        # 3. Convert conversation history + loop_messages
+        # 4. Convert conversation history + loop_messages
         conversation_msgs = _base_messages_to_model_messages(
             state.get("messages", [])
         )
         conversation_msgs.extend(state.get("loop_messages", []))
         all_messages = [system_msg, *conversation_msgs]
-
-        # 4. Convert to OpenAI format
         openai_messages = OpenAIAdapter.messages(all_messages)
-        openai_tools = OpenAIAdapter.tools(self._tool_specs)
+        openai_tools = OpenAIAdapter.tools(visible_specs)
 
         # 5. Call gateway
         run_id = state["run_config"].run_id
@@ -425,6 +438,23 @@ class LLMLoopModelTurnProvider:
 
         # 7. Convert to ModelTurnDraft
         return _tool_use_result_to_draft(tool_result, state)
+
+    def _filter_visible_tools(
+        self, definition: AgentDefinition,
+    ) -> list[ToolSpec]:
+        """Return only the tool specs currently visible to the model.
+
+        Uses resolve_visible_tools to determine which tools are visible
+        based on category (core/deferred) and activation state.
+        """
+        if self._catalog is None or self._deferred_store is None:
+            return self._tool_specs
+        visible_names = set(resolve_visible_tools(
+            list(definition.allowed_tools),
+            catalog=self._catalog,
+            store=self._deferred_store,
+        ))
+        return [s for s in self._tool_specs if s.name in visible_names]
 
     async def _next_turn_legacy(
         self,
@@ -594,6 +624,8 @@ def create_loop_model_turn_provider(
     *,
     tool_registry: Any | None = None,
     definition: AgentDefinition | None = None,
+    catalog: ToolCatalog | None = None,
+    deferred_store: DeferredToolStore | None = None,
 ) -> LLMLoopModelTurnProvider:
     resolved = registry.resolve_for_node(
         node_model=selection.tool_decision_model,
@@ -623,6 +655,8 @@ def create_loop_model_turn_provider(
             kwargs=kwargs,
         ),
         tool_specs=tool_specs,
+        catalog=catalog,
+        deferred_store=deferred_store,
     )
 
 

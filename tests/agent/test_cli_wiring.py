@@ -178,7 +178,7 @@ async def test_cli_generate_runner_preserves_supplied_grounding_ids() -> None:
 
 
 def test_cli_agent_choices_expose_top_level_agents_only() -> None:
-    assert CLI_AGENT_CHOICES == ("research", "orchestrator", "compare", "factcheck")
+    assert CLI_AGENT_CHOICES == ("generic", "research", "orchestrator", "compare", "factcheck")
 
 
 def test_resolve_cli_agent_definition_rejects_internal_synthesize() -> None:

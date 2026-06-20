@@ -28,7 +28,7 @@ from rag.utils.text import load_env_file
 
 agent_app = typer.Typer(add_completion=False, no_args_is_help=True)
 
-CLI_AGENT_CHOICES = ("research", "orchestrator", "compare", "factcheck")
+CLI_AGENT_CHOICES = ("generic", "research", "orchestrator", "compare", "factcheck")
 
 
 def _build_llm_tool_runners(
@@ -95,7 +95,7 @@ def _build_agent_service(
     runtime: Any,
     *,
     checkpoint_db: Path | None = None,
-    agent_type: str = "research",
+    agent_type: str = "generic",
     model_alias: str | None = None,
 ) -> AgentService:
     """从 RAGRuntime 构造 AgentService，注册真实 RAG tool runners。
@@ -335,9 +335,9 @@ def agent_chat(
         str,
         typer.Option(
             "--agent",
-            help="根 Agent：research, orchestrator, compare, factcheck。默认 research，不做自动意图判断。",
+            help="根 Agent：generic, research, orchestrator, compare, factcheck。默认 generic。",
         ),
-    ] = "research",
+    ] = "generic",
     model: Annotated[
         str | None,
         typer.Option("--model", help="主生成模型别名，对应 configs/models.yaml 中 capability=chat 的条目"),
@@ -468,9 +468,9 @@ def agent_run(
         str,
         typer.Option(
             "--agent",
-            help="根 Agent：research, orchestrator, compare, factcheck。默认 research，不做自动意图判断。",
+            help="根 Agent：generic, research, orchestrator, compare, factcheck。默认 generic。",
         ),
-    ] = "research",
+    ] = "generic",
     non_interactive: Annotated[
         bool, typer.Option("--non-interactive", help="非交互模式")
     ] = False,
@@ -517,6 +517,10 @@ def agent_run(
     vector_collection_prefix: Annotated[
         str | None,
         typer.Option("--vector-collection-prefix", help="Milvus collection prefix used at ingest time."),
+    ] = None,
+    input_files: Annotated[
+        list[str] | None,
+        typer.Option("--input-file", help="导入 workspace 的输入文件，可多次指定"),
     ] = None,
 ) -> None:
     """单次 Agent 运行。传入 --checkpoint-db 后支持跨进程恢复。"""
@@ -570,6 +574,7 @@ def agent_run(
                     task=task,
                     run_id=effective_run_id,
                     thread_id=effective_run_id,
+                    input_files=input_files or [],
                 )
             )
         )
@@ -612,9 +617,9 @@ def agent_resume(
         str,
         typer.Option(
             "--agent",
-            help="恢复时使用的根 Agent，必须与原 run 一致：research, orchestrator, compare, factcheck。",
+            help="恢复时使用的根 Agent，必须与原 run 一致：generic, research, orchestrator, compare, factcheck。",
         ),
-    ] = "research",
+    ] = "generic",
     checkpoint_db: Annotated[
         Path,
         typer.Option("--checkpoint-db", help="SQLite checkpoint 文件"),

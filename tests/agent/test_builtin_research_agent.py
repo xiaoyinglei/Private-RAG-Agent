@@ -25,6 +25,14 @@ def _registry_with_builtin_tools() -> ToolRegistry:
 def test_research_agent_uses_spec_tool_allowlist() -> None:
     assert RESEARCH_AGENT.agent_type == "research"
     assert RESEARCH_AGENT.allowed_tools == [
+        # core — always visible
+        "tool_search",
+        "activate_tools",
+        "list_files",
+        "read_file",
+        "write_file",
+        "run_python_inline",
+        # deferred — visible after tool_search + activate_tools
         "vector_search",
         "keyword_search",
         "grounding",
@@ -35,11 +43,7 @@ def test_research_agent_uses_spec_tool_allowlist() -> None:
         "asset_analyze",
         "llm_summarize",
         "rag_search_answer",
-        "list_files",
-        "read_file",
         "structured_probe",
-        "write_file",
-        "run_python",
     ]
 
 
@@ -49,8 +53,9 @@ def test_research_agent_prompt_requires_grounded_citations() -> None:
     assert "retrieved evidence" in prompt
     assert "citations" in prompt
     assert "insufficient evidence" in prompt
-    assert "Do not choose one plausible asset arbitrarily" in prompt
-    assert "ask for clarification" in prompt
+    assert "tool_search" in prompt
+    assert "activate_tools" in prompt
+    assert "run_python_inline" in prompt
 
 
 def test_research_agent_tool_decision_budget_can_emit_script_tool_calls() -> None:
