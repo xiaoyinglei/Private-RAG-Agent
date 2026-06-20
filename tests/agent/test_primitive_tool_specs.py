@@ -13,6 +13,7 @@ class TestPrimitiveToolSpecs:
             "structured_probe",
             "write_file",
             "run_python",
+            "run_python_inline",
         }
 
     def test_list_files_permissions(self) -> None:

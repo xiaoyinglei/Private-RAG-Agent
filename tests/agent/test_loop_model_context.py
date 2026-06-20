@@ -113,8 +113,7 @@ def test_loop_prompt_has_no_goal_gap_completion_authority() -> None:
 
     assert '"action": "execute" | "finish" | "pause"' in prompt
     assert "final_answer" in prompt
-    assert "actual tool calls take precedence" in prompt
-    assert "plan is advisory" in prompt
+    assert "Do not repeat completed tool calls" in prompt
     assert "open_gaps" not in prompt
     assert "goal checker" not in prompt
     assert "must call llm_summarize" not in prompt

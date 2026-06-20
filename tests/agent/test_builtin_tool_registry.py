@@ -34,7 +34,10 @@ def test_builtin_tool_registry_satisfies_research_agent_allowlist() -> None:
     registry = create_builtin_tool_registry()
     names = {tool.name for tool in registry.list_all()}
 
-    assert set(RESEARCH_AGENT.allowed_tools) <= names
+    # tool_search and activate_tools are registered dynamically by AgentService.
+    dynamically_registered = {"tool_search", "activate_tools"}
+
+    assert set(RESEARCH_AGENT.allowed_tools) <= names | dynamically_registered
 
 
 def test_legacy_builtin_registry_import_remains_compatible() -> None:

@@ -60,13 +60,14 @@ class AgentMessageAssembler:
         definition: Any,  # AgentDefinition
         state: LoopState,
         budget_remaining: int | None,
+        visible_tool_names: list[str] | None = None,
     ) -> ModelMessage:
         sections = [
-            self._identity_section(definition),
-            self._loop_contract_section(),
-            self._tool_use_policy_section(),
-            self._output_style_section(definition),
-            self._workspace_policy_section(),
+            self._identity_and_behavior_section(definition),
+            self._tool_contract_section(
+                definition,
+                visible_tool_names=visible_tool_names,
+            ),
             SystemPromptSection(
                 name="boundary",
                 content=SYSTEM_PROMPT_DYNAMIC_BOUNDARY,
@@ -83,72 +84,76 @@ class AgentMessageAssembler:
     # ── stable sections ──
 
     @staticmethod
-    def _identity_section(definition: Any) -> SystemPromptSection:
+    def _identity_and_behavior_section(definition: Any) -> SystemPromptSection:
+        """Merged identity + behavior + output style."""
         agent_type = getattr(definition, "agent_type", "agent")
         description = getattr(definition, "description", "")
         system_prompt = getattr(definition, "system_prompt", "")
+
         parts = [f"You are {agent_type}."]
         if description:
             parts.append(description)
         if system_prompt:
             parts.append(system_prompt)
+
+        parts.append(
+            "Be direct and concise. Do not ask opt-in questions like "
+            "'would you like me to' — if the next step is obvious, do it. "
+            "When you have enough context to answer, produce the final answer "
+            "immediately. Do not hedge or add unnecessary caveats.\n\n"
+            "Always preserve citation identifiers, evidence links, retrieval "
+            "scores, rerank scores, and artifact paths in your answer. "
+            "Never fabricate references or evidence."
+        )
+
         return SystemPromptSection(
-            name="identity",
+            name="identity_and_behavior",
             content="\n\n".join(parts),
             cache_scope="stable",
         )
 
     @staticmethod
-    def _loop_contract_section() -> SystemPromptSection:
-        return SystemPromptSection(
-            name="loop_contract",
-            content=(
-                "You operate in a bounded agent loop.  Each turn you may:\n"
-                "- Call one or more tools to advance the task.\n"
-                "- Finish with a complete answer when trusted context suffices.\n"
-                "- Pause only when external input or authorization is genuinely required.\n"
-                "\n"
-                "Do not repeat completed tool calls.  Read prior results before "
-                "choosing a new call.  Preserve citation identifiers, evidence "
-                "links, scores, and artifact paths in your answer."
-            ),
-            cache_scope="stable",
+    def _tool_contract_section(
+        definition: Any,
+        *,
+        visible_tool_names: list[str] | None = None,
+    ) -> SystemPromptSection:
+        """Merged loop contract + tool policy + tool discovery.
+
+        Shows only actually visible tools, not the full allowed list.
+        When visible_tool_names is None, falls back to allowed_tools.
+        """
+        allowed = getattr(definition, "allowed_tools", [])
+        visible = visible_tool_names if visible_tool_names is not None else allowed
+        tool_list = ", ".join(sorted(visible)) if visible else "none"
+
+        content = (
+            f"Available tools: {tool_list}\n\n"
+            "Tool calling rules:\n"
+            "- Call tools through the structured tool mechanism, not free-form text.\n"
+            "- Do not repeat a completed tool call. Read prior results before "
+            "choosing the next call.\n"
+            "- Keep tool arguments bounded — never place full documents, tables, "
+            "or logs inside arguments.\n"
+            "- You may call multiple independent tools in parallel.\n\n"
+            "Tool discovery:\n"
+            "- If your current tools cannot fulfill the task, call tool_search "
+            "first to find specialized tools, then activate_tools to load them. "
+            "Activated tools become available on the next turn.\n\n"
+            "Loop rules:\n"
+            "- Each turn: call tools, finish with an answer, or pause for "
+            "external input.\n"
+            "- When trusted context suffices, return action='finish' with a "
+            "complete, well-cited answer.\n"
+            "- Use action='pause' only when external input or authorization is "
+            "genuinely required.\n\n"
+            "File operations are restricted to scratch/, artifacts/, reports/, "
+            "or logs/. Read operations are bounded by size limits."
         )
 
-    @staticmethod
-    def _tool_use_policy_section() -> SystemPromptSection:
         return SystemPromptSection(
-            name="tool_use_policy",
-            content=(
-                "Tool calls are structured invocations, not free-form text.  "
-                "When you need a tool, request it through the tool calling "
-                "mechanism provided.  Do not embed tool arguments in your "
-                "text response.  Keep arguments bounded — do not place full "
-                "documents, tables, or logs inside tool arguments."
-            ),
-            cache_scope="stable",
-        )
-
-    @staticmethod
-    def _output_style_section(definition: Any) -> SystemPromptSection:
-        return SystemPromptSection(
-            name="output_style",
-            content=(
-                "Respond concisely.  Cite sources when available.  "
-                "Do not fabricate references or evidence."
-            ),
-            cache_scope="stable",
-        )
-
-    @staticmethod
-    def _workspace_policy_section() -> SystemPromptSection:
-        return SystemPromptSection(
-            name="workspace_policy",
-            content=(
-                "File operations are restricted to the workspace.  "
-                "Write only to scratch/, artifacts/, reports/, or logs/.  "
-                "Read operations are bounded by size limits."
-            ),
+            name="tool_contract",
+            content=content,
             cache_scope="stable",
         )
 

@@ -19,34 +19,24 @@ _SENTINEL = object()
 
 RESEARCH_AGENT_SYSTEM_PROMPT = """You are the ResearchAgent for deep single-topic research.
 
+Your task workflow:
+1. If the task involves a local file (xlsx, csv, json, etc.), use list_files to find it,
+   then use run_python_inline to read and analyze it directly. Skip RAG tools entirely.
+2. If the task requires searching indexed documents, first call tool_search to discover
+   retrieval tools (vector_search, keyword_search, etc.), then activate_tools to load them.
+   Only after activation can you use those tools.
+3. For structured data analysis, use tool_search to find asset tools, activate them,
+   then use asset_inspect/asset_read_slice/asset_analyze.
+
 Use retrieved evidence as the factual authority. Preserve evidence ids, citations,
 retrieval scores, citation anchors, and grounding metadata whenever available.
-Use memory only as historical or current-run context; if memory conflicts with
-retrieved evidence, trust retrieved evidence.
+Do not invent facts. When evidence is insufficient, state insufficient evidence.
 
-Use vector_search and keyword_search to gather candidates, grounding to verify
-source text, rerank when ordering matters, and llm_summarize only to synthesize
-the provided evidence. Do not invent facts. When evidence is insufficient,
-state insufficient evidence instead of filling gaps.
-
-For questions about files or structured artifacts, retrieval is only the locator
-step: use vector_search/keyword_search/grounding to find the relevant indexed
-asset id, then use asset_list, asset_inspect, asset_read_slice, and
-asset_analyze to read, filter, sort, aggregate, or validate source data through
-the asset's advertised analysis capabilities. Preserve the asset id and
-citation anchor in the final answer. Do not answer calculations from summary
-prose alone when a source asset with executable analysis capabilities is
-available.
-
-Use asset_read_slice for bounded local inspection when you need rows, columns,
-or nearby context that is larger than asset_inspect preview but smaller than
-the full asset. Do not load full tables into long-lived state.
-
-If the task does not specify which asset, sheet, product, scenario, or other
-scope should be used, inspect/list the relevant candidate assets before
-analysis. Do not choose one plausible asset arbitrarily. If multiple plausible
-assets can answer the same metric, either compute and label each candidate
-answer separately or ask for clarification when one final value is required.
+For local files:
+- Use the workspace-relative path (e.g. 'input_files/filename.xlsx'), NOT absolute paths.
+- For .xlsx: run_python_inline with openpyxl
+- For .csv: run_python_inline with pandas
+- NEVER try to index or search for a file that is already local.
 """
 
 
@@ -56,6 +46,14 @@ RESEARCH_AGENT = AgentDefinition(
     system_prompt=RESEARCH_AGENT_SYSTEM_PROMPT,
     # TODO: agent_* / rag_* / llm_* tool names must match ToolRegistry registration.
     allowed_tools=[
+        # core — always visible
+        "tool_search",
+        "activate_tools",
+        "list_files",
+        "read_file",
+        "write_file",
+        "run_python_inline",
+        # deferred — visible after tool_search + activate_tools
         "vector_search",
         "keyword_search",
         "grounding",
@@ -66,11 +64,7 @@ RESEARCH_AGENT = AgentDefinition(
         "asset_analyze",
         "llm_summarize",
         "rag_search_answer",
-        "list_files",
-        "read_file",
         "structured_probe",
-        "write_file",
-        "run_python",
     ],
     # TODO: migrate estimated_token_budget / max_iterations / max_depth to runtime config
     estimated_token_budget=96_000,

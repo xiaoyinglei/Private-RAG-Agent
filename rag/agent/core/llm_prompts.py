@@ -50,7 +50,12 @@ def build_loop_turn_prompt(
     budget_remaining: int,
     allowed_tools: Sequence[str] = (),
 ) -> str:
-    """Build the model contract for the ordinary Python loop kernel."""
+    """Build the model contract for the ordinary Python loop kernel.
+
+    ``allowed_tools`` should already be the resolved visible tool list
+    (caller uses VisibleToolResolver / resolve_visible_tools before
+    calling this function).
+    """
 
     task = state.get("task", "")
     iteration = state.get("iteration", 0)
@@ -65,32 +70,27 @@ def build_loop_turn_prompt(
         for result in tool_results
         if getattr(result, "status", None) == "error"
     )
-    return f"""You are the model decision boundary for one bounded agent loop turn.
+    visible_names = list(allowed_tools)
 
-Current task: {task}
+    return f"""Task: {task}
 Iteration: {iteration}
-Remaining token budget: {budget_remaining}
-Tool results: {ok_count} successful, {error_count} failed
-Available tools: {", ".join(allowed_tools) if allowed_tools else "none"}
+Budget remaining: {budget_remaining} tokens
+Tools completed: {ok_count} ok, {error_count} failed
+Available tools: {", ".join(visible_names) if visible_names else "none"}
 
-Return one structured outcome:
+Analyze the task and current context, then decide your next action.
+
+If a tool can advance the task → return action="execute" with concrete tool_calls.
+If you have enough context to answer → return action="finish" with a complete, well-cited final_answer.
+If you need external input → return action="pause" with a clear pause_reason.
+
+Do not repeat completed tool calls. Preserve citations, scores, and artifact paths.
+Keep tool arguments bounded — no full documents or logs in arguments.
+
+Return JSON:
 {{
     "action": "execute" | "finish" | "pause",
-    "tool_calls": [
-        {{"tool_call_id": "tc_xxxxxxxxxxxx", "tool_name": "vector_search", "arguments": {{"query": "..."}}}}
-    ],
-    "final_answer": "A complete candidate answer when action is finish",
-    "pause_reason": "The external input required when action is pause"
-}}
-
-Rules:
-- When a tool can materially advance the task, return action="execute" with one or more concrete calls.
-- actual tool calls take precedence over an inconsistent finish label.
-- When the task can be answered from current trusted context, return action="finish" with a non-empty final_answer.
-- Use action="pause" only when external input or authorization is genuinely required.
-- The current plan is advisory task context. It does not authorize tools or decide whether the run may finish.
-- Do not repeat a completed tool call. Read prior structured results before choosing another call.
-- Preserve citation identifiers, evidence links, retrieval scores, rerank scores,
-  computations, and artifact paths in the answer.
-- Keep tool arguments bounded. Do not place full documents, tables, logs, or scratchpad reasoning in the response.
-""".strip()
+    "tool_calls": [{{"tool_call_id": "tc_xxx", "tool_name": "...", "arguments": {{...}}}}],
+    "final_answer": "...",
+    "pause_reason": "..."
+}}""".strip()
