@@ -173,6 +173,15 @@ class LoopState(TypedDict):
     loop_messages: list[ModelMessage]
     pending_loop_tool_calls: list[PendingToolCall]
     tool_result_store: dict[str, Any]
+    # ── PR1: tool discovery state ──
+    discovery_active_tools: list[str]
+    discovery_active_tool_iterations: dict[str, int]
+    discovery_last_candidates: list[dict[str, object]]
+    discovery_last_search_query: str
+    discovery_search_history: list[dict[str, object]]
+    discovery_pinned_tools: list[str]
+    active_deferred_tools: list[str]  # backward compat alias
+    capability_diagnostics: list[RuntimeDiagnostic]
 
 
 def create_loop_state(
@@ -237,6 +246,15 @@ def create_loop_state(
         "loop_messages": [],
         "pending_loop_tool_calls": [],
         "tool_result_store": {},
+        # ── PR1: tool discovery state ──
+        "discovery_active_tools": [],
+        "discovery_active_tool_iterations": {},
+        "discovery_last_candidates": [],
+        "discovery_last_search_query": "",
+        "discovery_search_history": [],
+        "discovery_pinned_tools": [],
+        "active_deferred_tools": [],
+        "capability_diagnostics": [],
     }
 
 

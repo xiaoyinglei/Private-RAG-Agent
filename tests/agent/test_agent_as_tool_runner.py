@@ -5,7 +5,6 @@ from pydantic import ValidationError
 
 from rag.agent.builtin.compare import COMPARE_AGENT
 from rag.agent.builtin.factcheck import FACTCHECK_AGENT
-from rag.agent.builtin.orchestrator import ORCHESTRATOR_AGENT
 from rag.agent.builtin.research import RESEARCH_AGENT
 from rag.agent.builtin.synthesize import SYNTHESIZE_AGENT
 from rag.agent.builtin_registry import create_builtin_tool_registry
@@ -177,10 +176,6 @@ class TestBuildAgentToolSpec:
         assert spec.tool_spec.permissions.generate is True
         assert spec.agent_definition is RESEARCH_AGENT
 
-    def test_blocklist_rejects_orchestrator(self) -> None:
-        with pytest.raises(ValueError, match="blocklisted"):
-            build_agent_tool_spec(ORCHESTRATOR_AGENT)
-
     def test_all_four_agents_generate_valid_specs(self) -> None:
         for agent_def in [RESEARCH_AGENT, COMPARE_AGENT, FACTCHECK_AGENT, SYNTHESIZE_AGENT]:
             spec = build_agent_tool_spec(agent_def)
@@ -205,26 +200,6 @@ class TestBuiltinRegistryHasAgentTools:
         registry = create_builtin_tool_registry()
         # Specs are registered, but no runner attached (request-scoped injection)
         assert not registry.has_runner("agent_research")
-
-    def test_registry_does_not_contain_agent_orchestrator(self) -> None:
-        registry = create_builtin_tool_registry()
-        with pytest.raises(KeyError):
-            registry.get("agent_orchestrator")
-
-
-class TestOrchestratorAllowedTools:
-    def test_allowed_tools_includes_agent_research(self) -> None:
-        assert "agent_research" in ORCHESTRATOR_AGENT.allowed_tools
-
-    def test_allowed_tools_includes_agent_factcheck(self) -> None:
-        assert "agent_factcheck" in ORCHESTRATOR_AGENT.allowed_tools
-
-    def test_allowed_tools_excludes_agent_orchestrator(self) -> None:
-        assert "agent_orchestrator" not in ORCHESTRATOR_AGENT.allowed_tools
-
-    def test_allowed_tools_excludes_agent_synthesize(self) -> None:
-        assert "agent_synthesize" not in ORCHESTRATOR_AGENT.allowed_tools
-
 
 class TestAgentToolInput:
     def test_minimal_input_is_valid(self) -> None:
@@ -545,56 +520,3 @@ class TestRegistryCloneAndIsolation:
         assert a2._run_config.max_depth == 1
         assert a1._run_config.run_id == "run-1"
         assert a2._run_config.run_id == "run-2"
-
-
-@pytest.mark.anyio
-async def test_builtin_subagent_runner_is_injected_for_agent_tool_calls() -> None:
-    child_def = AgentDefinition(
-        agent_type="research",
-        description="Research child",
-        system_prompt="Research child task",
-        allowed_tools=["llm_summarize"],
-        estimated_token_budget=2500,
-        max_depth=1,
-    )
-    agent_registry = AgentRegistry()
-    agent_registry.register(child_def)
-    decision_provider = _ChildDecisionProvider()
-    factory = AgentServiceFactory(
-        tool_registry=create_builtin_tool_registry(
-            runners={
-                "llm_summarize": lambda payload: LLMTextOutput(
-                    text=f"summary:{payload.task}",
-                    evidence_ids=payload.evidence_ids,
-                    citation_ids=payload.citation_ids,
-                )
-            }
-        ),
-        model_registry=None,
-        model_turn_provider=decision_provider,
-    )
-    runner = BuiltinSubAgentRunner(agent_registry=agent_registry, service_factory=factory)
-    factory.bind_subagent_runner(runner)
-    service = factory.create(ORCHESTRATOR_AGENT)
-    call = ToolCallPlan.create(
-        "agent_research",
-        {
-            "task": "Find the reimbursement policy",
-            "goal": "Return a grounded summary",
-        },
-    )
-
-    result = await service.run(
-        AgentRunRequest(
-            task="Use a child research agent",
-            run_id="agent-tool-builtin-runner",
-            thread_id="agent-tool-builtin-runner",
-            pending_tool_calls=[call],
-        )
-    )
-
-    assert result.tool_results[0].status == "ok"
-    output = AgentToolOutput.model_validate(result.tool_results[0].output)
-    assert output.status == "done"
-    assert output.agent_name == "research"
-    assert "summary:## Task" in output.conclusion

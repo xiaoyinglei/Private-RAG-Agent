@@ -28,7 +28,7 @@ from rag.utils.text import load_env_file
 
 agent_app = typer.Typer(add_completion=False, no_args_is_help=True)
 
-CLI_AGENT_CHOICES = ("generic", "research", "orchestrator", "compare", "factcheck")
+CLI_AGENT_CHOICES = ("generic", "research", "compare", "factcheck")
 
 
 def _build_llm_tool_runners(
@@ -335,7 +335,7 @@ def agent_chat(
         str,
         typer.Option(
             "--agent",
-            help="根 Agent：generic, research, orchestrator, compare, factcheck。默认 generic。",
+            help="根 Agent：generic, research, compare, factcheck。默认 generic。",
         ),
     ] = "generic",
     model: Annotated[
@@ -468,7 +468,7 @@ def agent_run(
         str,
         typer.Option(
             "--agent",
-            help="根 Agent：generic, research, orchestrator, compare, factcheck。默认 generic。",
+            help="根 Agent：generic, research, compare, factcheck。默认 generic。",
         ),
     ] = "generic",
     non_interactive: Annotated[
@@ -617,7 +617,7 @@ def agent_resume(
         str,
         typer.Option(
             "--agent",
-            help="恢复时使用的根 Agent，必须与原 run 一致：generic, research, orchestrator, compare, factcheck。",
+            help="恢复时使用的根 Agent，必须与原 run 一致：generic, research, compare, factcheck。",
         ),
     ] = "generic",
     checkpoint_db: Annotated[

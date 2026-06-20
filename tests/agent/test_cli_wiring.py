@@ -178,7 +178,7 @@ async def test_cli_generate_runner_preserves_supplied_grounding_ids() -> None:
 
 
 def test_cli_agent_choices_expose_top_level_agents_only() -> None:
-    assert CLI_AGENT_CHOICES == ("generic", "research", "orchestrator", "compare", "factcheck")
+    assert CLI_AGENT_CHOICES == ("generic", "research", "compare", "factcheck")
 
 
 def test_resolve_cli_agent_definition_rejects_internal_synthesize() -> None:
@@ -186,12 +186,6 @@ def test_resolve_cli_agent_definition_rejects_internal_synthesize() -> None:
 
     with pytest.raises(ValueError, match="not a supported CLI agent"):
         _resolve_cli_agent_definition(registry, "synthesize")
-
-
-def test_build_agent_service_uses_requested_orchestrator_definition() -> None:
-    service = _build_agent_service(_Runtime(), agent_type="orchestrator")
-
-    assert service._definition.agent_type == "orchestrator"
 
 
 def test_build_agent_service_registers_all_asset_tool_runners() -> None:
