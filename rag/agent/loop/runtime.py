@@ -2,10 +2,12 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Sequence
 from inspect import isawaitable
-from typing import Protocol, cast
+from typing import Any, Protocol, cast
 
 from pydantic import BaseModel, ConfigDict, ValidationError
 
+from rag.agent.capabilities.catalog import DeferredToolStore, ToolCatalog
+from rag.agent.capabilities.context import iteration_var
 from rag.agent.core.checkpointing import CheckpointStore
 from rag.agent.core.context import RunRegistry
 from rag.agent.core.definition import AgentDefinition
@@ -100,6 +102,8 @@ class AgentLoop:
         observation_extractor: ObservationExtractor | None = None,
         plan_tracker: PlanTracker | None = None,
         max_model_retries: int = 1,
+        catalog: ToolCatalog | None = None,
+        deferred_store: DeferredToolStore | None = None,
     ) -> None:
         if max_model_retries < 0:
             raise ValueError("max_model_retries must be non-negative")
@@ -116,6 +120,8 @@ class AgentLoop:
         )
         self._plan_tracker = plan_tracker or PlanTracker()
         self._max_model_retries = max_model_retries
+        self._catalog = catalog
+        self._deferred_store = deferred_store
 
     async def run(self, state: LoopState) -> LoopState:
         if state["status"] != "running":
@@ -135,13 +141,21 @@ class AgentLoop:
         consecutive_model_failures = 0
         while state["status"] == "running":
             if state["pending_tool_calls"]:
-                paused = await self._execute_pending_tools(state)
+                token = iteration_var.set(state["iteration"])
+                try:
+                    paused = await self._execute_pending_tools(state)
+                finally:
+                    iteration_var.reset(token)
                 if paused:
                     return state
                 continue
 
             if state.get("pending_loop_tool_calls"):
-                paused = await self._execute_pending_loop_tools(state)
+                token = iteration_var.set(state["iteration"])
+                try:
+                    paused = await self._execute_pending_loop_tools(state)
+                finally:
+                    iteration_var.reset(token)
                 if paused:
                     return state
                 continue
@@ -352,6 +366,15 @@ class AgentLoop:
 
         return state
 
+    def _sync_discovery_to_state(self, state: LoopState) -> None:
+        """Sync deferred store state to LoopState discovery_* fields."""
+        if self._deferred_store is not None:
+            self._deferred_store.sync_to_state(state)
+            # Backward compat alias
+            state["active_deferred_tools"] = list(
+                self._deferred_store.active_names()
+            )
+
     async def _execute_pending_tools(self, state: LoopState) -> bool:
         result = await _await_value(
             self._tool_runner.execute_batch(
@@ -446,6 +469,8 @@ class AgentLoop:
                 else result.decision_reason or result.status
             )
             state["approval_request"] = request
+            # Sync active set even on pause (tool_search may have activated)
+            self._sync_discovery_to_state(state)
             await self._pause(
                 state,
                 reason=reason,
@@ -454,6 +479,9 @@ class AgentLoop:
                 transition_reason="approval_required",
             )
             return True
+
+        # Sync active deferred tools after tool execution
+        self._sync_discovery_to_state(state)
 
         await self._transition(
             state,
@@ -592,6 +620,9 @@ class AgentLoop:
                 transition_reason="approval_required",
             )
             return True
+
+        # Sync active deferred tools after tool execution
+        self._sync_discovery_to_state(state)
 
         # Finalize: convert terminal PendingToolCalls to ModelMessages
         self._finalize_loop_tool_calls(state, pending)

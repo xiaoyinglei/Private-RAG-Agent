@@ -5,6 +5,7 @@ from rag.agent.primitive_ops import (
     ListFilesOutput,
     ReadFileInput,
     ReadFileOutput,
+    RunPythonInlineInput,
     RunPythonInput,
     RunPythonOutput,
     StructuredProbeInput,
@@ -94,12 +95,29 @@ run_python_spec = ToolSpec(
     work_budget_cost=1000,
 )
 
+run_python_inline_spec = ToolSpec(
+    name="run_python_inline",
+    description=(
+        "Execute Python code directly. Pass code as a string — no need to write "
+        "a file first. Use for reading files (openpyxl, pandas, json), data analysis, "
+        "computation, and any quick Python task."
+    ),
+    input_model=RunPythonInlineInput,
+    output_model=RunPythonOutput,
+    error_model=ToolError,
+    permissions=ToolPermissions(read_fs=True, write_fs=True, execute_code=True),
+    timeout_seconds=60.0,
+    max_retries=0,
+    work_budget_cost=1000,
+)
+
 ALL_PRIMITIVE_TOOLS = [
     list_files_spec,
     read_file_spec,
     structured_probe_spec,
     write_file_spec,
     run_python_spec,
+    run_python_inline_spec,
 ]
 
 

@@ -282,7 +282,7 @@ def test_agent_run_help_exposes_explicit_agent_selector() -> None:
     assert "--agent" in result.output
     assert "--vector-collection-prefix" in result.output
     assert "research" in result.output
-    assert "orchestrator" in result.output
+    assert "generic" in result.output
 
 
 def test_agent_resume_help_exposes_agent_selector_for_checkpoint_restore() -> None:

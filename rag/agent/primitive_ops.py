@@ -99,6 +99,15 @@ class RunPythonInput(BaseModel):
     timeout_seconds: float = Field(default=30.0, gt=0, le=MAX_PYTHON_TIMEOUT)
 
 
+class RunPythonInlineInput(BaseModel):
+    code: str = Field(
+        min_length=1,
+        max_length=50000,
+        description="Python code to execute directly. Use for data analysis, file reading, computation.",
+    )
+    timeout_seconds: float = Field(default=30.0, gt=0, le=MAX_PYTHON_TIMEOUT)
+
+
 class RunPythonOutput(BaseModel):
     ok: bool
     exit_code: int
@@ -311,6 +320,24 @@ class PrimitiveOps:
             generated_files=generated_files,
         )
 
+    def run_python_inline(self, payload: RunPythonInlineInput) -> RunPythonOutput:
+        """Execute Python code directly without writing to a file first."""
+        import tempfile
+        scratch = self._workspace.root / "scratch"
+        scratch.mkdir(exist_ok=True)
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".py", dir=scratch, delete=False,
+        ) as f:
+            f.write(payload.code)
+            script_path = Path(f.name)
+        try:
+            return self.run_python(RunPythonInput(
+                script_path=str(self._workspace.relative_to_root(script_path)),
+                timeout_seconds=payload.timeout_seconds,
+            ))
+        finally:
+            script_path.unlink(missing_ok=True)
+
     # -- structured_probe --------------------------------------------------
 
     def structured_probe(self, payload: StructuredProbeInput) -> StructuredProbeOutput:
@@ -370,6 +397,7 @@ class PrimitiveOps:
             "structured_probe": self.structured_probe,
             "write_file": self.write_file,
             "run_python": self.run_python,
+            "run_python_inline": self.run_python_inline,
         }
 
 

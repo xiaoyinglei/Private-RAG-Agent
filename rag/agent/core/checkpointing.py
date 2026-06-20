@@ -513,6 +513,18 @@ def _normalize_loaded_state(state: LoopState) -> LoopState:
             run_config,
             source_scope=tuple(run_config.source_scope),
         )
+    # Backfill PR0/PR1 fields missing from older checkpoints
+    state.setdefault("loop_messages", [])
+    state.setdefault("pending_loop_tool_calls", [])
+    state.setdefault("tool_result_store", {})
+    state.setdefault("discovery_active_tools", [])
+    state.setdefault("discovery_active_tool_iterations", {})
+    state.setdefault("discovery_last_candidates", [])
+    state.setdefault("discovery_last_search_query", "")
+    state.setdefault("discovery_search_history", [])
+    state.setdefault("discovery_pinned_tools", [])
+    state.setdefault("active_deferred_tools", [])
+    state.setdefault("capability_diagnostics", [])
     return state
 
 
