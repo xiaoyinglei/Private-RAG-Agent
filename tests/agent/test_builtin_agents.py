@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from rag.agent.builtin import BUILTIN_AGENT_DEFINITIONS, create_builtin_agent_registry
-from rag.agent.builtin.compare import COMPARE_AGENT
 from rag.agent.builtin_registry import create_builtin_tool_registry
 
 
@@ -10,10 +9,6 @@ def test_create_builtin_agent_registry_registers_expected_agents() -> None:
 
     assert {definition.agent_type for definition in registry.list_all()} == {
         "generic",
-        "research",
-        "compare",
-        "factcheck",
-        "synthesize",
     }
 
 
@@ -35,18 +30,15 @@ def test_builtin_agent_allowed_tools_exist_in_builtin_tool_registry() -> None:
         assert set(definition.allowed_tools) <= tool_names | dynamically_registered
 
 
-def test_compare_agent_uses_compare_tool_contract() -> None:
-    assert "llm_compare" in COMPARE_AGENT.allowed_tools
-    assert "llm_generate" not in COMPARE_AGENT.allowed_tools
+def test_generic_agent_includes_llm_tools() -> None:
+    assert "llm_compare" in BUILTIN_AGENT_DEFINITIONS["generic"].allowed_tools
+    assert "llm_generate" in BUILTIN_AGENT_DEFINITIONS["generic"].allowed_tools
+    assert "llm_summarize" in BUILTIN_AGENT_DEFINITIONS["generic"].allowed_tools
 
 
-def test_research_agent_allows_grounded_rag_answer_tool() -> None:
-    assert "rag_search_answer" in BUILTIN_AGENT_DEFINITIONS["research"].allowed_tools
+def test_generic_agent_includes_rag_answer_tool() -> None:
+    assert "rag_search_answer" in BUILTIN_AGENT_DEFINITIONS["generic"].allowed_tools
 
 
-def test_builtin_agent_budget_defaults_match_orchestration_budget_policy() -> None:
+def test_generic_agent_budget_defaults() -> None:
     assert BUILTIN_AGENT_DEFINITIONS["generic"].estimated_token_budget == 96_000
-    assert BUILTIN_AGENT_DEFINITIONS["research"].estimated_token_budget == 96_000
-    assert BUILTIN_AGENT_DEFINITIONS["compare"].estimated_token_budget == 96_000
-    assert BUILTIN_AGENT_DEFINITIONS["factcheck"].estimated_token_budget == 64_000
-    assert BUILTIN_AGENT_DEFINITIONS["synthesize"].estimated_token_budget == 32_000

@@ -314,7 +314,7 @@ def test_runtime_boundaries_do_not_import_inner_graph_nodes() -> None:
         "rag/agent/core/agent_as_tool.py",
         "rag/agent/core/compiler.py",
         "rag/agent/core/llm_providers.py",
-        "rag/agent/builtin/research.py",
+        "rag/agent/builtin/generic.py",
     ]
 
     offenders = [

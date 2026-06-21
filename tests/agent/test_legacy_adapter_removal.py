@@ -6,7 +6,6 @@ import pytest
 from pydantic import ValidationError
 
 import rag.agent as agent_api
-from rag.agent.builtin.research import create_research_agent_service
 from rag.agent.core.agent_as_tool import AgentAsToolRunner
 from rag.agent.core.agent_service_factory import AgentServiceFactory
 from rag.agent.core.compiler import GraphCompiler
@@ -35,7 +34,7 @@ def test_agent_service_factory_has_no_legacy_provider_or_synthesis_binding() -> 
 
 @pytest.mark.parametrize(
     "entrypoint",
-    [GraphCompiler, AgentAsToolRunner, create_research_agent_service],
+    [GraphCompiler, AgentAsToolRunner],
 )
 def test_other_service_entrypoints_expose_only_model_turn_provider(
     entrypoint: object,

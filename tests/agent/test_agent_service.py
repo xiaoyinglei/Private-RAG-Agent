@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 from pydantic import BaseModel
 
-from rag.agent.builtin.research import RESEARCH_AGENT
+from rag.agent.builtin.generic import GENERIC_AGENT
 from rag.agent.builtin_registry import create_builtin_tool_registry
 from rag.agent.compat.goal_contract import GoalDeliverable, GoalSpec
 from rag.agent.core.context import AgentRunConfig, RunRegistry
@@ -103,7 +103,7 @@ def _service_with_registry(runners: dict | None = None) -> AgentService:
         ),
     )
     return AgentService(
-        definition=RESEARCH_AGENT,
+        definition=GENERIC_AGENT,
         tool_registry=create_builtin_tool_registry(runners=extra),
         model_turn_provider=_FinishFromResultsProvider(),
     )
@@ -117,7 +117,7 @@ def test_agent_service_initial_state_creates_runtime_handles() -> None:
 
     assert state["task"] == "Explain policy"
     assert state["run_config"].run_id == "svc-state"
-    assert state["run_config"].budget_total == RESEARCH_AGENT.estimated_token_budget
+    assert state["run_config"].budget_total == GENERIC_AGENT.estimated_token_budget
     assert "tool_action_proposals" not in state
     assert "plan" not in state
     assert "subtask_results" not in state
@@ -249,7 +249,7 @@ async def test_agent_service_run_without_runner_fails_closed() -> None:
     call = ToolCallPlan.create("llm_summarize", {"task": "Explain policy"})
     # Service without llm_summarize runner — should fail closed
     service = AgentService(
-        definition=RESEARCH_AGENT,
+        definition=GENERIC_AGENT,
         tool_registry=create_builtin_tool_registry(runners={}),
         model_turn_provider=_FinishFromResultsProvider(),
     )
@@ -283,7 +283,7 @@ async def test_agent_service_injects_model_backed_llm_tool_runners() -> None:
         },
     )
     service = AgentService(
-        definition=RESEARCH_AGENT,
+        definition=GENERIC_AGENT,
         tool_registry=create_builtin_tool_registry(runners={}),
         model_turn_provider=_FinishFromResultsProvider(),
         model_registry=_FakeModelRegistry(generator),  # type: ignore[arg-type]

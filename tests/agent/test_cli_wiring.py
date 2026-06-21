@@ -178,7 +178,7 @@ async def test_cli_generate_runner_preserves_supplied_grounding_ids() -> None:
 
 
 def test_cli_agent_choices_expose_top_level_agents_only() -> None:
-    assert CLI_AGENT_CHOICES == ("generic", "research", "compare", "factcheck")
+    assert CLI_AGENT_CHOICES == ("generic",)
 
 
 def test_resolve_cli_agent_definition_rejects_internal_synthesize() -> None:
@@ -189,7 +189,7 @@ def test_resolve_cli_agent_definition_rejects_internal_synthesize() -> None:
 
 
 def test_build_agent_service_registers_all_asset_tool_runners() -> None:
-    service = _build_agent_service(_RuntimeWithAssetStores(), agent_type="research")
+    service = _build_agent_service(_RuntimeWithAssetStores(), agent_type="generic")
 
     assert service._base_tool_registry.has_runner("asset_list")
     assert service._base_tool_registry.has_runner("asset_inspect")
@@ -200,7 +200,7 @@ def test_build_agent_service_registers_all_asset_tool_runners() -> None:
 def test_build_agent_service_honors_cli_model_alias_for_agent_decisions() -> None:
     service = _build_agent_service(
         _Runtime(),
-        agent_type="research",
+        agent_type="generic",
         model_alias="qwen3_8b_mlx_4bit",
     )
 
@@ -220,7 +220,7 @@ def test_build_agent_service_rejects_explicit_model_registry_failure(
     with pytest.raises(KeyError, match="unknown explicit alias"):
         _build_agent_service(
             _Runtime(),
-            agent_type="research",
+            agent_type="generic",
             model_alias="missing",
         )
 
@@ -234,7 +234,7 @@ def test_build_agent_service_records_automatic_model_registry_failure(
 
     monkeypatch.setattr(ModelRegistry, "from_env", fail_from_env)
 
-    service = _build_agent_service(_Runtime(), agent_type="research")
+    service = _build_agent_service(_Runtime(), agent_type="generic")
     state = service.initial_state(
         AgentRunRequest(
             task="Explain policy",
@@ -278,7 +278,7 @@ def test_display_result_surfaces_runtime_degradation(
 @pytest.mark.anyio
 async def test_build_agent_service_registers_rag_runner_with_execution_context() -> None:
     runtime = _RuntimeWithRetrieval()
-    service = _build_agent_service(runtime, agent_type="research")
+    service = _build_agent_service(runtime, agent_type="generic")
     access_policy = AccessPolicy(
         allowed_runtimes=frozenset({RuntimeMode.FAST})
     )

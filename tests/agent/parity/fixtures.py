@@ -17,7 +17,6 @@ from rag.schema.runtime import AccessPolicy
 
 PARITY_SCENARIO_NAMES = (
     "approval_resume",
-    "child_agent",
     "explicit_goal_spec",
     "message_compaction",
     "model_fallback",
