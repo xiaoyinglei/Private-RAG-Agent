@@ -196,7 +196,22 @@ class TaskToolRunner:
         parent_config: AgentRunConfig,
         payload: TaskInput,
     ) -> AgentRunConfig:
-        child_config = derive_child_config(parent_config, definition=None)
+        from rag.agent.core.definition import AgentDefinition
+
+        # Create a minimal definition for derive_child_config
+        child_def = AgentDefinition(
+            agent_type="task_child",
+            description="Generic task child",
+            system_prompt=self._policy.system_instructions,
+            allowed_tools=self._policy.allowed_tools,
+            estimated_token_budget=payload.token_budget or self._policy.token_budget,
+            estimated_work_budget=self._policy.work_budget,
+            max_iterations=self._policy.max_iterations,
+            max_depth=self._policy.max_depth,
+            model_selection=self._policy.model_selection,
+            tool_policy=self._policy.tool_policy,
+        )
+        child_config = derive_child_config(parent_config, child_def)
         if payload.token_budget is not None:
             child_config = replace(child_config, budget_total=payload.token_budget)
         return child_config

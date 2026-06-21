@@ -9,7 +9,7 @@ from langchain_core.messages import HumanMessage
 from langgraph.checkpoint.memory import MemorySaver
 from pydantic import BaseModel
 
-from rag.agent.builtin.research import RESEARCH_AGENT
+from rag.agent.builtin.generic import GENERIC_AGENT
 from rag.agent.compat.goal_contract import GoalDeliverable, GoalSpec
 from rag.agent.core.agent_as_tool import (
     AgentAsToolAdapter,
@@ -639,7 +639,6 @@ async def _child_agent() -> dict[str, object]:
 
 _SCENARIOS = {
     "approval_resume": _approval_resume,
-    "child_agent": _child_agent,
     "explicit_goal_spec": _explicit_goal_spec,
     "message_compaction": _message_compaction,
     "model_fallback": _model_fallback,

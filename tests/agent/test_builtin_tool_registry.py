@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import pytest
 
-from rag.agent.builtin.research import RESEARCH_AGENT
 from rag.agent.builtin_registry import create_builtin_tool_registry
 from rag.agent.tools.builtin_registry import (
     create_builtin_tool_registry as legacy_create_builtin_tool_registry,
@@ -20,24 +19,10 @@ def test_builtin_tool_registry_contains_rag_and_llm_specs() -> None:
         "llm_generate", "llm_summarize", "llm_compare",
         "rag_search_answer",
     } <= names
-    # agent-as-tool specs (registered without runners)
-    assert {
-        "agent_research", "agent_compare", "agent_factcheck", "agent_synthesize",
-    } <= names
     # PrimitiveOps tools
     assert {
-        "list_files", "read_file", "structured_probe", "write_file", "run_python",
+        "list_files", "read_file", "structured_probe", "write_file", "run_python", "run_python_inline",
     } <= names
-
-
-def test_builtin_tool_registry_satisfies_research_agent_allowlist() -> None:
-    registry = create_builtin_tool_registry()
-    names = {tool.name for tool in registry.list_all()}
-
-    # tool_search and activate_tools are registered dynamically by AgentService.
-    dynamically_registered = {"tool_search", "activate_tools"}
-
-    assert set(RESEARCH_AGENT.allowed_tools) <= names | dynamically_registered
 
 
 def test_legacy_builtin_registry_import_remains_compatible() -> None:

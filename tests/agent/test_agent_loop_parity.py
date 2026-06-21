@@ -88,7 +88,9 @@ async def test_agent_loop_matches_frozen_legacy_capabilities() -> None:
         dict[str, dict[str, Any]],
         await run_loop_scenarios(),
     )
-    assert set(loop) == set(legacy)
+    # child_agent removed — replaced by task tool
+    legacy_without_child = {k: v for k, v in legacy.items() if k != "child_agent"}
+    assert set(loop) == set(legacy_without_child)
 
     for scenario in ("single_tool", "multiple_tools", "tool_retry"):
         _assert_common_tool_parity(legacy[scenario], loop[scenario])
@@ -139,11 +141,7 @@ async def test_agent_loop_matches_frozen_legacy_capabilities() -> None:
     assert structured_legacy["groundedness_flag"] is True
     assert structured_loop["groundedness_flag"] is False
 
-    child_legacy = legacy["child_agent"]
-    child_loop = loop["child_agent"]
-    _assert_common_tool_parity(child_legacy, child_loop)
-    assert child_loop["observed"] == child_legacy["observed"]
-    assert child_loop["groundedness_flag"] is True
+    # child_agent scenario removed — replaced by task tool
 
 
 @pytest.mark.anyio

@@ -3,10 +3,7 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from rag.agent.builtin.compare import COMPARE_AGENT
-from rag.agent.builtin.factcheck import FACTCHECK_AGENT
-from rag.agent.builtin.research import RESEARCH_AGENT
-from rag.agent.builtin.synthesize import SYNTHESIZE_AGENT
+from rag.agent.builtin.generic import GENERIC_AGENT
 from rag.agent.builtin_registry import create_builtin_tool_registry
 from rag.agent.core.agent_as_tool import (
     AgentAsToolAdapter,
@@ -167,40 +164,6 @@ async def test_agent_as_tool_runner_rejects_exhausted_parent_depth() -> None:
         )
 
 
-class TestBuildAgentToolSpec:
-    def test_research_agent_generates_tool_spec(self) -> None:
-        spec = build_agent_tool_spec(RESEARCH_AGENT)
-        assert spec.tool_spec.name == "agent_research"
-        assert spec.tool_spec.input_model is AgentToolInput
-        assert spec.tool_spec.output_model is AgentToolOutput
-        assert spec.tool_spec.permissions.generate is True
-        assert spec.agent_definition is RESEARCH_AGENT
-
-    def test_all_four_agents_generate_valid_specs(self) -> None:
-        for agent_def in [RESEARCH_AGENT, COMPARE_AGENT, FACTCHECK_AGENT, SYNTHESIZE_AGENT]:
-            spec = build_agent_tool_spec(agent_def)
-            assert spec.tool_spec.name.startswith("agent_")
-            assert spec.tool_spec.timeout_seconds == 120.0
-            assert spec.tool_spec.max_retries == 0
-
-
-class TestBuiltinRegistryHasAgentTools:
-    def test_registry_contains_agent_research(self) -> None:
-        registry = create_builtin_tool_registry()
-        spec = registry.get("agent_research")
-        assert spec.name == "agent_research"
-        assert spec.input_model is AgentToolInput
-
-    def test_registry_contains_agent_factcheck(self) -> None:
-        registry = create_builtin_tool_registry()
-        spec = registry.get("agent_factcheck")
-        assert spec.name == "agent_factcheck"
-
-    def test_registry_has_no_runner_for_agent_tools_by_default(self) -> None:
-        registry = create_builtin_tool_registry()
-        # Specs are registered, but no runner attached (request-scoped injection)
-        assert not registry.has_runner("agent_research")
-
 class TestAgentToolInput:
     def test_minimal_input_is_valid(self) -> None:
         inp = AgentToolInput(task="Find documents about travel policy")
@@ -262,10 +225,10 @@ class TestAgentToolOutput:
             ],
             groundedness_flag=True,
         )
-        out = AgentToolOutput.from_run_result(result, "research")
+        out = AgentToolOutput.from_run_result(result, "generic")
         assert out.conclusion == "The travel policy covers 3 regions."
         assert out.status == "done"
-        assert out.agent_name == "research"
+        assert out.agent_name == "generic"
         assert out.confidence == 0.8
         assert out.evidence_refs[0].evidence_id == "ev-1"
         assert out.evidence_refs[0].citation_id == "cit-1"
@@ -307,7 +270,7 @@ class TestAgentToolOutput:
             groundedness_flag=True,
         )
 
-        out = AgentToolOutput.from_run_result(result, "research")
+        out = AgentToolOutput.from_run_result(result, "generic")
 
         assert len(out.evidence_refs) == 20
         assert len(out.citations) == 20
@@ -333,14 +296,14 @@ class TestAgentToolOutput:
             ],
         )
 
-        out = AgentToolOutput.from_run_result(result, "research")
+        out = AgentToolOutput.from_run_result(result, "generic")
 
         assert out.conclusion == "Conclusion still returns"
         assert out.evidence_refs == []
 
 
 class TestAgentAsToolAdapter:
-    def _make_adapter(self, agent_type: str = "research", run_config: AgentRunConfig | None = None):
+    def _make_adapter(self, agent_type: str = "generic", run_config: AgentRunConfig | None = None):
         """构造最小的 AgentAsToolAdapter 用于测试"""
         from rag.agent.core.agent_as_tool import AgentAsToolRunner
 
@@ -349,9 +312,7 @@ class TestAgentAsToolAdapter:
             agent_registry=AgentRegistry(),
         )
         # 注册一个子 agent definition
-        from rag.agent.builtin.research import RESEARCH_AGENT
-
-        runner._agent_registry.register(RESEARCH_AGENT)
+        runner._agent_registry.register(GENERIC_AGENT)
 
         rc = run_config or AgentRunConfig(
             run_id="test-run",
@@ -378,7 +339,7 @@ class TestAgentAsToolAdapter:
             max_depth=2,
             access_policy=AccessPolicy.default(),
         )
-        adapter = AgentAsToolAdapter(runner=runner, agent_type="research", run_config=rc)
+        adapter = AgentAsToolAdapter(runner=runner, agent_type="generic", run_config=rc)
         inp = AgentToolInput(task="Test task")
         with pytest.raises(AgentAsToolExecutionError, match="subagent execution failed"):
             await adapter(inp)
@@ -441,17 +402,17 @@ class TestRegistryCloneAndIsolation:
         base = create_builtin_tool_registry()
         cloned = base.clone()
 
-        # Clone 中有 specs 但没有 agent runners
-        assert cloned.get("agent_research").name == "agent_research"
-        assert not cloned.has_runner("agent_research")
+        # Clone 中有 specs 但没有 runners
+        assert cloned.get("llm_summarize").name == "llm_summarize"
+        assert not cloned.has_runner("llm_summarize")
 
         # 注入 runner 到 clone 不影响 base
-        async def _dummy_runner(payload: AgentToolInput) -> AgentToolOutput:
-            return AgentToolOutput(conclusion="ok", status="done", agent_name="research")
+        async def _dummy_runner(payload):
+            return None
 
-        cloned.register_runner("agent_research", _dummy_runner)
-        assert cloned.has_runner("agent_research")
-        assert not base.has_runner("agent_research")
+        cloned.register_runner("llm_summarize", _dummy_runner)
+        assert cloned.has_runner("llm_summarize")
+        assert not base.has_runner("llm_summarize")
 
     def test_base_registry_not_polluted_after_run_with_config(self) -> None:
         """模拟 run_with_config 生命周期后 base registry 无残留"""
@@ -459,30 +420,18 @@ class TestRegistryCloneAndIsolation:
         # 模拟 run_with_config 内部的 clone
         runtime = base.clone()
 
-        rc = AgentRunConfig(
-            run_id="isolation-test",
-            thread_id="isolation-thread",
-            budget_total=10000,
-            max_depth=2,
-            access_policy=AccessPolicy.default(),
-        )
-        # 注入 adapter（模拟 _runtime_tool_registry）
-        from rag.agent.core.agent_as_tool import AgentAsToolAdapter, AgentAsToolRunner
+        async def _dummy_runner(payload):
+            return None
 
-        runner = AgentAsToolRunner(
-            tool_registry=base,
-            agent_registry=AgentRegistry(),
-        )
-        adapter = AgentAsToolAdapter(runner=runner, agent_type="research", run_config=rc)
-        runtime.register_runner("agent_research", adapter)
+        runtime.register_runner("llm_summarize", _dummy_runner)
 
         # runtime 有 runner，base 没有
-        assert runtime.has_runner("agent_research")
-        assert not base.has_runner("agent_research")
+        assert runtime.has_runner("llm_summarize")
+        assert not base.has_runner("llm_summarize")
 
         # runtime registry 被丢弃（模拟 request 结束），base 保持干净
         del runtime
-        assert not base.has_runner("agent_research")
+        assert not base.has_runner("llm_summarize")
 
     def test_two_concurrent_adapters_have_independent_run_configs(self) -> None:
         """两个不同 run_config 的 adapter 互不干扰"""

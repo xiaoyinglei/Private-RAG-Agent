@@ -281,7 +281,6 @@ def test_agent_run_help_exposes_explicit_agent_selector() -> None:
     assert result.exit_code == 0
     assert "--agent" in result.output
     assert "--vector-collection-prefix" in result.output
-    assert "research" in result.output
     assert "generic" in result.output
 
 

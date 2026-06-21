@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from rag.agent.builtin.research import RESEARCH_AGENT
+from rag.agent.builtin.generic import GENERIC_AGENT
 from rag.agent.builtin_registry import create_builtin_tool_registry
 from rag.agent.tools.asset_tools import (
     AssetAnalyzeInput,
@@ -98,7 +98,7 @@ def test_builtin_registry_exposes_generic_asset_tools_not_file_type_specific_too
 
     assert {"asset_list", "asset_inspect", "asset_read_slice", "asset_analyze"} <= tool_names
     assert {"table_list", "table_inspect", "table_query_sql"}.isdisjoint(tool_names)
-    assert {"asset_list", "asset_inspect", "asset_read_slice", "asset_analyze"} <= set(RESEARCH_AGENT.allowed_tools)
+    assert {"asset_list", "asset_inspect", "asset_read_slice", "asset_analyze"} <= set(GENERIC_AGENT.allowed_tools)
 
 
 def test_asset_runner_lists_bounded_asset_metadata_and_capabilities() -> None:

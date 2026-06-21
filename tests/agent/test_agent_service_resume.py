@@ -5,7 +5,7 @@ from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.checkpoint.memory import MemorySaver
 from pydantic import BaseModel
 
-from rag.agent.builtin.research import RESEARCH_AGENT
+from rag.agent.builtin.generic import GENERIC_AGENT
 from rag.agent.builtin_registry import create_builtin_tool_registry
 from rag.agent.compat.goal_contract import GoalDeliverable, GoalSpec
 from rag.agent.core.checkpointing import agent_checkpoint_serde
@@ -264,7 +264,7 @@ async def test_resume_restores_explicit_goal_hook_after_process_boundary() -> No
 @pytest.mark.anyio
 async def test_resume_preserves_model_backed_llm_tool_runners() -> None:
     service = AgentService(
-        definition=RESEARCH_AGENT,
+        definition=GENERIC_AGENT,
         tool_registry=create_builtin_tool_registry(runners={}),
         model_turn_provider=_FinishProvider(),
         model_registry=_FakeModelRegistry(),  # type: ignore[arg-type]
