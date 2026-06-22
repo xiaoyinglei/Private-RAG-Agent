@@ -36,7 +36,7 @@ class ApprovalPolicy:
     1. spec=None → DENY（未注册）
     2. tool_name 在 DENY_TOOLS 中 → DENY
     3. 工具契约或运行时策略要求确认 → ASK
-    4. permissions.execute_code + auto_approve_sandboxed → ALLOW（沙箱内自动放行）
+    4. permissions.execute_code + auto_approve_sandboxed → ALLOW（显式沙箱自动放行）
     5. permissions.write_db / kg_mutation / user_data / write_fs / execute_code → ASK
     6. permissions.external_network → ASK
     7. 其余 → ALLOW
@@ -49,7 +49,7 @@ class ApprovalPolicy:
         arguments: dict[str, object],
         spec: ToolSpec | None,
         requires_confirmation: bool = False,
-        auto_approve_sandboxed: bool = True,
+        auto_approve_sandboxed: bool = False,
     ) -> ApprovalDecision:
         if spec is None:
             return ApprovalDecision(
@@ -93,6 +93,7 @@ class ApprovalPolicy:
             or permissions.kg_mutation
             or permissions.user_data
             or permissions.write_fs
+            or permissions.execute_code
         ):
             return self._ask_decision(
                 tool_name=tool_name,

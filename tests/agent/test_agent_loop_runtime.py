@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import asyncio
+from collections.abc import AsyncIterable
 from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 import pytest
 from langchain_core.messages import HumanMessage
@@ -35,6 +38,7 @@ from rag.agent.loop.stop_hooks import (
 from rag.agent.memory.compactor import LoopCompactionResult, LoopContextCompactor
 from rag.agent.memory.models import MemoryPolicy
 from rag.agent.state import ToolCallPlan
+from rag.agent.streaming.events import EventType, StreamEvent, text_delta
 from rag.agent.tools.registry import ToolExecutionContext, ToolRegistry
 from rag.agent.tools.spec import ToolError, ToolPermissions, ToolSpec
 from rag.schema.runtime import AccessPolicy
@@ -71,6 +75,29 @@ class _SequenceProvider:
         if isinstance(turn, Exception):
             raise turn
         return turn
+
+
+class _SinkAwareFinishProvider:
+    def __init__(self) -> None:
+        self._stream_sink: Any = None
+
+    async def next_turn(
+        self,
+        state: LoopState,
+        *,
+        definition: AgentDefinition,
+        budget_remaining: int,
+    ) -> ModelTurnDraft:
+        del definition, budget_remaining
+        if self._stream_sink is not None:
+            await self._stream_sink.emit(
+                text_delta(
+                    "partial",
+                    run_id=state["run_config"].run_id,
+                    turn=state["iteration"],
+                )
+            )
+        return ModelTurnDraft(action="finish", final_answer="Final answer.")
 
 
 @dataclass
@@ -200,6 +227,87 @@ def _loop(
         event_sink=events or _Events(),
         max_model_retries=max_model_retries,
     )
+
+
+async def _collect_events(
+    events: AsyncIterable[StreamEvent],
+) -> list[StreamEvent]:
+    return [event async for event in events]
+
+
+@pytest.mark.anyio
+async def test_run_streaming_injects_sink_and_closes_after_success() -> None:
+    config = _config("loop-streaming-success")
+    provider = _SinkAwareFinishProvider()
+    checkpoint = _Checkpoint()
+    state = create_loop_state(task="Stream final answer.", run_config=config)
+
+    events = await asyncio.wait_for(
+        _collect_events(
+            _loop(
+                definition=_definition(),
+                provider=provider,
+                tool_runner=ToolExecutionService(
+                    tool_registry=ToolRegistry(),
+                    record_writer=checkpoint,
+                ),
+                checkpoint=checkpoint,
+            ).run_streaming(state)
+        ),
+        timeout=1,
+    )
+
+    assert any(event.type is EventType.TEXT_DELTA for event in events)
+    assert events[-1].type is EventType.LOOP_END
+    assert events[-1].data["reason"] == "accepted"
+
+
+@pytest.mark.anyio
+async def test_run_streaming_tool_progress_keeps_run_and_turn_context() -> None:
+    config = _config("loop-streaming-tool-progress")
+    call = ToolCallPlan.create("echo", {"value": "hello"})
+    provider = _SequenceProvider(
+        [
+            ModelTurnDraft(action="execute", tool_calls=(call,)),
+            ModelTurnDraft(action="finish", final_answer="Final answer."),
+        ]
+    )
+
+    async def runner(
+        payload: _Input,
+        context: ToolExecutionContext,
+    ) -> _Output:
+        assert context.progress_callback is not None
+        await context.progress_callback("halfway", percent=50)
+        return _Output(text=payload.value)
+
+    registry = ToolRegistry()
+    registry.register(_spec("echo"))
+    registry.register_contextual_runner("echo", runner)
+    checkpoint = _Checkpoint()
+    state = create_loop_state(task="Echo with progress.", run_config=config)
+
+    events = await asyncio.wait_for(
+        _collect_events(
+            _loop(
+                definition=_definition(allowed_tools=["echo"]),
+                provider=provider,
+                tool_runner=ToolExecutionService(
+                    tool_registry=registry,
+                    record_writer=checkpoint,
+                ),
+                checkpoint=checkpoint,
+            ).run_streaming(state)
+        ),
+        timeout=1,
+    )
+    progress = [
+        event for event in events if event.type is EventType.TOOL_USE_PROGRESS
+    ]
+
+    assert len(progress) == 1
+    assert progress[0].run_id == config.run_id
+    assert progress[0].turn == 1
 
 
 @pytest.mark.anyio
