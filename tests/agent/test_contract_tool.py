@@ -4,7 +4,15 @@ import pytest
 from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 from pydantic import BaseModel
 
-from rag.agent.tools.spec import ToolError, ToolPermissions, ToolResult, ToolSpec
+from rag.agent.tools.spec import (
+    ExecutionCategory,
+    InterruptBehavior,
+    RiskLevel,
+    ToolError,
+    ToolPermissions,
+    ToolResult,
+    ToolSpec,
+)
 
 
 class SearchInput(BaseModel):
@@ -66,6 +74,78 @@ class TestToolSpec:
         assert spec.audit_log is True
         assert spec.idempotent is True
         assert spec.permissions.kg_mutation is True
+
+    def test_behavior_fields_accept_serialized_enum_values(self) -> None:
+        spec = ToolSpec(
+            name="write_report",
+            description="Write a report",
+            input_model=SearchInput,
+            output_model=SearchOutput,
+            error_model=ToolError,
+            permissions=ToolPermissions(write_fs=True),
+            timeout_seconds=5.0,
+            execution_category="write",  # type: ignore[arg-type]
+            risk_level="high",  # type: ignore[arg-type]
+            interrupt_behavior="block",  # type: ignore[arg-type]
+        )
+
+        assert spec.execution_category is ExecutionCategory.WRITE
+        assert spec.risk_level is RiskLevel.HIGH
+        assert spec.interrupt_behavior is InterruptBehavior.BLOCK
+
+    def test_legacy_is_read_only_constructor_arg_remains_compatible(self) -> None:
+        spec = ToolSpec(
+            name="legacy_read",
+            description="Read with legacy flag",
+            input_model=SearchInput,
+            output_model=SearchOutput,
+            error_model=ToolError,
+            permissions=ToolPermissions(read_db=True),
+            timeout_seconds=5.0,
+            is_read_only=True,
+        )
+
+        assert spec.is_read_only is True
+
+    def test_legacy_is_read_only_cannot_hide_side_effect_permissions(self) -> None:
+        with pytest.raises(ValueError, match="is_read_only"):
+            ToolSpec(
+                name="legacy_write",
+                description="Write with legacy read flag",
+                input_model=SearchInput,
+                output_model=SearchOutput,
+                error_model=ToolError,
+                permissions=ToolPermissions(write_fs=True),
+                timeout_seconds=5.0,
+                is_read_only=True,
+            )
+
+    def test_read_category_rejects_side_effect_permissions(self) -> None:
+        with pytest.raises(ValueError, match="execution_category"):
+            ToolSpec(
+                name="misclassified_write",
+                description="Write but claim read",
+                input_model=SearchInput,
+                output_model=SearchOutput,
+                error_model=ToolError,
+                permissions=ToolPermissions(write_fs=True),
+                timeout_seconds=5.0,
+                execution_category=ExecutionCategory.READ,
+            )
+
+    def test_risk_level_cannot_be_below_permission_risk(self) -> None:
+        with pytest.raises(ValueError, match="risk_level"):
+            ToolSpec(
+                name="low_risk_mutation",
+                description="Mutate but claim low risk",
+                input_model=SearchInput,
+                output_model=SearchOutput,
+                error_model=ToolError,
+                permissions=ToolPermissions(write_db=True),
+                timeout_seconds=5.0,
+                execution_category=ExecutionCategory.MUTATE,
+                risk_level=RiskLevel.LOW,
+            )
 
 
 class TestToolResult:

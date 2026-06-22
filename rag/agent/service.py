@@ -71,7 +71,7 @@ from rag.agent.memory.compactor import (
 from rag.agent.memory.models import MemoryPolicy
 from rag.agent.memory.store import WorkspaceMemoryStore
 from rag.agent.tools.registry import ToolRegistry, ToolRunner
-from rag.agent.tools.spec import ToolPermissions, ToolResult, ToolSpec
+from rag.agent.tools.spec import ExecutionCategory, ToolPermissions, ToolResult, ToolSpec
 from rag.schema.query import AnswerCitation, EvidenceItem
 from rag.schema.runtime import AccessPolicy
 
@@ -979,9 +979,9 @@ class AgentService:
             output_model=ToolSearchOutput,
             error_model=ToolSearchOutput,
             permissions=ToolPermissions(),
+            execution_category=ExecutionCategory.READ,
             timeout_seconds=5,
             idempotent=True,
-            is_read_only=True,
             concurrency_safe=True,
         )
 
@@ -1016,9 +1016,9 @@ class AgentService:
             output_model=ActivateToolsOutput,
             error_model=ActivateToolsOutput,
             permissions=ToolPermissions(),
+            execution_category=ExecutionCategory.TRANSFORM,
             timeout_seconds=5,
             idempotent=True,
-            is_read_only=False,
             concurrency_safe=True,
         )
 

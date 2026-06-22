@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from rag.agent.tools.spec import ToolError, ToolPermissions, ToolSpec
+from rag.agent.tools.spec import ExecutionCategory, ToolError, ToolPermissions, ToolSpec
 from rag.schema.query import RetrievalSignals
 
 
@@ -30,6 +30,7 @@ vector_search = ToolSpec(
     output_model=SearchOutput,
     error_model=ToolError,
     permissions=ToolPermissions(read_db=True, embed=True),
+    execution_category=ExecutionCategory.READ,
     timeout_seconds=10.0,
     max_retries=1,
     idempotent=True,
@@ -44,6 +45,7 @@ keyword_search = ToolSpec(
     output_model=SearchOutput,
     error_model=ToolError,
     permissions=ToolPermissions(read_db=True),
+    execution_category=ExecutionCategory.READ,
     timeout_seconds=5.0,
     max_retries=1,
     idempotent=True,
@@ -58,6 +60,7 @@ grounding = ToolSpec(
     output_model=SearchOutput,
     error_model=ToolError,
     permissions=ToolPermissions(read_db=True, read_object_store=True),
+    execution_category=ExecutionCategory.READ,
     timeout_seconds=15.0,
     max_retries=2,
     idempotent=True,
@@ -72,6 +75,7 @@ rerank = ToolSpec(
     output_model=SearchOutput,
     error_model=ToolError,
     permissions=ToolPermissions(read_db=True, embed=True, generate=True),
+    execution_category=ExecutionCategory.READ,
     timeout_seconds=10.0,
     max_retries=1,
     idempotent=True,
@@ -86,6 +90,7 @@ graph_expand = ToolSpec(
     output_model=SearchOutput,
     error_model=ToolError,
     permissions=ToolPermissions(read_db=True),
+    execution_category=ExecutionCategory.READ,
     timeout_seconds=5.0,
     max_retries=1,
     idempotent=True,
