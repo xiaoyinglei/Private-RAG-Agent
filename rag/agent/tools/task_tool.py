@@ -7,24 +7,26 @@ The child inherits tools but cannot recurse (task disabled by default).
 from __future__ import annotations
 
 import inspect
-from dataclasses import replace
 from typing import TYPE_CHECKING, Literal
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from rag.agent.core.context import AgentRunConfig, derive_child_config
+from rag.agent.core.context import AgentRunConfig
 from rag.agent.core.delegation import (
     DEFAULT_DELEGATION_TOKEN_BUDGET,
     AgentDelegationRequest,
+    DelegatedAgentResult,
+    DelegatedAgentRunner,
     ParentAgentContext,
 )
 from rag.agent.tools.spec import ToolError, ToolPermissions, ToolSpec
 
 if TYPE_CHECKING:
     from rag.agent.core.definition import AgentRuntimePolicy
-    from rag.agent.core.delegation import DelegatedAgentRunner
-    from rag.agent.service import AgentRunResult
+    from rag.agent.core.runtime_ports import RetrievalHintProvider
+    from rag.agent.loop.runtime import ModelTurnProvider
+    from rag.agent.tools.registry import ToolRegistry
 
 # ── I/O schemas ──────────────────────────────────────────────────
 
@@ -60,6 +62,7 @@ MAX_KEY_FACTS = 10
 MAX_FACT_CHARS = 200
 MAX_EVIDENCE_REFS = 20
 MAX_CITATIONS = 20
+TaskStatus = Literal["done", "failed", "paused"]
 
 
 class TaskOutput(BaseModel):
@@ -80,12 +83,12 @@ class TaskOutput(BaseModel):
         default_factory=list,
         max_length=MAX_CITATIONS,
     )
-    status: Literal["done", "failed", "paused"] = "failed"
+    status: TaskStatus = "failed"
     child_run_id: str = ""
     stop_reason: str | None = None
 
     @classmethod
-    def from_run_result(cls, result: AgentRunResult) -> TaskOutput:
+    def from_run_result(cls, result: DelegatedAgentResult) -> TaskOutput:
         return cls(
             conclusion=result.final_answer or "",
             key_facts=_extract_key_facts(result),
@@ -94,17 +97,25 @@ class TaskOutput(BaseModel):
                 c.model_dump(exclude_none=True)
                 for c in result.citations[:MAX_CITATIONS]
             ],
-            status=result.status if result.status in ("done", "failed", "paused") else "failed",
+            status=_coerce_status(result.status),
             child_run_id=result.run_id,
             stop_reason=result.stop_reason,
         )
 
     @classmethod
-    def error_result(cls, error_message: str, *, status: str = "failed") -> TaskOutput:
+    def error_result(cls, error_message: str, *, status: TaskStatus = "failed") -> TaskOutput:
         return cls(conclusion=error_message, status=status)
 
 
-def _extract_key_facts(result: AgentRunResult) -> list[str]:
+def _coerce_status(status: str) -> TaskStatus:
+    if status == "done":
+        return "done"
+    if status == "paused":
+        return "paused"
+    return "failed"
+
+
+def _extract_key_facts(result: DelegatedAgentResult) -> list[str]:
     facts: list[str] = []
     for item in result.evidence:
         text = getattr(item, "text", None)
@@ -115,7 +126,7 @@ def _extract_key_facts(result: AgentRunResult) -> list[str]:
     return facts
 
 
-def _extract_evidence_refs(result: AgentRunResult) -> list[dict[str, object]]:
+def _extract_evidence_refs(result: DelegatedAgentResult) -> list[dict[str, object]]:
     refs: list[dict[str, object]] = []
     for item in result.evidence[:MAX_EVIDENCE_REFS]:
         ref: dict[str, object] = {"evidence_id": item.evidence_id}
@@ -146,11 +157,11 @@ class TaskToolRunner:
         tool_registry: ToolRegistry,
         model_turn_provider: ModelTurnProvider | None = None,
         retrieval_hint_provider: RetrievalHintProvider | None = None,
+        delegated_runner: DelegatedAgentRunner | None = None,
     ) -> None:
+        del tool_registry, model_turn_provider, retrieval_hint_provider
         self._policy = policy
-        self._tool_registry = tool_registry
-        self._model_turn_provider = model_turn_provider
-        self._retrieval_hint_provider = retrieval_hint_provider
+        self._delegated_runner = delegated_runner
 
     async def run(
         self,
@@ -158,31 +169,34 @@ class TaskToolRunner:
         *,
         parent_config: AgentRunConfig,
     ) -> TaskOutput:
-        from rag.agent.service import AgentService
-
-        # Derive child config: bounded budget and depth
-        child_config = self._derive_child_config(parent_config, payload)
+        if self._delegated_runner is None:
+            return TaskOutput.error_result(
+                "Task delegation runner is not configured.",
+                status="failed",
+            )
 
         # Build child prompt
         child_prompt = payload.task
         if payload.context_summary:
             child_prompt = f"{payload.task}\n\n## Context\n{payload.context_summary}"
-
-        # Create child service with the same policy but no task tool
-        child_policy = self._child_policy()
-        service = AgentService(
-            policy=child_policy,
-            tool_registry=self._tool_registry,
-            model_turn_provider=self._model_turn_provider,
-            retrieval_hint_provider=self._retrieval_hint_provider,
-            # No subagent_runner — child cannot delegate
+        delegation = AgentDelegationRequest(
+            delegation_id=f"task-{uuid4().hex[:8]}",
+            agent_type="task_child",
+            prompt=child_prompt,
+            estimated_tokens=(
+                payload.token_budget
+                or self._policy.token_budget
+                or DEFAULT_DELEGATION_TOKEN_BUDGET
+            ),
         )
+        parent_state = ParentAgentContext(run_config=parent_config)
 
         try:
-            result = await service.run_with_config(
-                task=child_prompt,
-                run_config=child_config,
+            raw_result = self._delegated_runner.run_delegated_task(
+                request=delegation,
+                parent_state=parent_state,
             )
+            result = await raw_result if inspect.isawaitable(raw_result) else raw_result
         except Exception as exc:
             return TaskOutput.error_result(
                 f"Child execution failed: {exc}",
@@ -190,42 +204,6 @@ class TaskToolRunner:
             )
 
         return TaskOutput.from_run_result(result)
-
-    def _derive_child_config(
-        self,
-        parent_config: AgentRunConfig,
-        payload: TaskInput,
-    ) -> AgentRunConfig:
-        from rag.agent.core.definition import AgentDefinition
-
-        # Create a minimal definition for derive_child_config
-        child_def = AgentDefinition(
-            agent_type="task_child",
-            description="Generic task child",
-            system_prompt=self._policy.system_instructions,
-            allowed_tools=self._policy.allowed_tools,
-            estimated_token_budget=payload.token_budget or self._policy.token_budget,
-            estimated_work_budget=self._policy.work_budget,
-            max_iterations=self._policy.max_iterations,
-            max_depth=self._policy.max_depth,
-            model_selection=self._policy.model_selection,
-            tool_policy=self._policy.tool_policy,
-        )
-        child_config = derive_child_config(parent_config, child_def)
-        if payload.token_budget is not None:
-            child_config = replace(child_config, budget_total=payload.token_budget)
-        return child_config
-
-    def _child_policy(self) -> AgentRuntimePolicy:
-        """Derive child policy: same tools, no task delegation."""
-        return replace(
-            self._policy,
-            max_depth=max(self._policy.max_depth - 1, 0),
-            # Remove 'task' from core tools to prevent recursion
-            core_tool_names=tuple(
-                t for t in self._policy.core_tool_names if t != "task"
-            ),
-        )
 
 
 # ── Tool spec ────────────────────────────────────────────────────
