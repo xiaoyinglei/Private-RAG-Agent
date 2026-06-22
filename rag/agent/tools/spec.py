@@ -93,7 +93,6 @@ class ToolSpec:
     risk_level: RiskLevel = _INFER
     interrupt_behavior: InterruptBehavior = InterruptBehavior.CANCEL
     max_result_size_chars: int = 64000
-    prompt_template: str = ""
 
     def __post_init__(self) -> None:
         if self.execution_category is _INFER:
@@ -194,6 +193,7 @@ class ToolSpec:
             "risk_level": RiskLevel.LOW,
             "interrupt_behavior": InterruptBehavior.CANCEL,
             "concurrency_safe": True,
+            "idempotent": True,
             "requires_confirmation": False,
         }
         defaults.update(kwargs)

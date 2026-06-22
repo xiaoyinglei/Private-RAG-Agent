@@ -180,6 +180,9 @@ class ApprovalPolicy:
         )
 
 
+_RISK_ORDER = {"low": 0, "medium": 1, "high": 2}
+
+
 def merge_approval_requests(decisions: list[ApprovalDecision]) -> HumanInputRequest:
     """将多个 ASK 决策合并为一个 HumanInputRequest。"""
     if not decisions:
@@ -192,13 +195,16 @@ def merge_approval_requests(decisions: list[ApprovalDecision]) -> HumanInputRequ
             all_summaries.extend(d.request.tool_calls)
             tool_names.append(d.request.tool_calls[0].tool_name)
 
-    first = decisions[0]
+    max_risk = max(
+        (d.risk_level for d in decisions),
+        key=lambda r: _RISK_ORDER.get(r, 0),
+    )
     return HumanInputRequest(
         request_id=f"hir_{uuid4().hex[:12]}",
         kind="tool_approval",
         question=f"确认执行以下工具: {', '.join(tool_names)}",
         tool_calls=all_summaries,
-        context={"tool_count": len(all_summaries), "risk_level": first.risk_level},
+        context={"tool_count": len(all_summaries), "risk_level": max_risk},
         options=["allow_once", "deny", "abort"],
     )
 
