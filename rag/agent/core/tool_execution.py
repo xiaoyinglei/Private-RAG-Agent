@@ -193,6 +193,9 @@ class ToolExecutionService:
                     call.tool_name
                     in request.run_config.tool_policy.require_confirmation_for
                 ),
+                auto_approve_sandboxed=(
+                    request.run_config.tool_policy.auto_approve_sandboxed
+                ),
             )
             if decision.action == "deny" or call.tool_call_id in denied_ids:
                 results.append(
