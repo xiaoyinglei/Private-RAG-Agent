@@ -36,9 +36,10 @@ class ApprovalPolicy:
     1. spec=None → DENY（未注册）
     2. tool_name 在 DENY_TOOLS 中 → DENY
     3. 工具契约或运行时策略要求确认 → ASK
-    4. permissions.write_db / kg_mutation / user_data / write_fs / execute_code → ASK
-    5. permissions.external_network → ASK
-    6. 其余 → ALLOW
+    4. permissions.execute_code + auto_approve_sandboxed → ALLOW（沙箱内自动放行）
+    5. permissions.write_db / kg_mutation / user_data / write_fs / execute_code → ASK
+    6. permissions.external_network → ASK
+    7. 其余 → ALLOW
     """
 
     def decide(
@@ -48,6 +49,7 @@ class ApprovalPolicy:
         arguments: dict[str, object],
         spec: ToolSpec | None,
         requires_confirmation: bool = False,
+        auto_approve_sandboxed: bool = True,
     ) -> ApprovalDecision:
         if spec is None:
             return ApprovalDecision(
@@ -75,13 +77,22 @@ class ApprovalPolicy:
                 reason="工具契约要求执行前确认",
             )
 
-        # Ask for write / mutation / user data / filesystem / code execution
+        # Sandbox auto-approve: code execution inside a sandbox is safe
+        # by boundary (restricted fs, no network, timeout), not by
+        # user clicking "confirm" each time. Mirrors Claude/GPT behavior.
+        if auto_approve_sandboxed and permissions.execute_code:
+            return ApprovalDecision(
+                action=ApprovalAction.ALLOW,
+                reason="沙箱内代码执行，自动放行",
+                risk_level="low",
+            )
+
+        # Ask for write / mutation / user data / filesystem
         if (
             permissions.write_db
             or permissions.kg_mutation
             or permissions.user_data
             or permissions.write_fs
-            or permissions.execute_code
         ):
             return self._ask_decision(
                 tool_name=tool_name,

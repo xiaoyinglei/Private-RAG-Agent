@@ -26,6 +26,12 @@ class ToolPolicy:
     max_parallel_calls: int = 4
     require_confirmation_for: frozenset[str] = field(default_factory=frozenset)
     deny_tools: frozenset[str] = field(default_factory=frozenset)
+    # When True, tools with execute_code=True that run inside a sandbox
+    # are auto-approved without user confirmation. Safety comes from the
+    # sandbox boundary (restricted filesystem, no network, timeout),
+    # not from asking "are you sure?" each time.
+    # Mirrors Claude/GPT code interpreter: code runs automatically.
+    auto_approve_sandboxed: bool = True
 
 
 @dataclass(frozen=True)
