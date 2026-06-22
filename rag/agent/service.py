@@ -501,18 +501,16 @@ class AgentService:
         )
         self._validate_allowed_tools(runtime_registry)
 
-        # 6. Inject manifest context into messages
-        enriched_messages = self._inject_manifest_context(
-            messages or [], manifest,
-        )
+        # 6. Inject manifest context into task
+        enriched_task = self._inject_manifest_into_task(task, manifest)
 
         state = self._initial_loop_state_from_config(
-            task=task,
+            task=enriched_task,
             run_config=run_config,
             pending_tool_calls=pending_tool_calls,
             approved_tool_call_ids=approved_tool_call_ids,
             denied_tool_call_ids=denied_tool_call_ids,
-            messages=enriched_messages,
+            messages=messages,
             memory_store=memory_store,
             file_manifest=manifest,
         )
@@ -739,27 +737,21 @@ class AgentService:
             )
 
     @staticmethod
-    def _inject_manifest_context(
-        messages: list[BaseMessage],
-        manifest: FileManifest,
-    ) -> list[BaseMessage]:
-        """Inject file manifest context into the message list.
+    def _inject_manifest_into_task(task: str, manifest: FileManifest) -> str:
+        """Prepend file manifest context to the task string.
 
-        Adds a system message with the manifest context block before the
-        first human message, so the model sees file info on turn 1.
+        The task becomes the first HumanMessage. By prepending the manifest,
+        the model sees file info before the user's question, enabling
+        file-first processing on turn 1.
         """
         if not manifest.files:
-            return messages
-
-        from langchain_core.messages import SystemMessage
+            return task
 
         block = manifest.to_context_block()
         if not block:
-            return messages
+            return task
 
-        manifest_msg = SystemMessage(content=block)
-        # Insert manifest message as the first message (before any user message)
-        return [manifest_msg, *messages]
+        return f"{block}\n\n── User Task ──\n{task}"
 
     def _runtime_tool_registry(
         self,
