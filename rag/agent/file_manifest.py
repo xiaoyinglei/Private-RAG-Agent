@@ -365,7 +365,10 @@ def _pandas_preview_excel(
     path: Path,
     probe: StructuredProbeOutput,
 ) -> list[SheetPreview]:
-    """Pandas preview for Excel sheets."""
+    """Pandas preview for Excel sheets.
+
+    Uses probe-detected header row so pandas reads the correct column names.
+    """
     try:
         import pandas as pd
     except ImportError:
@@ -375,23 +378,36 @@ def _pandas_preview_excel(
     for table in probe.tables:
         sheet_name = table.name or f"Sheet{table.table_index + 1}"
         try:
-            df = pd.read_excel(
-                path, sheet_name=sheet_name, nrows=_PREVIEW_ROWS,
-            )
-            columns = [ColumnPreview(name=c, dtype=str(df[c].dtype)) for c in df.columns]
-            head = df.head(_PREVIEW_ROWS).to_dict(orient="records")
-            dtypes = {c: str(df[c].dtype) for c in df.columns}
-
-            # Detect header row from probe
+            # Use probe's header detection to pick the right row
             header_row = None
             if table.candidate_header_rows:
                 header_row = table.candidate_header_rows[0].row_index
+
+            # pandas header param is 0-based; probe row_index is 1-based
+            pandas_header = (header_row - 1) if header_row else 0
+            # Skip rows before the header, then read header + data rows
+            skip_rows = list(range(pandas_header)) if pandas_header > 0 else None
+
+            df = pd.read_excel(
+                path, sheet_name=sheet_name,
+                header=pandas_header,
+                skiprows=skip_rows,
+                nrows=_PREVIEW_ROWS,
+            )
+            # Clean up column names (NaN → Unnamed)
+            df.columns = [
+                str(c) if not str(c).startswith("Unnamed") else f"col_{i}"
+                for i, c in enumerate(df.columns)
+            ]
+            columns = [ColumnPreview(name=c, dtype=str(df[c].dtype)) for c in df.columns]
+            head = df.head(_PREVIEW_ROWS).to_dict(orient="records")
+            dtypes = {c: str(df[c].dtype) for c in df.columns}
 
             # Detect merged cells (from openpyxl)
             merged_cells = _detect_merged_cells(path, sheet_name)
 
             # Detect formulas
-            formula_cols = _detect_formula_columns(path, sheet_name, len(df.columns))
+            formula_cols = _detect_formula_columns(path, sheet_name, table.column_count)
 
             sheets.append(SheetPreview(
                 sheet_name=sheet_name,
@@ -415,7 +431,10 @@ def _pandas_preview_csv(
     file_kind: str,
     probe: StructuredProbeOutput,
 ) -> SheetPreview | None:
-    """Pandas preview for CSV/TSV."""
+    """Pandas preview for CSV/TSV.
+
+    Uses probe-detected header row so pandas reads the correct column names.
+    """
     try:
         import pandas as pd
     except ImportError:
@@ -424,14 +443,23 @@ def _pandas_preview_csv(
     sep = "\t" if file_kind == "tsv" else ","
     table = probe.tables[0] if probe.tables else None
     try:
-        df = pd.read_csv(path, sep=sep, nrows=_PREVIEW_ROWS)
-        columns = [ColumnPreview(name=c, dtype=str(df[c].dtype)) for c in df.columns]
-        head = df.head(_PREVIEW_ROWS).to_dict(orient="records")
-        dtypes = {c: str(df[c].dtype) for c in df.columns}
-
+        # Use probe's header detection
         header_row = None
         if table and table.candidate_header_rows:
             header_row = table.candidate_header_rows[0].row_index
+
+        pandas_header = (header_row - 1) if header_row else 0
+        skip_rows = list(range(pandas_header)) if pandas_header > 0 else None
+
+        df = pd.read_csv(path, sep=sep, header=pandas_header,
+                         skiprows=skip_rows, nrows=_PREVIEW_ROWS)
+        df.columns = [
+            str(c) if not str(c).startswith("Unnamed") else f"col_{i}"
+            for i, c in enumerate(df.columns)
+        ]
+        columns = [ColumnPreview(name=c, dtype=str(df[c].dtype)) for c in df.columns]
+        head = df.head(_PREVIEW_ROWS).to_dict(orient="records")
+        dtypes = {c: str(df[c].dtype) for c in df.columns}
 
         return SheetPreview(
             sheet_name=path.name,
