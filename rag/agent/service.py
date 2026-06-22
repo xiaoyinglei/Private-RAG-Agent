@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import AsyncGenerator, Mapping, Sequence
 from dataclasses import replace
 from inspect import isawaitable
 from pathlib import Path
@@ -351,6 +351,7 @@ class AgentService:
         checkpointer: BaseCheckpointSaver[str] | None = None,
         runtime_diagnostics: Sequence[RuntimeDiagnostic] = (),
         catalog: ToolCatalog | None = None,
+        stream_sink: Any = None,  # StreamEventSink | None
     ) -> None:
         if definition is not None and policy is not None:
             raise ValueError("Provide either 'definition' or 'policy', not both")
@@ -389,6 +390,7 @@ class AgentService:
             merge_runtime_diagnostics([], runtime_diagnostics)
         )
         self._checkpointer = checkpointer or create_agent_checkpointer(None)
+        self._stream_sink = stream_sink
         # Register core tools: tool_search, activate_tools, task
         self._register_discovery_tools()
         self._register_task_tool()
@@ -543,6 +545,84 @@ class AgentService:
             workspace_path=str(workspace.root),
         )
 
+    async def run_streaming(
+        self, request: AgentRunRequest
+    ) -> AsyncGenerator[Any, None]:
+        """流式运行 Agent，yield 每一个 StreamEvent。
+
+        用法：
+            async for event in service.run_streaming(request):
+                handle(event)
+        """
+
+        run_config = request.to_run_config(self._definition)
+
+        # 复用 run_with_config 的 setup 逻辑
+        from rag.agent.file_manifest import build_file_manifest
+        from rag.agent.primitive_ops import PrimitiveOps
+        from rag.agent.workspace import create_temp_workspace, import_files, open_workspace
+
+        if request.workspace_path:
+            workspace = open_workspace(request.workspace_path, create=True)
+        else:
+            workspace = create_temp_workspace()
+
+        if request.input_files:
+            import_files(workspace, [Path(f) for f in request.input_files])
+
+        manifest = build_file_manifest(workspace)
+        ops = PrimitiveOps(workspace=workspace)
+        memory_store = WorkspaceMemoryStore(
+            workspace=workspace,
+            policy=run_config.memory_policy,
+        )
+
+        file_tools_to_activate: set[str] = (
+            {"structured_probe"} if manifest.has_probeable_files else set()
+        )
+        runtime_registry = self._runtime_tool_registry(
+            run_config,
+            runners=ops.runners(),
+        )
+        self._validate_allowed_tools(runtime_registry)
+
+        enriched_task = self._inject_manifest_into_task(request.task, manifest)
+
+        state = self._initial_loop_state_from_config(
+            task=enriched_task,
+            run_config=run_config,
+            pending_tool_calls=request.pending_tool_calls,
+            approved_tool_call_ids=request.approved_tool_call_ids,
+            denied_tool_call_ids=request.denied_tool_call_ids,
+            messages=request.messages,
+            memory_store=memory_store,
+            file_manifest=manifest,
+        )
+        await self._apply_retrieval_hint(state)
+
+        checkpoint_store = LangGraphCheckpointStore(
+            self._checkpointer,
+            run_config=run_config,
+            compatibility_config=GoalCompatibilityConfig(
+                goal_spec=request.goal_spec
+            ),
+        )
+        loop = self._build_loop(
+            runtime_registry=runtime_registry,
+            checkpoint_store=checkpoint_store,
+            memory_store=memory_store,
+            goal_spec=request.goal_spec,
+            state=state,
+            auto_activate_tools=file_tools_to_activate,
+        )
+
+        try:
+            async for event in loop.run_streaming(state):
+                yield event
+        finally:
+            if state["status"] in {"completed", "failed"}:
+                RunRegistry.remove(run_config.run_id)
+
     def _initial_loop_state_from_config(
         self,
         *,
@@ -603,7 +683,7 @@ class AgentService:
                         candidates=[
                             SearchCandidate(
                                 name=tool_name,
-                                description=f"Auto-activated for file processing",
+                                description="Auto-activated for file processing",
                                 reason="structured input files detected",
                             )
                         ],
@@ -620,6 +700,7 @@ class AgentService:
             tool_runner=ToolExecutionService(
                 tool_registry=runtime_registry,
                 record_writer=checkpoint_store,
+                stream_sink=self._stream_sink,
             ),
             checkpoint_store=checkpoint_store,
             stop_hook_runner=StopHookRunner(
@@ -633,6 +714,7 @@ class AgentService:
             finish_candidate_builder=FinishCandidateBuilder(),
             catalog=self._catalog,
             deferred_store=store,
+            stream_sink=self._stream_sink,
         )
 
     def _resolve_model_turn_provider(
@@ -656,6 +738,7 @@ class AgentService:
                     definition=self._definition,
                     catalog=self._catalog,
                     deferred_store=store,
+                    stream_sink=self._stream_sink,
                 )
             except Exception as exc:
                 if state is not None:

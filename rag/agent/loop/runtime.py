@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from collections.abc import Awaitable, Sequence
+import asyncio
+from collections.abc import AsyncGenerator, Awaitable, Sequence
 from inspect import isawaitable
 from typing import Any, Protocol, cast
 
@@ -38,6 +39,8 @@ from rag.agent.loop.state import (
 from rag.agent.loop.stop_hooks import StopHookOutcome, StopHookRunner
 from rag.agent.memory.compactor import LoopCompactionResult
 from rag.agent.planning import MAX_PLAN_EVENTS, PlanEvent, PlanTracker
+from rag.agent.streaming.events import StreamEvent
+from rag.agent.streaming.sink import StreamEventSink
 
 
 class ModelTurnEnvelope(BaseModel):
@@ -99,6 +102,7 @@ class AgentLoop:
         stop_hook_runner: StopHookRunner,
         finish_candidate_builder: FinishCandidateBuilder,
         event_sink: LoopEventSink | None = None,
+        stream_sink: StreamEventSink | None = None,
         observation_extractor: ObservationExtractor | None = None,
         plan_tracker: PlanTracker | None = None,
         max_model_retries: int = 1,
@@ -115,6 +119,10 @@ class AgentLoop:
         self._stop_hook_runner = stop_hook_runner
         self._finish_candidate_builder = finish_candidate_builder
         self._event_sink = event_sink or NullLoopEventSink()
+        self._stream_sink = stream_sink
+        # 把 stream_sink 注入到 model provider（如果支持）
+        if stream_sink is not None and hasattr(model_provider, "_stream_sink"):
+            model_provider._stream_sink = stream_sink
         self._observation_extractor = (
             observation_extractor or ObservationExtractor()
         )
@@ -122,6 +130,72 @@ class AgentLoop:
         self._max_model_retries = max_model_retries
         self._catalog = catalog
         self._deferred_store = deferred_store
+
+    async def _emit_stream(self, event: Any) -> None:
+        """Emit a stream event if sink is configured."""
+        if self._stream_sink is not None:
+            await self._stream_sink.emit(event)
+
+    async def run_streaming(
+        self, state: LoopState
+    ) -> AsyncGenerator[StreamEvent, None]:
+        """流式运行 AgentLoop，yield 每一个 StreamEvent。
+
+        如果 run() 异常，会 yield 一个 ERROR 事件然后关闭 sink。
+        消费者不会挂死。
+
+        用法：
+            async for event in agent_loop.run_streaming(state):
+                handle(event)
+        """
+        from rag.agent.streaming.sink import QueueStreamEventSink
+
+        sink = QueueStreamEventSink()
+        sink_targets: list[tuple[Any, StreamEventSink | None]] = [
+            (self, self._stream_sink)
+        ]
+        self._stream_sink = sink
+        for target in (self._model_provider, self._tool_runner):
+            if hasattr(target, "_stream_sink"):
+                target_with_sink = cast(Any, target)
+                sink_targets.append(
+                    (target_with_sink, target_with_sink._stream_sink)
+                )
+                target_with_sink._stream_sink = sink
+
+        run_task: asyncio.Task[LoopState] | None = None
+        try:
+            run_task = asyncio.create_task(self.run(state))
+
+            # Always close the queue when run() returns, including normal
+            # completion paths that already emitted LOOP_END.
+            def _on_run_done(t: asyncio.Task[LoopState]) -> None:
+                del t
+                asyncio.create_task(sink.close())
+
+            run_task.add_done_callback(_on_run_done)
+
+            # 消费事件
+            async for event in sink.stream():
+                yield event
+
+            # stream 正常结束，等 run 完成（检查异常）
+            await run_task
+
+        except BaseException:
+            # 消费者被取消或出错，确保 sink 关闭
+            await sink.close()
+            if run_task is not None and not run_task.done():
+                run_task.cancel()
+                try:
+                    await run_task
+                except (asyncio.CancelledError, Exception):
+                    pass
+            raise
+
+        finally:
+            for target, original_sink in sink_targets:
+                target._stream_sink = original_sink
 
     async def run(self, state: LoopState) -> LoopState:
         if state["status"] != "running":
@@ -140,6 +214,13 @@ class AgentLoop:
 
         consecutive_model_failures = 0
         while state["status"] == "running":
+            # ── 流式事件：turn 开始 ──
+            await self._emit_stream(
+                _stream_turn_start(
+                    run_id=state["run_config"].run_id,
+                    turn=state["iteration"] + 1,
+                )
+            )
             if state["pending_tool_calls"]:
                 token = iteration_var.set(state["iteration"])
                 try:
@@ -200,6 +281,15 @@ class AgentLoop:
                     state,
                     transition,
                     checkpoint_reason="compaction",
+                )
+                # ── 流式事件：压缩完成 ──
+                await self._emit_stream(
+                    _stream_compact_layer(
+                        channels=list(compaction.channels),
+                        warnings=list(compaction.warnings),
+                        run_id=state["run_config"].run_id,
+                        turn=state["iteration"],
+                    )
                 )
 
             remaining = await handles.budget_ledger.remaining()
@@ -274,6 +364,15 @@ class AgentLoop:
                 )
                 if consecutive_model_failures < self._max_model_retries:
                     consecutive_model_failures += 1
+                    # ── 流式事件：恢复重试 ──
+                    await self._emit_stream(
+                        _stream_recovery(
+                            strategy="model_retry",
+                            detail=f"attempt={consecutive_model_failures}, error={str(exc)[:200]}",
+                            run_id=state["run_config"].run_id,
+                            turn=state["iteration"],
+                        )
+                    )
                     await self._transition(
                         state,
                         reason="retry",
@@ -305,6 +404,15 @@ class AgentLoop:
                 )
                 if consecutive_model_failures < self._max_model_retries:
                     consecutive_model_failures += 1
+                    # ── 流式事件：恢复重试 ──
+                    await self._emit_stream(
+                        _stream_recovery(
+                            strategy="model_retry",
+                            detail=f"attempt={consecutive_model_failures}, error={str(exc)[:200]}",
+                            run_id=state["run_config"].run_id,
+                            turn=state["iteration"],
+                        )
+                    )
                     await self._transition(
                         state,
                         reason="retry",
@@ -349,8 +457,24 @@ class AgentLoop:
                     },
                     checkpoint_reason="tool_calls_scheduled",
                 )
+                # ── 流式事件：turn 结束（工具调度） ──
+                await self._emit_stream(
+                    _stream_turn_end(
+                        run_id=state["run_config"].run_id,
+                        turn=state["iteration"],
+                        stop_reason="tool_use",
+                    )
+                )
                 continue
             if turn.action == "pause":
+                # ── 流式事件：turn 结束（暂停） ──
+                await self._emit_stream(
+                    _stream_turn_end(
+                        run_id=state["run_config"].run_id,
+                        turn=state["iteration"],
+                        stop_reason="pause",
+                    )
+                )
                 await self._pause(
                     state,
                     reason=cast(str, turn.pause_reason),
@@ -360,22 +484,53 @@ class AgentLoop:
                 )
                 return state
 
+            # ── 流式事件：turn 结束（完成） ──
+            await self._emit_stream(
+                _stream_turn_end(
+                    run_id=state["run_config"].run_id,
+                    turn=state["iteration"],
+                    stop_reason="end_turn",
+                )
+            )
             finished = await self._evaluate_finish(state, turn)
             if finished:
                 return state
 
+        # ── 流式事件：loop 结束（正常退出 while） ──
+        await self._emit_stream(
+            _stream_loop_end(
+                run_id=state["run_config"].run_id,
+                reason=state.get("terminal", {}) and state["terminal"].stop_reason
+                if state.get("terminal")
+                else "loop_exited",
+                total_turns=state["iteration"],
+            )
+        )
         return state
 
     def _sync_discovery_to_state(self, state: LoopState) -> None:
         """Sync deferred store state to LoopState discovery_* fields."""
         if self._deferred_store is not None:
-            self._deferred_store.sync_to_state(state)
+            self._deferred_store.sync_to_state(cast(dict[Any, Any], state))
             # Backward compat alias
             state["active_deferred_tools"] = list(
                 self._deferred_store.active_names()
             )
 
     async def _execute_pending_tools(self, state: LoopState) -> bool:
+        # ── 流式事件：工具开始执行 ──
+        run_id = state["run_config"].run_id
+        turn = state["iteration"]
+        for call in state["pending_tool_calls"]:
+            await self._emit_stream(
+                _stream_tool_use_start(
+                    tool_name=call.tool_name,
+                    tool_id=call.tool_call_id,
+                    run_id=run_id,
+                    turn=turn,
+                )
+            )
+
         result = await _await_value(
             self._tool_runner.execute_batch(
                 ToolBatchRequest(
@@ -410,6 +565,29 @@ class AgentLoop:
             state["tool_results"],
             new_results,
         )
+
+        # ── 流式事件：工具执行结果 ──
+        for tool_result in new_results:
+            if tool_result.status == "error":
+                await self._emit_stream(
+                    _stream_tool_use_error(
+                        tool_id=tool_result.tool_call_id,
+                        error=tool_result.error.message if tool_result.error else "Unknown error",
+                        run_id=run_id,
+                        turn=turn,
+                    )
+                )
+            else:
+                await self._emit_stream(
+                    _stream_tool_use_result(
+                        tool_name=tool_result.tool_name,
+                        tool_id=tool_result.tool_call_id,
+                        result=str(tool_result.output)[:500] if tool_result.output else "",
+                        run_id=run_id,
+                        turn=turn,
+                    )
+                )
+
         for tool_result in new_results:
             output = tool_result.output
             has_traceable_evidence = bool(
@@ -505,7 +683,6 @@ class AgentLoop:
         tool execution path, then converts results back to ModelMessage
         and appends to loop_messages.
         """
-        from rag.agent.core.messages import PendingToolCall
 
         pending = list(state.get("pending_loop_tool_calls", []))
         if not pending:
@@ -543,6 +720,19 @@ class AgentLoop:
             if ptc.status == "approved":
                 ptc.status = "running"
 
+        # ── 流式事件：工具开始执行 ──
+        run_id = state["run_config"].run_id
+        turn = state["iteration"]
+        for call in tool_call_plans:
+            await self._emit_stream(
+                _stream_tool_use_start(
+                    tool_name=call.tool_name,
+                    tool_id=call.tool_call_id,
+                    run_id=run_id,
+                    turn=turn,
+                )
+            )
+
         # Delegate to existing tool execution
         result = await _await_value(
             self._tool_runner.execute_batch(
@@ -579,6 +769,28 @@ class AgentLoop:
             state["tool_results"],
             new_results,
         )
+
+        # ── 流式事件：工具执行结果 ──
+        for tool_result in new_results:
+            if tool_result.status == "error":
+                await self._emit_stream(
+                    _stream_tool_use_error(
+                        tool_id=tool_result.tool_call_id,
+                        error=tool_result.error.message if tool_result.error else "Unknown error",
+                        run_id=run_id,
+                        turn=turn,
+                    )
+                )
+            else:
+                await self._emit_stream(
+                    _stream_tool_use_result(
+                        tool_name=tool_result.tool_name,
+                        tool_id=tool_result.tool_call_id,
+                        result=str(tool_result.output)[:500] if tool_result.output else "",
+                        run_id=run_id,
+                        turn=turn,
+                    )
+                )
 
         # Update PendingToolCall status from results
         result_by_id = {r.tool_call_id: r for r in new_results}
@@ -736,6 +948,13 @@ class AgentLoop:
             detail={"stop_code": outcome.code},
             checkpoint_reason="terminal_completed",
         )
+        await self._emit_stream(
+            _stream_loop_end(
+                run_id=state["run_config"].run_id,
+                reason=outcome.code,
+                total_turns=state["iteration"],
+            )
+        )
 
     async def _fail(
         self,
@@ -770,6 +989,14 @@ class AgentLoop:
             },
             checkpoint_reason=checkpoint_reason,
         )
+        # ── 流式事件：loop 结束 ──
+        await self._emit_stream(
+            _stream_loop_end(
+                run_id=state["run_config"].run_id,
+                reason=stop_reason,
+                total_turns=state["iteration"],
+            )
+        )
 
     async def _pause(
         self,
@@ -797,6 +1024,13 @@ class AgentLoop:
                 ),
             },
             checkpoint_reason=checkpoint_reason,
+        )
+        await self._emit_stream(
+            _stream_loop_end(
+                run_id=state["run_config"].run_id,
+                reason=str(transition_reason),
+                total_turns=state["iteration"],
+            )
         )
 
     async def _transition(
@@ -973,6 +1207,125 @@ def _latest_tool_error_message(state: LoopState) -> str:
             return result.error.message
         return f"Tool {result.tool_name} failed."
     return "Tool execution failed."
+
+
+# ── 流式事件 helper ──────────────────────────────────────
+
+
+def _stream_turn_start(*, run_id: str, turn: int) -> Any:
+    from rag.agent.streaming.events import EventType, StreamEvent, next_seq
+
+    return StreamEvent(
+        type=EventType.TURN_START,
+        run_id=run_id,
+        turn=turn,
+        seq=next_seq(),
+    )
+
+
+def _stream_turn_end(
+    *, run_id: str, turn: int, stop_reason: str
+) -> Any:
+    from rag.agent.streaming.events import EventType, StreamEvent, next_seq
+
+    return StreamEvent(
+        type=EventType.TURN_END,
+        run_id=run_id,
+        turn=turn,
+        seq=next_seq(),
+        data={"stop_reason": stop_reason},
+    )
+
+
+def _stream_loop_end(*, run_id: str, reason: str, total_turns: int) -> Any:
+    from rag.agent.streaming.events import EventType, StreamEvent, next_seq
+
+    return StreamEvent(
+        type=EventType.LOOP_END,
+        run_id=run_id,
+        seq=next_seq(),
+        data={"reason": reason, "total_turns": total_turns},
+    )
+
+
+def _stream_tool_use_start(
+    *, tool_name: str, tool_id: str, run_id: str, turn: int
+) -> Any:
+    from rag.agent.streaming.events import EventType, StreamEvent, next_seq
+
+    return StreamEvent(
+        type=EventType.TOOL_USE_START,
+        run_id=run_id,
+        turn=turn,
+        seq=next_seq(),
+        span_id=f"tool:{tool_id}",
+        data={"tool_name": tool_name, "tool_id": tool_id},
+    )
+
+
+def _stream_tool_use_result(
+    *, tool_name: str, tool_id: str, result: str, run_id: str, turn: int
+) -> Any:
+    from rag.agent.streaming.events import EventType, StreamEvent, next_seq
+
+    return StreamEvent(
+        type=EventType.TOOL_USE_RESULT,
+        run_id=run_id,
+        turn=turn,
+        seq=next_seq(),
+        span_id=f"tool:{tool_id}",
+        data={
+            "tool_name": tool_name,
+            "tool_id": tool_id,
+            "result": result,
+        },
+    )
+
+
+def _stream_tool_use_error(
+    *, tool_id: str, error: str, run_id: str, turn: int
+) -> Any:
+    from rag.agent.streaming.events import EventType, StreamEvent, next_seq
+
+    return StreamEvent(
+        type=EventType.TOOL_USE_ERROR,
+        run_id=run_id,
+        turn=turn,
+        seq=next_seq(),
+        span_id=f"tool:{tool_id}",
+        data={"tool_id": tool_id, "error": error},
+    )
+
+
+def _stream_compact_layer(
+    *, channels: list[str], warnings: list[str], run_id: str, turn: int
+) -> Any:
+    from rag.agent.streaming.events import EventType, StreamEvent, next_seq
+
+    return StreamEvent(
+        type=EventType.COMPACT_LAYER,
+        run_id=run_id,
+        turn=turn,
+        seq=next_seq(),
+        data={
+            "channels": channels,
+            "warnings": warnings,
+        },
+    )
+
+
+def _stream_recovery(
+    *, strategy: str, detail: str, run_id: str, turn: int
+) -> Any:
+    from rag.agent.streaming.events import EventType, StreamEvent, next_seq
+
+    return StreamEvent(
+        type=EventType.RECOVERY,
+        run_id=run_id,
+        turn=turn,
+        seq=next_seq(),
+        data={"strategy": strategy, "detail": detail},
+    )
 
 
 __all__ = [

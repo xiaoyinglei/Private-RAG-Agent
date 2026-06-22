@@ -28,6 +28,7 @@ from rag.agent.tools.registry import (
     ToolExecutionContext,
     ToolInputValidationError,
     ToolOutputValidationError,
+    ToolProgressCallback,
     ToolRegistry,
     ToolRunnerMissingError,
 )
@@ -149,12 +150,14 @@ class ToolExecutionService:
         approval_policy: ApprovalPolicy | None = None,
         require_idempotent_parallel: bool = True,
         pause_on_ambiguous: bool = True,
+        stream_sink: Any = None,  # StreamEventSink | None
     ) -> None:
         self._tool_registry = tool_registry
         self._record_writer = record_writer or VolatileExecutionRecordWriter()
         self._approval_policy = approval_policy or ApprovalPolicy()
         self._require_idempotent_parallel = require_idempotent_parallel
         self._pause_on_ambiguous = pause_on_ambiguous
+        self._stream_sink = stream_sink
 
     async def execute_batch(
         self,
@@ -411,6 +414,13 @@ class ToolExecutionService:
             await self._write(failed)
             return reserved, failed
 
+        # 创建进度回调（如果 stream_sink 可用）
+        progress_cb = self._make_progress_callback(
+            call.tool_call_id,
+            run_config=run_config,
+            state=state,
+        )
+
         current = record
         retry_count = 0
         while True:
@@ -425,6 +435,7 @@ class ToolExecutionService:
                             tool_call_id=call.tool_call_id,
                             state=state,
                             definition=definition,
+                            progress_callback=progress_cb,
                         ),
                     ),
                     timeout=spec.timeout_seconds,
@@ -617,6 +628,35 @@ class ToolExecutionService:
 
     async def _write(self, record: ToolExecutionRecord) -> None:
         await self._record_writer.write_execution_record(record)
+
+    def _make_progress_callback(
+        self,
+        tool_call_id: str,
+        *,
+        run_config: AgentRunConfig,
+        state: ToolState | None,
+    ) -> ToolProgressCallback | None:
+        """创建进度回调，工具可以调用它来报告执行进度。"""
+        if self._stream_sink is None:
+            return None
+        turn = state["iteration"] if state is not None else 0
+
+        async def progress_callback(
+            progress: str, percent: float | None = None
+        ) -> None:
+            from rag.agent.streaming.events import tool_use_progress
+
+            await self._stream_sink.emit(
+                tool_use_progress(
+                    tool_call_id,
+                    progress,
+                    percent=percent,
+                    run_id=run_config.run_id,
+                    turn=turn,
+                )
+            )
+
+        return progress_callback
 
     def _result(
         self,

@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from inspect import isawaitable
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Protocol, cast
 
 from pydantic import BaseModel, ValidationError
 
@@ -15,6 +15,14 @@ if TYPE_CHECKING:
     from rag.agent.loop.state import LoopState
 
 
+class ToolProgressCallback(Protocol):
+    def __call__(
+        self,
+        progress: str,
+        percent: float | None = None,
+    ) -> Awaitable[None]: ...
+
+
 @dataclass(frozen=True)
 class ToolExecutionContext:
     run_config: AgentRunConfig
@@ -22,6 +30,9 @@ class ToolExecutionContext:
     tool_call_id: str | None = None
     state: LoopState | None = None
     definition: AgentDefinition | None = None
+    # 进度回调：工具可以调用它来报告执行进度
+    # callback(tool_call_id, progress_text, percent)
+    progress_callback: ToolProgressCallback | None = None
 
 
 ToolRunnerResult = BaseModel | dict[str, object]
