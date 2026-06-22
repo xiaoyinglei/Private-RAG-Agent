@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
-from typing import Any, Literal, Self
+from typing import TYPE_CHECKING, Any, Literal, Self
 
 from langchain_core.messages import BaseMessage
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -35,6 +35,9 @@ from rag.agent.memory.models import (
 from rag.agent.planning import AgentPlan, PlanEvent
 from rag.agent.tools.spec import ToolResult
 from rag.schema.query import AnswerCitation, EvidenceItem, RetrievalSignals
+
+if TYPE_CHECKING:
+    from rag.agent.file_manifest import FileManifest
 
 MAX_STOP_HOOK_FEEDBACK = 10
 MAX_LOOP_MEMORY_WARNINGS = 20
@@ -182,6 +185,8 @@ class LoopState(TypedDict):
     discovery_pinned_tools: list[str]
     active_deferred_tools: list[str]  # backward compat alias
     capability_diagnostics: list[RuntimeDiagnostic]
+    # ── File manifest (file-first processing) ──
+    file_manifest: FileManifest | None
 
 
 def create_loop_state(
@@ -193,6 +198,7 @@ def create_loop_state(
     memory_warnings: Iterable[str] = (),
     runtime_diagnostics: Iterable[RuntimeDiagnostic] = (),
     retrieval_signals: RetrievalSignals | None = None,
+    file_manifest: FileManifest | None = None,
 ) -> LoopState:
     return {
         "task": task,
@@ -255,6 +261,8 @@ def create_loop_state(
         "discovery_pinned_tools": [],
         "active_deferred_tools": [],
         "capability_diagnostics": [],
+        # ── File manifest (file-first processing) ──
+        "file_manifest": file_manifest,
     }
 
 

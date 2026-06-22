@@ -46,6 +46,7 @@ class AgentDelegationRequest(BaseModel):
 
 
 class DelegatedAgentResult(Protocol):
+    run_id: str
     status: str
     final_answer: str | None
     stop_reason: str | None

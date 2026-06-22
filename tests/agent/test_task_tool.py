@@ -5,20 +5,18 @@ Verifies end-to-end: task tool → child loop → tool execution → result.
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 import pytest
 
 from rag.agent.builtin.generic import GENERIC_AGENT
-from rag.agent.core.context import AgentRunConfig, RunRegistry
-from rag.agent.core.definition import AgentDefinition, AgentRuntimePolicy
+from rag.agent.core.context import AgentRunConfig
+from rag.agent.core.delegation import AgentDelegationRequest, ParentAgentContext
 from rag.agent.core.turn_contracts import ToolCallPlan
-from rag.agent.loop.state import create_loop_state
-from rag.agent.service import AgentRunRequest, AgentService
+from rag.agent.service import AgentRunRequest, _TaskChildRunner
 from rag.agent.tools.registry import ToolRegistry
 from rag.agent.tools.task_tool import TaskInput, TaskOutput, TaskToolRunner, task_tool_spec
 from rag.schema.runtime import AccessPolicy
-
 
 # ── Helpers ──────────────────────────────────────────────────────
 
@@ -31,6 +29,30 @@ class _SimpleDecisionProvider:
 
         task = state.get("task", "")
         return ModelTurnDraft(action="finish", final_answer=f"answer: {task}")
+
+
+class _DelegatedTaskResult:
+    run_id = "child-run"
+    status = "done"
+    final_answer = "delegated answer"
+    stop_reason = None
+    tool_results = []
+    evidence = []
+    citations = []
+
+
+class _CapturingDelegatedRunner:
+    def __init__(self) -> None:
+        self.calls: list[tuple[AgentDelegationRequest, ParentAgentContext]] = []
+
+    def run_delegated_task(
+        self,
+        *,
+        request: AgentDelegationRequest,
+        parent_state: ParentAgentContext,
+    ) -> _DelegatedTaskResult:
+        self.calls.append((request, parent_state))
+        return _DelegatedTaskResult()
 
 
 def _make_run_config(**overrides) -> AgentRunConfig:
@@ -111,7 +133,12 @@ class TestTaskOutput:
 class TestTaskToolRunner:
     def test_child_policy_removes_task(self) -> None:
         policy = GENERIC_AGENT.to_runtime_policy()
-        runner = TaskToolRunner(policy=policy, tool_registry=ToolRegistry())
+        runner = _TaskChildRunner(
+            policy=policy,
+            tool_registry=ToolRegistry(),
+            model_turn_provider=None,
+            retrieval_hint_provider=None,
+        )
         child = runner._child_policy()
 
         assert "task" not in child.core_tool_names
@@ -122,10 +149,45 @@ class TestTaskToolRunner:
         from dataclasses import replace
 
         policy = replace(GENERIC_AGENT.to_runtime_policy(), max_depth=0)
-        runner = TaskToolRunner(policy=policy, tool_registry=ToolRegistry())
+        runner = _TaskChildRunner(
+            policy=policy,
+            tool_registry=ToolRegistry(),
+            model_turn_provider=None,
+            retrieval_hint_provider=None,
+        )
         child = runner._child_policy()
 
         assert child.max_depth == 0
+
+    @pytest.mark.anyio
+    async def test_uses_injected_delegated_runner(self) -> None:
+        policy = GENERIC_AGENT.to_runtime_policy()
+        delegated_runner = _CapturingDelegatedRunner()
+        parent_config = _make_run_config(max_depth=2)
+        runner = TaskToolRunner(
+            policy=policy,
+            tool_registry=ToolRegistry(),
+            delegated_runner=delegated_runner,
+        )
+
+        output = await runner.run(
+            TaskInput(
+                task="Summarize the data",
+                context_summary="Q1: 1M",
+                token_budget=1234,
+            ),
+            parent_config=parent_config,
+        )
+
+        assert output.status == "done"
+        assert output.conclusion == "delegated answer"
+        assert len(delegated_runner.calls) == 1
+        request, parent_state = delegated_runner.calls[0]
+        assert request.agent_type == "task_child"
+        assert request.estimated_tokens == 1234
+        assert "Summarize the data" in request.prompt
+        assert "Q1: 1M" in request.prompt
+        assert parent_state["run_config"] == parent_config
 
 
 # ── Integration tests ────────────────────────────────────────────
@@ -134,8 +196,8 @@ class TestTaskToolRunner:
 @pytest.mark.anyio
 async def test_task_tool_end_to_end() -> None:
     """Full round-trip: task tool → child loop → tool execution → result."""
-    from rag.agent.core.agent_service_factory import AgentServiceFactory
     from rag.agent.builtin_registry import create_builtin_tool_registry
+    from rag.agent.core.agent_service_factory import AgentServiceFactory
 
     # Create a service with the generic agent and all builtin tools
     tool_registry = create_builtin_tool_registry()
@@ -176,8 +238,8 @@ async def test_task_tool_end_to_end() -> None:
 @pytest.mark.anyio
 async def test_task_tool_with_context_summary() -> None:
     """Task tool passes context_summary to child."""
-    from rag.agent.core.agent_service_factory import AgentServiceFactory
     from rag.agent.builtin_registry import create_builtin_tool_registry
+    from rag.agent.core.agent_service_factory import AgentServiceFactory
 
     tool_registry = create_builtin_tool_registry()
     decision_provider = _SimpleDecisionProvider()

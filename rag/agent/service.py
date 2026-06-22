@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from dataclasses import replace
 from inspect import isawaitable
 from pathlib import Path
-from typing import cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 from uuid import uuid4
 
 from langchain_core.messages import BaseMessage
@@ -12,8 +13,9 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from rag.agent.capabilities.catalog import (
     CORE_TOOLS,
-    DeferredToolStore,
     DEFERRED_TOOLS,
+    DeferredToolStore,
+    SearchCandidate,
     ToolCatalog,
     ToolCatalogEntry,
     flatten_schema,
@@ -32,9 +34,9 @@ from rag.agent.core.checkpointing import (
     LangGraphCheckpointStore,
     create_agent_checkpointer,
 )
-from rag.agent.core.context import AgentRunConfig, RunRegistry
+from rag.agent.core.context import AgentRunConfig, RunRegistry, derive_child_config
 from rag.agent.core.definition import AgentDefinition, AgentRuntimePolicy
-from rag.agent.core.delegation import DelegatedAgentRunner
+from rag.agent.core.delegation import AgentDelegationRequest, DelegatedAgentRunner, ParentAgentContext
 from rag.agent.core.finalization import FinishCandidateBuilder
 from rag.agent.core.human_input import HumanInputRequest, HumanInputResponse
 from rag.agent.core.llm_providers import create_loop_model_turn_provider
@@ -72,6 +74,9 @@ from rag.agent.tools.registry import ToolRegistry, ToolRunner
 from rag.agent.tools.spec import ToolPermissions, ToolResult, ToolSpec
 from rag.schema.query import AnswerCitation, EvidenceItem
 from rag.schema.runtime import AccessPolicy
+
+if TYPE_CHECKING:
+    from rag.agent.file_manifest import FileManifest
 
 
 class AgentRunRequest(BaseModel):
@@ -249,6 +254,88 @@ class _ResultDrivenModelTurnProvider:
         )
 
 
+class _TaskChildRunner:
+    """Service-layer runner for the generic task tool.
+
+    Tools may request delegation, but service owns child-loop construction.
+    """
+
+    def __init__(
+        self,
+        *,
+        policy: AgentRuntimePolicy,
+        tool_registry: ToolRegistry,
+        model_turn_provider: ModelTurnProvider | None,
+        retrieval_hint_provider: RetrievalHintProvider | None,
+    ) -> None:
+        self._policy = policy
+        self._tool_registry = tool_registry
+        self._model_turn_provider = model_turn_provider
+        self._retrieval_hint_provider = retrieval_hint_provider
+
+    async def run_delegated_task(
+        self,
+        *,
+        request: AgentDelegationRequest,
+        parent_state: ParentAgentContext,
+    ) -> AgentRunResult:
+        child_policy = self._child_policy()
+        child_config = self._derive_child_config(
+            parent_state["run_config"],
+            child_policy,
+            request,
+        )
+        child_service = AgentService(
+            policy=child_policy,
+            tool_registry=self._tool_registry,
+            model_turn_provider=self._model_turn_provider,
+            retrieval_hint_provider=self._retrieval_hint_provider,
+        )
+        return await child_service.run_with_config(
+            task=request.prompt,
+            run_config=child_config,
+        )
+
+    def _child_policy(self) -> AgentRuntimePolicy:
+        return replace(
+            self._policy,
+            max_depth=max(self._policy.max_depth - 1, 0),
+            core_tool_names=tuple(
+                tool
+                for tool in self._policy.core_tool_names
+                if tool != "task"
+            ),
+        )
+
+    def _derive_child_config(
+        self,
+        parent_config: AgentRunConfig,
+        child_policy: AgentRuntimePolicy,
+        request: AgentDelegationRequest,
+    ) -> AgentRunConfig:
+        child_definition = AgentDefinition(
+            agent_type="task_child",
+            description="Generic task child",
+            system_prompt=child_policy.system_instructions,
+            allowed_tools=child_policy.allowed_tools,
+            estimated_token_budget=(
+                request.estimated_tokens or child_policy.token_budget
+            ),
+            estimated_work_budget=child_policy.work_budget,
+            max_iterations=child_policy.max_iterations,
+            max_depth=child_policy.max_depth,
+            model_selection=child_policy.model_selection,
+            tool_policy=child_policy.tool_policy,
+        )
+        child_config = derive_child_config(parent_config, child_definition)
+        if request.estimated_tokens is not None:
+            child_config = replace(
+                child_config,
+                budget_total=request.estimated_tokens,
+            )
+        return child_config
+
+
 class AgentService:
     def __init__(
         self,
@@ -270,7 +357,6 @@ class AgentService:
         if policy is not None:
             # Convert AgentRuntimePolicy → AgentDefinition for internal compat.
             # Remove this when service internals migrate to AgentRuntimePolicy.
-            from rag.agent.capabilities.catalog import CORE_TOOLS, DEFERRED_TOOLS
             core = [t for t in policy.core_tool_names]
             deferred = [t for t in policy.deferred_tool_names]
             definition = AgentDefinition(
@@ -381,6 +467,7 @@ class AgentService:
         input_files: list[str] | None = None,
         workspace_path: str | None = None,
     ) -> AgentRunResult:
+        from rag.agent.file_manifest import build_file_manifest
         from rag.agent.primitive_ops import PrimitiveOps
         from rag.agent.workspace import create_temp_workspace, import_files, open_workspace
 
@@ -394,25 +481,40 @@ class AgentService:
         if input_files:
             import_files(workspace, [Path(f) for f in input_files])
 
-        # 3. Create PrimitiveOps and inject runners
+        # 3. Build file manifest (file-first processing)
+        manifest = build_file_manifest(workspace)
+
+        # 4. Create PrimitiveOps and inject runners
         ops = PrimitiveOps(workspace=workspace)
         memory_store = WorkspaceMemoryStore(
             workspace=workspace,
             policy=run_config.memory_policy,
+        )
+
+        # 5. Promote structured_probe to core if we have probeable files
+        file_tools_to_activate: set[str] = (
+            {"structured_probe"} if manifest.has_probeable_files else set()
         )
         runtime_registry = self._runtime_tool_registry(
             run_config,
             runners=ops.runners(),
         )
         self._validate_allowed_tools(runtime_registry)
+
+        # 6. Inject manifest context into messages
+        enriched_messages = self._inject_manifest_context(
+            messages or [], manifest,
+        )
+
         state = self._initial_loop_state_from_config(
             task=task,
             run_config=run_config,
             pending_tool_calls=pending_tool_calls,
             approved_tool_call_ids=approved_tool_call_ids,
             denied_tool_call_ids=denied_tool_call_ids,
-            messages=messages,
+            messages=enriched_messages,
             memory_store=memory_store,
+            file_manifest=manifest,
         )
         await self._apply_retrieval_hint(state)
         checkpoint_store = LangGraphCheckpointStore(
@@ -428,6 +530,7 @@ class AgentService:
             memory_store=memory_store,
             goal_spec=goal_spec,
             state=state,
+            auto_activate_tools=file_tools_to_activate,
         )
         try:
             result_state = await loop.run(state)
@@ -452,6 +555,7 @@ class AgentService:
         denied_tool_call_ids: list[str] | None = None,
         messages: list[BaseMessage] | None = None,
         memory_store: WorkspaceMemoryStore | None = None,
+        file_manifest: FileManifest | None = None,
     ) -> LoopState:
         RunRegistry.remove(run_config.run_id)
         handles = RunRegistry.get_or_create(run_config)
@@ -463,6 +567,7 @@ class AgentService:
             pending_tool_calls=pending_tool_calls or (),
             messages=messages or (),
             runtime_diagnostics=self._runtime_diagnostics,
+            file_manifest=file_manifest,
         )
         state["approved_tool_call_ids"] = list(
             approved_tool_call_ids or ()
@@ -480,6 +585,7 @@ class AgentService:
         memory_store: WorkspaceMemoryStore | None,
         goal_spec: GoalSpec | None,
         state: LoopState | None = None,
+        auto_activate_tools: set[str] | None = None,
     ) -> AgentLoop:
         # Create and bind DeferredToolStore BEFORE resolving provider
         # (provider needs store for tool filtering)
@@ -488,7 +594,25 @@ class AgentService:
         )
         deferred_store_var.set(store)
         if state is not None:
-            store.sync_from_state(state)
+            store.sync_from_state(cast(dict[Any, Any], state))
+
+        # Auto-activate file-related tools (skip tool_search + activate_tools)
+        if auto_activate_tools:
+            for tool_name in auto_activate_tools:
+                try:
+                    store.set_pending_candidates(
+                        query="__file_manifest_auto__",
+                        candidates=[
+                            SearchCandidate(
+                                name=tool_name,
+                                description=f"Auto-activated for file processing",
+                                reason="structured input files detected",
+                            )
+                        ],
+                    )
+                    store.activate(tool_name, iteration=0, source_query="__file_manifest_auto__")
+                except (KeyError, RuntimeError):
+                    pass  # Already active or not in allowed_tools
         provider = self._resolve_model_turn_provider(state)
         output_finalizer = self._resolve_output_finalizer(state)
         return AgentLoop(
@@ -614,6 +738,29 @@ class AgentService:
                 f"unregistered tools: {', '.join(dict.fromkeys(missing))}"
             )
 
+    @staticmethod
+    def _inject_manifest_context(
+        messages: list[BaseMessage],
+        manifest: FileManifest,
+    ) -> list[BaseMessage]:
+        """Inject file manifest context into the message list.
+
+        Adds a system message with the manifest context block before the
+        first human message, so the model sees file info on turn 1.
+        """
+        if not manifest.files:
+            return messages
+
+        from langchain_core.messages import SystemMessage
+
+        block = manifest.to_context_block()
+        if not block:
+            return messages
+
+        manifest_msg = SystemMessage(content=block)
+        # Insert manifest message as the first message (before any user message)
+        return [manifest_msg, *messages]
+
     def _runtime_tool_registry(
         self,
         run_config: AgentRunConfig,
@@ -648,6 +795,12 @@ class AgentService:
                 tool_registry=runtime,
                 model_turn_provider=self._model_turn_provider,
                 retrieval_hint_provider=self._retrieval_hint_provider,
+                delegated_runner=_TaskChildRunner(
+                    policy=self._definition.to_runtime_policy(),
+                    tool_registry=runtime,
+                    model_turn_provider=self._model_turn_provider,
+                    retrieval_hint_provider=self._retrieval_hint_provider,
+                ),
             )
 
             async def _task_runner(payload: BaseModel) -> TaskOutput:
@@ -700,8 +853,9 @@ class AgentService:
         for spec in registry.list_all():
             if spec.name in filt.deny:
                 continue
+            category: Literal["core", "deferred", "internal"]
             if spec.name in filt.promote_to_core or spec.name in CORE_TOOLS:
-                category: str = "core"
+                category = "core"
             elif spec.name in DEFERRED_TOOLS:
                 category = "deferred"
             else:
@@ -770,7 +924,10 @@ class AgentService:
                 max_results=input_data.max_results,
             )
 
-        self._base_tool_registry.register(search_spec, runner=_search_runner)
+        self._base_tool_registry.register(
+            search_spec,
+            runner=cast(ToolRunner, _search_runner),
+        )
 
         # ── activate_tools ──
         activate_spec = ToolSpec(
@@ -806,7 +963,10 @@ class AgentService:
                 iteration=iteration_var.get(0),
             )
 
-        self._base_tool_registry.register(activate_spec, runner=_activate_runner)
+        self._base_tool_registry.register(
+            activate_spec,
+            runner=cast(ToolRunner, _activate_runner),
+        )
 
     def _register_task_tool(self) -> None:
         """Register the 'task' tool spec (runner injected per-request in _runtime_tool_registry)."""
