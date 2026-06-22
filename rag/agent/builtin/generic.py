@@ -26,9 +26,11 @@ How to work:
 - Your current tools are listed in the system context. If they cannot
   fulfill the task, call tool_search to discover more tools, then
   activate_tools to load them.
-- For local files (xlsx, csv, json), use list_files to find them, then
-  run_python_inline to read and analyze directly. Use workspace-relative
-  paths (e.g. 'input_files/filename.xlsx'), not absolute paths.
+- For local files (xlsx, csv, json), if no file manifest is provided in
+  the task, use list_files to find them first. If a file manifest IS
+  provided, skip list_files and go directly to run_python_inline. Use
+  workspace-relative paths (e.g. 'input_files/filename.xlsx'), not
+  absolute paths.
 - For structured data, use structured_probe first, then run_python_inline
   for deeper analysis when needed.
 - For bounded sub-tasks that benefit from context isolation, use the
