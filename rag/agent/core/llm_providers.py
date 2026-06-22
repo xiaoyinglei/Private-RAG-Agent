@@ -5,10 +5,14 @@ from collections.abc import Awaitable, Mapping
 from typing import Any, Literal
 from uuid import uuid4
 
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 from pydantic import BaseModel, Field
 
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
-
+from rag.agent.capabilities.catalog import (
+    DeferredToolStore,
+    ToolCatalog,
+    resolve_visible_tools,
+)
 from rag.agent.core.context import RunRegistry
 from rag.agent.core.definition import AgentDefinition, ModelSelectionPolicy
 from rag.agent.core.llm_context import (
@@ -17,22 +21,15 @@ from rag.agent.core.llm_context import (
 )
 from rag.agent.core.llm_registry import ModelRegistry
 from rag.agent.core.messages import ModelMessage, StopReason, ToolCall, ToolUseResult
-from rag.agent.core.runtime_diagnostics import RuntimeDiagnostic
 from rag.agent.core.runtime_ports import (
     RetrievalHintProvider,
     RetrievalHintUpdate,
-)
-from rag.agent.capabilities.catalog import (
-    DeferredToolStore,
-    ToolCatalog,
-    resolve_visible_tools,
 )
 from rag.agent.core.tool_schema import AgentMessageAssembler, OpenAIAdapter
 from rag.agent.core.turn_contracts import ToolCallPlan
 from rag.agent.loop.state import (
     LoopState,
     ModelTurnDraft,
-    append_loop_diagnostic,
 )
 from rag.agent.tools.spec import ToolSpec
 from rag.assembly.tokenizer import TokenAccountingService, TokenizerContract
@@ -341,6 +338,7 @@ class LLMLoopModelTurnProvider:
         tool_specs: list[ToolSpec] | None = None,
         catalog: ToolCatalog | None = None,
         deferred_store: DeferredToolStore | None = None,
+        stream_sink: Any = None,
     ) -> None:
         self._kwargs = kwargs or {}
         self._gateway = gateway or _fallback_gateway(
@@ -360,6 +358,7 @@ class LLMLoopModelTurnProvider:
         self._catalog = catalog
         self._deferred_store = deferred_store
         self._assembler = AgentMessageAssembler()
+        self._stream_sink = stream_sink
 
     async def next_turn(
         self,
@@ -387,13 +386,15 @@ class LLMLoopModelTurnProvider:
         definition: AgentDefinition,
         budget_remaining: int,
     ) -> ModelTurnDraft:
-        """OpenAI-compatible native tool calling path."""
+        """OpenAI-compatible native tool calling path.
+
+        When stream_sink is configured, emits TEXT_DELTA events as
+        chunks arrive from the LLM.
+        """
         # 1. Flush completed tool call/result pairs into loop_messages
-        #    so the model sees its own tool history on subsequent turns.
         _flush_tool_results_to_loop_messages(state)
 
         # 2. Resolve visible tools BEFORE building system message
-        #    so the prompt shows only tools the model can actually call.
         visible_specs = self._filter_visible_tools(definition)
         visible_tool_names = [s.name for s in visible_specs]
 
@@ -421,23 +422,96 @@ class LLMLoopModelTurnProvider:
         except KeyError:
             ledger = None
 
-        result = await self._gateway.agenerate_with_tools(
-            stage=LLMCallStage.TOOL_DECISION,
-            messages=openai_messages,
-            tools=openai_tools,
-            ledger=ledger,
-            lease_id=(
-                f"{run_id}:loop_turn:{state.get('iteration', 0)}:"
-                f"{uuid4().hex}"
-            ),
-            kwargs=self._kwargs,
+        lease_id = (
+            f"{run_id}:loop_turn:{state.get('iteration', 0)}:"
+            f"{uuid4().hex}"
         )
 
+        if self._stream_sink is not None:
+            result_value = await self._streaming_call(
+                state=state,
+                messages=openai_messages,
+                tools=openai_tools,
+                ledger=ledger,
+                lease_id=lease_id,
+            )
+        else:
+            result = await self._gateway.agenerate_with_tools(
+                stage=LLMCallStage.TOOL_DECISION,
+                messages=openai_messages,
+                tools=openai_tools,
+                ledger=ledger,
+                lease_id=lease_id,
+                kwargs=self._kwargs,
+            )
+            result_value = result.value
+
         # 6. Parse response
-        tool_result = OpenAIAdapter.parse_tool_calls(result.value)
+        tool_result = OpenAIAdapter.parse_tool_calls(result_value)
 
         # 7. Convert to ModelTurnDraft
         return _tool_use_result_to_draft(tool_result, state)
+
+    async def _streaming_call(
+        self,
+        *,
+        state: LoopState,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        ledger: Any,
+        lease_id: str,
+    ) -> Any:
+        """流式调用 LLM，emit TEXT_DELTA 事件。
+
+        从流式 chunks 中收集文本和工具调用，构造 OpenAI 格式的 result。
+        不执行工具 — 工具执行由 AgentLoop 的主路径负责。
+        """
+        from rag.agent.streaming.events import text_delta as make_text_delta
+
+        run_id = state["run_config"].run_id
+        turn = state.get("iteration", 0)
+        accumulated_text = ""
+
+        tool_calls: list[dict[str, Any]] = []
+        current_tool: dict[str, Any] | None = None
+        current_tool_json = ""
+
+        async for chunk in self._gateway.astream_with_tools(
+            stage=LLMCallStage.TOOL_DECISION,
+            messages=messages,
+            tools=tools,
+            ledger=ledger,
+            lease_id=lease_id,
+            kwargs=self._kwargs,
+        ):
+            if chunk.type == "text_delta" and chunk.content:
+                accumulated_text += chunk.content
+                await self._stream_sink.emit(
+                    make_text_delta(chunk.content, run_id=run_id, turn=turn)
+                )
+            elif chunk.type == "tool_use_start":
+                current_tool = {
+                    "id": chunk.tool_id,
+                    "type": "function",
+                    "function": {"name": chunk.tool_name, "arguments": ""},
+                }
+                current_tool_json = ""
+            elif chunk.type == "tool_input_delta":
+                current_tool_json += chunk.content
+            elif chunk.type == "content_block_stop":
+                if current_tool is not None:
+                    current_tool["function"]["arguments"] = current_tool_json
+                    tool_calls.append(current_tool)
+                    current_tool = None
+                    current_tool_json = ""
+
+        message: dict[str, Any] = {
+            "role": "assistant",
+            "content": accumulated_text,
+        }
+        if tool_calls:
+            message["tool_calls"] = tool_calls
+        return {"choices": [{"message": message}]}
 
     def _filter_visible_tools(
         self, definition: AgentDefinition,
@@ -582,7 +656,7 @@ def _flush_tool_results_to_loop_messages(state: LoopState) -> None:
     }
 
     # Index pending plans by id for argument lookup
-    plan_by_id: dict[str, Any] = {}
+    plan_by_id: dict[str, ToolCallPlan] = {}
     for plan in state.get("pending_tool_calls", []):
         tc_id = getattr(plan, "tool_call_id", None)
         if tc_id:
@@ -593,8 +667,8 @@ def _flush_tool_results_to_loop_messages(state: LoopState) -> None:
         if tc_id in existing_ids:
             continue
 
-        plan = plan_by_id.get(tc_id)
-        arguments = dict(plan.arguments) if plan is not None else {}
+        matched_plan = plan_by_id.get(tc_id)
+        arguments = dict(matched_plan.arguments) if matched_plan is not None else {}
 
         # assistant message with tool_call
         loop_messages.append(
@@ -626,6 +700,7 @@ def create_loop_model_turn_provider(
     definition: AgentDefinition | None = None,
     catalog: ToolCatalog | None = None,
     deferred_store: DeferredToolStore | None = None,
+    stream_sink: Any = None,
 ) -> LLMLoopModelTurnProvider:
     resolved = registry.resolve_for_node(
         node_model=selection.tool_decision_model,
@@ -657,6 +732,7 @@ def create_loop_model_turn_provider(
         tool_specs=tool_specs,
         catalog=catalog,
         deferred_store=deferred_store,
+        stream_sink=stream_sink,
     )
 
 

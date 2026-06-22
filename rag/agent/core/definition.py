@@ -26,6 +26,9 @@ class ToolPolicy:
     max_parallel_calls: int = 4
     require_confirmation_for: frozenset[str] = field(default_factory=frozenset)
     deny_tools: frozenset[str] = field(default_factory=frozenset)
+    # Opt-in only. Code execution is approval-gated by default even when a
+    # tool is expected to run in a sandbox.
+    auto_approve_sandboxed: bool = False
 
 
 @dataclass(frozen=True)

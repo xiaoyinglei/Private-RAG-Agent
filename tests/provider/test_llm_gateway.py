@@ -8,7 +8,7 @@ from pydantic import BaseModel
 
 from rag.agent.core.context import BudgetLedger
 from rag.assembly.support import _OpenAICompatibleChatGenerator
-from rag.providers.llm_gateway import LLMContextOverflowError, LLMGateway
+from rag.providers.llm_gateway import LLMContextOverflowError, LLMGateway, StreamChunk
 from rag.schema.llm import (
     LLMCallStage,
     LLMProviderResult,
@@ -74,6 +74,21 @@ class _StructuredUsageAwareGenerator:
                 source="provider",
             ),
         )
+
+
+class _StreamingGenerator:
+    def stream_with_tools(
+        self,
+        *,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        **kwargs: Any,
+    ) -> list[StreamChunk]:
+        del messages, tools, kwargs
+        return [
+            StreamChunk(type="text_delta", content="one two"),
+            StreamChunk(type="message_stop", stop_reason="end_turn"),
+        ]
 
 
 def _gateway(
@@ -234,6 +249,27 @@ async def test_gateway_accounts_for_structured_generation_as_one_call() -> None:
     assert result.usage.total_tokens == 8
     assert await ledger.committed() == 8
     assert generator.calls[0]["max_tokens"] == 4
+
+
+@pytest.mark.anyio
+async def test_streaming_gateway_commits_tokenizer_estimate_usage() -> None:
+    ledger = BudgetLedger(total=20)
+
+    chunks = [
+        chunk
+        async for chunk in _gateway(_StreamingGenerator()).astream_with_tools(
+            stage=LLMCallStage.TOOL_DECISION,
+            messages=[{"role": "user", "content": "hello prompt"}],
+            tools=[],
+            ledger=ledger,
+            lease_id="decision:stream",
+        )
+    ]
+
+    assert [chunk.type for chunk in chunks] == ["text_delta", "message_stop"]
+    assert chunks[0].content == "one two"
+    assert await ledger.committed() == 5
+    assert await ledger.reserved() == 0
 
 
 def test_openai_compatible_generator_preserves_response_usage() -> None:

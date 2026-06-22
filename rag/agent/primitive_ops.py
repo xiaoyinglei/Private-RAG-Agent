@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import csv
 import mimetypes
 from pathlib import Path
@@ -108,6 +109,15 @@ class RunPythonInlineInput(BaseModel):
     timeout_seconds: float = Field(default=30.0, gt=0, le=MAX_PYTHON_TIMEOUT)
 
 
+class ImagePreview(BaseModel):
+    """Preview of a generated image file."""
+    path: str
+    base64_data: str
+    mime_type: str
+    width: int | None = None
+    height: int | None = None
+
+
 class RunPythonOutput(BaseModel):
     ok: bool
     exit_code: int
@@ -117,6 +127,7 @@ class RunPythonOutput(BaseModel):
     stderr_truncated: bool
     duration_ms: float
     generated_files: list[str]
+    image_previews: list[ImagePreview] = Field(default_factory=list)
 
 
 class StructuredProbeInput(BaseModel):
@@ -142,6 +153,8 @@ class StructuredTableProbe(BaseModel):
     sample_rows: list[list[CellValue]] = Field(default_factory=list)
     candidate_header_rows: list[CandidateHeaderRow] = Field(default_factory=list)
     data_start_row: int | None = Field(default=None, ge=1)
+    merged_cells: bool = False
+    formula_columns: list[str] = Field(default_factory=list)
 
 
 class StructuredProbeOutput(BaseModel):
@@ -309,6 +322,12 @@ class PrimitiveOps:
             str(self._workspace.relative_to_root(Path(f))) for f in generated[:MAX_GENERATED_FILES]
         ]
 
+        # Detect and preview generated images
+        image_previews = _collect_image_previews(
+            [Path(f) for f in generated],
+            workspace=self._workspace,
+        )
+
         return RunPythonOutput(
             ok=result.exit_code == 0,
             exit_code=result.exit_code,
@@ -318,17 +337,27 @@ class PrimitiveOps:
             stderr_truncated=len(result.stderr) >= 50_000,
             duration_ms=result.duration_ms,
             generated_files=generated_files,
+            image_previews=image_previews,
         )
 
     def run_python_inline(self, payload: RunPythonInlineInput) -> RunPythonOutput:
-        """Execute Python code directly without writing to a file first."""
+        """Execute Python code directly without writing to a file first.
+
+        Automatically patches matplotlib.pyplot.show() to save figures
+        to scratch/ so chart output is captured.
+        """
         import tempfile
         scratch = self._workspace.root / "scratch"
         scratch.mkdir(exist_ok=True)
+
+        # Prepend matplotlib auto-capture preamble
+        preamble = _matplotlib_preamble(scratch)
+        full_code = preamble + "\n" + payload.code
+
         with tempfile.NamedTemporaryFile(
             mode="w", suffix=".py", dir=scratch, delete=False,
         ) as f:
-            f.write(payload.code)
+            f.write(full_code)
             script_path = Path(f.name)
         try:
             return self.run_python(RunPythonInput(
@@ -587,6 +616,7 @@ def _probe_excel_file(
     except ImportError as exc:
         raise RuntimeError("openpyxl is required to probe Excel workbooks") from exc
 
+    # First pass: data_only for values
     workbook = openpyxl.load_workbook(path, read_only=True, data_only=True)
     tables: list[StructuredTableProbe] = []
     for table_index, sheet_name in enumerate(workbook.sheetnames[:max_tables]):
@@ -616,6 +646,33 @@ def _probe_excel_file(
             )
         )
     workbook.close()
+
+    # Second pass: detect merged cells and formulas (requires non-read-only)
+    try:
+        wb2 = openpyxl.load_workbook(path, read_only=False, data_only=False)
+        for table in tables:
+            if table.name and table.name in wb2.sheetnames:
+                sheet = wb2[table.name]
+                # Merged cells
+                table.merged_cells = len(sheet.merged_cells.ranges) > 0
+                # Formula detection: check first 10 rows
+                formula_cols: list[str] = []
+                max_col = min(table.column_count, max_columns)
+                for row in sheet.iter_rows(
+                    min_row=1, max_row=min(10, table.row_count),
+                    max_col=max_col, values_only=False,
+                ):
+                    for cell in row:
+                        if (cell.value and isinstance(cell.value, str)
+                                and cell.value.startswith("=")):
+                            col_letter = cell.column_letter
+                            if col_letter not in formula_cols:
+                                formula_cols.append(col_letter)
+                table.formula_columns = formula_cols
+        wb2.close()
+    except Exception:
+        pass  # Best-effort; merged_cells/formula_columns stay default
+
     return tables, len(workbook.sheetnames) > max_tables
 
 
@@ -716,8 +773,99 @@ def _column_letter(index: int) -> str:
     return letters
 
 
+# ---------------------------------------------------------------------------
+# Image / chart helpers
+# ---------------------------------------------------------------------------
+
+_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".svg", ".webp", ".gif", ".bmp"}
+
+_IMAGE_MIME_MAP = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".svg": "image/svg+xml",
+    ".webp": "image/webp",
+    ".gif": "image/gif",
+    ".bmp": "image/bmp",
+}
+
+MAX_IMAGE_PREVIEW_BYTES = 2_000_000  # 2MB
+
+
+def _matplotlib_preamble(scratch_dir: Path) -> str:
+    """Code injected before user code to auto-capture matplotlib figures."""
+    scratch_str = str(scratch_dir).replace("\\", "\\\\")
+    return f'''# -- matplotlib auto-capture preamble --
+import os
+os.makedirs("{scratch_str}", exist_ok=True)
+try:
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    _plt_show_orig = plt.show
+    _plt_save_counter = [0]
+    def _plt_show_auto(*args, **kwargs):
+        fig = plt.gcf()
+        if fig.get_axes():
+            _plt_save_counter[0] += 1
+            path = os.path.join("{scratch_str}", f"chart_{{_plt_save_counter[0]:03d}}.png")
+            fig.savefig(path, dpi=150, bbox_inches="tight")
+        _plt_show_orig(*args, **kwargs)
+    plt.show = _plt_show_auto
+except ImportError:
+    pass
+# -- end preamble --
+'''
+
+
+def _collect_image_previews(
+    file_paths: list[Path],
+    *,
+    workspace: WorkspaceRuntime,
+) -> list[ImagePreview]:
+    """Collect base64 previews for generated image files."""
+    previews: list[ImagePreview] = []
+    for path in file_paths:
+        if not path.is_file():
+            continue
+        ext = path.suffix.lower()
+        if ext not in _IMAGE_EXTENSIONS:
+            continue
+        size = path.stat().st_size
+        if size > MAX_IMAGE_PREVIEW_BYTES:
+            continue
+        try:
+            data = path.read_bytes()
+            b64 = base64.b64encode(data).decode("ascii")
+            mime = _IMAGE_MIME_MAP.get(ext, "image/png")
+            rel_path = str(workspace.relative_to_root(path))
+            # Try to get dimensions
+            width, height = _image_dimensions(path)
+            previews.append(ImagePreview(
+                path=rel_path,
+                base64_data=b64,
+                mime_type=mime,
+                width=width,
+                height=height,
+            ))
+        except Exception:
+            continue
+    return previews
+
+
+def _image_dimensions(path: Path) -> tuple[int | None, int | None]:
+    """Get image dimensions using PIL if available."""
+    try:
+        from PIL import Image
+        with Image.open(path) as img:
+            return img.size
+    except Exception:
+        return None, None
+
+
 __all__ = [
     "FileInfo",
+    "ImagePreview",
     "ListFilesInput",
     "ListFilesOutput",
     "PrimitiveOps",

@@ -26,15 +26,38 @@ How to work:
 - Your current tools are listed in the system context. If they cannot
   fulfill the task, call tool_search to discover more tools, then
   activate_tools to load them.
-- For local files (xlsx, csv, json), use list_files to find them, then
-  run_python_inline to read and analyze directly. Use workspace-relative
-  paths (e.g. 'input_files/filename.xlsx'), not absolute paths.
+- For local files (xlsx, csv, json), if no file manifest is provided in
+  the task, use list_files to find them first. If a file manifest IS
+  provided, skip list_files and go directly to run_python_inline. Use
+  workspace-relative paths (e.g. 'input_files/filename.xlsx'), not
+  absolute paths.
 - For structured data, use structured_probe first, then run_python_inline
   for deeper analysis when needed.
 - For bounded sub-tasks that benefit from context isolation, use the
   task tool to spawn a child loop with its own context.
 - Preserve citation identifiers, evidence links, scores, and artifact
   paths in your answer. Never fabricate references.
+
+## File Processing Mode
+
+When an Input Files manifest is present in your context, you are in file
+processing mode. Follow these rules:
+
+- You already have the file manifest and probe summaries. Do NOT call
+  list_files for these files — go straight to run_python_inline.
+- structured_probe and run_python_inline are available immediately — no
+  tool_search or activate_tools needed.
+- For structured files (csv, xlsx), always use run_python_inline with
+  pandas for computation. Never guess column names, sheet names, or data
+  values.
+- Every answer must cite: file path, sheet/table name, columns used,
+  row count, and calculation method.
+- For numerical answers (sums, averages, ratios), perform a cross-validation
+  check (e.g. groupby-sum vs raw-sum, or row-count consistency).
+- If the manifest shows ambiguity (merged cells, formulas, multiple header
+  candidates), report it before computing.
+- Charts: use matplotlib to generate charts. Call plt.savefig() to save
+  to scratch/ — the chart will be captured automatically.
 """
 
 
