@@ -6,7 +6,7 @@ from uuid import uuid4
 from pydantic import BaseModel
 
 from rag.agent.core.human_input import HumanInputRequest, ToolCallSummary
-from rag.agent.tools.spec import ToolSpec
+from rag.agent.tools.spec import ExecutionCategory, RiskLevel, ToolSpec
 
 
 class ApprovalAction(StrEnum):
@@ -30,16 +30,15 @@ _DENY_TOOLS = frozenset({
 
 
 class ApprovalPolicy:
-    """基于 ToolSpec.permissions 的工具审批策略。
+    """基于 ToolSpec.execution_category 的工具审批策略。
 
     规则（优先级从高到低）：
     1. spec=None → DENY（未注册）
     2. tool_name 在 DENY_TOOLS 中 → DENY
     3. 工具契约或运行时策略要求确认 → ASK
-    4. permissions.execute_code + auto_approve_sandboxed → ALLOW（显式沙箱自动放行）
-    5. permissions.write_db / kg_mutation / user_data / write_fs / execute_code → ASK
-    6. permissions.external_network → ASK
-    7. 其余 → ALLOW
+    4. EXECUTE + auto_approve_sandboxed + 无网络/持久变更权限 → ALLOW
+    5. EXECUTE / WRITE / MUTATE / NETWORK / SYSTEM → ASK
+    6. READ / TRANSFORM → ALLOW
     """
 
     def decide(
@@ -58,8 +57,6 @@ class ApprovalPolicy:
                 risk_level="high",
             )
 
-        permissions = spec.permissions
-
         # Deny tools by exact name match
         if tool_name in _DENY_TOOLS:
             return ApprovalDecision(
@@ -73,47 +70,74 @@ class ApprovalPolicy:
                 tool_name=tool_name,
                 arguments=arguments,
                 spec=spec,
-                risk_level="medium",
+                risk_level=_risk_value(spec),
                 reason="工具契约要求执行前确认",
+            )
+
+        category = spec.execution_category
+        if not isinstance(category, ExecutionCategory):
+            return self._ask_decision(
+                tool_name=tool_name,
+                arguments=arguments,
+                spec=spec,
+                risk_level="high",
+                reason="工具执行类别无效，需要人工确认",
             )
 
         # Sandbox auto-approve: code execution inside a sandbox is safe
         # by boundary (restricted fs, no network, timeout), not by
         # user clicking "confirm" each time. Mirrors Claude/GPT behavior.
-        if auto_approve_sandboxed and permissions.execute_code:
+        if (
+            category == ExecutionCategory.EXECUTE
+            and auto_approve_sandboxed
+            and _sandbox_auto_approvable(spec)
+        ):
             return ApprovalDecision(
                 action=ApprovalAction.ALLOW,
                 reason="沙箱内代码执行，自动放行",
                 risk_level="low",
             )
 
-        # Ask for write / mutation / user data / filesystem
-        if (
-            permissions.write_db
-            or permissions.kg_mutation
-            or permissions.user_data
-            or permissions.write_fs
-            or permissions.execute_code
+        # Ask for write / mutate / execute / network / system
+        if category in (
+            ExecutionCategory.WRITE,
+            ExecutionCategory.MUTATE,
+            ExecutionCategory.EXECUTE,
+            ExecutionCategory.NETWORK,
+            ExecutionCategory.SYSTEM,
         ):
+            reason_map = {
+                ExecutionCategory.WRITE: "写入操作需要确认",
+                ExecutionCategory.MUTATE: "不可逆变更操作需要确认",
+                ExecutionCategory.EXECUTE: "代码执行需要确认",
+                ExecutionCategory.NETWORK: "外部网络访问需要确认",
+                ExecutionCategory.SYSTEM: "系统操作需要确认",
+            }
+            risk_map = {
+                ExecutionCategory.WRITE: "medium",
+                ExecutionCategory.MUTATE: "high",
+                ExecutionCategory.EXECUTE: "medium",
+                ExecutionCategory.NETWORK: "medium",
+                ExecutionCategory.SYSTEM: "high",
+            }
             return self._ask_decision(
                 tool_name=tool_name,
                 arguments=arguments,
                 spec=spec,
-                risk_level="medium",
-                reason="写入或数据变更操作需要确认",
+                risk_level=_risk_value(spec, minimum=risk_map[category]),
+                reason=reason_map[category],
             )
 
-        # Ask for external network
-        if permissions.external_network:
+        if spec.permissions_require_approval:
             return self._ask_decision(
                 tool_name=tool_name,
                 arguments=arguments,
                 spec=spec,
-                risk_level="medium",
-                reason="外部网络访问需要确认",
+                risk_level=_risk_value(spec),
+                reason="工具权限包含写入、变更、代码执行或外部访问，需要确认",
             )
 
-        # Allow read-only tools
+        # READ / TRANSFORM → allow
         return ApprovalDecision(
             action=ApprovalAction.ALLOW,
             reason="只读工具，自动允许",
@@ -183,3 +207,42 @@ def _truncate_arg(value: str, max_len: int = 60) -> str:
     if len(value) <= max_len:
         return value
     return value[:max_len] + "..."
+
+
+def _risk_value(spec: ToolSpec, *, minimum: str | None = None) -> str:
+    risk = spec.risk_level
+    if isinstance(risk, RiskLevel):
+        risk_level = risk
+    elif isinstance(risk, str):
+        try:
+            risk_level = RiskLevel(risk)
+        except ValueError:
+            risk_level = RiskLevel.HIGH
+    else:
+        risk_level = RiskLevel.HIGH
+
+    minimum_level = spec.minimum_risk_level
+    if minimum is not None:
+        minimum_level = max(
+            minimum_level,
+            RiskLevel(minimum),
+            key=lambda level: _RISK_ORDER[level],
+        )
+    return max(risk_level, minimum_level, key=lambda level: _RISK_ORDER[level]).value
+
+
+def _sandbox_auto_approvable(spec: ToolSpec) -> bool:
+    permissions = spec.permissions
+    return permissions.execute_code and not (
+        permissions.external_network
+        or permissions.write_db
+        or permissions.kg_mutation
+        or permissions.user_data
+    )
+
+
+_RISK_ORDER = {
+    RiskLevel.LOW: 0,
+    RiskLevel.MEDIUM: 1,
+    RiskLevel.HIGH: 2,
+}

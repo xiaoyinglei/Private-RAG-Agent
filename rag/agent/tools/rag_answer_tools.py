@@ -8,7 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from rag.agent.core.context import RunRegistry
 from rag.agent.tools.registry import ToolExecutionContext
-from rag.agent.tools.spec import ToolError, ToolPermissions, ToolSpec
+from rag.agent.tools.spec import ExecutionCategory, ToolError, ToolPermissions, ToolSpec
 from rag.providers.llm_gateway import llm_budget_scope
 from rag.schema.query import AnswerCitation, EvidenceItem, RetrievalSignals
 
@@ -36,6 +36,7 @@ rag_search_answer = ToolSpec(
     output_model=RAGSearchAnswerOutput,
     error_model=ToolError,
     permissions=ToolPermissions(read_db=True, embed=True, generate=True),
+    execution_category=ExecutionCategory.READ,
     timeout_seconds=45.0,
     max_retries=0,
     idempotent=True,

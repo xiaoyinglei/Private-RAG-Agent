@@ -13,7 +13,7 @@ from rag.agent.primitive_ops import (
     WriteFileInput,
     WriteFileOutput,
 )
-from rag.agent.tools.spec import ToolError, ToolPermissions, ToolSpec
+from rag.agent.tools.spec import ExecutionCategory, ToolError, ToolPermissions, ToolSpec
 
 list_files_spec = ToolSpec(
     name="list_files",
@@ -25,11 +25,11 @@ list_files_spec = ToolSpec(
     output_model=ListFilesOutput,
     error_model=ToolError,
     permissions=ToolPermissions(read_fs=True),
+    execution_category=ExecutionCategory.READ,
     timeout_seconds=5.0,
     max_retries=1,
     idempotent=True,
     concurrency_safe=True,
-    is_read_only=True,
     work_budget_cost=200,
 )
 
@@ -44,11 +44,11 @@ read_file_spec = ToolSpec(
     output_model=ReadFileOutput,
     error_model=ToolError,
     permissions=ToolPermissions(read_fs=True),
+    execution_category=ExecutionCategory.READ,
     timeout_seconds=10.0,
     max_retries=1,
     idempotent=True,
     concurrency_safe=True,
-    is_read_only=True,
     work_budget_cost=500,
 )
 
@@ -63,11 +63,11 @@ structured_probe_spec = ToolSpec(
     output_model=StructuredProbeOutput,
     error_model=ToolError,
     permissions=ToolPermissions(read_fs=True),
+    execution_category=ExecutionCategory.READ,
     timeout_seconds=20.0,
     max_retries=0,
     idempotent=True,
     concurrency_safe=True,
-    is_read_only=True,
     work_budget_cost=700,
 )
 
@@ -78,6 +78,7 @@ write_file_spec = ToolSpec(
     output_model=WriteFileOutput,
     error_model=ToolError,
     permissions=ToolPermissions(write_fs=True),
+    execution_category=ExecutionCategory.WRITE,
     timeout_seconds=5.0,
     max_retries=0,
     work_budget_cost=200,
@@ -90,6 +91,7 @@ run_python_spec = ToolSpec(
     output_model=RunPythonOutput,
     error_model=ToolError,
     permissions=ToolPermissions(read_fs=True, write_fs=True, execute_code=True),
+    execution_category=ExecutionCategory.EXECUTE,
     timeout_seconds=60.0,
     max_retries=0,
     work_budget_cost=1000,
@@ -106,6 +108,7 @@ run_python_inline_spec = ToolSpec(
     output_model=RunPythonOutput,
     error_model=ToolError,
     permissions=ToolPermissions(read_fs=True, write_fs=True, execute_code=True),
+    execution_category=ExecutionCategory.EXECUTE,
     timeout_seconds=60.0,
     max_retries=0,
     work_budget_cost=1000,

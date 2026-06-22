@@ -21,7 +21,7 @@ from rag.agent.core.registry import AgentRegistry
 from rag.agent.core.runtime_ports import RetrievalHintProvider
 from rag.agent.loop.runtime import ModelTurnProvider
 from rag.agent.tools.registry import ToolRegistry
-from rag.agent.tools.spec import ToolError, ToolPermissions, ToolSpec
+from rag.agent.tools.spec import ExecutionCategory, ToolError, ToolPermissions, ToolSpec
 from rag.schema.query import AnswerCitation
 
 if TYPE_CHECKING:
@@ -294,6 +294,7 @@ def build_agent_tool_spec(agent_definition: AgentDefinition) -> AgentToolSpec:
             embed=True,
             generate=True,
         ),
+        execution_category=ExecutionCategory.READ,
         timeout_seconds=120.0,
         max_retries=0,
         work_budget_cost=2_000,
