@@ -17,6 +17,7 @@ from rag.agent.core.finalization import (
     FinishCandidateBuildError,
 )
 from rag.agent.core.human_input import HumanInputRequest
+from rag.agent.core.llm_context import AgentLLMContextOverflowError
 from rag.agent.core.observations import ObservationBatch, ObservationExtractor
 from rag.agent.core.output_models import ValidatedFinalOutput
 from rag.agent.core.runtime_diagnostics import RuntimeDiagnostic
@@ -41,6 +42,7 @@ from rag.agent.memory.compactor import LoopCompactionResult
 from rag.agent.planning import MAX_PLAN_EVENTS, PlanEvent, PlanTracker
 from rag.agent.streaming.events import StreamEvent
 from rag.agent.streaming.sink import StreamEventSink
+from rag.providers.llm_gateway import LLMContextOverflowError
 
 
 class ModelTurnEnvelope(BaseModel):
@@ -330,6 +332,77 @@ class AgentLoop:
                     envelope.draft,
                     state=state,
                 )
+            except (AgentLLMContextOverflowError, LLMContextOverflowError) as exc:
+                if not state.get("reactive_compact_used"):
+                    state["reactive_compact_used"] = True
+                    reactive_compact = getattr(
+                        self._context_manager,
+                        "reactive_compact",
+                        None,
+                    )
+                    if reactive_compact is not None:
+                        try:
+                            compaction = await _await_value(reactive_compact(state))
+                        except Exception as compact_exc:
+                            await self._fail(
+                                state,
+                                stop_reason="context_compaction_failed",
+                                error=str(compact_exc) or type(compact_exc).__name__,
+                                transition_reason="failed",
+                                checkpoint_reason="context_compaction_failed",
+                            )
+                            return state
+                        append_loop_diagnostic(
+                            state,
+                            RuntimeDiagnostic.from_exception(
+                                code="context_overflow_recovered",
+                                component="agent_loop",
+                                error=exc,
+                                severity="warning",
+                            ),
+                        )
+                        if compaction.changed:
+                            state["iteration"] = max(0, state["iteration"] - 1)
+                            transition = LoopTransition(
+                                reason="compaction",
+                                iteration=state["iteration"],
+                                detail={
+                                    "mode": "reactive",
+                                    "channels": list(compaction.channels),
+                                    "warnings": list(compaction.warnings),
+                                },
+                            )
+                            await self._set_transition(
+                                state,
+                                transition,
+                                checkpoint_reason="reactive_compaction",
+                            )
+                            await self._emit_stream(
+                                _stream_compact_layer(
+                                    channels=list(compaction.channels),
+                                    warnings=list(compaction.warnings),
+                                    run_id=state["run_config"].run_id,
+                                    turn=state["iteration"],
+                                )
+                            )
+                            continue
+                append_loop_diagnostic(
+                    state,
+                    RuntimeDiagnostic.from_exception(
+                        code="context_overflow",
+                        component="agent_loop",
+                        error=exc,
+                        severity="error",
+                    ),
+                )
+                await self._fail(
+                    state,
+                    stop_reason="context_overflow",
+                    error=str(exc) or type(exc).__name__,
+                    transition_reason="failed",
+                    checkpoint_reason="context_overflow",
+                )
+                return state
             except (FinishCandidateBuildError, ValidationError, ValueError) as exc:
                 if (
                     isinstance(exc, FinishCandidateBuildError)

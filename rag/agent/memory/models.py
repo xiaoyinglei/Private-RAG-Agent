@@ -24,7 +24,7 @@ ContextSectionName = Literal[
     "open_decisions",
 ]
 
-MemoryRefStatus = Literal["available", "deleted", "unavailable"]
+MemoryRefStatus = Literal["available", "deleted", "unavailable", "compacted"]
 StateRetentionChannel = Literal[
     "tool_results",
     "structured_observations",
@@ -63,6 +63,14 @@ class MemoryPolicy(BaseModel):
     max_working_summary_chars: int = Field(default=8000, ge=80)
     max_extracted_facts: int = Field(default=200, ge=1)
     max_message_batch_chars: int = Field(default=256_000, ge=1)
+    snip_compact_threshold: int = Field(default=50, ge=1)
+    snip_keep_head: int = Field(default=5, ge=0)
+    snip_keep_tail: int = Field(default=30, ge=0)
+    micro_compact_keep_recent: int = Field(default=3, ge=0)
+    micro_compact_max_chars: int = Field(default=500, ge=50)
+    reactive_compact_tail_count: int = Field(default=6, ge=1)
+    reactive_compact_max_observations: int = Field(default=10, ge=1)
+    reactive_compact_max_evidence: int = Field(default=20, ge=1)
 
 
 class MemoryRef(BaseModel):

@@ -14,6 +14,7 @@ from pydantic import BaseModel
 from rag.agent.core.context import AgentRunConfig, RunRegistry
 from rag.agent.core.definition import AgentDefinition
 from rag.agent.core.finalization import FinishCandidateBuilder
+from rag.agent.core.messages import ModelMessage
 from rag.agent.core.tool_execution import (
     ToolExecutionRecord,
     ToolExecutionService,
@@ -41,6 +42,8 @@ from rag.agent.state import ToolCallPlan
 from rag.agent.streaming.events import EventType, StreamEvent, text_delta
 from rag.agent.tools.registry import ToolExecutionContext, ToolRegistry
 from rag.agent.tools.spec import ToolError, ToolPermissions, ToolSpec
+from rag.providers.llm_gateway import LLMContextOverflowError
+from rag.schema.llm import LLMCallStage
 from rag.schema.runtime import AccessPolicy
 
 
@@ -883,6 +886,74 @@ async def test_context_compaction_runs_before_provider_and_is_checkpointed() -> 
         "msg-3"
     ]
     assert "compaction" in [reason for reason, _ in checkpoint.snapshots]
+
+
+@pytest.mark.anyio
+async def test_context_overflow_triggers_reactive_compaction_once() -> None:
+    config = _config(
+        "loop-runtime-reactive-compaction",
+        memory_policy=MemoryPolicy(
+            message_compaction_min_count=99,
+            reactive_compact_tail_count=2,
+            reactive_compact_max_observations=3,
+            reactive_compact_max_evidence=3,
+        ),
+    )
+    provider = _SequenceProvider(
+        [
+            LLMContextOverflowError(
+                stage=LLMCallStage.TOOL_DECISION,
+                input_tokens=10_000,
+                max_input_tokens=1_000,
+            ),
+            ModelTurnDraft(action="finish", final_answer="Recovered."),
+        ]
+    )
+    checkpoint = _Checkpoint()
+    state = create_loop_state(
+        task="Recover after overflow.",
+        run_config=config,
+        messages=[
+            HumanMessage(content=f"message {index}", id=f"msg-{index}")
+            for index in range(5)
+        ],
+    )
+    state["loop_messages"] = [
+        ModelMessage(role="user", content=f"loop message {index}")
+        for index in range(5)
+    ]
+
+    result = await _loop(
+        definition=_definition(),
+        provider=provider,
+        tool_runner=ToolExecutionService(tool_registry=ToolRegistry()),
+        checkpoint=checkpoint,
+        context_manager=LoopContextCompactor(),
+        max_model_retries=0,
+    ).run(state)
+
+    assert result["status"] == "completed"
+    assert len(provider.seen_states) == 2
+    assert provider.seen_states[1]["reactive_compact_used"] is True
+    assert [message.id for message in provider.seen_states[1]["messages"]] == [
+        "msg-3",
+        "msg-4",
+    ]
+    assert [
+        message.content for message in provider.seen_states[1]["loop_messages"]
+    ] == [
+        "[3 earlier loop messages snipped for context management]",
+        "loop message 3",
+        "loop message 4",
+    ]
+    assert "reactive_compaction" in [reason for reason, _ in checkpoint.snapshots]
+    reactive_snapshot = [
+        snapshot
+        for reason, snapshot in checkpoint.snapshots
+        if reason == "reactive_compaction"
+    ][0]
+    assert reactive_snapshot["latest_transition"] is not None
+    assert reactive_snapshot["latest_transition"].reason == "compaction"
 
 
 @pytest.mark.anyio
