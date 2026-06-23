@@ -26,9 +26,7 @@ from rag.agent.primitive_ops import (
     ImagePreview,
     PrimitiveOps,
     RunPythonInlineInput,
-    RunPythonOutput,
     StructuredProbeInput,
-    StructuredTableProbe,
 )
 from rag.agent.runner.python_runner import LocalSubprocessPythonRunner
 from rag.agent.workspace import WorkspaceRuntime
