@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from pydantic import BaseModel
 
 from rag.agent.core.context import AgentRunConfig
@@ -27,9 +27,16 @@ from rag.agent.loop.state import (
 )
 from rag.agent.memory.compactor import LoopContextCompactor, MemoryCompactor
 from rag.agent.memory.injector import ContextBuilder
-from rag.agent.memory.models import MemoryPolicy, StateChannelReplacement
+from rag.agent.memory.models import (
+    ExternalizedToolOutput,
+    MemoryPolicy,
+    MemoryRef,
+    MessageBatchPayload,
+    StateChannelReplacement,
+)
 from rag.agent.planning import PlanStep, PlanTracker, PlanUpdate
 from rag.agent.state import ToolCallPlan
+from rag.agent.tools.spec import ToolResult
 from rag.assembly.tokenizer import TokenAccountingService, TokenizerContract
 from rag.schema.llm import LLMCallStage, LLMStageBudget
 from rag.schema.runtime import AccessPolicy
@@ -49,6 +56,35 @@ class _StubGenerator:
     ) -> BaseModel:
         self.calls.append((prompt, schema, kwargs))
         return schema.model_validate(self._responses.pop(0))
+
+
+class _ToolOutput(BaseModel):
+    value: str
+
+
+class _RecordingMemoryStore:
+    def __init__(self) -> None:
+        self.records: list[BaseModel] = []
+
+    def write_tool_output(
+        self,
+        payload: BaseModel,
+        *,
+        summary: str,
+        source_tool_call_id: str | None = None,
+        source_tool_name: str | None = None,
+        warnings: list[str] | None = None,
+    ) -> MemoryRef:
+        self.records.append(payload)
+        ref_id = f"mem_{len(self.records)}"
+        return MemoryRef(
+            ref_id=ref_id,
+            path=f".agent_memory/records/{ref_id}.json",
+            summary=summary,
+            source_tool_call_id=source_tool_call_id,
+            source_tool_name=source_tool_name,
+            warnings=list(warnings or []),
+        )
 
 
 def _definition() -> AgentDefinition:
@@ -374,6 +410,121 @@ def test_loop_context_compaction_is_observable_before_model_turn() -> None:
     assert state["latest_transition"] is not None
     assert state["latest_transition"].reason == "compaction"
     assert "memory_unavailable" in state["memory_warnings"]
+
+
+def test_loop_context_snips_messages_without_splitting_tool_pairs() -> None:
+    tool_call_id = "tc-search"
+    store = _RecordingMemoryStore()
+    state = create_loop_state(
+        task="Summarize the conversation.",
+        run_config=AgentRunConfig(
+            run_id="loop-snip-compaction",
+            thread_id="loop-snip-compaction",
+            budget_total=10_000,
+            max_depth=2,
+            access_policy=AccessPolicy.default(),
+            memory_policy=MemoryPolicy(
+                message_compaction_min_count=99,
+                snip_compact_threshold=4,
+                snip_keep_head=1,
+                snip_keep_tail=1,
+            ),
+        ),
+        messages=[
+            HumanMessage(content="original task", id="msg-head"),
+            HumanMessage(content="old detail 1", id="msg-old-1"),
+            HumanMessage(content="old detail 2", id="msg-old-2"),
+            AIMessage(
+                content="",
+                id="msg-ai-tool",
+                tool_calls=[
+                    {
+                        "id": tool_call_id,
+                        "name": "vector_search",
+                        "args": {"query": "policy"},
+                    }
+                ],
+            ),
+            ToolMessage(
+                content="search result",
+                id="msg-tool-result",
+                tool_call_id=tool_call_id,
+            ),
+        ],
+    )
+
+    result = LoopContextCompactor(store=store).prepare(state)
+
+    assert result.changed is True
+    assert "messages" in result.channels
+    assert "memory_refs" in result.channels
+    assert [message.id for message in state["messages"]] == [
+        "msg-head",
+        "snip_compact_2",
+        "msg-ai-tool",
+        "msg-tool-result",
+    ]
+    assert "2 earlier messages snipped" in str(state["messages"][1].content)
+    assert len(store.records) == 1
+    stored = store.records[0]
+    assert isinstance(stored, MessageBatchPayload)
+    assert [message.id for message in stored.messages] == ["msg-old-1", "msg-old-2"]
+
+
+def test_loop_context_micro_compacts_old_small_tool_results() -> None:
+    pinned_call = ToolCallPlan.create("read_file", {"path": "active.md"})
+    state = create_loop_state(
+        task="Use tool results.",
+        run_config=AgentRunConfig(
+            run_id="loop-micro-compaction",
+            thread_id="loop-micro-compaction",
+            budget_total=10_000,
+            max_depth=2,
+            access_policy=AccessPolicy.default(),
+            memory_policy=MemoryPolicy(
+                max_tool_output_chars=64_000,
+                micro_compact_keep_recent=1,
+                micro_compact_max_chars=120,
+            ),
+        ),
+    )
+    state["pending_tool_calls"] = [pinned_call]
+    state["tool_results"] = [
+        ToolResult(
+            tool_call_id="tc-old",
+            tool_name="read_file",
+            status="ok",
+            output=_ToolOutput(value="old result"),
+            latency_ms=1.0,
+        ),
+        ToolResult(
+            tool_call_id=pinned_call.tool_call_id,
+            tool_name=pinned_call.tool_name,
+            status="ok",
+            output=_ToolOutput(value="pinned result"),
+            latency_ms=1.0,
+        ),
+        ToolResult(
+            tool_call_id="tc-recent",
+            tool_name="read_file",
+            status="ok",
+            output=_ToolOutput(value="recent result"),
+            latency_ms=1.0,
+        ),
+    ]
+
+    result = LoopContextCompactor().prepare(state)
+
+    assert result.changed is True
+    assert "tool_results" in result.channels
+    old_output = state["tool_results"][0].output
+    assert isinstance(old_output, ExternalizedToolOutput)
+    assert old_output.status == "compacted"
+    assert old_output.ref.status == "compacted"
+    assert "read_file" in old_output.summary
+    assert "memory_unavailable" in old_output.warnings
+    assert isinstance(state["tool_results"][1].output, _ToolOutput)
+    assert isinstance(state["tool_results"][2].output, _ToolOutput)
 
 
 def _apply_replacement(

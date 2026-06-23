@@ -158,6 +158,7 @@ class LoopState(TypedDict):
     memory_refs: list[MemoryRef]
     memory_budget: MemoryBudgetSnapshot | None
     memory_warnings: list[str]
+    reactive_compact_used: bool
     agent_plan: AgentPlan | None
     plan_events: list[PlanEvent]
     stop_hook_feedback: list[StopHookFeedback]
@@ -237,6 +238,7 @@ def create_loop_state(
             memory_warnings,
             limit=MAX_LOOP_MEMORY_WARNINGS,
         ),
+        "reactive_compact_used": False,
         "agent_plan": None,
         "plan_events": [],
         "stop_hook_feedback": [],

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -79,6 +80,34 @@ def test_store_writes_reads_and_tombstones_records(tmp_path: Path) -> None:
     assert resolved.payload is None
     assert resolved.summary == "list_files files=1 first=input_files/sales.csv"
     assert resolved.reason == "retention_limit"
+
+
+def test_store_preserves_compacted_record_status(tmp_path: Path) -> None:
+    workspace = _workspace(tmp_path)
+    store = WorkspaceMemoryStore(workspace=workspace)
+    ref = MemoryRef(
+        ref_id="mem_compacted",
+        path=".agent_memory/records/mem_compacted.json",
+        summary="compacted result",
+        status="compacted",
+    )
+    record = MemoryRecord(
+        original_output_model="rag.agent.primitive_ops.ListFilesOutput",
+        summary="compacted result",
+        ref=ref,
+        status="compacted",
+        payload=None,
+    )
+    path = workspace.root / ref.path
+    path.write_text(
+        json.dumps(record.model_dump(mode="json"), ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    restored = store.resolve(ref)
+
+    assert restored.status == "compacted"
+    assert restored.ref.status == "compacted"
 
 
 def test_store_rejects_invalid_or_escaping_refs(tmp_path: Path) -> None:
