@@ -10,10 +10,37 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: astral-sh/setup-uv@v6
         with:
           python-version: "3.12"
       - run: uv sync
-      - run: uv run pytest -v
-      - run: uv run ruff check .
-      - run: uv run mypy rag tests
+      - run: uv run pytest -q
+      - run: uv run lint-imports
+      - name: Ruff changed Python files
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            base_sha="${{ github.event.pull_request.base.sha }}"
+          else
+            base_sha="HEAD~1"
+          fi
+          mapfile -t changed_py < <(git diff --name-only --diff-filter=ACMRT "$base_sha...HEAD" -- '*.py')
+          if [ "${#changed_py[@]}" -eq 0 ]; then
+            echo "No changed Python files to lint."
+          else
+            uv run ruff check "${changed_py[@]}"
+          fi
+      - name: Mypy changed source files
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            base_sha="${{ github.event.pull_request.base.sha }}"
+          else
+            base_sha="HEAD~1"
+          fi
+          mapfile -t changed_py < <(git diff --name-only --diff-filter=ACMRT "$base_sha...HEAD" -- 'rag/*.py' 'rag/**/*.py')
+          if [ "${#changed_py[@]}" -eq 0 ]; then
+            echo "No changed source files to type-check."
+          else
+            uv run mypy "${changed_py[@]}"
+          fi

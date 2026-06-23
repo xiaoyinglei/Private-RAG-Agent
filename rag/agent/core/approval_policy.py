@@ -180,7 +180,7 @@ class ApprovalPolicy:
         )
 
 
-_RISK_ORDER = {"low": 0, "medium": 1, "high": 2}
+_RISK_ORDER: dict[str, int] = {"low": 0, "medium": 1, "high": 2}
 
 
 def merge_approval_requests(decisions: list[ApprovalDecision]) -> HumanInputRequest:
@@ -232,9 +232,9 @@ def _risk_value(spec: ToolSpec, *, minimum: str | None = None) -> str:
         minimum_level = max(
             minimum_level,
             RiskLevel(minimum),
-            key=lambda level: _RISK_ORDER[level],
+            key=lambda level: _RISK_ORDER[level.value],
         )
-    return max(risk_level, minimum_level, key=lambda level: _RISK_ORDER[level]).value
+    return max(risk_level, minimum_level, key=lambda level: _RISK_ORDER[level.value]).value
 
 
 def _sandbox_auto_approvable(spec: ToolSpec) -> bool:
@@ -245,10 +245,3 @@ def _sandbox_auto_approvable(spec: ToolSpec) -> bool:
         or permissions.kg_mutation
         or permissions.user_data
     )
-
-
-_RISK_ORDER = {
-    RiskLevel.LOW: 0,
-    RiskLevel.MEDIUM: 1,
-    RiskLevel.HIGH: 2,
-}

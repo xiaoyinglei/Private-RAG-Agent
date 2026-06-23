@@ -423,6 +423,7 @@ class ToolExecutionService:
 
         current = record
         retry_count = 0
+        output: BaseModel | None = None
         while True:
             try:
                 output = await asyncio.wait_for(
@@ -597,6 +598,8 @@ class ToolExecutionService:
                 await self._write(failed)
                 return result, failed
 
+        if output is None:
+            raise RuntimeError(f"{call.tool_name} exited retry loop without a result")
         await _commit_work_budget(call, run_config, reserved, work_cost)
         failure = _structured_output_failure(output)
         if failure is not None:

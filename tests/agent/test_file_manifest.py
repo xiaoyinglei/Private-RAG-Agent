@@ -30,6 +30,7 @@ from rag.agent.primitive_ops import (
     StructuredProbeInput,
     StructuredTableProbe,
 )
+from rag.agent.runner.python_runner import LocalSubprocessPythonRunner
 from rag.agent.workspace import WorkspaceRuntime
 
 # ---------------------------------------------------------------------------
@@ -49,6 +50,11 @@ def ws(tmp_path: Path) -> WorkspaceRuntime:
 @pytest.fixture()
 def ops(ws: WorkspaceRuntime) -> PrimitiveOps:
     return PrimitiveOps(workspace=ws)
+
+
+@pytest.fixture()
+def subprocess_ops(ws: WorkspaceRuntime) -> PrimitiveOps:
+    return PrimitiveOps(workspace=ws, python_runner=LocalSubprocessPythonRunner())
 
 
 # ---------------------------------------------------------------------------
@@ -315,7 +321,7 @@ class TestProbeEnhancements:
 
 class TestChartCapture:
     def test_matplotlib_savefig_captured(
-        self, ws: WorkspaceRuntime, ops: PrimitiveOps,
+        self, ws: WorkspaceRuntime, subprocess_ops: PrimitiveOps,
     ) -> None:
         """Matplotlib savefig should be captured as image_preview."""
         code = """
@@ -327,12 +333,12 @@ plt.plot([1, 2, 3], [4, 5, 6])
 plt.savefig("scratch/test_chart.png")
 plt.close()
 """
-        out = ops.run_python_inline(RunPythonInlineInput(code=code))
+        out = subprocess_ops.run_python_inline(RunPythonInlineInput(code=code))
         assert out.ok is True
         assert any("test_chart.png" in f for f in out.generated_files)
 
     def test_plt_show_auto_saves(
-        self, ws: WorkspaceRuntime, ops: PrimitiveOps,
+        self, ws: WorkspaceRuntime, subprocess_ops: PrimitiveOps,
     ) -> None:
         """plt.show() should auto-save figures via the preamble."""
         code = """
@@ -344,18 +350,18 @@ plt.plot([1, 2, 3], [10, 20, 30])
 plt.title("Test Chart")
 plt.show()
 """
-        out = ops.run_python_inline(RunPythonInlineInput(code=code))
+        out = subprocess_ops.run_python_inline(RunPythonInlineInput(code=code))
         assert out.ok is True
         # The preamble should have saved the chart
         chart_files = [f for f in out.generated_files if "chart_" in f and f.endswith(".png")]
         assert len(chart_files) >= 1
 
     def test_no_chart_when_no_matplotlib(
-        self, ws: WorkspaceRuntime, ops: PrimitiveOps,
+        self, ws: WorkspaceRuntime, subprocess_ops: PrimitiveOps,
     ) -> None:
         """Code without matplotlib should not produce charts."""
         code = "print(42)"
-        out = ops.run_python_inline(RunPythonInlineInput(code=code))
+        out = subprocess_ops.run_python_inline(RunPythonInlineInput(code=code))
         assert out.ok is True
         assert out.image_previews == []
 
