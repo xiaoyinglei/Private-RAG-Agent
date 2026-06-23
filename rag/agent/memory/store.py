@@ -195,7 +195,7 @@ def _int_value(value: object, *, default: int) -> int:
 
 
 def _status_value(value: object) -> MemoryRefStatus:
-    if value in {"available", "deleted", "unavailable"}:
+    if value in {"available", "deleted", "unavailable", "compacted"}:
         return cast(MemoryRefStatus, value)
     return "available"
 

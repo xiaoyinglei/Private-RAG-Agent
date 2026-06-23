@@ -7,9 +7,10 @@ from datetime import UTC, datetime
 from hashlib import sha256
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
-from langchain_core.messages import BaseMessage
+from langchain_core.messages import BaseMessage, HumanMessage
 from pydantic import BaseModel
 
+from rag.agent.core.messages import ModelMessage
 from rag.agent.memory.models import (
     ContextBudgetSnapshot,
     EvictedStateItem,
@@ -49,6 +50,13 @@ class _ExternalizationMetadata:
     unavailable_count: int = 0
     memory_refs: list[MemoryRef] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class _LayerResult:
+    changed: bool = False
+    channels: tuple[str, ...] = ()
+    warnings: tuple[str, ...] = ()
 
 
 class WorkingMemoryCompactor:
@@ -1304,6 +1312,13 @@ class LoopContextCompactor:
         initial_warnings = list(state["memory_warnings"])
         changed_channels: list[str] = []
 
+        for layer in (
+            self._snip_compact(state_dict, policy),
+            self._micro_compact(state_dict, policy),
+        ):
+            if layer.changed:
+                changed_channels.extend(layer.channels)
+
         compacted_messages = MessageCompactor(
             policy=policy,
             store=self._store,
@@ -1355,6 +1370,379 @@ class LoopContextCompactor:
             channels=channels,
             warnings=warnings,
         )
+
+    def reactive_compact(self, state: LoopState) -> LoopCompactionResult:
+        """Aggressively shrink loop state after a provider context overflow."""
+
+        state_dict = cast(dict[str, Any], state)
+        policy = state["run_config"].memory_policy
+        initial_warnings = list(state["memory_warnings"])
+        changed_channels: list[str] = []
+
+        message_policy = policy.model_copy(
+            update={
+                "message_compaction_min_count": 1,
+                "max_message_tail_count": policy.reactive_compact_tail_count,
+            }
+        )
+        compacted_messages = MessageCompactor(
+            policy=message_policy,
+            store=self._store,
+        ).compact_initial_state(dict(state_dict))
+        message_update = {
+            channel: compacted_messages.get(channel)
+            for channel in self._MESSAGE_CHANNELS
+            if compacted_messages.get(channel) != state_dict.get(channel)
+        }
+        if message_update:
+            changed_channels.extend(message_update)
+            self._apply_update(state_dict, message_update)
+
+        tool_layer = self._micro_compact(
+            state_dict,
+            policy,
+            keep_recent=0,
+            force=True,
+        )
+        if tool_layer.changed:
+            changed_channels.extend(tool_layer.channels)
+
+        loop_message_layer = self._compact_loop_messages(
+            state_dict,
+            limit=policy.reactive_compact_tail_count,
+        )
+        if loop_message_layer.changed:
+            changed_channels.extend(loop_message_layer.channels)
+
+        for channel, limit in (
+            ("structured_observations", policy.reactive_compact_max_observations),
+            ("evidence", policy.reactive_compact_max_evidence),
+            ("evidence_refs", policy.reactive_compact_max_evidence),
+            ("citations", policy.reactive_compact_max_evidence),
+        ):
+            if self._bound_channel_tail(state_dict, channel, limit=limit):
+                changed_channels.append(channel)
+
+        if changed_channels:
+            self._append_memory_warnings(state_dict, ["reactive_compact"])
+            changed_channels.append("memory_warnings")
+
+        warnings = tuple(
+            warning
+            for warning in state["memory_warnings"]
+            if warning not in initial_warnings
+        )
+        return LoopCompactionResult(
+            changed=bool(changed_channels),
+            channels=tuple(dict.fromkeys(changed_channels)),
+            warnings=warnings,
+        )
+
+    def _snip_compact(
+        self,
+        state: dict[str, Any],
+        policy: MemoryPolicy,
+    ) -> _LayerResult:
+        messages = [
+            message for message in state.get("messages", []) if isinstance(message, BaseMessage)
+        ]
+        if len(messages) <= policy.snip_compact_threshold:
+            return _LayerResult()
+
+        head_count = min(policy.snip_keep_head, len(messages))
+        tail_count = min(policy.snip_keep_tail, len(messages))
+        tail_start = max(head_count, len(messages) - tail_count)
+        tail_start = WorkingMemoryCompactor._extend_tail_for_tool_pairs(
+            messages,
+            tail_start,
+        )
+        if tail_start <= head_count:
+            return _LayerResult()
+
+        snipped_messages = messages[head_count:tail_start]
+        channels = ["messages"]
+        warnings: list[str] = []
+        ref = MessageCompactor(
+            policy=policy,
+            store=self._store,
+        )._write_message_batch(snipped_messages, warnings=warnings)
+        if ref is not None:
+            self._append_memory_refs(state, [ref])
+            channels.append("memory_refs")
+        if warnings:
+            self._append_memory_warnings(state, warnings)
+            channels.append("memory_warnings")
+
+        snipped_count = tail_start - head_count
+        placeholder = HumanMessage(
+            content=(
+                f"[{snipped_count} earlier messages snipped for context management]"
+            ),
+            id=f"snip_compact_{snipped_count}",
+        )
+        state["messages"] = [
+            *messages[:head_count],
+            placeholder,
+            *messages[tail_start:],
+        ]
+        return _LayerResult(
+            changed=True,
+            channels=tuple(dict.fromkeys(channels)),
+            warnings=tuple(dict.fromkeys(warnings)),
+        )
+
+    def _compact_loop_messages(
+        self,
+        state: dict[str, Any],
+        *,
+        limit: int,
+    ) -> _LayerResult:
+        messages = [
+            message
+            for message in state.get("loop_messages", [])
+            if isinstance(message, ModelMessage)
+        ]
+        if len(messages) <= limit:
+            return _LayerResult()
+
+        tail_start = max(0, len(messages) - limit)
+        tail_start = self._extend_loop_message_tail_for_tool_pairs(
+            messages,
+            tail_start,
+        )
+        if tail_start <= 0:
+            return _LayerResult()
+
+        snipped_count = tail_start
+        state["loop_messages"] = [
+            ModelMessage(
+                role="user",
+                content=(
+                    f"[{snipped_count} earlier loop messages snipped for context management]"
+                ),
+            ),
+            *messages[tail_start:],
+        ]
+        return _LayerResult(changed=True, channels=("loop_messages",))
+
+    @staticmethod
+    def _extend_loop_message_tail_for_tool_pairs(
+        messages: list[ModelMessage],
+        start: int,
+    ) -> int:
+        required_tool_call_ids = {
+            message.tool_call_id
+            for message in messages[start:]
+            if message.role == "tool" and message.tool_call_id
+        }
+        if not required_tool_call_ids:
+            return start
+        earliest = start
+        for index in range(start - 1, -1, -1):
+            call_ids = {
+                call.id
+                for call in messages[index].tool_calls
+                if call.id
+            }
+            if call_ids & required_tool_call_ids:
+                earliest = index
+                required_tool_call_ids -= call_ids
+                if not required_tool_call_ids:
+                    break
+        return earliest
+
+    def _micro_compact(
+        self,
+        state: dict[str, Any],
+        policy: MemoryPolicy,
+        *,
+        keep_recent: int | None = None,
+        force: bool = False,
+    ) -> _LayerResult:
+        tool_results = list(state.get("tool_results", []))
+        if not tool_results:
+            return _LayerResult()
+
+        helper = MemoryCompactor(
+            policy=policy,
+            store=self._store,
+            loop_mode=True,
+        )
+        pinned_keys = helper._pin_loop_context(  # noqa: SLF001 - same module.
+            state,
+            {},
+            new_memory_refs=[],
+        ).get("tool_results", set())
+        keep_recent_count = (
+            policy.micro_compact_keep_recent if keep_recent is None else keep_recent
+        )
+        recent_start = (
+            len(tool_results)
+            if keep_recent_count <= 0
+            else max(
+                0,
+                len(tool_results) - keep_recent_count,
+            )
+        )
+
+        compacted: list[Any] = []
+        new_refs: list[MemoryRef] = []
+        warnings: list[str] = []
+        changed = False
+        for index, result in enumerate(tool_results):
+            if not isinstance(result, ToolResult):
+                compacted.append(result)
+                continue
+            if not force and index >= recent_start:
+                compacted.append(result)
+                continue
+            if _item_key(result) in pinned_keys:
+                compacted.append(result)
+                continue
+            replacement, ref, result_warnings = self._micro_compact_result(
+                result,
+                policy=policy,
+                helper=helper,
+                force=force,
+            )
+            compacted.append(replacement)
+            if replacement is result:
+                continue
+            changed = True
+            if ref is not None:
+                new_refs.append(ref)
+            warnings.extend(result_warnings)
+
+        if not changed:
+            return _LayerResult()
+
+        state["tool_results"] = compacted
+        channels = ["tool_results"]
+        if new_refs:
+            self._append_memory_refs(state, new_refs)
+            channels.append("memory_refs")
+        if warnings:
+            self._append_memory_warnings(state, warnings)
+            channels.append("memory_warnings")
+        return _LayerResult(
+            changed=True,
+            channels=tuple(dict.fromkeys(channels)),
+            warnings=tuple(dict.fromkeys(warnings)),
+        )
+
+    def _micro_compact_result(
+        self,
+        result: ToolResult,
+        *,
+        policy: MemoryPolicy,
+        helper: MemoryCompactor,
+        force: bool,
+    ) -> tuple[ToolResult, MemoryRef | None, list[str]]:
+        if result.status == "error" or result.output is None:
+            return result, None, []
+        if isinstance(result.output, ExternalizedToolOutput):
+            return result, result.output.ref, []
+        output_json = result.output.model_dump_json()
+        if not force and len(output_json) > policy.max_tool_output_chars:
+            return result, None, []
+
+        summary = self._truncate_text(
+            helper.summarize_tool_result(result),
+            limit=policy.micro_compact_max_chars,
+        )
+        original_output_model = _model_path(result.output)
+        warnings: list[str] = []
+        if self._store is not None:
+            try:
+                ref = self._store.write_tool_output(
+                    result.output,
+                    summary=summary,
+                    source_tool_call_id=result.tool_call_id,
+                    source_tool_name=result.tool_name,
+                )
+                replacement = result.model_copy(
+                    update={
+                        "output": ExternalizedToolOutput(
+                            original_output_model=original_output_model,
+                            summary=summary,
+                            ref=ref,
+                            status=ref.status,
+                        )
+                    }
+                )
+                return replacement, ref, warnings
+            except Exception as exc:
+                warnings.extend(
+                    [
+                        "memory_compaction_failed",
+                        MemoryCompactor._one_line(str(exc)),
+                    ]
+                )
+        else:
+            warnings.append("memory_unavailable")
+
+        ref = MemoryRef(
+            ref_id=f"compacted_{result.tool_call_id}",
+            path=f".agent_memory/records/compacted_{result.tool_call_id}.json",
+            summary=summary,
+            source_tool_call_id=result.tool_call_id,
+            source_tool_name=result.tool_name,
+            status="compacted",
+            warnings=list(dict.fromkeys(warnings)),
+        )
+        replacement = result.model_copy(
+            update={
+                "output": ExternalizedToolOutput(
+                    original_output_model=original_output_model,
+                    summary=summary,
+                    ref=ref,
+                    status="compacted",
+                    warnings=list(dict.fromkeys(warnings)),
+                )
+            }
+        )
+        return replacement, ref, warnings
+
+    @staticmethod
+    def _append_memory_refs(state: dict[str, Any], refs: list[MemoryRef]) -> None:
+        by_id = {
+            ref.ref_id: ref
+            for ref in state.get("memory_refs", [])
+            if isinstance(ref, MemoryRef)
+        }
+        for ref in refs:
+            by_id[ref.ref_id] = ref
+        state["memory_refs"] = list(by_id.values())
+
+    @staticmethod
+    def _append_memory_warnings(state: dict[str, Any], warnings: list[str]) -> None:
+        state["memory_warnings"] = list(
+            dict.fromkeys(
+                [
+                    *[str(item) for item in state.get("memory_warnings", [])],
+                    *[warning for warning in warnings if warning],
+                ]
+            )
+        )
+
+    @staticmethod
+    def _bound_channel_tail(
+        state: dict[str, Any],
+        channel: str,
+        *,
+        limit: int,
+    ) -> bool:
+        items = list(state.get(channel, []))
+        if len(items) <= limit:
+            return False
+        state[channel] = items[-limit:]
+        return True
+
+    @staticmethod
+    def _truncate_text(text: str, *, limit: int) -> str:
+        if len(text) <= limit:
+            return text
+        return text[:limit].rstrip() + " [truncated]"
 
     @staticmethod
     def _apply_update(
