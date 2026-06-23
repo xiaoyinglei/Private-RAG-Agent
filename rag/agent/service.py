@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from collections.abc import AsyncGenerator, Mapping, Sequence
 from dataclasses import replace
 from inspect import isawaitable
@@ -69,14 +70,17 @@ from rag.agent.memory.compactor import (
     MessageCompactor,
 )
 from rag.agent.memory.models import MemoryPolicy
+from rag.agent.memory.persistent import PersistentMemoryStore
 from rag.agent.memory.store import WorkspaceMemoryStore
 from rag.agent.tools.registry import ToolRegistry, ToolRunner
-from rag.agent.tools.spec import ToolPermissions, ToolResult, ToolSpec
+from rag.agent.tools.spec import ExecutionCategory, ToolPermissions, ToolResult, ToolSpec
 from rag.schema.query import AnswerCitation, EvidenceItem
 from rag.schema.runtime import AccessPolicy
 
 if TYPE_CHECKING:
     from rag.agent.file_manifest import FileManifest
+
+logger = logging.getLogger(__name__)
 
 
 class AgentRunRequest(BaseModel):
@@ -517,6 +521,10 @@ class AgentService:
             file_manifest=manifest,
         )
         await self._apply_retrieval_hint(state)
+
+        # 7. Load persistent memories for cross-session context
+        persistent_store = PersistentMemoryStore(workspace)
+        await self._load_persistent_memories(state, persistent_store, task=enriched_task)
         checkpoint_store = LangGraphCheckpointStore(
             self._checkpointer,
             run_config=run_config,
@@ -539,6 +547,14 @@ class AgentService:
             raise
         if result_state["status"] in {"completed", "failed"}:
             RunRegistry.remove(run_config.run_id)
+
+        # 8. Extract persistent memories from completed conversation
+        if result_state["status"] == "completed":
+            try:
+                await self._extract_persistent_memories(result_state, persistent_store)
+            except Exception:
+                logger.warning("Persistent memory extraction failed", exc_info=True)
+
         return AgentRunResult.from_loop_result(
             result_state,
             definition=self._definition,
@@ -600,6 +616,10 @@ class AgentService:
         )
         await self._apply_retrieval_hint(state)
 
+        # Load persistent memories for cross-session context
+        persistent_store = PersistentMemoryStore(workspace)
+        await self._load_persistent_memories(state, persistent_store, task=enriched_task)
+
         checkpoint_store = LangGraphCheckpointStore(
             self._checkpointer,
             run_config=run_config,
@@ -622,6 +642,12 @@ class AgentService:
         finally:
             if state["status"] in {"completed", "failed"}:
                 RunRegistry.remove(run_config.run_id)
+            # Extract persistent memories from completed conversation
+            if state["status"] == "completed":
+                try:
+                    await self._extract_persistent_memories(state, persistent_store)
+                except Exception:
+                    logger.warning("Persistent memory extraction failed", exc_info=True)
 
     def _initial_loop_state_from_config(
         self,
@@ -836,6 +862,135 @@ class AgentService:
 
         return f"{block}\n\n── User Task ──\n{task}"
 
+    # ── Persistent memory helpers ──
+
+    async def _load_persistent_memories(
+        self,
+        state: LoopState,
+        store: PersistentMemoryStore,
+        *,
+        task: str,
+    ) -> None:
+        """Load persistent memories into the loop state for context injection."""
+        if not store.is_available:
+            return
+
+        try:
+            from rag.agent.memory.persistent import MemorySelector
+
+            index_content = store.read_index()
+            state["memory_index"] = index_content
+
+            if not index_content.strip():
+                return
+
+            # Create a memory gateway if available
+            memory_gateway = self._create_memory_gateway("memory_select")
+            if memory_gateway is None:
+                # No gateway — fall back to rule-only selection
+                selector = MemorySelector(max_selected=5, max_tokens=4000)
+            else:
+                selector = MemorySelector(
+                    llm_gateway=memory_gateway,
+                    max_selected=5,
+                    max_tokens=4000,
+                )
+
+            selected = await selector.select(
+                task=task,
+                index_content=index_content,
+                store=store,
+            )
+            state["persistent_memories"] = [m.to_markdown() for m in selected]
+        except Exception:
+            logger.warning("Failed to load persistent memories", exc_info=True)
+
+    async def _extract_persistent_memories(
+        self,
+        state: LoopState,
+        store: PersistentMemoryStore,
+    ) -> None:
+        """Extract new memories from the completed conversation (background task)."""
+        if not store.is_available:
+            return
+
+        try:
+            from rag.agent.memory.persistent import MemoryExtractor
+
+            extract_gateway = self._create_memory_gateway("memory_extract")
+            if extract_gateway is None:
+                return
+
+            extractor = MemoryExtractor(llm_gateway=extract_gateway)
+            written = await extractor.extract(state=state, store=store)
+            if written:
+                logger.info("Extracted persistent memories: %s", written)
+
+            # Optionally consolidate
+            from rag.agent.memory.persistent import MemoryConsolidator
+
+            consolidate_gateway = self._create_memory_gateway("memory_consolidate")
+            consolidator = MemoryConsolidator(
+                llm_gateway=consolidate_gateway or extract_gateway
+            )
+            result = await consolidator.consolidate(store)
+            if result.action == "consolidated":
+                logger.info(
+                    "Consolidated memories: %d -> %d",
+                    result.before_count,
+                    result.after_count,
+                )
+        except Exception:
+            logger.warning("Failed to extract persistent memories", exc_info=True)
+
+    def _create_memory_gateway(
+        self,
+        stage: str = "memory_select",
+    ) -> Any | None:
+        """Create an LLM gateway for memory operations.
+
+        Resolves the model for the given memory stage from the generation
+        config in models.yaml. Falls back to the default model if no
+        stage-specific config is found.
+
+        Returns None if no model registry is available.
+        """
+        if self._model_registry is None:
+            return None
+        try:
+            model_alias = self._resolve_memory_model_alias(stage)
+            resolved = self._model_registry.resolve_or_fallback(model_alias)
+            if resolved.gateway is not None:
+                return resolved.gateway
+            if resolved.token_accounting is None:
+                return None
+            from rag.providers.llm_gateway import LLMGateway
+
+            return LLMGateway(
+                generator=resolved.generator,
+                token_accounting=resolved.token_accounting,
+                model_context_tokens=resolved.context_window_tokens,
+            )
+        except Exception:
+            logger.debug("Failed to create memory gateway for stage %s", stage, exc_info=True)
+            return None
+
+    def _resolve_memory_model_alias(self, stage: str) -> str:
+        """Resolve model alias for a memory stage from the runtime config.
+
+        Uses the GenerationConfig parsed from models.yaml by the catalog.
+        Falls back to the default model if no stage-specific config is found.
+        """
+        if self._model_registry is None:
+            return ""
+        try:
+            task_config = getattr(self._model_registry.generation_config, stage, None)
+            if task_config is not None and task_config.model:
+                return str(task_config.model)
+        except Exception:
+            logger.debug("Failed to resolve memory model from runtime config", exc_info=True)
+        return str(self._model_registry.default_model)
+
     def _runtime_tool_registry(
         self,
         run_config: AgentRunConfig,
@@ -979,9 +1134,9 @@ class AgentService:
             output_model=ToolSearchOutput,
             error_model=ToolSearchOutput,
             permissions=ToolPermissions(),
+            execution_category=ExecutionCategory.READ,
             timeout_seconds=5,
             idempotent=True,
-            is_read_only=True,
             concurrency_safe=True,
         )
 
@@ -1016,9 +1171,9 @@ class AgentService:
             output_model=ActivateToolsOutput,
             error_model=ActivateToolsOutput,
             permissions=ToolPermissions(),
+            execution_category=ExecutionCategory.TRANSFORM,
             timeout_seconds=5,
             idempotent=True,
-            is_read_only=False,
             concurrency_safe=True,
         )
 

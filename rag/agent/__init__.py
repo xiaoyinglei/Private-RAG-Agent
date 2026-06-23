@@ -33,10 +33,19 @@ from rag.agent.state import (
     ToolCallPlan,
 )
 from rag.agent.tools.registry import ToolRegistry
-from rag.agent.tools.spec import ToolError, ToolPermissions, ToolResult, ToolSpec
+from rag.agent.tools.spec import (
+    ExecutionCategory,
+    InterruptBehavior,
+    RiskLevel,
+    ToolError,
+    ToolPermissions,
+    ToolResult,
+    ToolSpec,
+)
 
 __all__ = [
     "AgentDefinition",
+    "ExecutionCategory",
     "GraphCompiler",
     "AgentRegistry",
     "AgentRunConfig",
@@ -53,6 +62,7 @@ __all__ = [
     "BudgetLedger",
     "ContextBudgetSnapshot",
     "ExtractedFact",
+    "InterruptBehavior",
     "MemoryPolicy",
     "ModelSelectionPolicy",
     "PlanEvent",
@@ -60,6 +70,7 @@ __all__ = [
     "PlanStepPatch",
     "PlanTracker",
     "PlanUpdate",
+    "RiskLevel",
     "RunRegistry",
     "DelegatedAgentRunner",
     "ToolCallPlan",

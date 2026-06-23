@@ -78,6 +78,18 @@ class AgentMessageAssembler:
                 budget_remaining=budget_remaining,
             ),
         ]
+
+        # Inject persistent memories if available
+        persistent_memories = state.get("persistent_memories", [])
+        if persistent_memories:
+            sections.append(
+                SystemPromptSection(
+                    name="persistent_memory",
+                    content=_format_persistent_memories(persistent_memories),
+                    cache_scope="dynamic",
+                )
+            )
+
         content = "\n\n".join(s.content for s in sections)
         return ModelMessage(role="system", content=content)
 
@@ -162,7 +174,7 @@ class AgentMessageAssembler:
     @staticmethod
     def _runtime_state_section(
         *,
-        state: dict[str, Any],
+        state: dict[str, Any] | Any,
         budget_remaining: int | None,
     ) -> SystemPromptSection:
         iteration = state.get("iteration", 0)
@@ -186,6 +198,18 @@ class AgentMessageAssembler:
             content="\n".join(lines),
             cache_scope="dynamic",
         )
+
+
+def _format_persistent_memories(memories: list[str]) -> str:
+    """Format persistent memory texts for injection into the system message."""
+    if not memories:
+        return ""
+    lines = [
+        "Relevant memories from previous sessions (for context, not authoritative):",
+    ]
+    for i, memory_text in enumerate(memories, 1):
+        lines.append(f"<memory index=\"{i}\">\n{memory_text}\n</memory>")
+    return "\n\n".join(lines)
 
 
 # ── OpenAI adapter ──

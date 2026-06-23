@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 import yaml
 
@@ -35,7 +37,7 @@ def _make_config(
     )
 
 
-def test_load_configs_models_maps_openai_compatible_protocol(tmp_path) -> None:
+def test_load_configs_models_maps_openai_compatible_protocol(tmp_path: Path) -> None:
     config_path = tmp_path / "models.yaml"
     config_path.write_text(
         yaml.safe_dump(
@@ -72,7 +74,10 @@ def test_load_configs_models_maps_openai_compatible_protocol(tmp_path) -> None:
     assert config.llm_stage_budgets[LLMCallStage.TOOL_DECISION].max_input_tokens == 12000
 
 
-def test_load_configs_models_preserves_api_key_env_for_cloud_models(tmp_path, monkeypatch) -> None:
+def test_load_configs_models_preserves_api_key_env_for_cloud_models(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     config_path = tmp_path / "models.yaml"
     config_path.write_text(
         yaml.safe_dump(
@@ -101,7 +106,51 @@ def test_load_configs_models_preserves_api_key_env_for_cloud_models(tmp_path, mo
     assert provider_config.api_key == "sk-test"
 
 
-def test_from_env_loads_dotenv_before_resolving_model_config(tmp_path, monkeypatch) -> None:
+def test_load_configs_models_preserves_memory_generation_config(tmp_path: Path) -> None:
+    config_path = tmp_path / "models.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "models": {
+                    "main": {
+                        "capability": "chat",
+                        "provider": "qwen",
+                        "protocol": "openai_compatible",
+                        "model": "main-model",
+                        "base_url": "http://127.0.0.1:8080/v1",
+                    },
+                    "mimo_cloud": {
+                        "capability": "chat",
+                        "provider": "mimo",
+                        "protocol": "openai_compatible",
+                        "model": "mimo-v2-flash",
+                        "base_url": "https://api.xiaomimimo.com/v1",
+                    },
+                },
+                "defaults": {"primary_model": "main"},
+                "generation": {
+                    "memory_extract": {
+                        "model": "mimo_cloud",
+                        "max_tokens": 2048,
+                        "temperature": 0.3,
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    config = ModelRegistry._load_yaml_file(config_path)
+
+    assert config.generation.memory_extract.model == "mimo_cloud"
+    assert config.generation.memory_extract.max_tokens == 2048
+    assert config.generation.memory_extract.temperature == 0.3
+
+
+def test_from_env_loads_dotenv_before_resolving_model_config(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     config_path = tmp_path / "models.yaml"
     config_path.write_text(
         yaml.safe_dump(

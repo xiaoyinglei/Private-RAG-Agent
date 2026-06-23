@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 from pydantic import BaseModel
 
@@ -9,9 +11,12 @@ from rag.agent.compat.goal_contract import GoalDeliverable, GoalSpec
 from rag.agent.core.context import AgentRunConfig, RunRegistry
 from rag.agent.core.definition import AgentDefinition
 from rag.agent.loop.state import LoopState, ModelTurnDraft
+from rag.agent.primitive_ops import PrimitiveOps
+from rag.agent.runner.python_runner import LocalSubprocessPythonRunner
 from rag.agent.service import AgentRunRequest, AgentRunResult, AgentService
 from rag.agent.state import ToolCallPlan
 from rag.agent.tools.llm_tools import LLMTextOutput
+from rag.agent.workspace import WorkspaceRuntime
 from rag.schema.query import RetrievalSignals
 from rag.schema.runtime import AccessPolicy
 
@@ -402,13 +407,25 @@ async def test_agent_service_run_with_primitive_ops_through_agent_loop() -> None
 
 
 @pytest.mark.anyio
-async def test_agent_service_run_python_nonzero_exit_is_tool_error(tmp_path) -> None:
+async def test_agent_service_run_python_nonzero_exit_is_tool_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A script process failure must be visible as ToolResult.status='error'."""
     workspace = tmp_path / "workspace"
     for name in ("scratch", "artifacts", "reports", "logs", "input_files"):
         (workspace / name).mkdir(parents=True)
     (workspace / "scratch" / "fail.py").write_text("import sys\nsys.exit(7)\n")
     call = ToolCallPlan.create("run_python", {"script_path": "scratch/fail.py"})
+    from rag.agent import primitive_ops as primitive_ops_module
+
+    def _local_primitive_ops(*, workspace: WorkspaceRuntime) -> PrimitiveOps:
+        return PrimitiveOps(
+            workspace=workspace,
+            python_runner=LocalSubprocessPythonRunner(),
+        )
+
+    monkeypatch.setattr(primitive_ops_module, "PrimitiveOps", _local_primitive_ops)
     service = AgentService(
         definition=AgentDefinition(
             agent_type="python_test",

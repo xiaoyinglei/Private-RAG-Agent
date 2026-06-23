@@ -423,6 +423,7 @@ class ToolExecutionService:
 
         current = record
         retry_count = 0
+        output: BaseModel | None = None
         while True:
             try:
                 output = await asyncio.wait_for(
@@ -597,6 +598,8 @@ class ToolExecutionService:
                 await self._write(failed)
                 return result, failed
 
+        if output is None:
+            raise RuntimeError(f"{call.tool_name} exited retry loop without a result")
         await _commit_work_budget(call, run_config, reserved, work_cost)
         failure = _structured_output_failure(output)
         if failure is not None:
@@ -613,6 +616,7 @@ class ToolExecutionService:
             failed = _record_from_result(current, result, status="failed")
             await self._write(failed)
             return result, failed
+        output = _enforce_result_size(output, spec)
         result = ToolResult(
             tool_call_id=call.tool_call_id,
             tool_name=call.tool_name,
@@ -807,6 +811,31 @@ def _parallel_safe(
 ) -> bool:
     return spec.concurrency_safe and (
         spec.idempotent or not require_idempotent
+    )
+
+
+def _enforce_result_size(output: BaseModel, spec: ToolSpec) -> BaseModel:
+    """Truncate tool output if it exceeds the spec's max_result_size_chars."""
+    try:
+        serialized = output.model_dump_json()
+    except Exception:
+        return output
+    if len(serialized) <= spec.max_result_size_chars:
+        return output
+    # Truncate and wrap in a warning envelope
+    truncated_text = serialized[:spec.max_result_size_chars]
+    return ToolError(
+        code="result_truncated",
+        message=(
+            f"Tool output exceeded {spec.max_result_size_chars} chars "
+            f"({len(serialized)} chars) and was truncated."
+        ),
+        retryable=False,
+        detail={
+            "truncated_preview": truncated_text[:2000],
+            "original_size_chars": len(serialized),
+            "max_size_chars": spec.max_result_size_chars,
+        },
     )
 
 

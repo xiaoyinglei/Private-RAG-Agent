@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pydantic import BaseModel, Field
 
-from rag.agent.tools.spec import ToolError, ToolPermissions, ToolSpec
+from rag.agent.tools.spec import ExecutionCategory, ToolError, ToolPermissions, ToolSpec
 
 
 class LLMGenerateInput(BaseModel):
@@ -41,6 +41,7 @@ llm_generate = ToolSpec(
     output_model=LLMTextOutput,
     error_model=ToolError,
     permissions=ToolPermissions(generate=True),
+    execution_category=ExecutionCategory.TRANSFORM,
     timeout_seconds=30.0,
     max_retries=1,
     idempotent=True,
@@ -55,6 +56,7 @@ llm_summarize = ToolSpec(
     output_model=LLMTextOutput,
     error_model=ToolError,
     permissions=ToolPermissions(generate=True),
+    execution_category=ExecutionCategory.TRANSFORM,
     timeout_seconds=30.0,
     max_retries=1,
     idempotent=True,
@@ -69,6 +71,7 @@ llm_compare = ToolSpec(
     output_model=LLMTextOutput,
     error_model=ToolError,
     permissions=ToolPermissions(generate=True),
+    execution_category=ExecutionCategory.TRANSFORM,
     timeout_seconds=30.0,
     max_retries=1,
     idempotent=True,

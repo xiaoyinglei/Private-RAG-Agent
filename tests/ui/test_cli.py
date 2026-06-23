@@ -1,4 +1,5 @@
 import json
+import re
 from pathlib import Path
 
 from pytest import MonkeyPatch
@@ -13,6 +14,11 @@ from rag.schema.runtime import RetrievalDiagnostics
 from tests.support import make_runtime
 
 runner = CliRunner()
+_ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+
+
+def _plain_help(output: str) -> str:
+    return _ANSI_RE.sub("", output)
 
 
 def _use_isolated_cli_runtime(monkeypatch: MonkeyPatch) -> None:
@@ -179,12 +185,17 @@ def test_assembly_profile_cli_surface_is_removed() -> None:
     assert agent_run_help.exit_code == 0
     assert agent_resume_help.exit_code == 0
 
-    assert "profiles" not in root_help.output
-    assert "--profile" not in query_help.output
-    assert "--profile" not in agent_run_help.output
-    assert "--profile" not in agent_resume_help.output
+    root_output = _plain_help(root_help.output)
+    query_output = _plain_help(query_help.output)
+    agent_run_output = _plain_help(agent_run_help.output)
+    agent_resume_output = _plain_help(agent_resume_help.output)
 
-    for output in (agent_run_help.output, agent_resume_help.output):
+    assert "profiles" not in root_output
+    assert "--profile" not in query_output
+    assert "--profile" not in agent_run_output
+    assert "--profile" not in agent_resume_output
+
+    for output in (agent_run_output, agent_resume_output):
         assert "--model" in output
         assert "--embedding-model" in output
         assert "--reranker-model" in output
@@ -270,25 +281,27 @@ def test_cli_query_help_uses_new_retrieval_profile_option() -> None:
     result = runner.invoke(app, ["query", "--help"], env={"COLUMNS": "240"})
 
     assert result.exit_code == 0
-    assert "--retrieval-profile" in result.output
-    assert "--model" in result.output
-    assert "--vector-collection-prefix" in result.output
+    output = _plain_help(result.output)
+    assert "--retrieval-profile" in output
+    assert "--model" in output
+    assert "--vector-collection-prefix" in output
 
 
 def test_agent_run_help_exposes_explicit_agent_selector() -> None:
     result = runner.invoke(app, ["agent", "run", "--help"], env={"COLUMNS": "240"})
 
     assert result.exit_code == 0
-    assert "--agent" in result.output
-    assert "--vector-collection-prefix" in result.output
-    assert "generic" in result.output
+    output = _plain_help(result.output)
+    assert "--agent" in output
+    assert "--vector-collection-prefix" in output
+    assert "generic" in output
 
 
 def test_agent_resume_help_exposes_agent_selector_for_checkpoint_restore() -> None:
     result = runner.invoke(app, ["agent", "resume", "--help"], env={"COLUMNS": "240"})
 
     assert result.exit_code == 0
-    assert "--agent" in result.output
+    assert "--agent" in _plain_help(result.output)
 
 
 def test_cli_benchmark_help_defaults_to_new_milvus_backend() -> None:
@@ -298,7 +311,9 @@ def test_cli_benchmark_help_defaults_to_new_milvus_backend() -> None:
 
     assert ingest_help.exit_code == 0
     assert evaluate_help.exit_code == 0
-    assert "--retrieval-profile" in evaluate_help.output
-    assert "--mode" not in evaluate_help.output
-    assert "[default: milvus]" in ingest_help.output
-    assert "[default: milvus]" in evaluate_help.output
+    ingest_output = _plain_help(ingest_help.output)
+    evaluate_output = _plain_help(evaluate_help.output)
+    assert "--retrieval-profile" in evaluate_output
+    assert "--mode" not in evaluate_output
+    assert "[default: milvus]" in ingest_output
+    assert "[default: milvus]" in evaluate_output

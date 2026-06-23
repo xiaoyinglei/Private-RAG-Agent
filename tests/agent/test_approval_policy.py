@@ -7,7 +7,7 @@ from rag.agent.core.approval_policy import (
     ApprovalPolicy,
     merge_approval_requests,
 )
-from rag.agent.tools.spec import ToolError, ToolPermissions, ToolSpec
+from rag.agent.tools.spec import ExecutionCategory, RiskLevel, ToolError, ToolPermissions, ToolSpec
 
 
 class _DummyInput(BaseModel):
@@ -68,7 +68,7 @@ class TestApprovalPolicy:
             spec=spec,
         )
         assert result.action == ApprovalAction.ASK
-        assert result.risk_level == "medium"
+        assert result.risk_level == "high"  # kg_mutation → MUTATE → high
         assert result.request is not None
         assert result.request.kind == "tool_approval"
         assert len(result.request.tool_calls) == 1
@@ -142,6 +142,18 @@ def test_execute_code_requires_ask() -> None:
     assert result.action == ApprovalAction.ASK
 
 
+def test_auto_approve_sandboxed_does_not_bypass_network_permission() -> None:
+    policy = ApprovalPolicy()
+    spec = _make_spec(name="network_python", execute_code=True, external_network=True)
+    result = policy.decide(
+        tool_name="network_python",
+        arguments={"script_path": "scratch/fetch.py"},
+        spec=spec,
+        auto_approve_sandboxed=True,
+    )
+    assert result.action == ApprovalAction.ASK
+
+
 def test_read_fs_allows() -> None:
     policy = ApprovalPolicy()
     spec = _make_spec(name="list_files", read_fs=True)
@@ -151,6 +163,38 @@ def test_read_fs_allows() -> None:
         spec=spec,
     )
     assert result.action == ApprovalAction.ALLOW
+
+
+def test_permission_backstop_prevents_runtime_category_downgrade() -> None:
+    policy = ApprovalPolicy()
+    spec = _make_spec(name="write_file", write_fs=True)
+    object.__setattr__(spec, "execution_category", ExecutionCategory.READ)
+
+    result = policy.decide(
+        tool_name="write_file",
+        arguments={"path": "reports/a.md"},
+        spec=spec,
+    )
+
+    assert result.action == ApprovalAction.ASK
+    assert result.risk_level == "medium"
+
+
+def test_spec_risk_level_controls_approval_summary() -> None:
+    policy = ApprovalPolicy()
+    spec = _make_spec(name="write_file", write_fs=True)
+    object.__setattr__(spec, "risk_level", RiskLevel.HIGH)
+
+    result = policy.decide(
+        tool_name="write_file",
+        arguments={"path": "reports/a.md"},
+        spec=spec,
+    )
+
+    assert result.action == ApprovalAction.ASK
+    assert result.risk_level == "high"
+    assert result.request is not None
+    assert result.request.tool_calls[0].risk_level == "high"
 
 
 class TestMergeApprovalRequests:

@@ -4,7 +4,7 @@ from typing import Any, Literal, Protocol
 
 from pydantic import BaseModel, Field, model_validator
 
-from rag.agent.tools.spec import ToolError, ToolPermissions, ToolSpec
+from rag.agent.tools.spec import ExecutionCategory, ToolError, ToolPermissions, ToolSpec
 from rag.ingest.table_executor import MAX_SLICE_ROWS, TableExecutor
 from rag.schema.core import AssetRecord
 
@@ -367,6 +367,7 @@ asset_list = ToolSpec(
     output_model=AssetListOutput,
     error_model=ToolError,
     permissions=ToolPermissions(read_db=True),
+    execution_category=ExecutionCategory.READ,
     timeout_seconds=5.0,
     max_retries=1,
     idempotent=True,
@@ -384,6 +385,7 @@ asset_inspect = ToolSpec(
     output_model=AssetInspectOutput,
     error_model=ToolError,
     permissions=ToolPermissions(read_db=True, read_object_store=True),
+    execution_category=ExecutionCategory.READ,
     timeout_seconds=10.0,
     max_retries=1,
     idempotent=True,
@@ -401,6 +403,7 @@ asset_read_slice = ToolSpec(
     output_model=AssetReadSliceOutput,
     error_model=ToolError,
     permissions=ToolPermissions(read_db=True, read_object_store=True),
+    execution_category=ExecutionCategory.READ,
     timeout_seconds=10.0,
     max_retries=1,
     idempotent=True,
@@ -418,6 +421,7 @@ asset_analyze = ToolSpec(
     output_model=AssetAnalyzeOutput,
     error_model=ToolError,
     permissions=ToolPermissions(read_db=True, read_object_store=True),
+    execution_category=ExecutionCategory.READ,
     timeout_seconds=10.0,
     max_retries=1,
     idempotent=True,

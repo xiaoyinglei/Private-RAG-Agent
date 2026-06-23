@@ -363,9 +363,21 @@ def test_ensure_benchmark_layout_creates_full_and_mini_directories(tmp_path) -> 
     assert paths.eval_variant_dir("retrieval", "mini").is_dir()
 
 
-def test_build_runtime_for_benchmark_creates_storage_root(tmp_path) -> None:
+def test_build_runtime_for_benchmark_creates_storage_root(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
     storage_root = tmp_path / "benchmarks" / "fiqa" / "index"
     assert not storage_root.exists()
+
+    class _FakeRuntime:
+        def __init__(self) -> None:
+            self.capability_bundle = type("_Bundle", (), {"embedding_bindings": []})()
+
+        def close(self) -> None:
+            return None
+
+    def _fake_from_request(*, storage, request, assembly_service):
+        return _FakeRuntime()
+
+    monkeypatch.setattr(benchmarks.RAGRuntime, "from_request", staticmethod(_fake_from_request))
 
     runtime = build_runtime_for_benchmark(
         storage_root=storage_root,
@@ -628,6 +640,22 @@ def test_build_runtime_for_benchmark_rerank_override_clears_stale_rerank_path(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("RAG_RERANK_MODEL_PATH", "/tmp/old-bge-reranker")
+    captured: dict[str, object] = {}
+
+    class _FakeRuntime:
+        def __init__(self) -> None:
+            self.capability_bundle = type("_Bundle", (), {"embedding_bindings": []})()
+
+        def close(self) -> None:
+            return None
+
+    def _fake_from_request(*, storage, request, assembly_service):
+        captured["storage"] = storage
+        captured["request"] = request
+        captured["assembly_service"] = assembly_service
+        return _FakeRuntime()
+
+    monkeypatch.setattr(benchmarks.RAGRuntime, "from_request", staticmethod(_fake_from_request))
 
     runtime = build_runtime_for_benchmark(
         storage_root=tmp_path / "benchmarks" / "medical_retrieval" / "index",
@@ -637,10 +665,12 @@ def test_build_runtime_for_benchmark_rerank_override_clears_stale_rerank_path(
         vector_backend="sqlite",
     )
     try:
-        binding = runtime.capability_bundle.rerank_bindings[0]
-        assert binding.model_name == "Qwen/Qwen3-Reranker-4B"
-        provider = binding.backend
-        assert provider.rerank_model_name == "Qwen/Qwen3-Reranker-4B"
+        request = captured["request"]
+        assert isinstance(request, benchmarks.AssemblyRequest)
+        assert request.overrides is not None
+        assert request.overrides.rerank is not None
+        assert request.overrides.rerank.rerank_model == "Qwen/Qwen3-Reranker-4B"
+        assert request.overrides.rerank.rerank_model_path is None
     finally:
         runtime.close()
 

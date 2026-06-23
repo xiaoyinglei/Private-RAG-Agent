@@ -20,7 +20,7 @@ from rag.agent.core.delegation import (
     DelegatedAgentRunner,
     ParentAgentContext,
 )
-from rag.agent.tools.spec import ToolError, ToolPermissions, ToolSpec
+from rag.agent.tools.spec import ExecutionCategory, ToolError, ToolPermissions, ToolSpec
 
 if TYPE_CHECKING:
     from rag.agent.core.definition import AgentRuntimePolicy
@@ -225,6 +225,7 @@ task_tool_spec = ToolSpec(
         embed=True,
         generate=True,
     ),
+    execution_category=ExecutionCategory.READ,
     timeout_seconds=180.0,
     max_retries=0,
     work_budget_cost=2_000,
