@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from collections.abc import AsyncGenerator, Mapping, Sequence
 from dataclasses import replace
 from inspect import isawaitable
@@ -78,6 +79,8 @@ from rag.schema.runtime import AccessPolicy
 
 if TYPE_CHECKING:
     from rag.agent.file_manifest import FileManifest
+
+logger = logging.getLogger(__name__)
 
 
 class AgentRunRequest(BaseModel):
@@ -545,13 +548,12 @@ class AgentService:
         if result_state["status"] in {"completed", "failed"}:
             RunRegistry.remove(run_config.run_id)
 
-        # 8. Extract persistent memories from completed conversation (non-blocking)
+        # 8. Extract persistent memories from completed conversation
         if result_state["status"] == "completed":
-            import asyncio
-
-            asyncio.create_task(
-                self._extract_persistent_memories(result_state, persistent_store)
-            )
+            try:
+                await self._extract_persistent_memories(result_state, persistent_store)
+            except Exception:
+                logger.warning("Persistent memory extraction failed", exc_info=True)
 
         return AgentRunResult.from_loop_result(
             result_state,
@@ -640,13 +642,12 @@ class AgentService:
         finally:
             if state["status"] in {"completed", "failed"}:
                 RunRegistry.remove(run_config.run_id)
-            # Extract persistent memories from completed conversation (non-blocking)
+            # Extract persistent memories from completed conversation
             if state["status"] == "completed":
-                import asyncio
-
-                asyncio.create_task(
-                    self._extract_persistent_memories(state, persistent_store)
-                )
+                try:
+                    await self._extract_persistent_memories(state, persistent_store)
+                except Exception:
+                    logger.warning("Persistent memory extraction failed", exc_info=True)
 
     def _initial_loop_state_from_config(
         self,
@@ -884,7 +885,7 @@ class AgentService:
                 return
 
             # Create a memory gateway if available
-            memory_gateway = self._create_memory_gateway()
+            memory_gateway = self._create_memory_gateway("memory_select")
             if memory_gateway is None:
                 # No gateway — fall back to rule-only selection
                 selector = MemorySelector(max_selected=5, max_tokens=4000)
@@ -916,11 +917,11 @@ class AgentService:
         try:
             from rag.agent.memory.persistent import MemoryExtractor
 
-            memory_gateway = self._create_memory_gateway()
-            if memory_gateway is None:
+            extract_gateway = self._create_memory_gateway("memory_extract")
+            if extract_gateway is None:
                 return
 
-            extractor = MemoryExtractor(llm_gateway=memory_gateway)
+            extractor = MemoryExtractor(llm_gateway=extract_gateway)
             written = await extractor.extract(state=state, store=store)
             if written:
                 logger.info("Extracted persistent memories: %s", written)
@@ -928,7 +929,10 @@ class AgentService:
             # Optionally consolidate
             from rag.agent.memory.persistent import MemoryConsolidator
 
-            consolidator = MemoryConsolidator(llm_gateway=memory_gateway)
+            consolidate_gateway = self._create_memory_gateway("memory_consolidate")
+            consolidator = MemoryConsolidator(
+                llm_gateway=consolidate_gateway or extract_gateway
+            )
             result = await consolidator.consolidate(store)
             if result.action == "consolidated":
                 logger.info(
@@ -939,22 +943,27 @@ class AgentService:
         except Exception:
             logger.warning("Failed to extract persistent memories", exc_info=True)
 
-    def _create_memory_gateway(self) -> Any | None:
+    def _create_memory_gateway(
+        self,
+        stage: str = "memory_select",
+    ) -> Any | None:
         """Create an LLM gateway for memory operations.
+
+        Resolves the model for the given memory stage from the generation
+        config in models.yaml. Falls back to the default model if no
+        stage-specific config is found.
 
         Returns None if no model registry is available.
         """
         if self._model_registry is None:
             return None
         try:
-            # Use the default model for memory operations
-            # (can be overridden with memory_select config in models.yaml)
-            resolved = self._model_registry.resolve_or_fallback(
-                self._model_registry.default_model
-            )
+            model_alias = self._resolve_memory_model_alias(stage)
+            resolved = self._model_registry.resolve_or_fallback(model_alias)
             if resolved.gateway is not None:
                 return resolved.gateway
-            # Create a gateway from the resolved generator
+            if resolved.token_accounting is None:
+                return None
             from rag.providers.llm_gateway import LLMGateway
 
             return LLMGateway(
@@ -963,8 +972,24 @@ class AgentService:
                 model_context_tokens=resolved.context_window_tokens,
             )
         except Exception:
-            logger.debug("Failed to create memory gateway", exc_info=True)
+            logger.debug("Failed to create memory gateway for stage %s", stage, exc_info=True)
             return None
+
+    def _resolve_memory_model_alias(self, stage: str) -> str:
+        """Resolve model alias for a memory stage from the runtime config.
+
+        Uses the GenerationConfig parsed from models.yaml by the catalog.
+        Falls back to the default model if no stage-specific config is found.
+        """
+        if self._model_registry is None:
+            return ""
+        try:
+            task_config = getattr(self._model_registry.generation_config, stage, None)
+            if task_config is not None and task_config.model:
+                return str(task_config.model)
+        except Exception:
+            logger.debug("Failed to resolve memory model from runtime config", exc_info=True)
+        return str(self._model_registry.default_model)
 
     def _runtime_tool_registry(
         self,

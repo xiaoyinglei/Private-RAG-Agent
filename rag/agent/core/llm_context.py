@@ -407,11 +407,14 @@ class AgentLLMContextAssembler:
             max_context_tokens=max_context_tokens,
             token_accounting=self._token_accounting,
         )
+        # Inject persistent memories as recalled_memories for the historical_hints section
+        recalled = tuple(state.get("persistent_memories", ()))
         return builder.assemble_loop(
             definition=self._empty_definition(),
             state=state,
             included_sections=included_sections,
             required_sections=required_sections,
+            recalled_memories=recalled,
         )
 
     @staticmethod

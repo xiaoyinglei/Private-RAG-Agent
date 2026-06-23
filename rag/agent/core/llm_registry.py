@@ -10,6 +10,7 @@ from rag.agent.core.llm_config import AgentModelsConfig, ModelProvider, ModelSpe
 from rag.assembly.models import ProviderConfig
 from rag.assembly.support import build_provider
 from rag.assembly.tokenizer import TokenAccountingService, TokenizerContract
+from rag.models.config import GenerationConfig, GenerationTaskConfig
 from rag.providers.llm_gateway import LLMGateway
 from rag.schema.llm import parse_llm_stage_budgets
 
@@ -50,6 +51,10 @@ class ModelRegistry:
     @property
     def fallback_model(self) -> str | None:
         return self._config.fallback_model
+
+    @property
+    def generation_config(self) -> GenerationConfig:
+        return self._config.generation
 
     @classmethod
     def from_env(cls, env_path: str = ".env", *, default_model: str | None = None) -> ModelRegistry:
@@ -122,6 +127,7 @@ class ModelRegistry:
             "models": agent_models,
             "default_model": default_model,
             "fallback_model": data.get("fallback_model", default_model),
+            "generation": _parse_generation_config(data.get("generation")),
             "llm_stage_budgets": parse_llm_stage_budgets(data.get("llm_budgets")),
         })
 
@@ -235,6 +241,32 @@ def _agent_provider_kind(entry: dict[str, object]) -> str:
 
 def _normalized_provider_value(value: object) -> str:
     return str(value or "").strip().lower().replace("-", "_")
+
+
+def _parse_generation_config(raw: object) -> GenerationConfig:
+    if not isinstance(raw, dict):
+        return GenerationConfig()
+
+    def parse_task(name: str) -> GenerationTaskConfig:
+        entry = raw.get(name)
+        if not isinstance(entry, dict):
+            return GenerationTaskConfig()
+        return GenerationTaskConfig(
+            model=entry.get("model"),
+            max_tokens=int(entry["max_tokens"]) if "max_tokens" in entry else None,
+            temperature=float(entry["temperature"]) if "temperature" in entry else None,
+        )
+
+    return GenerationConfig(
+        summary=parse_task("summary"),
+        answer=parse_task("answer"),
+        planner=parse_task("planner"),
+        synthesize=parse_task("synthesize"),
+        factcheck=parse_task("factcheck"),
+        memory_select=parse_task("memory_select"),
+        memory_extract=parse_task("memory_extract"),
+        memory_consolidate=parse_task("memory_consolidate"),
+    )
 
 
 def _api_key_from_env(name: str | None) -> str | None:
