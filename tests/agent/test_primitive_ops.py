@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -17,12 +18,18 @@ from rag.agent.primitive_ops import (
     StructuredProbeInput,
     WriteFileInput,
 )
-from rag.agent.runner.python_runner import PythonRunResult
+from rag.agent.runner.python_runner import LocalSubprocessPythonRunner, PythonRunResult
 from rag.agent.workspace import WorkspacePathError, WorkspaceRuntime
 
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
+
+
+requires_seatbelt = pytest.mark.skipif(
+    shutil.which("sandbox-exec") is None,
+    reason="Seatbelt sandbox-exec is not available on this platform",
+)
 
 
 @pytest.fixture()
@@ -39,6 +46,11 @@ def ops(ws: WorkspaceRuntime) -> PrimitiveOps:
     return PrimitiveOps(workspace=ws)
 
 
+@pytest.fixture()
+def subprocess_ops(ws: WorkspaceRuntime) -> PrimitiveOps:
+    return PrimitiveOps(workspace=ws, python_runner=LocalSubprocessPythonRunner())
+
+
 # ---------------------------------------------------------------------------
 # Fake runner (for deterministic tests)
 # ---------------------------------------------------------------------------
@@ -49,7 +61,7 @@ class FakePythonRunner:
     """Records the call and returns a canned result."""
 
     result: PythonRunResult
-    last_call: dict | None = None
+    last_call: dict[str, object] | None = None
 
     def run(
         self,
@@ -415,35 +427,34 @@ class TestWriteFile:
 
 
 class TestRunPython:
-    def test_successful_script(self, ws: WorkspaceRuntime, ops: PrimitiveOps) -> None:
+    def test_successful_script(self, ws: WorkspaceRuntime, subprocess_ops: PrimitiveOps) -> None:
         script = ws.scratch / "hello.py"
         script.write_text('print("hello")')
-        out = ops.run_python(RunPythonInput(script_path="scratch/hello.py"))
+        out = subprocess_ops.run_python(RunPythonInput(script_path="scratch/hello.py"))
         assert out.ok is True
         assert out.exit_code == 0
         assert "hello" in out.stdout
 
-    def test_failing_script(self, ws: WorkspaceRuntime, ops: PrimitiveOps) -> None:
+    def test_failing_script(self, ws: WorkspaceRuntime, subprocess_ops: PrimitiveOps) -> None:
         script = ws.scratch / "fail.py"
         script.write_text("import sys; sys.exit(1)")
-        out = ops.run_python(RunPythonInput(script_path="scratch/fail.py"))
+        out = subprocess_ops.run_python(RunPythonInput(script_path="scratch/fail.py"))
         assert out.ok is False
         assert out.exit_code == 1
 
     def test_script_generating_files(
-        self, ws: WorkspaceRuntime, ops: PrimitiveOps
+        self, ws: WorkspaceRuntime, subprocess_ops: PrimitiveOps
     ) -> None:
         script = ws.scratch / "gen.py"
         script.write_text(
             'from pathlib import Path\nPath("scratch/output.txt").write_text("created")'
         )
-        out = ops.run_python(RunPythonInput(script_path="scratch/gen.py"))
+        out = subprocess_ops.run_python(RunPythonInput(script_path="scratch/gen.py"))
         assert "scratch/output.txt" in out.generated_files
         assert (ws.scratch / "output.txt").read_text() == "created"
 
-    def test_script_tempfile_uses_scratch(
-        self, ws: WorkspaceRuntime, ops: PrimitiveOps
-    ) -> None:
+    @requires_seatbelt
+    def test_script_tempfile_uses_scratch(self, ws: WorkspaceRuntime, ops: PrimitiveOps) -> None:
         script = ws.scratch / "tmpfile.py"
         script.write_text(
             "import tempfile\n"
@@ -458,6 +469,7 @@ class TestRunPython:
         assert out.ok is True
         assert "scratch/" in out.stdout
 
+    @requires_seatbelt
     def test_script_cannot_write_outside_workspace(
         self, tmp_path: Path, ws: WorkspaceRuntime, ops: PrimitiveOps
     ) -> None:
@@ -474,6 +486,7 @@ class TestRunPython:
         assert not (tmp_path / "outside.txt").exists()
         assert "Operation not permitted" in out.stderr
 
+    @requires_seatbelt
     def test_script_cannot_write_input_files(
         self, ws: WorkspaceRuntime, ops: PrimitiveOps
     ) -> None:

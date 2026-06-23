@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage
@@ -83,7 +84,7 @@ async def test_selector_skips_llm_when_user_memories_fill_selection() -> None:
             return memories
 
     selected = await MemorySelector(
-        llm_gateway=gateway, max_selected=5, llm_threshold=0
+        llm_gateway=cast(Any, gateway), max_selected=5, llm_threshold=0
     ).select(
         task="continue work",
         index_content=index_content,
