@@ -5,6 +5,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field, model_validator
 
+from rag.models.config import GenerationConfig
 from rag.schema.llm import (
     DEFAULT_LLM_STAGE_BUDGETS,
     LLMCallStage,
@@ -40,6 +41,7 @@ class AgentModelsConfig(BaseModel):
     models: dict[str, ModelSpec] = Field(default_factory=dict)
     default_model: str
     fallback_model: str | None = None
+    generation: GenerationConfig = Field(default_factory=GenerationConfig)
     llm_stage_budgets: dict[LLMCallStage, LLMStageBudget] = Field(
         default_factory=lambda: {
             stage: budget.model_copy()

@@ -187,6 +187,9 @@ class LoopState(TypedDict):
     capability_diagnostics: list[RuntimeDiagnostic]
     # ── File manifest (file-first processing) ──
     file_manifest: FileManifest | None
+    # ── Persistent cross-session memory ──
+    persistent_memories: list[str]  # selected memory texts for current run
+    memory_index: str  # MEMORY.md content (cheap, always loaded)
 
 
 def create_loop_state(
@@ -263,6 +266,9 @@ def create_loop_state(
         "capability_diagnostics": [],
         # ── File manifest (file-first processing) ──
         "file_manifest": file_manifest,
+        # ── Persistent cross-session memory ──
+        "persistent_memories": [],
+        "memory_index": "",
     }
 
 
