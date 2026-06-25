@@ -103,6 +103,11 @@ _DEFAULT_ACTIVATION_GROUPS: dict[str, str] = {
     "apply_patch": "workspace",
     "run_command": "workspace",
     "structured_probe": "workspace",
+
+    # mcp: external tools from MCP servers (always deferred, never resident)
+    # Individual MCP tools are not listed here — they get activation_group="mcp"
+    # from their ToolCard.  This entry is for tools that don't have a ToolCard
+    # but whose name starts with "mcp__".
 }
 
 

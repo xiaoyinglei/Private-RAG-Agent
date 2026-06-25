@@ -60,6 +60,10 @@ class AgentRuntimePolicy:
     output_validation_max_retries: int = 2
     max_stop_hook_blocks: int = 3
 
+    # ── MCP (external tool source) ──
+    mcp_servers: tuple[str, ...] = ()      # enabled MCP server names
+    mcp_allow_all_tools: bool = False      # explicitly allow ALL MCP tools (default: only allowlisted)
+
     # ── legacy compatibility metadata (not used for behavior) ──
     agent_type: str = "generic"
     description: str = ""

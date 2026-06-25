@@ -75,7 +75,8 @@ from rag.agent.memory.compactor import (
 from rag.agent.memory.models import MemoryPolicy
 from rag.agent.memory.persistent import PersistentMemoryStore
 from rag.agent.memory.store import WorkspaceMemoryStore
-from rag.agent.tools.registry import ToolRegistry, ToolRunner
+from rag.agent.tools.mcp_adapter import MCPToolRegistry
+from rag.agent.tools.registry import ContextualToolRunner, ToolRegistry, ToolRunner
 from rag.agent.tools.spec import ExecutionCategory, ToolPermissions, ToolResult, ToolSpec
 from rag.schema.query import AnswerCitation, EvidenceItem
 from rag.schema.runtime import AccessPolicy
@@ -347,6 +348,7 @@ class AgentService:
         runtime_diagnostics: Sequence[RuntimeDiagnostic] = (),
         catalog: ToolCatalog | None = None,
         stream_sink: Any = None,  # StreamEventSink | None
+        mcp_registry: MCPToolRegistry | None = None,
     ) -> None:
         if definition is not None and policy is not None:
             raise ValueError("Provide either 'definition' or 'policy', not both")
@@ -384,6 +386,7 @@ class AgentService:
         self._runtime_diagnostics = tuple(merge_runtime_diagnostics([], runtime_diagnostics))
         self._checkpointer = checkpointer or create_agent_checkpointer(None)
         self._stream_sink = stream_sink
+        self._mcp_registry = mcp_registry
         # Register core tools: tool_search, activate_tools, task
         self._register_discovery_tools()
         self._register_task_tool()
@@ -969,6 +972,9 @@ class AgentService:
                 except KeyError:
                     pass
 
+        # Inject MCP tools (if any)
+        self._inject_mcp_tools(runtime)
+
         # Wire generic 'task' tool with request-scoped parent_config
         if runtime.has_runner("task") or "task" in {s.name for s in self._base_tool_registry.list_all()}:
             from rag.agent.tools.task_tool import TaskOutput, TaskToolRunner
@@ -1025,6 +1031,35 @@ class AgentService:
                 registry.register_contextual_runner(tool_name, runner)
             except KeyError:
                 pass
+
+    def _inject_mcp_tools(self, runtime: ToolRegistry) -> None:
+        """Register MCP tool specs, runners, and formatters in the runtime registry.
+
+        MCP tools are pre-loaded (connected before AgentService creation).
+        This method synchronously registers them in the per-request cloned registry.
+        """
+        if self._mcp_registry is None:
+            return
+        for spec in self._mcp_registry.list_all_tools():
+            # Register spec (if not already present)
+            try:
+                runtime.get(spec.name)
+            except KeyError:
+                runtime.register(spec)
+
+            # Register contextual runner
+            try:
+                runner = self._mcp_registry.get_runner(spec.name)
+                runtime.register_contextual_runner(spec.name, runner)
+            except KeyError:
+                logger.warning(
+                    f"MCP tool '{spec.name}' has no runner — call skipped"
+                )
+
+            # Register formatter if not already present
+            if runtime.get_formatter(spec.name) is None:
+                from rag.agent.tools.formatters.mcp_tools import MCPToolFormatter
+                runtime.register_formatter(MCPToolFormatter(spec.name))
 
     def _build_catalog(self, registry: ToolRegistry) -> ToolCatalog:
         """Build a ToolCatalog from all tools in the registry.

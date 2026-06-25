@@ -1,0 +1,40 @@
+# MCP Server Configuration
+# Each server must be explicitly enabled and have an explicit tools_allowlist.
+# Default: all servers are disabled.
+
+servers:
+  - name: github
+    transport: stdio
+    command: npx
+    args: ["-y", "@modelcontextprotocol/server-github"]
+    env:
+      GITHUB_PERSONAL_ACCESS_TOKEN: ${GITHUB_TOKEN}
+    tools_allowlist:
+      - search_repositories
+      - get_file_contents
+      - list_issues
+      - create_issue
+    enabled: false
+
+  - name: postgres
+    transport: stdio
+    command: npx
+    args: ["-y", "@modelcontextprotocol/server-postgres"]
+    env:
+      DATABASE_URL: ${POSTGRES_URL}
+    tools_allowlist:
+      - query
+      - list_tables
+    enabled: false
+
+  - name: filesystem
+    transport: stdio
+    command: npx
+    args: ["-y", "@modelcontextprotocol/server-filesystem"]
+    env:
+      ALLOWED_DIRECTORIES: ${MCP_FS_ALLOWED_DIRS}
+    tools_allowlist:
+      - read_file
+      - list_directory
+      - search_files
+    enabled: false
