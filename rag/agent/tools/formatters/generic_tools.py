@@ -110,6 +110,39 @@ class RunCommandFormatter:
         return None
 
 
+class ToolReplFormatter:
+    """Formatter for tool_repl — renders stdout + batch summary."""
+
+    tool_name = "tool_repl"
+
+    def format_result(self, result: ToolResult) -> ContextSection | None:
+        if result.status != "ok" or result.output is None:
+            return None
+        exit_code = getattr(result.output, "exit_code", -1)
+        stdout = getattr(result.output, "stdout", "") or ""
+        stderr = getattr(result.output, "stderr", "") or ""
+        timed_out = getattr(result.output, "timed_out", False)
+        duration_ms = getattr(result.output, "duration_ms", 0.0)
+
+        lines: list[str] = [
+            f"tool_repl: exit_code={exit_code} duration={duration_ms:.0f}ms"
+            + (" TIMED_OUT" if timed_out else ""),
+        ]
+        if stdout:
+            lines.append(f"  stdout: {_one_line(stdout)[:600]}")
+        if stderr:
+            lines.append(f"  stderr: {_one_line(stderr)[:400]}")
+        return ContextSection(
+            name="tool_results",
+            content="\n".join(lines),
+            token_count=0,
+            required=False,
+        )
+
+    def format_externalized(self, ref: ExternalizedToolOutput) -> ContextSection | None:
+        return None
+
+
 class UpdatePlanFormatter:
     """Formatter for update_plan results — render current plan state."""
 

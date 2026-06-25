@@ -394,9 +394,61 @@ update_plan_spec = ToolSpec(
 # Module aggregates
 # ═══════════════════════════════════════════════════════════════════════════════
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# tool_repl — programmatic batch tool calling (Claude REPL-like)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+tool_repl_spec = ToolSpec(
+    name="tool_repl",
+    description=(
+        "Enter batch tool-calling mode. Write Python code that declares tool "
+        "calls using tools.declare(name, **args). All declared tools are executed "
+        "in batch after your code finishes — you don't wait for each one. "
+        "Use this when you need to call multiple tools, process their results, "
+        "or iterate over data without returning to the LLM between each step."
+    ),
+    input_model=RunCommandInput,  # reuse: command is Python code
+    output_model=RunCommandOutput,
+    error_model=ToolError,
+    permissions=ToolPermissions(read_fs=True, write_fs=True, execute_code=True),
+    execution_category=ExecutionCategory.EXECUTE,
+    timeout_seconds=120.0,
+    max_retries=0,
+    work_budget_cost=800,
+    aci=ToolCard(
+        when_to_use=(
+            "Use when you need to call multiple tools in sequence or batch: "
+            "search knowledge AND search assets, process results, iterate over "
+            "findings. This is MORE efficient than calling tools one-by-one "
+            "because results come back together on the next turn."
+        ),
+        when_not_to_use=(
+            "Do not use for single tool calls — just call the tool directly. "
+            "Do not use for simple file reads or edits — use read_file/search_text/apply_patch. "
+            "Do not use for quick Python one-liners — use run_python with the code= parameter."
+        ),
+        preconditions=("activated tools are available via tools.list_available()",),
+        required_context=("which tools to call and with what arguments",),
+        input_examples=(
+            {"command": "tools.declare('search_knowledge', query='Q3 revenue', top_k=5)\ntools.declare('search_assets', query='financial tables', max_results=3)"},
+        ),
+        output_examples=("stdout: 'declared: search_knowledge seq=1\\ndeclared: search_assets seq=2'",),
+        output_cap_policy="truncate",
+        failure_codes=("timeout", "syntax_error"),
+        retryable=True,
+        user_recoverable=True,
+        model_next_action="Fix Python errors and retry.",
+        selection_tags=("batch", "repl", "programmatic"),
+        file_types=(".py",),
+        domains=("code", "agent_internal"),
+        activation_group="workspace",
+    ),
+)
+
 ALL_GENERIC_TOOLS: list[ToolSpec] = [
     search_text_spec,
     apply_patch_spec,
     run_command_spec,
     update_plan_spec,
+    tool_repl_spec,
 ]

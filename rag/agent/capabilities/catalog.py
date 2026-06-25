@@ -33,6 +33,7 @@ CORE_TOOLS: frozenset[str] = frozenset({
     "apply_patch",
     "run_command",
     "update_plan",
+    "tool_repl",
 })
 
 DEFERRED_TOOLS: frozenset[str] = frozenset({
@@ -103,6 +104,7 @@ _DEFAULT_ACTIVATION_GROUPS: dict[str, str] = {
     "apply_patch": "workspace",
     "run_command": "workspace",
     "structured_probe": "workspace",
+    "tool_repl": "workspace",
 
     # mcp: external tools from MCP servers (always deferred, never resident)
     # Individual MCP tools are not listed here — they get activation_group="mcp"

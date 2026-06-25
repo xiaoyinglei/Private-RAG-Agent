@@ -8,6 +8,7 @@ from rag.agent.tools.formatters.generic_tools import (
     ApplyPatchFormatter,
     RunCommandFormatter,
     SearchTextFormatter,
+    ToolReplFormatter,
     UpdatePlanFormatter,
 )
 from rag.agent.tools.formatters.asset_tools import (
@@ -128,6 +129,7 @@ def create_builtin_tool_registry(
         ApplyPatchFormatter(),
         RunCommandFormatter(),
         UpdatePlanFormatter(),
+        ToolReplFormatter(),
     )
     for formatter in generic_formatters:
         registry.register_formatter(formatter)

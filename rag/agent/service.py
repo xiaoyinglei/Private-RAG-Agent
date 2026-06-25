@@ -972,8 +972,8 @@ class AgentService:
                 except KeyError:
                     pass
 
-        # Inject MCP tools (if any)
-        self._inject_mcp_tools(runtime)
+        # Assemble full tool pool (builtin + MCP + deny rules)
+        self._assemble_tool_pool(runtime)
 
         # Wire generic 'task' tool with request-scoped parent_config
         if runtime.has_runner("task") or "task" in {s.name for s in self._base_tool_registry.list_all()}:
@@ -1032,6 +1032,28 @@ class AgentService:
             except KeyError:
                 pass
 
+    def _assemble_tool_pool(self, runtime: ToolRegistry) -> None:
+        """Single entry point for tool pool assembly.
+
+        Combines builtin catalog building + MCP injection + deny rules
+        in one place.  Called from _runtime_tool_registry() for each run.
+
+        This is the moral equivalent of Claude Code's assembleToolPool:
+        built-in + MCP, unified filtering, single catalog registration.
+        """
+        # 1. MCP tools → registry + catalog + allowed_tools
+        self._inject_mcp_tools(runtime)
+
+        # 2. Deny rules — apply ToolCatalogFilter to MCP tools as well
+        deny = self._definition.runtime_policy.tool_catalog_filter.deny
+        if deny:
+            for tool_name in sorted(deny):
+                if tool_name in self._definition.allowed_tools:
+                    self._definition.allowed_tools.remove(tool_name)
+                # Remove from catalog if present
+                if self._catalog.get(tool_name) is not None:
+                    logger.info(f"Tool '{tool_name}' removed by deny rule")
+
     def _inject_mcp_tools(self, runtime: ToolRegistry) -> None:
         """Register MCP tool specs, runners, formatters, and catalog entries.
 
@@ -1044,9 +1066,6 @@ class AgentService:
             return
 
         # Extend allowed_tools so activate_tools accepts MCP tools.
-        # The activate_tools runner captures allowed_tools at registration time
-        # (before MCP tools are injected).  We append MCP names here so any
-        # subsequent activation check passes.
         mcp_names = [s.name for s in self._mcp_registry.list_all_tools()]
         for name in mcp_names:
             if name not in self._definition.allowed_tools:

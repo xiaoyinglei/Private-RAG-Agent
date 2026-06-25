@@ -17,6 +17,7 @@ from rag.agent.tools.formatters.generic_tools import (
     ApplyPatchFormatter,
     RunCommandFormatter,
     SearchTextFormatter,
+    ToolReplFormatter,
     UpdatePlanFormatter,
 )
 from rag.agent.tools.formatters.llm_tools import (
@@ -57,6 +58,7 @@ __all__ = [
     "RunPythonFormatter",
     "SearchTextFormatter",
     "StructuredProbeFormatter",
+    "ToolReplFormatter",
     "UpdatePlanFormatter",
     "VectorSearchFormatter",
     "WriteFileFormatter",
