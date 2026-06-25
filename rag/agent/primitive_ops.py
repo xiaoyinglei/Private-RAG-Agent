@@ -312,6 +312,11 @@ class PrimitiveOps:
     # -- run_python --------------------------------------------------------
 
     def run_python(self, payload: RunPythonInput) -> RunPythonOutput:
+        # Code path: write injected preamble + user code to temp file
+        if payload.code:
+            return self._run_python_code(payload)
+
+        # Script path: existing behaviour
         script_abs = self._workspace.resolve_path(payload.script_path)
         self._workspace.ensure_within_scratch(script_abs)
 
@@ -321,22 +326,86 @@ class PrimitiveOps:
         if not script_abs.is_file():
             raise FileNotFoundError(f"Script not found: {payload.script_path}")
 
+        return self._execute_python_file(script_abs, payload.args, payload.timeout_seconds)
+
+    def _run_python_code(self, payload: RunPythonInput) -> RunPythonOutput:
+        """Execute Python code with SDK preamble injected.
+
+        Writes code to a temp .py file in scratch/, prepends the Tool SDK
+        so agent-written Python can use tools.declare().
+        """
+        import tempfile
+
+        # Load SDK preamble
+        sdk_source = _load_sdk_preamble()
+
+        # Build the full script: matplotlib preamble + SDK + user code
+        matplot_preamble = _matplotlib_preamble(scratch)
+        full_code = f"{matplot_preamble}\n\n{sdk_source}\n\n{payload.code}"
+
+        # Write to temp file in scratch/
+        scratch = self._workspace.root / "scratch"
+        scratch.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            suffix=".py",
+            dir=str(scratch),
+            delete=False,
+            encoding="utf-8",
+        ) as tf:
+            tf.write(full_code)
+            temp_path = Path(tf.name)
+
+        # Set env vars for the SDK
+        prev_scratch = os.environ.get("AGENT_SCRATCH_DIR")
+        prev_available = os.environ.get("AGENT_AVAILABLE_TOOLS")
+        try:
+            os.environ["AGENT_SCRATCH_DIR"] = str(scratch)
+            # Pass available tool names (activated tools set by caller)
+            available = os.environ.get("AGENT_AVAILABLE_TOOLS", "")
+            if not available:
+                os.environ["AGENT_AVAILABLE_TOOLS"] = ""
+            return self._execute_python_file(
+                temp_path, payload.args, payload.timeout_seconds,
+            )
+        finally:
+            if prev_scratch is not None:
+                os.environ["AGENT_SCRATCH_DIR"] = prev_scratch
+            else:
+                os.environ.pop("AGENT_SCRATCH_DIR", None)
+            if prev_available is not None:
+                os.environ["AGENT_AVAILABLE_TOOLS"] = prev_available
+            else:
+                os.environ.pop("AGENT_AVAILABLE_TOOLS", None)
+            # Clean up temp file
+            try:
+                temp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    def _execute_python_file(
+        self,
+        script_path: Path,
+        args: list[str],
+        timeout: float,
+    ) -> RunPythonOutput:
+        """Execute a Python file and capture results."""
         before = _snapshot_files(self._workspace.root)
 
         result = self._python_runner.run(
-            script_abs,
-            args=payload.args,
+            script_path,
+            args=args,
             cwd=self._workspace.root,
-            timeout=payload.timeout_seconds,
+            timeout=timeout,
         )
 
         after = _snapshot_files(self._workspace.root)
         generated = sorted(after - before)
         generated_files = [
-            str(self._workspace.relative_to_root(Path(f))) for f in generated[:MAX_GENERATED_FILES]
+            str(self._workspace.relative_to_root(Path(f)))
+            for f in generated[:MAX_GENERATED_FILES]
         ]
 
-        # Detect and preview generated images
         image_previews = _collect_image_previews(
             [Path(f) for f in generated],
             workspace=self._workspace,
@@ -830,6 +899,35 @@ except ImportError:
     pass
 # -- end preamble --
 '''
+
+
+_SDK_PREAMBLE_CACHE: str | None = None
+
+
+def _load_sdk_preamble() -> str:
+    """Load the Tool SDK source as a string to prepend to user code."""
+    global _SDK_PREAMBLE_CACHE
+    if _SDK_PREAMBLE_CACHE is not None:
+        return _SDK_PREAMBLE_CACHE
+    sdk_path = Path(__file__).resolve().parent / "tool_sdk.py"
+    if sdk_path.exists():
+        _SDK_PREAMBLE_CACHE = sdk_path.read_text(encoding="utf-8")
+        return _SDK_PREAMBLE_CACHE
+    # Fallback: minimal inline SDK
+    _SDK_PREAMBLE_CACHE = """
+import json, os
+class _ToolDeclarer:
+    def __init__(self): self._count = 0
+    def declare(self, name, **args):
+        if self._count >= int(os.environ.get('AGENT_MAX_BATCH_SIZE','10')): return {'declared':False}
+        batch=os.path.join(os.environ.get('AGENT_SCRATCH_DIR','.'),'tool_calls.jsonl')
+        import pathlib; pathlib.Path(batch).parent.mkdir(parents=True,exist_ok=True)
+        with open(batch,'a') as f: f.write(json.dumps({'tool_name':name,'arguments':args},default=str)+'\\n')
+        self._count+=1; return {'declared':name,'seq':self._count}
+    def list_available(self): return os.environ.get('AGENT_AVAILABLE_TOOLS','').split(',')
+tools = _ToolDeclarer()
+"""
+    return _SDK_PREAMBLE_CACHE
 
 
 def _collect_image_previews(

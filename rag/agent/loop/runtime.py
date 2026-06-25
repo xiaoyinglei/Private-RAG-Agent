@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import AsyncGenerator, Awaitable, Sequence
 from inspect import isawaitable
 from typing import Any, Protocol, cast
 
 from pydantic import BaseModel, ConfigDict, ValidationError
 
-from rag.agent.capabilities.catalog import DeferredToolStore, ToolCatalog
+from rag.agent.capabilities.catalog import CORE_TOOLS, DeferredToolStore, ToolCatalog
 from rag.agent.capabilities.context import iteration_var
 from rag.agent.core.checkpointing import (
     CheckpointStore,
@@ -15,6 +16,7 @@ from rag.agent.core.checkpointing import (
     _migrate_discovery_events,
 )
 from rag.agent.core.context import RunRegistry
+from rag.agent.core.turn_contracts import ToolCallPlan
 from rag.agent.core.definition import AgentDefinition
 from rag.agent.core.finalization import (
     FinishCandidateBuilder,
@@ -45,6 +47,8 @@ from rag.agent.loop.stop_hooks import StopHookOutcome, StopHookRunner
 from rag.agent.loop.substate import DeferredToolState, MemoryState, PlanState
 from rag.agent.memory.compactor import LoopCompactionResult
 from rag.agent.planning import MAX_PLAN_EVENTS, PlanEvent, PlanTracker
+
+logger = logging.getLogger(__name__)
 from rag.agent.streaming.events import StreamEvent
 from rag.agent.streaming.sink import StreamEventSink
 from rag.agent.tools.observation import ToolExecutionObservation
@@ -690,6 +694,11 @@ class AgentLoop:
         # Sync active deferred tools after tool execution
         self._sync_discovery_to_state(state)
 
+        # Process declarative tool batch (B2b: code-as-tool)
+        batch_plans = self._process_tool_batch(state)
+        if batch_plans:
+            state["pending_tool_calls"].extend(batch_plans)
+
         await self._transition(
             state,
             reason="tool_execution",
@@ -710,6 +719,57 @@ class AgentLoop:
             active_ids.add(tr.tool_call_id)
         state["tool_call_ledger"].trim(active_tool_call_ids=active_ids)
         return False
+
+    def _process_tool_batch(self, state: LoopState) -> list[PendingToolCall]:
+        """Check for declarative tool batch (tool_calls.jsonl).
+
+        Returns PendingToolCall list for validated declarations.
+        The batch file is cleaned up after reading.
+        """
+        import os as _os
+
+        scratch_dir = _os.environ.get("AGENT_SCRATCH_DIR")
+        if not scratch_dir:
+            return []
+        from pathlib import Path
+
+        batch_file = Path(scratch_dir) / "tool_calls.jsonl"
+        if not batch_file.exists():
+            return []
+
+        from rag.agent.core.tool_batch_reader import clean_batch_file, read_tool_batch
+
+        declarations = read_tool_batch(scratch_dir)
+        if not declarations:
+            clean_batch_file(scratch_dir)
+            return []
+
+        allowed = self._definition.allowed_tools
+        new_pending: list[PendingToolCall] = []
+        for decl in declarations:
+            name = decl.tool_name
+            # Basic validation: activation + allowed_tools
+            if name not in allowed:
+                logger.warning(f"Batch tool '{name}' not in allowed_tools — skipped")
+                continue
+            if name not in CORE_TOOLS and (
+                self._deferred_store is None or not self._deferred_store.is_active(name)
+            ):
+                logger.warning(f"Batch tool '{name}' not activated — skipped")
+                continue
+            plan = ToolCallPlan(
+                tool_call_id=f"batch__{name}__{decl.line_number}",
+                tool_name=name,
+                arguments=decl.arguments,
+            )
+            new_pending.append(PendingToolCall(plan=plan, status="pending"))
+
+        if new_pending:
+            logger.info(
+                f"Batch: {len(new_pending)} tool(s) queued from tool_calls.jsonl"
+            )
+        clean_batch_file(scratch_dir)
+        return new_pending
 
     async def _evaluate_finish(
         self,
