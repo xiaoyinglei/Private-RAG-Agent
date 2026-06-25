@@ -14,6 +14,8 @@ from pydantic import (
     model_validator,
 )
 
+from rag.agent.tools.card import ToolCard
+
 # ============================================================
 # 行为枚举 —— 工具自描述的核心
 # ============================================================
@@ -93,6 +95,9 @@ class ToolSpec:
     risk_level: RiskLevel = _INFER
     interrupt_behavior: InterruptBehavior = InterruptBehavior.CANCEL
     max_result_size_chars: int = 64000
+
+    # ---- ACI 伴生（可选，第一阶段仅作 metadata）----
+    aci: ToolCard | None = None
 
     def __post_init__(self) -> None:
         if self.execution_category is _INFER:

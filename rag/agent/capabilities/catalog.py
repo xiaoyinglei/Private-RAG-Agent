@@ -29,30 +29,81 @@ CORE_TOOLS: frozenset[str] = frozenset({
     "read_file",
     "write_file",
     "run_python",
-    "run_python_inline",
+    "search_text",
+    "apply_patch",
+    "run_command",
+    "update_plan",
 })
 
 DEFERRED_TOOLS: frozenset[str] = frozenset({
-    # RAG retrieval
+    # Semantic RAG tools (agent-visible, on-demand activation)
+    "search_knowledge",
+    "search_assets",
+    # LLM sub-agent tools
+    "llm_generate",
+    "llm_summarize",
+    "llm_compare",
+    # Primitive / workspace
+    "structured_probe",
+})
+
+# Internal building blocks — used by semantic tool runners, NOT visible to LLM.
+# These are the old fine-grained pipeline tools that search_knowledge/search_assets
+# orchestrate internally.  Kept registered so runners can call them, but the agent
+# should never see or activate them directly.
+INTERNAL_TOOLS: frozenset[str] = frozenset({
+    # RAG retrieval pipeline
     "vector_search",
     "keyword_search",
     "grounding",
     "rerank",
     "graph_expand",
-    # Asset tools
+    "rag_search_answer",
+    # Asset pipeline
     "asset_list",
     "asset_inspect",
     "asset_read_slice",
     "asset_analyze",
-    # LLM tools
-    "llm_generate",
-    "llm_summarize",
-    "llm_compare",
-    # Composite
-    "rag_search_answer",
-    # Primitive / workspace (extended)
-    "structured_probe",
+    # Deprecated / merged
+    "run_python_inline",
 })
+
+# ── Activation groups (PR7: supplementary metadata, NOT a visibility switch) ──
+# These describe which functional domain a tool belongs to.  They are used for:
+#   1. Enriching tool_search results with grouping information
+#   2. Supporting batch activation by group (e.g. activate all "rag" tools)
+# They do NOT change resolve_visible_tools() — category remains the visibility
+# master switch (core/deferred/internal).
+#
+# If a ToolCard on the ToolSpec specifies an activation_group, that takes
+# precedence.  Otherwise this mapping is the fallback.
+
+_DEFAULT_ACTIVATION_GROUPS: dict[str, str] = {
+    # resident: always visible, no search/activation needed
+    "tool_search": "resident",
+    "activate_tools": "resident",
+    "task": "resident",
+    "list_files": "resident",
+    "read_file": "resident",
+    "update_plan": "resident",
+
+    # rag: semantic knowledge and asset retrieval (activated on demand)
+    "search_knowledge": "rag",
+    "search_assets": "rag",
+
+    # code: LLM sub-agent tools
+    "llm_generate": "code",
+    "llm_summarize": "code",
+    "llm_compare": "code",
+
+    # workspace: file operations and code execution (activated on demand)
+    "write_file": "workspace",
+    "run_python": "workspace",
+    "search_text": "workspace",
+    "apply_patch": "workspace",
+    "run_command": "workspace",
+    "structured_probe": "workspace",
+}
 
 
 # ── Tokenizer (ASCII + CJK single-char) ──
@@ -150,6 +201,15 @@ class ToolCatalogEntry:
     schema_text: str = ""
     source: str = "builtin"
 
+    # ── ToolCard-derived fields (PR5: enrich search and candidate display) ──
+    activation_group: str = ""
+    when_to_use: str = ""
+    when_not_to_use: str = ""
+    domains: tuple[str, ...] = ()
+    file_types: tuple[str, ...] = ()
+    failure_codes: tuple[str, ...] = ()
+    selection_tags: tuple[str, ...] = ()
+
 
 # ── Search candidate ──
 
@@ -160,6 +220,12 @@ class SearchCandidate:
     name: str
     description: str
     reason: str
+
+    # ── ToolCard summary fields (PR5) ──
+    when_to_use: str = ""
+    activation_group: str = ""
+    tags: tuple[str, ...] = ()
+    domains: tuple[str, ...] = ()
 
 
 # ── Tool Catalog with BM25 ──
@@ -205,6 +271,8 @@ class ToolCatalog:
             return "core"
         if tool_name in DEFERRED_TOOLS:
             return "deferred"
+        if tool_name in INTERNAL_TOOLS:
+            return "internal"
         return "internal"
 
     def search(
@@ -238,7 +306,15 @@ class ToolCatalog:
                 continue
             reason = self._build_reason(query_tokens, entry)
             candidates.append(
-                SearchCandidate(name=name, description=entry.description, reason=reason)
+                SearchCandidate(
+                    name=name,
+                    description=entry.description,
+                    reason=reason,
+                    when_to_use=entry.when_to_use,
+                    activation_group=entry.activation_group,
+                    tags=entry.selection_tags,
+                    domains=entry.domains,
+                )
             )
         return candidates
 
@@ -261,6 +337,42 @@ class ToolCatalog:
         if not hits:
             return "matched query context"
         return f"matched: {', '.join(hits[:5])}"
+
+    @staticmethod
+    def build_search_text(
+        name: str,
+        description: str,
+        schema_text: str = "",
+        *,
+        when_to_use: str = "",
+        when_not_to_use: str = "",
+        domains: tuple[str, ...] = (),
+        file_types: tuple[str, ...] = (),
+        selection_tags: tuple[str, ...] = (),
+    ) -> str:
+        """Build BM25 search text from tool identity and optional ToolCard fields.
+
+        ToolCard fields are appended so they boost relevance without replacing
+        the core identity text (name, description, schema).
+        """
+        parts: list[str] = [
+            name,
+            name.replace("_", " "),
+            description,
+            schema_text,
+        ]
+        # Append ToolCard fields (each is optional — no-op when empty)
+        if when_to_use:
+            parts.append(when_to_use)
+        if when_not_to_use:
+            parts.append(when_not_to_use)
+        if domains:
+            parts.extend(domains)
+        if file_types:
+            parts.extend(file_types)
+        if selection_tags:
+            parts.extend(selection_tags)
+        return " ".join(filter(None, parts))
 
 
 # ── Deferred Tool Store (per-run, backed by LoopState) ──

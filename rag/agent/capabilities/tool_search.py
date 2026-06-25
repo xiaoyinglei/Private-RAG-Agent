@@ -52,6 +52,11 @@ class ToolCandidate(BaseModel):
     description: str
     reason: str
 
+    # ── ToolCard summary (PR5) ──
+    when_to_use: str = Field(default="")
+    activation_group: str = Field(default="")
+    tags: tuple[str, ...] = Field(default=())
+
 
 class ToolSearchOutput(BaseModel):
     """Output from the tool_search tool."""
@@ -75,11 +80,18 @@ class ActivateToolsInput(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     names: list[str] = Field(
-        min_length=1,
-        max_length=20,
+        default_factory=list,
         description=(
             "Tool names to activate. Must be from the most recent "
             "tool_search results. Example: ['excel_analyze', 'csv_reader']"
+        ),
+    )
+    group: str | None = Field(
+        default=None,
+        description=(
+            "Optional: activate all tools in a given activation_group "
+            "from the pending candidates. Examples: 'rag', 'code', 'workspace'. "
+            "When provided, these tools are added to the names list."
         ),
     )
 
@@ -118,7 +130,14 @@ def execute_tool_search(
 
     return ToolSearchOutput(
         candidates=tuple(
-            ToolCandidate(name=c.name, description=c.description, reason=c.reason)
+            ToolCandidate(
+                name=c.name,
+                description=c.description,
+                reason=c.reason,
+                when_to_use=c.when_to_use,
+                activation_group=c.activation_group,
+                tags=c.tags,
+            )
             for c in candidates
         ),
         query=query,
@@ -136,6 +155,7 @@ def execute_activate_tools(
     allowed_tools: list[str],
     deny_tools: frozenset[str],
     iteration: int,
+    group: str | None = None,
 ) -> ActivateToolsOutput:
     """Activate tools explicitly chosen by the model.
 
@@ -146,13 +166,26 @@ def execute_activate_tools(
     4. Must not be in deny_tools
     5. Must exist in the catalog
     6. Activation count must not exceed max_active
+
+    If group is provided, all pending candidates whose activation_group
+    matches are added to the names list (deduplicated).
     """
+    # PR7: expand by activation group
+    effective_names = list(names)
+    if group:
+        for candidate_name in store.pending_names():
+            if candidate_name in effective_names:
+                continue
+            entry = catalog.get(candidate_name)
+            if entry is not None and entry.activation_group == group:
+                effective_names.append(candidate_name)
+
     activated: list[str] = []
     already_active: list[str] = []
     not_in_candidates: list[str] = []
     denied: list[str] = []
 
-    for name in names:
+    for name in effective_names:
         # Already active?
         if store.is_active(name):
             already_active.append(name)
