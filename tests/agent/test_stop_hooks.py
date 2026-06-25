@@ -12,7 +12,6 @@ from rag.agent.core.finalization import (
     FinishCandidateBuilder,
     FinishCandidateBuildError,
 )
-from rag.agent.core.observations import EvidenceRef
 from rag.agent.core.output_finalizer import OutputValidationExhaustedError
 from rag.agent.loop.state import ModelTurnDraft, create_loop_state
 from rag.agent.loop.stop_hooks import (
@@ -353,11 +352,23 @@ async def test_explicit_goal_contract_accepts_traceable_evidence() -> None:
         ],
     )
     state = _state()
-    state["evidence_refs"] = [
-        EvidenceRef(
-            evidence_id="evidence-1",
-            citation_id="citation-1",
-            source="citation",
+    # PR2: evidence_refs derived from tool_results, not direct state field
+    from pydantic import BaseModel
+
+    from rag.agent.tools.spec import ToolResult
+
+    class _EvidenceOutput(BaseModel):
+        evidence_refs: list[dict[str, object]]
+
+    state["tool_results"] = [
+        ToolResult(
+            tool_call_id="tc-1",
+            tool_name="test",
+            status="ok",
+            output=_EvidenceOutput(
+                evidence_refs=[{"evidence_id": "evidence-1", "citation_id": "citation-1"}],
+            ),
+            latency_ms=100,
         )
     ]
 

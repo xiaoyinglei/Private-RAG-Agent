@@ -48,10 +48,9 @@ def create_model_llm_tool_runners(
         assembled = AgentLLMContextAssembler(
             token_accounting=gateway.token_accounting,
             stage_budgets={
-                effective_stage: gateway.effective_stage_budget(
-                    effective_stage
-                ),
+                effective_stage: gateway.effective_stage_budget(effective_stage),
             },
+            formatter_resolver=None,
         ).assemble_generate(
             definition=definition,
             state=state,
@@ -85,10 +84,9 @@ def create_model_llm_tool_runners(
         assembled = AgentLLMContextAssembler(
             token_accounting=gateway.token_accounting,
             stage_budgets={
-                LLMCallStage.LLM_SUMMARIZE: gateway.effective_stage_budget(
-                    LLMCallStage.LLM_SUMMARIZE
-                ),
+                LLMCallStage.LLM_SUMMARIZE: gateway.effective_stage_budget(LLMCallStage.LLM_SUMMARIZE),
             },
+            formatter_resolver=None,
         ).assemble_summarize(
             definition=definition,
             state=state,
@@ -121,10 +119,9 @@ def create_model_llm_tool_runners(
         assembled = AgentLLMContextAssembler(
             token_accounting=gateway.token_accounting,
             stage_budgets={
-                LLMCallStage.LLM_COMPARE: gateway.effective_stage_budget(
-                    LLMCallStage.LLM_COMPARE
-                ),
+                LLMCallStage.LLM_COMPARE: gateway.effective_stage_budget(LLMCallStage.LLM_COMPARE),
             },
+            formatter_resolver=None,
         ).assemble_compare(
             definition=definition,
             state=state,
@@ -165,22 +162,13 @@ async def _generate_text(
     try:
         ledger = RunRegistry.get(run_config.run_id).budget_ledger
     except KeyError as exc:
-        raise RuntimeError(
-            f"Runtime handles missing for run_id={run_config.run_id}"
-        ) from exc
+        raise RuntimeError(f"Runtime handles missing for run_id={run_config.run_id}") from exc
     result = await gateway.agenerate_text(
         stage=stage,
         prompt=prompt,
         ledger=ledger,
-        lease_id=(
-            execution_context.tool_call_id
-            or f"{run_config.run_id}:{node_name}:{uuid4().hex}"
-        ),
-        kwargs={
-            key: value
-            for key, value in getattr(resolved, "kwargs", {}).items()
-            if key != "max_tokens"
-        },
+        lease_id=(execution_context.tool_call_id or f"{run_config.run_id}:{node_name}:{uuid4().hex}"),
+        kwargs={key: value for key, value in getattr(resolved, "kwargs", {}).items() if key != "max_tokens"},
     )
     return result.value
 
@@ -226,9 +214,7 @@ def _trusted_agent_context(
     execution_context: ToolExecutionContext,
 ) -> tuple[LoopState, AgentDefinition]:
     if execution_context.state is None or execution_context.definition is None:
-        raise RuntimeError(
-            "Agent LLM tools require trusted LoopState and AgentDefinition"
-        )
+        raise RuntimeError("Agent LLM tools require trusted LoopState and AgentDefinition")
     return execution_context.state, execution_context.definition
 
 

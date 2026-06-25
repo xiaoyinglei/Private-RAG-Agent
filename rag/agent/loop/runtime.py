@@ -9,7 +9,11 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 
 from rag.agent.capabilities.catalog import DeferredToolStore, ToolCatalog
 from rag.agent.capabilities.context import iteration_var
-from rag.agent.core.checkpointing import CheckpointStore
+from rag.agent.core.checkpointing import (
+    CheckpointStore,
+    _migrate_discovery_candidates,
+    _migrate_discovery_events,
+)
 from rag.agent.core.context import RunRegistry
 from rag.agent.core.definition import AgentDefinition
 from rag.agent.core.finalization import (
@@ -25,7 +29,6 @@ from rag.agent.core.tool_execution import (
     ToolBatchRequest,
     ToolBatchResult,
 )
-from rag.agent.core.turn_contracts import ToolCallPlan
 from rag.agent.loop.state import (
     LoopPause,
     LoopState,
@@ -34,14 +37,17 @@ from rag.agent.loop.state import (
     LoopTransitionReason,
     ModelTurn,
     ModelTurnDraft,
+    PendingToolCall,
     append_loop_diagnostic,
     replace_latest_transition,
 )
 from rag.agent.loop.stop_hooks import StopHookOutcome, StopHookRunner
+from rag.agent.loop.substate import DeferredToolState, MemoryState, PlanState
 from rag.agent.memory.compactor import LoopCompactionResult
 from rag.agent.planning import MAX_PLAN_EVENTS, PlanEvent, PlanTracker
 from rag.agent.streaming.events import StreamEvent
 from rag.agent.streaming.sink import StreamEventSink
+from rag.agent.tools.observation import ToolExecutionObservation
 from rag.providers.llm_gateway import LLMContextOverflowError
 
 
@@ -125,9 +131,8 @@ class AgentLoop:
         # 把 stream_sink 注入到 model provider（如果支持）
         if stream_sink is not None and hasattr(model_provider, "_stream_sink"):
             model_provider._stream_sink = stream_sink
-        self._observation_extractor = (
-            observation_extractor or ObservationExtractor()
-        )
+        self._observation_extractor = observation_extractor or ObservationExtractor()
+        self._observed_tool_call_ids: set[str] = set()
         self._plan_tracker = plan_tracker or PlanTracker()
         self._max_model_retries = max_model_retries
         self._catalog = catalog
@@ -138,9 +143,7 @@ class AgentLoop:
         if self._stream_sink is not None:
             await self._stream_sink.emit(event)
 
-    async def run_streaming(
-        self, state: LoopState
-    ) -> AsyncGenerator[StreamEvent, None]:
+    async def run_streaming(self, state: LoopState) -> AsyncGenerator[StreamEvent, None]:
         """流式运行 AgentLoop，yield 每一个 StreamEvent。
 
         如果 run() 异常，会 yield 一个 ERROR 事件然后关闭 sink。
@@ -153,16 +156,12 @@ class AgentLoop:
         from rag.agent.streaming.sink import QueueStreamEventSink
 
         sink = QueueStreamEventSink()
-        sink_targets: list[tuple[Any, StreamEventSink | None]] = [
-            (self, self._stream_sink)
-        ]
+        sink_targets: list[tuple[Any, StreamEventSink | None]] = [(self, self._stream_sink)]
         self._stream_sink = sink
         for target in (self._model_provider, self._tool_runner):
             if hasattr(target, "_stream_sink"):
                 target_with_sink = cast(Any, target)
-                sink_targets.append(
-                    (target_with_sink, target_with_sink._stream_sink)
-                )
+                sink_targets.append((target_with_sink, target_with_sink._stream_sink))
                 target_with_sink._stream_sink = sink
 
         run_task: asyncio.Task[LoopState] | None = None
@@ -204,10 +203,12 @@ class AgentLoop:
             return state
         handles = RunRegistry.get_or_create(state["run_config"])
         if state["agent_plan"] is None:
-            plan, events = self._plan_tracker.initialize_task(
-                task=state["task"]
-            )
+            plan, events = self._plan_tracker.initialize_task(task=state["task"])
             state["agent_plan"] = plan
+            state["plan_state"] = PlanState(
+                agent_plan=plan,
+                plan_events=list(state.get("plan_events", [])),
+            )
             self._append_plan_events(state, events)
         await self._checkpoint_store.save_snapshot(
             state,
@@ -233,33 +234,18 @@ class AgentLoop:
                     return state
                 continue
 
-            if state.get("pending_loop_tool_calls"):
-                token = iteration_var.set(state["iteration"])
-                try:
-                    paused = await self._execute_pending_loop_tools(state)
-                finally:
-                    iteration_var.reset(token)
-                if paused:
-                    return state
-                continue
-
             if state["iteration"] >= self._definition.max_iterations:
                 await self._fail(
                     state,
                     stop_reason="max_iterations",
-                    error=(
-                        "Agent loop reached the configured maximum number "
-                        "of model turns."
-                    ),
+                    error=("Agent loop reached the configured maximum number of model turns."),
                     transition_reason="max_iterations",
                     checkpoint_reason="max_iterations",
                 )
                 return state
 
             try:
-                compaction = await _await_value(
-                    self._context_manager.prepare(state)
-                )
+                compaction = await _await_value(self._context_manager.prepare(state))
             except Exception as exc:
                 await self._fail(
                     state,
@@ -312,21 +298,13 @@ class AgentLoop:
                     definition=self._definition,
                     budget_remaining=remaining,
                 )
-                envelope = (
-                    provided
-                    if isinstance(provided, ModelTurnEnvelope)
-                    else ModelTurnEnvelope(draft=provided)
-                )
+                envelope = provided if isinstance(provided, ModelTurnEnvelope) else ModelTurnEnvelope(draft=provided)
                 for provider_transition in envelope.transitions:
-                    transition = provider_transition.model_copy(
-                        update={"iteration": state["iteration"]}
-                    )
+                    transition = provider_transition.model_copy(update={"iteration": state["iteration"]})
                     await self._set_transition(
                         state,
                         transition,
-                        checkpoint_reason=(
-                            f"provider_{provider_transition.reason}"
-                        ),
+                        checkpoint_reason=(f"provider_{provider_transition.reason}"),
                     )
                 turn = await self._finish_candidate_builder.build(
                     envelope.draft,
@@ -335,6 +313,9 @@ class AgentLoop:
             except (AgentLLMContextOverflowError, LLMContextOverflowError) as exc:
                 if not state.get("reactive_compact_used"):
                     state["reactive_compact_used"] = True
+                    ms = state.get("memory_state")
+                    if isinstance(ms, MemoryState):
+                        state["memory_state"] = ms.model_copy(update={"reactive_compact_used": True})
                     reactive_compact = getattr(
                         self._context_manager,
                         "reactive_compact",
@@ -404,10 +385,7 @@ class AgentLoop:
                 )
                 return state
             except (FinishCandidateBuildError, ValidationError, ValueError) as exc:
-                if (
-                    isinstance(exc, FinishCandidateBuildError)
-                    and _has_tool_error(state)
-                ):
+                if isinstance(exc, FinishCandidateBuildError) and _has_tool_error(state):
                     append_loop_diagnostic(
                         state,
                         RuntimeDiagnostic.from_exception(
@@ -417,7 +395,6 @@ class AgentLoop:
                             severity="error",
                         ),
                     )
-                    state["insufficient_evidence_flag"] = True
                     await self._fail(
                         state,
                         stop_reason="tool_error",
@@ -509,8 +486,16 @@ class AgentLoop:
             consecutive_model_failures = 0
             state["last_model_turn"] = turn
             if turn.action == "execute":
-                state["pending_tool_calls"] = list(turn.tool_calls)
+                state["tool_call_ledger"].append_plans(
+                    turn.tool_calls,
+                    turn=state["iteration"],
+                )
+                state["pending_tool_calls"] = [PendingToolCall(plan=call, status="pending") for call in turn.tool_calls]
                 self._record_plan_decision(state, turn)
+                # Trim ledger after new pending state: active = just-created calls
+                state["tool_call_ledger"].trim(
+                    active_tool_call_ids={p.tool_call_id for p in state["pending_tool_calls"]},
+                )
             await self._transition(
                 state,
                 reason="next_turn",
@@ -524,9 +509,7 @@ class AgentLoop:
                     reason="tool_execution",
                     detail={
                         "phase": "scheduled",
-                        "tool_call_ids": [
-                            call.tool_call_id for call in turn.tool_calls
-                        ],
+                        "tool_call_ids": [call.tool_call_id for call in turn.tool_calls],
                     },
                     checkpoint_reason="tool_calls_scheduled",
                 )
@@ -582,12 +565,20 @@ class AgentLoop:
         return state
 
     def _sync_discovery_to_state(self, state: LoopState) -> None:
-        """Sync deferred store state to LoopState discovery_* fields."""
+        """Sync deferred store state to LoopState discovery_* fields + DeferredToolState."""
         if self._deferred_store is not None:
             self._deferred_store.sync_to_state(cast(dict[Any, Any], state))
             # Backward compat alias
-            state["active_deferred_tools"] = list(
-                self._deferred_store.active_names()
+            state["active_deferred_tools"] = list(self._deferred_store.active_names())
+            # ── PR1 dual-write: typed DeferredToolState ──
+            state["deferred_tool_state"] = DeferredToolState(
+                active_tools=list(state.get("discovery_active_tools", [])),
+                active_tool_iterations=dict(state.get("discovery_active_tool_iterations", {})),
+                last_candidates=_migrate_discovery_candidates(state.get("discovery_last_candidates", [])),
+                last_search_query=str(state.get("discovery_last_search_query", "")),
+                search_history=_migrate_discovery_events(state.get("discovery_search_history", [])),
+                pinned_tools=list(state.get("discovery_pinned_tools", [])),
+                capability_diagnostics=list(state.get("capability_diagnostics", [])),
             )
 
     async def _execute_pending_tools(self, state: LoopState) -> bool:
@@ -607,31 +598,23 @@ class AgentLoop:
         result = await _await_value(
             self._tool_runner.execute_batch(
                 ToolBatchRequest(
-                    calls=tuple(state["pending_tool_calls"]),
+                    calls=tuple(call.plan for call in state["pending_tool_calls"]),
                     run_config=state["run_config"],
-                    allowed_tools=frozenset(
-                        self._definition.allowed_tools
-                    ),
-                    approved_tool_call_ids=tuple(
-                        state["approved_tool_call_ids"]
-                    ),
-                    denied_tool_call_ids=tuple(
-                        state["denied_tool_call_ids"]
-                    ),
-                    execution_records=state[
-                        "tool_execution_records"
-                    ],
-                    retrieval_signals=state["retrieval_signals"],
+                    allowed_tools=frozenset(self._definition.allowed_tools),
+                    approved_tool_call_ids=tuple(state["approved_tool_call_ids"]),
+                    denied_tool_call_ids=tuple(state["denied_tool_call_ids"]),
+                    execution_records=state["tool_execution_records"],
                 ),
                 state=state,
                 definition=self._definition,
             )
         )
         state["run_config"] = result.run_config
-        state["pending_tool_calls"] = list(result.pending_tool_calls)
+        state["pending_tool_calls"] = [
+            PendingToolCall(plan=call, status="pending") for call in result.pending_tool_calls
+        ]
         state["tool_execution_records"] = {
-            call_id: record.model_copy(deep=True)
-            for call_id, record in result.execution_records.items()
+            call_id: record.model_copy(deep=True) for call_id, record in result.execution_records.items()
         }
         new_results = list(result.tool_results)
         state["tool_results"] = _merge_keyed(
@@ -661,40 +644,17 @@ class AgentLoop:
                     )
                 )
 
-        for tool_result in new_results:
-            output = tool_result.output
-            has_traceable_evidence = bool(
-                getattr(output, "evidence_refs", ())
-                or getattr(output, "citations", ())
-                or getattr(output, "evidence_ids", ())
-                or getattr(output, "citation_ids", ())
-            )
-            state["groundedness_flag"] = (
-                state["groundedness_flag"]
-                or bool(getattr(output, "groundedness_flag", False))
-                or has_traceable_evidence
-            )
-            state["insufficient_evidence_flag"] = (
-                state["insufficient_evidence_flag"]
-                or bool(getattr(output, "insufficient_evidence", False))
-                or bool(
-                    getattr(
-                        output,
-                        "insufficient_evidence_flag",
-                        False,
-                    )
-                )
-            )
         if result.context_budget is not None:
             state["context_budget"] = result.context_budget
+            ms = state.get("memory_state")
+            if isinstance(ms, MemoryState):
+                state["memory_state"] = ms.model_copy(update={"context_budget": result.context_budget})
 
         batch = self._observation_extractor.extract(
             new_results,
-            seen_tool_call_ids=[
-                observation.tool_call_id
-                for observation in state["structured_observations"]
-            ],
+            seen_tool_call_ids=list(self._observed_tool_call_ids),
         )
+        self._observed_tool_call_ids.update(observation.tool_call_id for observation in batch.structured_observations)
         self._merge_observations(state, batch)
         self._record_plan_observations(state, batch)
 
@@ -714,11 +674,7 @@ class AgentLoop:
 
         if result.status in {"paused", "reconciliation_required"}:
             request = result.human_input_request
-            reason = (
-                request.question
-                if request is not None
-                else result.decision_reason or result.status
-            )
+            reason = request.question if request is not None else result.decision_reason or result.status
             state["approval_request"] = request
             # Sync active set even on pause (tool_search may have activated)
             self._sync_discovery_to_state(state)
@@ -741,219 +697,19 @@ class AgentLoop:
                 "phase": "recorded",
                 "result_count": len(new_results),
                 "pending_count": len(state["pending_tool_calls"]),
-                "skipped_completed_tool_call_ids": list(
-                    result.skipped_completed_tool_call_ids
-                ),
+                "skipped_completed_tool_call_ids": list(result.skipped_completed_tool_call_ids),
             },
             checkpoint_reason="tool_results_recorded",
         )
+
+        # Trim ledger: keep entries for pending + just-completed calls
+        active_ids: set[str] = set()
+        for p in state["pending_tool_calls"]:
+            active_ids.add(p.tool_call_id)
+        for tr in new_results:
+            active_ids.add(tr.tool_call_id)
+        state["tool_call_ledger"].trim(active_tool_call_ids=active_ids)
         return False
-
-    async def _execute_pending_loop_tools(self, state: LoopState) -> bool:
-        """Execute pending loop tool calls (PR0 PendingToolCall state machine).
-
-        Converts PendingToolCall → ToolCallPlan, delegates to the existing
-        tool execution path, then converts results back to ModelMessage
-        and appends to loop_messages.
-        """
-
-        pending = list(state.get("pending_loop_tool_calls", []))
-        if not pending:
-            return False
-
-        denied_ids = set(state.get("denied_tool_call_ids", []))
-
-        # Mark pending as approved or denied
-        for ptc in pending:
-            if ptc.status == "pending":
-                if ptc.tool_call_id in denied_ids:
-                    ptc.status = "denied"
-                    ptc.summary = f"Tool {ptc.tool_name} denied by policy."
-                else:
-                    ptc.status = "approved"
-
-        # Convert to ToolCallPlan for existing execution path
-        tool_call_plans = [
-            ToolCallPlan(
-                tool_call_id=ptc.tool_call_id,
-                tool_name=ptc.tool_name,
-                arguments=ptc.arguments,
-            )
-            for ptc in pending
-            if ptc.status in ("approved", "running")
-        ]
-
-        if not tool_call_plans:
-            # All were denied — generate tool result messages
-            self._finalize_loop_tool_calls(state, pending)
-            return False
-
-        # Mark as running
-        for ptc in pending:
-            if ptc.status == "approved":
-                ptc.status = "running"
-
-        # ── 流式事件：工具开始执行 ──
-        run_id = state["run_config"].run_id
-        turn = state["iteration"]
-        for call in tool_call_plans:
-            await self._emit_stream(
-                _stream_tool_use_start(
-                    tool_name=call.tool_name,
-                    tool_id=call.tool_call_id,
-                    run_id=run_id,
-                    turn=turn,
-                )
-            )
-
-        # Delegate to existing tool execution
-        result = await _await_value(
-            self._tool_runner.execute_batch(
-                ToolBatchRequest(
-                    calls=tuple(tool_call_plans),
-                    run_config=state["run_config"],
-                    allowed_tools=frozenset(
-                        self._definition.allowed_tools
-                    ),
-                    approved_tool_call_ids=tuple(
-                        state["approved_tool_call_ids"]
-                    ),
-                    denied_tool_call_ids=tuple(
-                        state["denied_tool_call_ids"]
-                    ),
-                    execution_records=state[
-                        "tool_execution_records"
-                    ],
-                    retrieval_signals=state["retrieval_signals"],
-                ),
-                state=state,
-                definition=self._definition,
-            )
-        )
-
-        # Update state from execution result
-        state["run_config"] = result.run_config
-        state["tool_execution_records"] = {
-            call_id: record.model_copy(deep=True)
-            for call_id, record in result.execution_records.items()
-        }
-        new_results = list(result.tool_results)
-        state["tool_results"] = _merge_keyed(
-            state["tool_results"],
-            new_results,
-        )
-
-        # ── 流式事件：工具执行结果 ──
-        for tool_result in new_results:
-            if tool_result.status == "error":
-                await self._emit_stream(
-                    _stream_tool_use_error(
-                        tool_id=tool_result.tool_call_id,
-                        error=tool_result.error.message if tool_result.error else "Unknown error",
-                        run_id=run_id,
-                        turn=turn,
-                    )
-                )
-            else:
-                await self._emit_stream(
-                    _stream_tool_use_result(
-                        tool_name=tool_result.tool_name,
-                        tool_id=tool_result.tool_call_id,
-                        result=str(tool_result.output)[:500] if tool_result.output else "",
-                        run_id=run_id,
-                        turn=turn,
-                    )
-                )
-
-        # Update PendingToolCall status from results
-        result_by_id = {r.tool_call_id: r for r in new_results}
-        for ptc in pending:
-            if ptc.tool_call_id in result_by_id:
-                tr = result_by_id[ptc.tool_call_id]
-                if tr.status == "ok":
-                    ptc.status = "completed"
-                    # Generate summary from output
-                    output = tr.output
-                    if output is not None:
-                        preview = output.model_dump_json(exclude_none=True)
-                        ptc.summary = preview[:500]
-                        if len(preview) > 500:
-                            store_key = f"result_{ptc.tool_call_id}"
-                            state["tool_result_store"][store_key] = output
-                            ptc.result_store_key = store_key
-                else:
-                    ptc.status = "failed"
-                    if tr.error is not None:
-                        ptc.summary = f"Error: {tr.error.message}"
-                    else:
-                        ptc.summary = f"Tool {ptc.tool_name} failed."
-
-        # Check if approval is needed (paused status from tool runner)
-        if result.status in {"paused", "reconciliation_required"}:
-            request = result.human_input_request
-            reason = (
-                request.question
-                if request is not None
-                else result.decision_reason or result.status
-            )
-            state["approval_request"] = request
-            await self._pause(
-                state,
-                reason=reason,
-                request=request,
-                checkpoint_reason="tool_pause",
-                transition_reason="approval_required",
-            )
-            return True
-
-        # Sync active deferred tools after tool execution
-        self._sync_discovery_to_state(state)
-
-        # Finalize: convert terminal PendingToolCalls to ModelMessages
-        self._finalize_loop_tool_calls(state, pending)
-
-        await self._transition(
-            state,
-            reason="tool_execution",
-            detail={
-                "phase": "loop_tool_completed",
-                "result_count": len(new_results),
-            },
-            checkpoint_reason="loop_tool_results_recorded",
-        )
-        return False
-
-    def _finalize_loop_tool_calls(
-        self,
-        state: LoopState,
-        pending: list[Any],
-    ) -> None:
-        """Convert terminal PendingToolCalls to ModelMessages and remove from pending."""
-        from rag.agent.core.messages import ModelMessage
-
-        terminal = []
-        remaining = []
-        for ptc in pending:
-            if ptc.status in ("completed", "failed", "denied"):
-                terminal.append(ptc)
-            else:
-                remaining.append(ptc)
-
-        # Add tool result messages to loop_messages
-        for ptc in terminal:
-            content = ptc.summary or ""
-            if ptc.result_store_key:
-                content += f"\n[Full result stored at: {ptc.result_store_key}]"
-            state["loop_messages"].append(
-                ModelMessage(
-                    role="tool",
-                    content=content,
-                    tool_call_id=ptc.tool_call_id,
-                )
-            )
-
-        # Update pending list
-        state["pending_loop_tool_calls"] = remaining
 
     async def _evaluate_finish(
         self,
@@ -1010,10 +766,12 @@ class AgentLoop:
             final_answer=candidate,
             final_output=outcome.final_output,
         )
-        plan, events = self._plan_tracker.record_completion(
-            state["agent_plan"]
-        )
+        plan, events = self._plan_tracker.record_completion(state["agent_plan"])
         state["agent_plan"] = plan
+        state["plan_state"] = PlanState(
+            agent_plan=plan,
+            plan_events=list(state.get("plan_events", [])),
+        )
         self._append_plan_events(state, events)
         await self._transition(
             state,
@@ -1052,6 +810,10 @@ class AgentLoop:
             blocked=True,
         )
         state["agent_plan"] = plan
+        state["plan_state"] = PlanState(
+            agent_plan=plan,
+            plan_events=list(state.get("plan_events", [])),
+        )
         self._append_plan_events(state, events)
         await self._transition(
             state,
@@ -1090,11 +852,7 @@ class AgentLoop:
             reason=transition_reason,
             detail={
                 "reason": reason,
-                "request_kind": (
-                    getattr(request, "kind", None)
-                    if request is not None
-                    else None
-                ),
+                "request_kind": (getattr(request, "kind", None) if request is not None else None),
             },
             checkpoint_reason=checkpoint_reason,
         )
@@ -1162,12 +920,14 @@ class AgentLoop:
             return
         updated, events = self._plan_tracker.record_decision_progress(
             plan,
-            tool_call_ids=[
-                call.tool_call_id for call in turn.tool_calls
-            ],
+            tool_call_ids=[call.tool_call_id for call in turn.tool_calls],
             tool_names=[call.tool_name for call in turn.tool_calls],
         )
         state["agent_plan"] = updated
+        state["plan_state"] = PlanState(
+            agent_plan=updated,
+            plan_events=list(state.get("plan_events", [])),
+        )
         self._append_plan_events(state, events)
 
     def _record_plan_observations(
@@ -1175,12 +935,28 @@ class AgentLoop:
         state: LoopState,
         batch: ObservationBatch,
     ) -> None:
+        typed_observations = [
+            ToolExecutionObservation(
+                tool_call_id=obs.tool_call_id,
+                tool_name=obs.tool_name,
+                status=obs.status,
+                related_step_ids=list(getattr(obs, "related_step_ids", []) or []),
+                metadata=dict(getattr(obs, "metadata", {}) or {}),
+            )
+            for obs in batch.structured_observations
+        ]
         plan, events = self._plan_tracker.record_observation_progress(
-            state["agent_plan"],
-            observations=batch.structured_observations,
+            plan=state["agent_plan"],
+            observations=typed_observations,
         )
-        state["agent_plan"] = plan
-        self._append_plan_events(state, events)
+        if plan is not None:
+            state["agent_plan"] = plan
+            state["plan_events"] = [*state["plan_events"], *events][-MAX_PLAN_EVENTS:]
+            # PR1 dual-write
+            if hasattr(state["plan_state"], "model_copy"):
+                state["plan_state"] = state["plan_state"].model_copy(
+                    update={"agent_plan": plan, "plan_events": list(state["plan_events"])}
+                )
 
     @staticmethod
     def _append_plan_events(
@@ -1191,47 +967,19 @@ class AgentLoop:
             *state["plan_events"],
             *events,
         ][-MAX_PLAN_EVENTS:]
+        state["plan_state"] = PlanState(
+            agent_plan=state.get("agent_plan"),
+            plan_events=list(state["plan_events"]),
+        )
 
     @staticmethod
     def _merge_observations(
         state: LoopState,
         batch: ObservationBatch,
     ) -> None:
-        state["structured_observations"] = _merge_keyed(
-            state["structured_observations"],
-            batch.structured_observations,
-        )
-        state["answer_candidates"] = _merge_keyed(
-            state["answer_candidates"],
-            batch.answer_candidates,
-        )
-        state["evidence_refs"] = _merge_keyed(
-            state["evidence_refs"],
-            batch.evidence_refs,
-        )
-        state["computation_results"] = _merge_keyed(
-            state["computation_results"],
-            batch.computation_results,
-        )
-        state["context_units"] = _merge_keyed(
-            state["context_units"],
-            batch.context_units,
-        )
-        state["locators"] = _merge_keyed(
-            state["locators"],
-            batch.locators,
-        )
-        state["asset_refs"] = list(
-            dict.fromkeys([*state["asset_refs"], *batch.asset_refs])
-        )
-        state["evidence"] = _merge_keyed(
-            state["evidence"],
-            batch.evidence,
-        )
-        state["citations"] = _merge_keyed(
-            state["citations"],
-            batch.citations,
-        )
+        # PR2: ObservationExtractor no longer writes tool-semantic fields to LoopState.
+        # Tool output rendering is handled by ToolOutputFormatter via ContextBuilder.
+        return
 
 
 async def _await_value[T](value: T | Awaitable[T]) -> T:
@@ -1296,9 +1044,7 @@ def _stream_turn_start(*, run_id: str, turn: int) -> Any:
     )
 
 
-def _stream_turn_end(
-    *, run_id: str, turn: int, stop_reason: str
-) -> Any:
+def _stream_turn_end(*, run_id: str, turn: int, stop_reason: str) -> Any:
     from rag.agent.streaming.events import EventType, StreamEvent, next_seq
 
     return StreamEvent(
@@ -1321,9 +1067,7 @@ def _stream_loop_end(*, run_id: str, reason: str, total_turns: int) -> Any:
     )
 
 
-def _stream_tool_use_start(
-    *, tool_name: str, tool_id: str, run_id: str, turn: int
-) -> Any:
+def _stream_tool_use_start(*, tool_name: str, tool_id: str, run_id: str, turn: int) -> Any:
     from rag.agent.streaming.events import EventType, StreamEvent, next_seq
 
     return StreamEvent(
@@ -1336,9 +1080,7 @@ def _stream_tool_use_start(
     )
 
 
-def _stream_tool_use_result(
-    *, tool_name: str, tool_id: str, result: str, run_id: str, turn: int
-) -> Any:
+def _stream_tool_use_result(*, tool_name: str, tool_id: str, result: str, run_id: str, turn: int) -> Any:
     from rag.agent.streaming.events import EventType, StreamEvent, next_seq
 
     return StreamEvent(
@@ -1355,9 +1097,7 @@ def _stream_tool_use_result(
     )
 
 
-def _stream_tool_use_error(
-    *, tool_id: str, error: str, run_id: str, turn: int
-) -> Any:
+def _stream_tool_use_error(*, tool_id: str, error: str, run_id: str, turn: int) -> Any:
     from rag.agent.streaming.events import EventType, StreamEvent, next_seq
 
     return StreamEvent(
@@ -1370,9 +1110,7 @@ def _stream_tool_use_error(
     )
 
 
-def _stream_compact_layer(
-    *, channels: list[str], warnings: list[str], run_id: str, turn: int
-) -> Any:
+def _stream_compact_layer(*, channels: list[str], warnings: list[str], run_id: str, turn: int) -> Any:
     from rag.agent.streaming.events import EventType, StreamEvent, next_seq
 
     return StreamEvent(
@@ -1387,9 +1125,7 @@ def _stream_compact_layer(
     )
 
 
-def _stream_recovery(
-    *, strategy: str, detail: str, run_id: str, turn: int
-) -> Any:
+def _stream_recovery(*, strategy: str, detail: str, run_id: str, turn: int) -> Any:
     from rag.agent.streaming.events import EventType, StreamEvent, next_seq
 
     return StreamEvent(

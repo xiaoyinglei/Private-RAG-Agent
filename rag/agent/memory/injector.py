@@ -21,8 +21,8 @@ if TYPE_CHECKING:
     from langchain_core.messages import BaseMessage
 
     from rag.agent.loop.state import LoopState
+    from rag.agent.tools.formatter import ToolOutputFormatterResolver
     from rag.agent.tools.spec import ToolResult
-    from rag.schema.query import AnswerCitation, EvidenceItem
 
     type ContextState = LoopState
 
@@ -80,6 +80,7 @@ class ContextBuilder:
         max_context_tokens: int,
         max_section_chars: int = 4000,
         token_accounting: ContextTokenAccounting | None = None,
+        formatter_resolver: ToolOutputFormatterResolver | None = None,
     ) -> None:
         if max_context_tokens < 0:
             raise ValueError("max_context_tokens must be non-negative")
@@ -87,6 +88,7 @@ class ContextBuilder:
             raise ValueError("max_section_chars must be positive")
         self._max_context_tokens = max_context_tokens
         self._max_section_chars = max_section_chars
+        self._formatter_resolver = formatter_resolver
         self._token_accounting = token_accounting or TokenAccountingService(
             TokenizerContract(
                 embedding_model_name="agent-context",
@@ -125,11 +127,7 @@ class ContextBuilder:
                 candidates,
                 name,
                 content,
-                required=(
-                    required
-                    if required_sections is None
-                    else name in required_sections
-                ),
+                required=(required if required_sections is None else name in required_sections),
             )
 
         add("system", definition.system_prompt, required=True)
@@ -143,14 +141,6 @@ class ContextBuilder:
         add(
             "plan",
             self._format_plan(state.get("agent_plan")),
-            required=True,
-        )
-        add(
-            "evidence",
-            self._format_evidence(
-                state.get("evidence", []),
-                state.get("citations", []),
-            ),
             required=True,
         )
         add(
@@ -177,7 +167,7 @@ class ContextBuilder:
         )
         add(
             "tool_results",
-            self._format_tool_observations(state),
+            self._format_tool_context(state),
             required=True,
         )
 
@@ -240,9 +230,7 @@ class ContextBuilder:
                 **selected_by_name,
                 section.name: section,
             }
-            if self._selected_token_count(candidates, candidate_selection) <= (
-                self._max_context_tokens
-            ):
+            if self._selected_token_count(candidates, candidate_selection) <= (self._max_context_tokens):
                 selected_by_name[section.name] = section
                 continue
 
@@ -269,11 +257,7 @@ class ContextBuilder:
             dropped_reasons[section.name] = "budget_priority"
             degraded = True
         return _ContextSelection(
-            sections=[
-                selected_by_name[section.name]
-                for section in candidates
-                if section.name in selected_by_name
-            ],
+            sections=[selected_by_name[section.name] for section in candidates if section.name in selected_by_name],
             dropped_sections=dropped,
             summarized_sections=list(dict.fromkeys(summarized)),
             required_truncated=list(dict.fromkeys(required_truncated)),
@@ -291,15 +275,11 @@ class ContextBuilder:
     ) -> ContextBudgetSnapshot:
         sections = selection.sections
         by_name = {section.name: section.token_count for section in sections}
-        summarized = [
-            section.name for section in sections if section.content.endswith("[truncated]")
-        ]
+        summarized = [section.name for section in sections if section.content.endswith("[truncated]")]
         summarized = list(dict.fromkeys([*summarized, *selection.summarized_sections]))
         return ContextBudgetSnapshot(
             max_context_tokens=self._max_context_tokens,
-            used_context_tokens=self._token_accounting.count(
-                self._render_sections(sections)
-            ),
+            used_context_tokens=self._token_accounting.count(self._render_sections(sections)),
             system_tokens=by_name.get("system", 0) + by_name.get("policy_hints", 0),
             planning_tokens=by_name.get("plan", 0),
             evidence_tokens=by_name.get("evidence", 0),
@@ -316,9 +296,7 @@ class ContextBuilder:
             section_token_counts={str(key): value for key, value in by_name.items()},
             dropped_section_reasons=selection.dropped_section_reasons,
             memory_ref_count=len(state.get("memory_refs", [])),
-            externalized_record_count=self._externalized_tool_output_count(
-                state.get("tool_results", [])
-            ),
+            externalized_record_count=self._externalized_tool_output_count(state.get("tool_results", [])),
             warnings=list(dict.fromkeys([*state.get("memory_warnings", []), *selection.warnings])),
         )
 
@@ -354,9 +332,7 @@ class ContextBuilder:
                 **selected_by_name,
                 section.name: clipped,
             }
-            if self._selected_token_count(candidates, candidate_selection) <= (
-                self._max_context_tokens
-            ):
+            if self._selected_token_count(candidates, candidate_selection) <= (self._max_context_tokens):
                 best = clipped
                 low = midpoint + 1
             else:
@@ -368,11 +344,7 @@ class ContextBuilder:
         candidates: Sequence[ContextSection],
         selected_by_name: dict[ContextSectionName, ContextSection],
     ) -> int:
-        selected = [
-            selected_by_name[section.name]
-            for section in candidates
-            if section.name in selected_by_name
-        ]
+        selected = [selected_by_name[section.name] for section in candidates if section.name in selected_by_name]
         return self._token_accounting.count(self._render_sections(selected))
 
     def _section_token_count(
@@ -384,9 +356,7 @@ class ContextBuilder:
 
     @staticmethod
     def _render_sections(sections: Sequence[ContextSection]) -> str:
-        return "\n\n".join(
-            f"[{section.name}]\n{section.content}" for section in sections
-        )
+        return "\n\n".join(f"[{section.name}]\n{section.content}" for section in sections)
 
     @staticmethod
     def _format_policy_hints(policy_hints: Sequence[str]) -> str:
@@ -439,70 +409,13 @@ class ContextBuilder:
                 lines.append(step_line)
                 expected_tools = getattr(step, "expected_tool_names", None)
                 if isinstance(expected_tools, list) and expected_tools:
-                    lines.append(
-                        "  expected_tool_names: "
-                        + self._format_list([str(item) for item in expected_tools])
-                    )
+                    lines.append("  expected_tool_names: " + self._format_list([str(item) for item in expected_tools]))
                 tool_call_ids = getattr(step, "tool_call_ids", None)
                 if isinstance(tool_call_ids, list) and tool_call_ids:
-                    lines.append(
-                        "  tool_call_ids: "
-                        + self._format_list([str(item) for item in tool_call_ids])
-                    )
+                    lines.append("  tool_call_ids: " + self._format_list([str(item) for item in tool_call_ids]))
                 notes = getattr(step, "notes", None)
                 if isinstance(notes, str) and notes.strip():
                     lines.append(f"  notes: {self._one_line(notes)}")
-        return "\n".join(lines)
-
-    def _format_evidence(
-        self,
-        evidence_items: Sequence[EvidenceItem],
-        citations: Sequence[AnswerCitation],
-    ) -> str:
-        if not evidence_items and not citations:
-            return ""
-
-        citations_by_evidence: dict[str, list[AnswerCitation]] = {}
-        for citation in citations:
-            citations_by_evidence.setdefault(citation.evidence_id, []).append(citation)
-
-        lines = [
-            "Retrieved evidence is the authoritative source for factual claims.",
-            "If evidence conflicts with memory, trust this evidence.",
-        ]
-        for evidence in evidence_items:
-            metadata = self._metadata_line(
-                evidence_id=evidence.evidence_id,
-                doc_id=evidence.doc_id,
-                score=evidence.score,
-                anchor=evidence.citation_anchor,
-                record_type=evidence.record_type,
-                file_name=evidence.file_name,
-                source_id=evidence.source_id,
-                source_type=evidence.source_type,
-            )
-            lines.append(f"- {metadata}")
-            lines.append(f"  text: {self._one_line(evidence.text)}")
-            evidence_citations = citations_by_evidence.get(evidence.evidence_id, [])
-            if evidence_citations:
-                citation_text = ", ".join(
-                    self._format_citation(citation) for citation in evidence_citations
-                )
-                lines.append(f"  citations: {citation_text}")
-
-        cited_evidence_ids = {citation.evidence_id for citation in citations}
-        evidence_ids = {evidence.evidence_id for evidence in evidence_items}
-        orphan_citations = [
-            citation for citation in citations if citation.evidence_id not in evidence_ids
-        ]
-        if orphan_citations:
-            lines.append("Citations without matching evidence items:")
-            lines.extend(f"- {self._format_citation(citation)}" for citation in orphan_citations)
-        if cited_evidence_ids - evidence_ids:
-            lines.append(
-                "Missing evidence ids referenced by citations: "
-                + ", ".join(sorted(cited_evidence_ids - evidence_ids))
-            )
         return "\n".join(lines)
 
     def _format_working_memory(self, working_summary: Any, facts: Sequence[Any]) -> str:
@@ -583,147 +496,6 @@ class ContextBuilder:
         lines.extend(self._format_message(message) for message in messages)
         return "\n".join(lines)
 
-    def _format_tool_observations(self, state: ContextState) -> str:
-        structured = state.get("structured_observations", [])
-        if structured:
-            return self._format_structured_observations(structured)
-        return self._format_tool_results(state.get("tool_results", []))
-
-    def _format_structured_observations(self, observations: Sequence[Any]) -> str:
-        lines = ["Structured tool observations:"]
-        for observation in observations:
-            prefix = (
-                f"- tool_call_id={getattr(observation, 'tool_call_id', '<unknown>')} "
-                f"tool_name={getattr(observation, 'tool_name', '<unknown>')} "
-                f"status={getattr(observation, 'status', '<unknown>')}"
-            )
-            lines.append(prefix)
-            answer = getattr(observation, "answer_candidate", None)
-            if answer is not None:
-                text = getattr(answer, "text", "")
-                if isinstance(text, str) and text.strip():
-                    lines.append(f"  answer_candidate: {self._one_line(text)}")
-            evidence_refs = getattr(observation, "evidence_refs", []) or []
-            if evidence_refs:
-                refs = ", ".join(
-                    self._one_line(str(getattr(ref, "key", ref)))
-                    for ref in evidence_refs
-                )
-                lines.append(f"  evidence_refs: {refs}")
-            context_units = getattr(observation, "context_units", []) or []
-            if context_units:
-                lines.append("  context_units:")
-                for unit in context_units[: self._MAX_LOCATORS_PER_OBSERVATION]:
-                    lines.append(
-                        "    - "
-                        f"unit_id={self._format_identifier(getattr(unit, 'unit_id', '<unknown>'))} "
-                        f"unit_type={self._one_line(str(getattr(unit, 'unit_type', '<unknown>')))} "
-                        f"{self._format_locator(getattr(unit, 'locator', {}))}"
-                    )
-                    capabilities = getattr(unit, "capabilities", None)
-                    if isinstance(capabilities, list) and capabilities:
-                        lines.append(
-                            "      capabilities: "
-                            + self._format_list([str(item) for item in capabilities])
-                        )
-                    preview = getattr(unit, "preview", None)
-                    if preview:
-                        lines.append(f"      preview: {self._one_line(str(preview))}")
-            locators = [] if context_units else (getattr(observation, "locators", []) or [])
-            if locators:
-                lines.append("  locators:")
-                for locator in locators[: self._MAX_LOCATORS_PER_OBSERVATION]:
-                    lines.append(f"    - {self._format_locator(locator)}")
-                remaining = len(locators) - self._MAX_LOCATORS_PER_OBSERVATION
-                if remaining > 0:
-                    lines.append(f"    - ... {remaining} more locators")
-            if error := getattr(observation, "error", None):
-                lines.append(f"  error: {self._one_line(str(error))}")
-        return "\n".join(lines)
-
-    def _format_locator(self, locator: Any) -> str:
-        if not isinstance(locator, dict):
-            return self._one_line(str(locator))
-
-        fields = (
-            "asset_id",
-            "doc_id",
-            "source_id",
-            "section_id",
-            "asset_type",
-            "table_index",
-            "table_name",
-            "used_range",
-            "sheet_name",
-            "page_no",
-            "element_ref",
-            "citation_anchor",
-            "evidence_id",
-            "path",
-            "name",
-            "size_bytes",
-            "is_dir",
-            "mime_type",
-            "file_kind",
-            "truncated",
-            "is_binary",
-            "readable_as_text",
-            "encoding",
-            "source_tool",
-            "generated",
-            "generated_by",
-            "ok",
-            "exit_code",
-            "duration_ms",
-            "stdout_truncated",
-            "stderr_truncated",
-            "header_row_index",
-            "header_confidence",
-            "data_start_row",
-            "row_count",
-            "column_count",
-        )
-        parts = [
-            f"{field}={self._format_locator_value(field, locator[field])}"
-            for field in fields
-            if locator.get(field) not in (None, "", [])
-        ]
-
-        capabilities = locator.get("analysis_capabilities")
-        if isinstance(capabilities, list) and capabilities:
-            parts.append("analysis_capabilities=" + self._format_list(capabilities))
-
-        columns = locator.get("columns") or locator.get("column_names")
-        if isinstance(columns, list) and columns:
-            parts.append(
-                "columns="
-                + self._format_list(
-                    columns,
-                    limit=self._MAX_COLUMNS_PER_LOCATOR,
-                )
-            )
-
-        head_rows = locator.get("head_rows")
-        if isinstance(head_rows, list) and head_rows:
-            rows = [
-                self._format_row_preview(row)
-                for row in head_rows[: self._MAX_HEAD_ROWS_PER_LOCATOR]
-            ]
-            parts.append("head_rows=" + self._format_list(rows, limit=len(rows)))
-
-        return " ".join(parts) if parts else self._one_line(str(locator))
-
-    def _format_row_preview(self, row: Any) -> str:
-        if not isinstance(row, dict):
-            return self._one_line(str(row))
-        cells: list[str] = []
-        for index, (key, value) in enumerate(row.items()):
-            if index >= self._MAX_ROW_CELLS:
-                cells.append("...")
-                break
-            cells.append(f"{key}={value}")
-        return "{" + self._one_line(", ".join(cells)) + "}"
-
     def _format_list(self, values: Sequence[Any], *, limit: int | None = None) -> str:
         effective_limit = limit if limit is not None else len(values)
         shown = [self._one_line(str(value)) for value in values[:effective_limit]]
@@ -734,12 +506,6 @@ class ContextBuilder:
     @staticmethod
     def _format_identifier(value: object) -> str:
         return ContextBuilder._preserve_spaces_one_line(str(value))
-
-    @staticmethod
-    def _format_locator_value(field: str, value: object) -> str:
-        if field in {"path", "name", "sheet_name", "element_ref", "generated_by"}:
-            return ContextBuilder._preserve_spaces_one_line(str(value))
-        return ContextBuilder._one_line(str(value))
 
     @staticmethod
     def _preserve_spaces_one_line(text: str) -> str:
@@ -776,6 +542,32 @@ class ContextBuilder:
                     )
         return "\n".join(lines)
 
+    def _format_tool_context(self, state: ContextState) -> str:
+        tool_results = state.get("tool_results", [])
+        if not tool_results:
+            return ""
+        resolver = self._formatter_resolver
+        sections: list[str] = []
+        for result in tool_results:
+            formatter = resolver(result.tool_name) if resolver else None
+            if formatter is not None:
+                # Check for externalized output first
+                from rag.agent.memory.models import ExternalizedToolOutput
+
+                if isinstance(result.output, ExternalizedToolOutput):
+                    section = formatter.format_externalized(result.output)
+                else:
+                    section = formatter.format_result(result)
+            else:
+                from rag.agent.tools.formatter import format_tool_result_fallback
+
+                section = format_tool_result_fallback(result)
+            if section is not None and section.content.strip():
+                sections.append(section.content)
+        if not sections:
+            return ""
+        return "Tool results:\n" + "\n".join(sections)
+
     def _format_loop_open_decisions(self, state: LoopState) -> str:
         lines: list[str] = []
         request = state.get("approval_request")
@@ -793,14 +585,9 @@ class ContextBuilder:
                 )
         response = state.get("approval_response")
         if response is not None:
-            lines.append(
-                "approval_response: "
-                f"request_id={response.request_id} decision={response.decision}"
-            )
+            lines.append(f"approval_response: request_id={response.request_id} decision={response.decision}")
             if response.user_message:
-                lines.append(
-                    f"user_message: {self._one_line(response.user_message)}"
-                )
+                lines.append(f"user_message: {self._one_line(response.user_message)}")
         pending_tool_calls = state.get("pending_tool_calls", [])
         if pending_tool_calls:
             lines.append("pending_tool_calls:")
@@ -808,43 +595,27 @@ class ContextBuilder:
                 lines.append(
                     f"- tool_call_id={pending_call.tool_call_id} "
                     f"tool_name={pending_call.tool_name} "
-                    f"arguments={self._one_line(str(pending_call.arguments))}"
+                    f"arguments={self._one_line(str(pending_call.plan.arguments))}"
                 )
         feedback = state.get("stop_hook_feedback", [])
         if feedback:
             lines.append("finish_feedback:")
             for item in feedback:
                 lines.append(
-                    f"- code={item.code} occurrences={item.occurrences} "
-                    f"message={self._one_line(item.message)}"
+                    f"- code={item.code} occurrences={item.occurrences} message={self._one_line(item.message)}"
                 )
         warnings = state.get("stop_hook_warnings", [])
         if warnings:
             lines.append("finish_warnings:")
             for item in warnings:
                 lines.append(
-                    f"- code={item.code} occurrences={item.occurrences} "
-                    f"message={self._one_line(item.message)}"
+                    f"- code={item.code} occurrences={item.occurrences} message={self._one_line(item.message)}"
                 )
         return "\n".join(lines)
 
     @staticmethod
     def _metadata_line(**values: object) -> str:
-        return " ".join(
-            f"{key}={value}" for key, value in values.items() if value not in (None, "", [])
-        )
-
-    @staticmethod
-    def _format_citation(citation: AnswerCitation) -> str:
-        values = {
-            "citation_id": citation.citation_id,
-            "evidence_id": citation.evidence_id,
-            "anchor": citation.citation_anchor,
-            "record_type": citation.record_type,
-            "doc_id": citation.doc_id,
-            "file_name": citation.file_name,
-        }
-        return ContextBuilder._metadata_line(**values)
+        return " ".join(f"{key}={value}" for key, value in values.items() if value not in (None, "", []))
 
     @staticmethod
     def _format_message(message: BaseMessage) -> str:
@@ -870,11 +641,7 @@ class ContextBuilder:
 
     @staticmethod
     def _externalized_tool_output_count(tool_results: Sequence[ToolResult]) -> int:
-        return sum(
-            1
-            for result in tool_results
-            if isinstance(getattr(result, "output", None), ExternalizedToolOutput)
-        )
+        return sum(1 for result in tool_results if isinstance(getattr(result, "output", None), ExternalizedToolOutput))
 
     @staticmethod
     def _one_line(text: str) -> str:
@@ -885,5 +652,6 @@ class ContextBuilder:
             return content
         truncated = content[: self._max_section_chars].rstrip()
         return f"{truncated}\n[truncated]"
+
 
 __all__ = ["ContextBuilder"]

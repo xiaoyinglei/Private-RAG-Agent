@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Protocol, cast
 
 from pydantic import BaseModel, ValidationError
 
+from rag.agent.tools.formatter import ToolOutputFormatter
 from rag.agent.tools.spec import ToolSpec
 
 if TYPE_CHECKING:
@@ -76,6 +77,7 @@ class ToolRegistry:
         self._tools: dict[str, ToolSpec] = {}
         self._runners: dict[str, ToolRunner] = {}
         self._contextual_runners: dict[str, ContextualToolRunner] = {}
+        self._formatters: dict[str, ToolOutputFormatter] = {}
 
     def register(self, spec: ToolSpec, *, runner: ToolRunner | None = None) -> None:
         self._tools[spec.name] = spec
@@ -105,6 +107,14 @@ class ToolRegistry:
         self._contextual_runners[tool_name] = runner
         self._runners.pop(tool_name, None)
 
+    def register_formatter(self, formatter: ToolOutputFormatter) -> None:
+        """Register a per-tool output formatter for ContextBuilder."""
+        self._formatters[formatter.tool_name] = formatter
+
+    def get_formatter(self, tool_name: str) -> ToolOutputFormatter | None:
+        """Get the formatter for a tool, or None."""
+        return self._formatters.get(tool_name)
+
     def has_runner(self, tool_name: str) -> bool:
         return tool_name in self._runners or tool_name in self._contextual_runners
 
@@ -128,9 +138,7 @@ class ToolRegistry:
 
         if contextual_runner is not None:
             if execution_context is None:
-                raise ToolExecutionContextMissingError(
-                    f"{tool_name} requires a trusted execution context"
-                )
+                raise ToolExecutionContextMissingError(f"{tool_name} requires a trusted execution context")
             raw_output = contextual_runner(input_payload, execution_context)
         else:
             if runner is None:
@@ -154,6 +162,7 @@ class ToolRegistry:
         cloned._tools = dict(self._tools)
         cloned._runners = dict(self._runners)
         cloned._contextual_runners = dict(self._contextual_runners)
+        cloned._formatters = dict(self._formatters)
         return cloned
 
     def list_all(self) -> list[ToolSpec]:

@@ -7,6 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from rag.agent.compat.goal_contract import GoalContractEvaluator, GoalSpec
 from rag.agent.core.definition import AgentDefinition
+from rag.agent.core.observations import ComputationResult, ContextBinding, EvidenceRef
 from rag.agent.core.output_finalizer import (
     OutputValidationExhaustedError,
     StructuredOutputFinalizer,
@@ -19,6 +20,8 @@ from rag.agent.loop.state import (
     append_stop_hook_feedback,
     append_stop_hook_warning,
 )
+from rag.agent.loop.substate import FinishState
+from rag.agent.tools.spec import ToolResult
 
 
 class StopVerdict(BaseModel):
@@ -117,6 +120,10 @@ class StopHookRunner:
                         message=verdict.message or verdict.code,
                     ),
                 )
+                state["finish_state"] = FinishState(
+                    feedback=list(state.get("stop_hook_feedback", [])),
+                    warnings=list(state.get("stop_hook_warnings", [])),
+                )
                 continue
             if verdict.action == "block":
                 feedback = append_stop_hook_feedback(
@@ -126,14 +133,15 @@ class StopHookRunner:
                         message=verdict.message or verdict.code,
                     ),
                 )
+                state["finish_state"] = FinishState(
+                    feedback=list(state.get("stop_hook_feedback", [])),
+                    warnings=list(state.get("stop_hook_warnings", [])),
+                )
                 if feedback.occurrences >= self._max_blocks:
                     return StopHookOutcome(
                         action="halt",
                         code="stop_hook_block_limit",
-                        message=(
-                            "Equivalent stop-hook feedback reached the "
-                            "configured block limit."
-                        ),
+                        message=("Equivalent stop-hook feedback reached the configured block limit."),
                         detail={
                             "blocked_code": verdict.code,
                             "occurrences": feedback.occurrences,
@@ -184,9 +192,7 @@ class StructuredOutputStopHook:
         candidate: str,
     ) -> StopVerdict:
         if self._finalizer is None:
-            raise RuntimeError(
-                "structured output is configured without a finalizer"
-            )
+            raise RuntimeError("structured output is configured without a finalizer")
         try:
             output = await _await_output(
                 self._finalizer.finalize(
@@ -216,18 +222,70 @@ class GoalContractStopHook:
     def __init__(self, *, goal_spec: GoalSpec) -> None:
         self._goal_spec = goal_spec
 
+    @staticmethod
+    def _collect_evidence_refs(
+        tool_results: list[ToolResult],
+    ) -> list[EvidenceRef]:
+        """Derive evidence_refs from tool_results instead of deprecated state field."""
+        refs: list[EvidenceRef] = []
+        for r in tool_results:
+            if r.status == "ok" and r.output is not None:
+                er = getattr(r.output, "evidence_refs", None)
+                if isinstance(er, list):
+                    for item in er:
+                        if isinstance(item, EvidenceRef):
+                            refs.append(item)
+                        elif isinstance(item, dict):
+                            refs.append(EvidenceRef.model_validate(item))
+        return refs
+
+    @staticmethod
+    def _collect_computation_results(
+        tool_results: list[ToolResult],
+    ) -> list[ComputationResult]:
+        """Derive computation_results from tool_results instead of deprecated state field."""
+        results: list[ComputationResult] = []
+        for r in tool_results:
+            if r.status == "ok" and r.output is not None:
+                cr = getattr(r.output, "computation_results", None)
+                if isinstance(cr, list):
+                    for item in cr:
+                        if isinstance(item, ComputationResult):
+                            results.append(item)
+                        elif isinstance(item, dict):
+                            results.append(ComputationResult.model_validate(item))
+        return results
+
+    @staticmethod
+    def _collect_context_bindings(
+        tool_results: list[ToolResult],
+    ) -> list[ContextBinding]:
+        """Derive context_bindings from tool_results instead of deprecated state field."""
+        bindings: list[ContextBinding] = []
+        for r in tool_results:
+            if r.status == "ok" and r.output is not None:
+                cb = getattr(r.output, "context_bindings", None)
+                if isinstance(cb, list):
+                    for item in cb:
+                        if isinstance(item, ContextBinding):
+                            bindings.append(item)
+                        elif isinstance(item, dict):
+                            bindings.append(ContextBinding.model_validate(item))
+        return bindings
+
     async def evaluate(
         self,
         *,
         state: LoopState,
         candidate: str,
     ) -> StopVerdict:
+        tool_results = list(state.get("tool_results", []))
         evaluation = GoalContractEvaluator().evaluate(
             goal_spec=self._goal_spec,
             candidate=candidate,
-            evidence_refs=state["evidence_refs"],
-            computation_results=state["computation_results"],
-            context_bindings=state["context_bindings"],
+            evidence_refs=self._collect_evidence_refs(tool_results),
+            computation_results=self._collect_computation_results(tool_results),
+            context_bindings=self._collect_context_bindings(tool_results),
         )
         if evaluation.satisfied:
             return StopVerdict(
@@ -237,10 +295,7 @@ class GoalContractStopHook:
         return StopVerdict(
             action="block",
             code="goal_contract_unsatisfied",
-            message="; ".join(
-                issue.description
-                for issue in evaluation.issues
-            )
+            message="; ".join(issue.description for issue in evaluation.issues)
             or "Explicit goal contract is not satisfied.",
             detail={
                 "unsatisfied_issue_ids": evaluation.issue_ids,

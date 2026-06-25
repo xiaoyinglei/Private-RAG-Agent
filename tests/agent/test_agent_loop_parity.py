@@ -8,12 +8,7 @@ import pytest
 
 from tests.agent.parity.loop_scenarios import run_loop_scenarios
 
-BASELINE_PATH = (
-    Path(__file__).parent
-    / "parity"
-    / "baselines"
-    / "legacy_graph_v1.json"
-)
+BASELINE_PATH = Path(__file__).parent / "parity" / "baselines" / "legacy_graph_v1.json"
 
 OBSOLETE_CONTROLLER_FIELDS = {
     "produced_gaps",
@@ -54,17 +49,12 @@ def _assert_common_tool_parity(
         "final_answer",
         "output_validation_errors",
         "tool_results",
-        "answer_candidates",
-        "evidence",
-        "citations",
-        "retrieval_signals",
-        "retrieval_signals_debug",
-        "evidence_refs",
-        "computation_results",
-        "locators",
         "insufficient_evidence_flag",
     ):
         assert loop[field] == legacy[field], field
+    # PR2: these observation fields no longer written to LoopState
+    for field in ("answer_candidates", "evidence", "citations", "evidence_refs", "computation_results", "locators"):
+        assert loop[field] == [], f"PR2: {field} expected empty, got {loop[field]}"
     legacy_output = legacy["final_output"]
     loop_output = loop["final_output"]
     if legacy_output is None:
@@ -101,18 +91,9 @@ async def test_agent_loop_matches_frozen_legacy_capabilities() -> None:
     rag_loop = loop["rag_grounding"]
     _assert_common_tool_parity(rag_legacy, rag_loop)
     assert rag_loop["groundedness_flag"] is True
-    _assert_legacy_subset(
-        rag_legacy["context_units"],
-        rag_loop["context_units"],
-    )
-    _assert_legacy_subset(
-        rag_legacy["structured_observations"],
-        rag_loop["structured_observations"],
-    )
-    locator = rag_loop["context_units"][0]["locator"]
-    assert locator["rerank_score"] == 0.99
-    assert locator["retrieval_channels"] == ["vector", "rerank"]
-    assert locator["retrieval_family"] == "hybrid"
+    # PR2: context_units and structured_observations no longer written to LoopState
+    assert rag_loop["context_units"] == []
+    assert rag_loop["structured_observations"] == []
 
     approval_legacy = legacy["approval_resume"]
     approval_loop = loop["approval_resume"]
@@ -127,9 +108,7 @@ async def test_agent_loop_matches_frozen_legacy_capabilities() -> None:
         approval_legacy["resumed"],
         approval_loop["resumed"],
     )
-    assert approval_loop["resumed"]["observed"] == {
-        "runner_calls": ["approved"]
-    }
+    assert approval_loop["resumed"]["observed"] == {"runner_calls": ["approved"]}
     # The loop clears the fulfilled request instead of exposing stale approval data.
     assert approval_legacy["resumed"]["human_input_request"] is not None
     assert approval_loop["resumed"]["human_input_request"] is None
@@ -161,13 +140,14 @@ async def test_agent_loop_documents_intentional_controller_changes() -> None:
     goal_legacy = legacy["explicit_goal_spec"]
     goal_loop = loop["explicit_goal_spec"]
     assert goal_loop["status"] == goal_legacy["status"] == "paused"
-    for field in ("tool_results", "answer_candidates", "evidence_refs"):
+    for field in ("tool_results",):
         assert goal_loop[field] == goal_legacy[field]
+    # PR2: answer_candidates and evidence_refs no longer written to LoopState
+    assert goal_loop["answer_candidates"] == []
+    assert goal_loop["evidence_refs"] == []
     assert goal_loop["open_gap_ids"] == []
     assert goal_loop["satisfied_requirements"] == []
-    assert goal_loop["stop_hook_feedback"][0]["code"] == (
-        "goal_contract_unsatisfied"
-    )
+    assert goal_loop["stop_hook_feedback"][0]["code"] == ("goal_contract_unsatisfied")
 
     compaction_legacy = legacy["message_compaction"]
     compaction_loop = loop["message_compaction"]
@@ -179,17 +159,11 @@ async def test_agent_loop_documents_intentional_controller_changes() -> None:
     fallback_legacy = legacy["model_fallback"]
     fallback_loop = loop["model_fallback"]
     assert fallback_loop["status"] == fallback_legacy["status"] == "paused"
-    assert fallback_loop["observed"]["model_resolutions"] == (
-        fallback_legacy["observed"]["model_resolutions"]
-    )
+    assert fallback_loop["observed"]["model_resolutions"] == (fallback_legacy["observed"]["model_resolutions"])
     assert "fallback" in fallback_loop["observed"]["transition_reasons"]
 
     for scenario in loop.values():
-        states = (
-            scenario.values()
-            if "paused" in scenario and "resumed" in scenario
-            else (scenario,)
-        )
+        states = scenario.values() if "paused" in scenario and "resumed" in scenario else (scenario,)
         for state in states:
             assert state["open_gap_ids"] == []
             assert state["satisfied_requirements"] == []

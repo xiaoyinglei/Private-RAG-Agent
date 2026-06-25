@@ -3,7 +3,6 @@ from __future__ import annotations
 import logging
 from collections.abc import AsyncGenerator, Mapping, Sequence
 from dataclasses import replace
-from inspect import isawaitable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, cast
 from uuid import uuid4
@@ -33,6 +32,7 @@ from rag.agent.capabilities.tool_search import (
 from rag.agent.compat.goal_contract import GoalCompatibilityConfig, GoalSpec
 from rag.agent.core.checkpointing import (
     LangGraphCheckpointStore,
+    _digest_text,
     create_agent_checkpointer,
 )
 from rag.agent.core.context import AgentRunConfig, RunRegistry, derive_child_config
@@ -65,6 +65,7 @@ from rag.agent.loop.state import (
     create_loop_state,
 )
 from rag.agent.loop.stop_hooks import StopHookRunner, build_stop_hooks
+from rag.agent.loop.substate import MemoryState, PersistentMemorySnapshot
 from rag.agent.memory.compactor import (
     LoopContextCompactor,
     MessageCompactor,
@@ -125,9 +126,7 @@ class AgentRunResult(BaseModel):
     status: str
     final_answer: str | None = None
     final_output: BaseModel | None = None
-    output_validation_errors: list[dict[str, object]] = Field(
-        default_factory=list
-    )
+    output_validation_errors: list[dict[str, object]] = Field(default_factory=list)
     stop_reason: str | None = None
     tool_results: list[ToolResult] = Field(default_factory=list)
     evidence: list[EvidenceItem] = Field(default_factory=list)
@@ -168,45 +167,46 @@ class AgentRunResult(BaseModel):
         terminal = state["terminal"]
         pause = state["pause"]
         pending = state["pending_tool_calls"]
+
+        # PR2: derive evidence/citations from tool_results, not deprecated state fields
+        evidence: list[EvidenceItem] = []
+        citations: list[AnswerCitation] = []
+        for result in state.get("tool_results", []):
+            if result.status == "ok" and result.output is not None:
+                ev = getattr(result.output, "evidence", None)
+                if isinstance(ev, list):
+                    for item in ev:
+                        if isinstance(item, EvidenceItem):
+                            evidence.append(item)
+                        else:
+                            evidence.append(EvidenceItem.model_validate(item))
+                ct = getattr(result.output, "citations", None)
+                if isinstance(ct, list):
+                    for item in ct:
+                        if isinstance(item, AnswerCitation):
+                            citations.append(item)
+                        else:
+                            citations.append(AnswerCitation.model_validate(item))
+
         return cls(
             run_id=run_config.run_id,
             thread_id=run_config.thread_id,
-            status=(
-                "done"
-                if state["status"] == "completed"
-                else state["status"]
-            ),
+            status=("done" if state["status"] == "completed" else state["status"]),
             final_answer=state["final_answer"],
             final_output=_restore_final_output(
                 state["final_output"],
                 definition=definition,
             ),
-            output_validation_errors=list(
-                state["output_validation_errors"]
-            ),
-            stop_reason=(
-                None
-                if terminal is None
-                else terminal.stop_reason
-            ),
+            output_validation_errors=list(state["output_validation_errors"]),
+            stop_reason=(None if terminal is None else terminal.stop_reason),
             tool_results=list(state["tool_results"]),
-            evidence=list(state["evidence"]),
-            citations=list(state["citations"]),
+            evidence=evidence,
+            citations=citations,
             iteration=state["iteration"],
-            groundedness_flag=state["groundedness_flag"],
-            insufficient_evidence_flag=(
-                state["insufficient_evidence_flag"]
-            ),
-            needs_user_input=(
-                None
-                if is_terminal or pause is None
-                else pause.reason
-            ),
-            human_input_request=(
-                None
-                if is_terminal
-                else state["approval_request"]
-            ),
+            groundedness_flag=_derive_groundedness(list(state["tool_results"])),
+            insufficient_evidence_flag=_derive_insufficient_evidence(list(state["tool_results"])),
+            needs_user_input=(None if is_terminal or pause is None else pause.reason),
+            human_input_request=(None if is_terminal else state["approval_request"]),
             pending_tool_calls_summary=[
                 {
                     "tool_call_id": call.tool_call_id,
@@ -231,26 +231,21 @@ class _ResultDrivenModelTurnProvider:
         if state["stop_hook_feedback"]:
             return ModelTurnDraft(
                 action="pause",
-                pause_reason=(
-                    "No model turn provider is available to address "
-                    "stop-hook feedback."
-                ),
+                pause_reason=("No model turn provider is available to address stop-hook feedback."),
             )
-        if state["answer_candidates"]:
-            return ModelTurnDraft(
-                action="finish",
-                final_answer=state["answer_candidates"][-1].text,
-            )
+        # PR2: answer_candidates no longer written to LoopState; use tool output directly
         if state["tool_results"]:
             latest = state["tool_results"][-1]
             if latest.error is not None:
                 return ModelTurnDraft(action="finish")
-            reason = (
-                "Tool execution produced no answer candidate."
-            )
+            if latest.output is not None:
+                text = getattr(latest.output, "text", None) or getattr(latest.output, "result", None)
+                if text:
+                    return ModelTurnDraft(action="finish", final_answer=str(text))
+            # Tool produced output but no extracted answer text; pause for direction
             return ModelTurnDraft(
                 action="pause",
-                pause_reason=reason,
+                pause_reason="Tool execution produced no extractable answer.",
             )
         return ModelTurnDraft(
             action="pause",
@@ -304,11 +299,7 @@ class _TaskChildRunner:
         return replace(
             self._policy,
             max_depth=max(self._policy.max_depth - 1, 0),
-            core_tool_names=tuple(
-                tool
-                for tool in self._policy.core_tool_names
-                if tool != "task"
-            ),
+            core_tool_names=tuple(tool for tool in self._policy.core_tool_names if tool != "task"),
         )
 
     def _derive_child_config(
@@ -322,9 +313,7 @@ class _TaskChildRunner:
             description="Generic task child",
             system_prompt=child_policy.system_instructions,
             allowed_tools=child_policy.allowed_tools,
-            estimated_token_budget=(
-                request.estimated_tokens or child_policy.token_budget
-            ),
+            estimated_token_budget=(request.estimated_tokens or child_policy.token_budget),
             estimated_work_budget=child_policy.work_budget,
             max_iterations=child_policy.max_iterations,
             max_depth=child_policy.max_depth,
@@ -390,9 +379,7 @@ class AgentService:
         self._subagent_runner = subagent_runner
         self._output_finalizer = output_finalizer
         self._model_registry = model_registry
-        self._runtime_diagnostics = tuple(
-            merge_runtime_diagnostics([], runtime_diagnostics)
-        )
+        self._runtime_diagnostics = tuple(merge_runtime_diagnostics([], runtime_diagnostics))
         self._checkpointer = checkpointer or create_agent_checkpointer(None)
         self._stream_sink = stream_sink
         # Register core tools: tool_search, activate_tools, task
@@ -432,12 +419,8 @@ class AgentService:
             messages=messages or (),
             runtime_diagnostics=self._runtime_diagnostics,
         )
-        state["approved_tool_call_ids"] = list(
-            approved_tool_call_ids or ()
-        )
-        state["denied_tool_call_ids"] = list(
-            denied_tool_call_ids or ()
-        )
+        state["approved_tool_call_ids"] = list(approved_tool_call_ids or ())
+        state["denied_tool_call_ids"] = list(denied_tool_call_ids or ())
         return cast(
             LoopState,
             MessageCompactor(
@@ -498,9 +481,7 @@ class AgentService:
         )
 
         # 5. Promote structured_probe to core if we have probeable files
-        file_tools_to_activate: set[str] = (
-            {"structured_probe"} if manifest.has_probeable_files else set()
-        )
+        file_tools_to_activate: set[str] = {"structured_probe"} if manifest.has_probeable_files else set()
         runtime_registry = self._runtime_tool_registry(
             run_config,
             runners=ops.runners(),
@@ -520,17 +501,12 @@ class AgentService:
             memory_store=memory_store,
             file_manifest=manifest,
         )
-        await self._apply_retrieval_hint(state)
-
-        # 7. Load persistent memories for cross-session context
         persistent_store = PersistentMemoryStore(workspace)
         await self._load_persistent_memories(state, persistent_store, task=enriched_task)
         checkpoint_store = LangGraphCheckpointStore(
             self._checkpointer,
             run_config=run_config,
-            compatibility_config=GoalCompatibilityConfig(
-                goal_spec=goal_spec
-            ),
+            compatibility_config=GoalCompatibilityConfig(goal_spec=goal_spec),
         )
         loop = self._build_loop(
             runtime_registry=runtime_registry,
@@ -561,9 +537,7 @@ class AgentService:
             workspace_path=str(workspace.root),
         )
 
-    async def run_streaming(
-        self, request: AgentRunRequest
-    ) -> AsyncGenerator[Any, None]:
+    async def run_streaming(self, request: AgentRunRequest) -> AsyncGenerator[Any, None]:
         """流式运行 Agent，yield 每一个 StreamEvent。
 
         用法：
@@ -593,9 +567,7 @@ class AgentService:
             policy=run_config.memory_policy,
         )
 
-        file_tools_to_activate: set[str] = (
-            {"structured_probe"} if manifest.has_probeable_files else set()
-        )
+        file_tools_to_activate: set[str] = {"structured_probe"} if manifest.has_probeable_files else set()
         runtime_registry = self._runtime_tool_registry(
             run_config,
             runners=ops.runners(),
@@ -614,18 +586,13 @@ class AgentService:
             memory_store=memory_store,
             file_manifest=manifest,
         )
-        await self._apply_retrieval_hint(state)
-
-        # Load persistent memories for cross-session context
         persistent_store = PersistentMemoryStore(workspace)
         await self._load_persistent_memories(state, persistent_store, task=enriched_task)
 
         checkpoint_store = LangGraphCheckpointStore(
             self._checkpointer,
             run_config=run_config,
-            compatibility_config=GoalCompatibilityConfig(
-                goal_spec=request.goal_spec
-            ),
+            compatibility_config=GoalCompatibilityConfig(goal_spec=request.goal_spec),
         )
         loop = self._build_loop(
             runtime_registry=runtime_registry,
@@ -673,12 +640,8 @@ class AgentService:
             runtime_diagnostics=self._runtime_diagnostics,
             file_manifest=file_manifest,
         )
-        state["approved_tool_call_ids"] = list(
-            approved_tool_call_ids or ()
-        )
-        state["denied_tool_call_ids"] = list(
-            denied_tool_call_ids or ()
-        )
+        state["approved_tool_call_ids"] = list(approved_tool_call_ids or ())
+        state["denied_tool_call_ids"] = list(denied_tool_call_ids or ())
         return state
 
     def _build_loop(
@@ -717,7 +680,7 @@ class AgentService:
                     store.activate(tool_name, iteration=0, source_query="__file_manifest_auto__")
                 except (KeyError, RuntimeError):
                     pass  # Already active or not in allowed_tools
-        provider = self._resolve_model_turn_provider(state)
+        provider = self._resolve_model_turn_provider(state, tool_registry=runtime_registry)
         output_finalizer = self._resolve_output_finalizer(state)
         return AgentLoop(
             definition=self._definition,
@@ -746,6 +709,8 @@ class AgentService:
     def _resolve_model_turn_provider(
         self,
         state: LoopState | None,
+        *,
+        tool_registry: ToolRegistry | None = None,
     ) -> ModelTurnProvider:
         if self._model_turn_provider is not None:
             return self._model_turn_provider
@@ -757,14 +722,19 @@ class AgentService:
                         "DeferredToolStore is not bound — "
                         "AgentLoop must set deferred_store_var before creating provider"
                     )
+                effective_registry = tool_registry or self._base_tool_registry
+                formatter_resolver = (
+                    (lambda name: tool_registry.get_formatter(name)) if tool_registry is not None else None
+                )
                 return create_loop_model_turn_provider(
                     self._model_registry,
                     self._definition.model_selection,
-                    tool_registry=self._base_tool_registry,
+                    tool_registry=effective_registry,
                     definition=self._definition,
                     catalog=self._catalog,
                     deferred_store=store,
                     stream_sink=self._stream_sink,
+                    formatter_resolver=formatter_resolver,
                 )
             except Exception as exc:
                 if state is not None:
@@ -784,66 +754,27 @@ class AgentService:
     ) -> StructuredOutputFinalizer | None:
         if self._output_finalizer is not None:
             return self._output_finalizer
-        if (
-            self._definition.output_model is None
-            or self._model_registry is None
-        ):
+        if self._definition.output_model is None or self._model_registry is None:
             return None
         try:
-            return create_model_structured_output_finalizer(
-                self._model_registry
-            )
+            return create_model_structured_output_finalizer(self._model_registry)
         except Exception as exc:
             if state is not None:
                 append_loop_diagnostic(
                     state,
                     RuntimeDiagnostic.from_exception(
-                        code=(
-                            "structured_output_finalizer_"
-                            "initialization_failed"
-                        ),
+                        code=("structured_output_finalizer_initialization_failed"),
                         component="structured_output_finalizer",
                         error=exc,
                     ),
                 )
             return None
 
-    async def _apply_retrieval_hint(self, state: LoopState) -> None:
-        provider = self._retrieval_hint_provider
-        if provider is None:
-            return
-        try:
-            update = provider.hint(state)
-            if isawaitable(update):
-                update = await update
-        except Exception as exc:
-            append_loop_diagnostic(
-                state,
-                RuntimeDiagnostic.from_exception(
-                    code="retrieval_hint_failed",
-                    component="retrieval_hint",
-                    error=exc,
-                ),
-            )
-            return
-        retrieval_signals = update.get("retrieval_signals")
-        if retrieval_signals is not None:
-            state["retrieval_signals"] = retrieval_signals
-        state["retrieval_signals_debug"] = update.get(
-            "retrieval_signals_debug"
-        )
-
     def _validate_allowed_tools(self, registry: ToolRegistry) -> None:
         registered = {tool.name for tool in registry.list_all()}
-        missing = [
-            name
-            for name in self._definition.allowed_tools
-            if name not in registered
-        ]
+        missing = [name for name in self._definition.allowed_tools if name not in registered]
         if missing:
-            raise ValueError(
-                f"unregistered tools: {', '.join(dict.fromkeys(missing))}"
-            )
+            raise ValueError(f"unregistered tools: {', '.join(dict.fromkeys(missing))}")
 
     @staticmethod
     def _inject_manifest_into_task(task: str, manifest: FileManifest) -> str:
@@ -902,6 +833,28 @@ class AgentService:
                 store=store,
             )
             state["persistent_memories"] = [m.to_markdown() for m in selected]
+
+            # ── PR1 dual-write: update PersistentMemorySnapshot ──
+            ms = state.get("memory_state")
+            if isinstance(ms, MemoryState):
+                state["memory_state"] = ms.model_copy(
+                    update={
+                        "persistent": PersistentMemorySnapshot(
+                            index_digest=_digest_text(index_content),
+                            selected_count=len(selected) if selected else 0,
+                            selected_summaries=([m.to_markdown()[:200] for m in selected] if selected else []),
+                        )
+                    }
+                )
+            else:
+                # memory_state not present (shouldn't happen after Task 2, but guard)
+                state["memory_state"] = MemoryState(
+                    persistent=PersistentMemorySnapshot(
+                        index_digest=_digest_text(index_content),
+                        selected_count=len(selected) if selected else 0,
+                        selected_summaries=([m.to_markdown()[:200] for m in selected] if selected else []),
+                    ),
+                )
         except Exception:
             logger.warning("Failed to load persistent memories", exc_info=True)
 
@@ -930,9 +883,7 @@ class AgentService:
             from rag.agent.memory.persistent import MemoryConsolidator
 
             consolidate_gateway = self._create_memory_gateway("memory_consolidate")
-            consolidator = MemoryConsolidator(
-                llm_gateway=consolidate_gateway or extract_gateway
-            )
+            consolidator = MemoryConsolidator(llm_gateway=consolidate_gateway or extract_gateway)
             result = await consolidator.consolidate(store)
             if result.action == "consolidated":
                 logger.info(
@@ -1035,6 +986,7 @@ class AgentService:
 
             async def _task_runner(payload: BaseModel) -> TaskOutput:
                 from rag.agent.tools.task_tool import TaskInput
+
                 input_data = TaskInput.model_validate(payload)
                 return await task_runner.run(input_data, parent_config=run_config)
 
@@ -1049,7 +1001,7 @@ class AgentService:
         for spec in self._base_tool_registry.list_all():
             if not spec.name.startswith("agent_"):
                 continue
-            agent_type = spec.name[len("agent_"):]
+            agent_type = spec.name[len("agent_") :]
             adapter = AgentAsToolAdapter(
                 runner=runner,
                 agent_type=agent_type,
@@ -1094,12 +1046,17 @@ class AgentService:
             schema_text = ""
             if category == "deferred" and hasattr(spec.input_model, "model_json_schema"):
                 schema_text = flatten_schema(spec.input_model.model_json_schema())
-            search_text = " ".join(filter(None, [
-                spec.name,
-                spec.name.replace("_", " "),
-                spec.description,
-                schema_text,
-            ]))
+            search_text = " ".join(
+                filter(
+                    None,
+                    [
+                        spec.name,
+                        spec.name.replace("_", " "),
+                        spec.description,
+                        schema_text,
+                    ],
+                )
+            )
             catalog.register(
                 ToolCatalogEntry(
                     name=spec.name,
@@ -1144,8 +1101,7 @@ class AgentService:
             store = deferred_store_var.get(None)
             if store is None:
                 raise RuntimeError(
-                    "DeferredToolStore is not bound — "
-                    "AgentLoop must set deferred_store_var before tool execution"
+                    "DeferredToolStore is not bound — AgentLoop must set deferred_store_var before tool execution"
                 )
             return execute_tool_search(
                 query=input_data.query,
@@ -1181,8 +1137,7 @@ class AgentService:
             store = deferred_store_var.get(None)
             if store is None:
                 raise RuntimeError(
-                    "DeferredToolStore is not bound — "
-                    "AgentLoop must set deferred_store_var before tool execution"
+                    "DeferredToolStore is not bound — AgentLoop must set deferred_store_var before tool execution"
                 )
             return execute_activate_tools(
                 names=input_data.names,
@@ -1325,12 +1280,29 @@ class AgentService:
             work_budget_total=self._definition.estimated_work_budget,
             agent_type=self._definition.agent_type,
             max_depth=self._definition.max_depth,
-            access_policy=(
-                self._definition.access_policy
-                or AccessPolicy.default()
-            ),
+            access_policy=(self._definition.access_policy or AccessPolicy.default()),
             tool_policy=self._definition.tool_policy,
         )
+
+
+def _derive_groundedness(tool_results: list[ToolResult]) -> bool:
+    """Derive groundedness_flag from the last RAG generation ToolResult.output."""
+    for result in reversed(tool_results):
+        if result.status == "ok" and result.output is not None:
+            if bool(getattr(result.output, "groundedness_flag", False)):
+                return True
+    return False
+
+
+def _derive_insufficient_evidence(tool_results: list[ToolResult]) -> bool:
+    """Derive insufficient_evidence_flag from the last RAG generation ToolResult.output."""
+    for result in reversed(tool_results):
+        if result.status == "ok" and result.output is not None:
+            if bool(getattr(result.output, "insufficient_evidence", False)) or bool(
+                getattr(result.output, "insufficient_evidence_flag", False)
+            ):
+                return True
+    return False
 
 
 def _restore_final_output(
@@ -1343,9 +1315,7 @@ def _restore_final_output(
     envelope = ValidatedFinalOutput.model_validate(raw_output)
     expected_path = output_model_path(definition.output_model)
     if envelope.model_path != expected_path:
-        raise ValueError(
-            "Checkpoint final output model does not match AgentDefinition.output_model"
-        )
+        raise ValueError("Checkpoint final output model does not match AgentDefinition.output_model")
     return definition.output_model.model_validate(envelope.data)
 
 

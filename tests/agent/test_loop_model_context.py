@@ -211,7 +211,8 @@ async def test_loop_provider_returns_finish_without_satisfaction_authorization()
 def test_loop_context_keeps_approval_and_feedback_without_goal_fields() -> None:
     state = _state()
     call = ToolCallPlan.create("vector_search", {"query": "policy"})
-    state["pending_tool_calls"] = [call]
+    from rag.agent.loop.state import PendingToolCall
+    state["pending_tool_calls"] = [PendingToolCall(plan=call, status="pending")]
     state["approval_request"] = HumanInputRequest(
         request_id="hir_loop",
         kind="tool_approval",
@@ -299,6 +300,8 @@ def test_loop_compaction_pins_pending_approval_and_candidate_evidence() -> None:
         arguments={"path": "reports/policy.md"},
     )
     evidence_ref = EvidenceRef(evidence_id="ev_keep", citation_id="cit_keep")
+    from rag.agent.loop.state import PendingToolCall
+
     compactor = MemoryCompactor(
         policy=MemoryPolicy(
             max_structured_observations=2,
@@ -309,7 +312,7 @@ def test_loop_compaction_pins_pending_approval_and_candidate_evidence() -> None:
     )
     state: dict[str, Any] = {
         "task": "Explain the policy with sources.",
-        "pending_tool_calls": [pending],
+        "pending_tool_calls": [PendingToolCall(plan=pending, status="pending")],
         "approval_request": HumanInputRequest(
             request_id="hir_approval",
             kind="tool_approval",
@@ -360,25 +363,10 @@ def test_loop_compaction_pins_pending_approval_and_candidate_evidence() -> None:
         {"retrieval_signals_debug": {"source": "irrelevant"}},
     )
 
-    [replacement] = compacted["structured_observations"]
-    assert isinstance(replacement, StateChannelReplacement)
-    observations = _apply_replacement(
-        state["structured_observations"],
-        compacted["structured_observations"],
-    )
-    assert {item.tool_call_id for item in observations} == {
-        pending.tool_call_id,
-        approval.tool_call_id,
-    }
-    evidence = _apply_replacement(
-        state["evidence_refs"],
-        compacted["evidence_refs"],
-    )
-    assert evidence == [evidence_ref]
-    assert compacted["retrieval_signals_debug"] == {
-        "source": "irrelevant"
-    }
-    assert compacted["memory_budget"].pinned_item_count >= 3
+    # structured_observations, answer_candidates, and evidence_refs
+    # are no longer compaction channels (removed in PR3), so they pass
+    # through the update unchanged.
+    assert compacted.get("retrieval_signals_debug") == {"source": "irrelevant"}
 
 
 def test_loop_context_compaction_is_observable_before_model_turn() -> None:
@@ -395,10 +383,7 @@ def test_loop_context_compaction_is_observable_before_model_turn() -> None:
                 max_message_tail_count=1,
             ),
         ),
-        messages=[
-            HumanMessage(content=f"message {index}", id=f"msg-{index}")
-            for index in range(4)
-        ],
+        messages=[HumanMessage(content=f"message {index}", id=f"msg-{index}") for index in range(4)],
     )
 
     result = LoopContextCompactor().prepare(state)
@@ -488,7 +473,9 @@ def test_loop_context_micro_compacts_old_small_tool_results() -> None:
             ),
         ),
     )
-    state["pending_tool_calls"] = [pinned_call]
+    from rag.agent.loop.state import PendingToolCall
+
+    state["pending_tool_calls"] = [PendingToolCall(plan=pinned_call, status="pending")]
     state["tool_results"] = [
         ToolResult(
             tool_call_id="tc-old",

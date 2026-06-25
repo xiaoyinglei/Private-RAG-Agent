@@ -7,18 +7,17 @@ translate to/from these types at the boundary.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from enum import Enum
+from dataclasses import dataclass
+from enum import StrEnum
 from typing import Any, Literal
 from uuid import uuid4
 
 from pydantic import BaseModel, Field
 
-
 # ── Stop reason ──
 
 
-class StopReason(str, Enum):
+class StopReason(StrEnum):
     """Normalized stop reason.  AgentLoop control flow depends *only* on this."""
 
     TOOL_USE = "tool_use"
@@ -66,29 +65,6 @@ class ModelMessage:
     tool_call_id: str | None = None  # required when role="tool"
 
 
-# ── Pending tool call (state machine) ──
-
-
-class PendingToolCall(BaseModel):
-    """Tracks lifecycle of a single tool call from request to completion.
-
-    State transitions:
-        pending → approved → running → completed
-        pending → denied
-        pending → approved → running → failed
-    """
-
-    tool_call_id: str
-    tool_name: str
-    arguments: dict[str, Any]
-    status: Literal[
-        "pending", "approved", "denied", "running", "completed", "failed"
-    ] = "pending"
-    approval_required: bool = False
-    summary: str | None = None
-    result_store_key: str | None = None
-
-
 # ── Tool use result ──
 
 
@@ -105,7 +81,6 @@ class ToolUseResult(BaseModel):
 
 __all__ = [
     "ModelMessage",
-    "PendingToolCall",
     "StopReason",
     "ToolCall",
     "ToolUseResult",

@@ -7,6 +7,28 @@ from typing import Any
 from langchain_core.messages import BaseMessage
 from pydantic import BaseModel
 
+from rag.agent.tools.spec import ToolResult
+
+
+def _derive_groundedness(tool_results: list[ToolResult]) -> bool:
+    """Derive groundedness_flag from the last RAG generation ToolResult.output."""
+    for result in reversed(tool_results):
+        if result.status == "ok" and result.output is not None:
+            if bool(getattr(result.output, "groundedness_flag", False)):
+                return True
+    return False
+
+
+def _derive_insufficient_evidence(tool_results: list[ToolResult]) -> bool:
+    """Derive insufficient_evidence_flag from the last RAG generation ToolResult.output."""
+    for result in reversed(tool_results):
+        if result.status == "ok" and result.output is not None:
+            if bool(getattr(result.output, "insufficient_evidence", False)) or bool(
+                getattr(result.output, "insufficient_evidence_flag", False)
+            ):
+                return True
+    return False
+
 
 def normalize_loop_state(
     state: Mapping[str, Any],
@@ -20,32 +42,20 @@ def normalize_loop_state(
     normalized: dict[str, object] = {
         "status": state.get("status"),
         "stop_reason": getattr(terminal, "stop_reason", None),
-        "decision_reason": (
-            None
-            if state.get("latest_transition") is None
-            else state["latest_transition"].reason
-        ),
+        "decision_reason": (None if state.get("latest_transition") is None else state["latest_transition"].reason),
         "final_answer": state.get("final_answer"),
         "final_output": _normalize_value(state.get("final_output")),
-        "output_validation_errors": _normalize_value(
-            state.get("output_validation_errors", [])
-        ),
+        "output_validation_errors": _normalize_value(state.get("output_validation_errors", [])),
         "iteration": state.get("iteration", 0),
-        "groundedness_flag": bool(
-            state.get("groundedness_flag", False)
-        ),
-        "insufficient_evidence_flag": bool(
-            state.get("insufficient_evidence_flag", False)
-        ),
+        "groundedness_flag": _derive_groundedness(list(state.get("tool_results", []))),
+        "insufficient_evidence_flag": _derive_insufficient_evidence(list(state.get("tool_results", []))),
         "needs_user_input": getattr(pause, "reason", None),
-        "human_input_request": _normalize_value(
-            state.get("approval_request")
-        ),
+        "human_input_request": _normalize_value(state.get("approval_request")),
         "pending_tool_calls": [
             {
                 "tool_call_id": call.tool_call_id,
                 "tool_name": call.tool_name,
-                "arguments": _normalize_value(call.arguments),
+                "arguments": _normalize_value(call.plan.arguments),
             }
             for call in state.get("pending_tool_calls", [])
         ],
@@ -63,52 +73,23 @@ def normalize_loop_state(
         ],
         "evidence": _normalize_value(state.get("evidence", [])),
         "citations": _normalize_value(state.get("citations", [])),
-        "retrieval_signals": _normalize_value(
-            state.get("retrieval_signals")
-        ),
-        "retrieval_signals_debug": _normalize_value(
-            state.get("retrieval_signals_debug")
-        ),
-        "structured_observations": _normalize_value(
-            state.get("structured_observations", [])
-        ),
-        "answer_candidates": _normalize_value(
-            state.get("answer_candidates", [])
-        ),
-        "evidence_refs": _normalize_value(
-            state.get("evidence_refs", [])
-        ),
-        "computation_results": _normalize_value(
-            state.get("computation_results", [])
-        ),
-        "context_units": _normalize_value(
-            state.get("context_units", [])
-        ),
+        "retrieval_signals": _normalize_value(state.get("retrieval_signals")),
+        "retrieval_signals_debug": _normalize_value(state.get("retrieval_signals_debug")),
+        "structured_observations": _normalize_value(state.get("structured_observations", [])),
+        "answer_candidates": _normalize_value(state.get("answer_candidates", [])),
+        "evidence_refs": _normalize_value(state.get("evidence_refs", [])),
+        "computation_results": _normalize_value(state.get("computation_results", [])),
+        "context_units": _normalize_value(state.get("context_units", [])),
         "locators": _normalize_value(state.get("locators", [])),
         "satisfied_requirements": [],
         "open_gap_ids": [],
-        "messages": [
-            _normalize_message(message)
-            for message in state.get("messages", [])
-        ],
-        "working_summary": _normalize_value(
-            state.get("working_summary")
-        ),
-        "memory_refs": _normalize_value(
-            state.get("memory_refs", [])
-        ),
-        "memory_budget": _normalize_value(
-            state.get("memory_budget")
-        ),
-        "memory_warnings": list(
-            state.get("memory_warnings", [])
-        ),
-        "runtime_diagnostics": _normalize_value(
-            state.get("runtime_diagnostics", [])
-        ),
-        "stop_hook_feedback": _normalize_value(
-            state.get("stop_hook_feedback", [])
-        ),
+        "messages": [_normalize_message(message) for message in state.get("messages", [])],
+        "working_summary": _normalize_value(state.get("working_summary")),
+        "memory_refs": _normalize_value(state.get("memory_refs", [])),
+        "memory_budget": _normalize_value(state.get("memory_budget")),
+        "memory_warnings": list(state.get("memory_warnings", [])),
+        "runtime_diagnostics": _normalize_value(state.get("runtime_diagnostics", [])),
+        "stop_hook_feedback": _normalize_value(state.get("stop_hook_feedback", [])),
     }
     if observed is not None:
         normalized["observed"] = _normalize_value(observed)

@@ -11,17 +11,14 @@ from rag.agent.core.agent_as_tool import (
     AgentAsToolRunner,
     AgentToolInput,
     AgentToolOutput,
-    build_agent_tool_spec,
 )
-from rag.agent.core.agent_service_factory import AgentServiceFactory
 from rag.agent.core.context import AgentRunConfig, RunRegistry
 from rag.agent.core.definition import AgentDefinition
 from rag.agent.core.delegation import AgentDelegationRequest
 from rag.agent.core.registry import AgentRegistry
-from rag.agent.core.subagent_runner import BuiltinSubAgentRunner
 from rag.agent.core.turn_contracts import ToolCallPlan
 from rag.agent.loop.state import LoopState, ModelTurnDraft, create_loop_state
-from rag.agent.service import AgentRunRequest, AgentRunResult
+from rag.agent.service import AgentRunResult
 from rag.agent.tools.llm_tools import LLMTextOutput
 from rag.schema.query import RetrievalSignals
 from rag.schema.runtime import AccessPolicy
@@ -69,7 +66,7 @@ class _ChildDecisionProvider:
             )
         return ModelTurnDraft(
             action="finish",
-            final_answer=state["answer_candidates"][-1].text,
+            final_answer="summary:Child task",  # PR2: answer_candidates no longer written to LoopState
         )
 
 
@@ -111,7 +108,6 @@ async def test_agent_as_tool_runner_executes_registered_child_with_derived_confi
                 )
             }
         ),
-
         model_turn_provider=decision_provider,
     )
 
@@ -150,7 +146,6 @@ async def test_agent_as_tool_runner_rejects_exhausted_parent_depth() -> None:
     runner = AgentAsToolRunner(
         agent_registry=agent_registry,
         tool_registry=create_builtin_tool_registry(),
-
     )
 
     with pytest.raises(RuntimeError, match="Agent nesting depth exceeded"):
@@ -347,6 +342,7 @@ class TestAgentAsToolAdapter:
     @pytest.mark.anyio
     async def test_adapter_is_callable_compatible_with_tool_runner(self) -> None:
         """adapter 实例可直接作为 ToolRunner 使用"""
+
         class _CompletedSubAgentRunner:
             async def run_delegated_task(
                 self,

@@ -74,19 +74,16 @@ class _FinishFromResultsProvider:
         budget_remaining: int,
     ) -> ModelTurnDraft:
         del definition, budget_remaining
-        if state["answer_candidates"]:
-            return ModelTurnDraft(
-                action="finish",
-                final_answer=state["answer_candidates"][-1].text,
-            )
         if state["tool_results"]:
             latest = state["tool_results"][-1]
             if latest.error is not None:
                 return ModelTurnDraft(action="finish")
-            summary = ", ".join(
-                f"{result.tool_name}:{result.status}"
-                for result in state["tool_results"]
-            )
+            # PR2: answer_candidates no longer written to LoopState; use tool output directly
+            if latest.output is not None:
+                text = getattr(latest.output, "text", None) or getattr(latest.output, "output_text", None)
+                if text:
+                    return ModelTurnDraft(action="finish", final_answer=text)
+            summary = ", ".join(f"{result.tool_name}:{result.status}" for result in state["tool_results"])
             return ModelTurnDraft(
                 action="finish",
                 final_answer=f"Completed: {summary}",
@@ -163,9 +160,7 @@ def test_agent_initial_state_does_not_persist_explicit_goal_spec() -> None:
 
 def test_agent_run_result_clears_stale_human_input_when_done() -> None:
     service = _service_with_registry()
-    state = service.initial_state(
-        AgentRunRequest(task="Explain policy", run_id="svc-clear", thread_id="svc-clear")
-    )
+    state = service.initial_state(AgentRunRequest(task="Explain policy", run_id="svc-clear", thread_id="svc-clear"))
     state["status"] = "done"
     state["needs_user_input"] = "stale approval"
     state["human_input_request"] = object()
@@ -270,7 +265,8 @@ async def test_agent_service_run_without_runner_fails_closed() -> None:
 
     assert result.status == "failed"
     assert result.stop_reason == "tool_error"
-    assert result.insufficient_evidence_flag is True
+    # No RAG generation output from this tool error, so insufficient_evidence_flag stays False
+    assert result.insufficient_evidence_flag is False
     assert result.tool_results[0].status == "error"
     assert result.tool_results[0].error.code == "tool_not_implemented"
 
@@ -397,8 +393,7 @@ async def test_agent_service_run_with_primitive_ops_through_agent_loop() -> None
     )
 
     assert result.status == "done", (
-        f"status={result.status}, stop_reason={result.stop_reason}, "
-        f"needs_user_input={result.needs_user_input}"
+        f"status={result.status}, stop_reason={result.stop_reason}, needs_user_input={result.needs_user_input}"
     )
     assert result.workspace_path is not None
     write_result = result.tool_results[0]

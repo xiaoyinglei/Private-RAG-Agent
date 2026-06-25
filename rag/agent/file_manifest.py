@@ -18,12 +18,12 @@ from pydantic import BaseModel, Field
 
 from rag.agent.primitive_ops import (
     StructuredProbeOutput,
+    StructuredTableProbe,
     _is_delimited_text_file,
     _is_excel_file,
     _probe_delimited_file,
     _probe_excel_file,
 )
-from rag.agent.runner.python_runner import LocalSubprocessPythonRunner, PythonRunResult
 from rag.agent.workspace import WorkspaceRuntime
 
 logger = logging.getLogger(__name__)
@@ -300,16 +300,9 @@ def _build_entry(path: Path, workspace: WorkspaceRuntime) -> FileManifestEntry:
 
 def _run_probe(path: Path, mime_type: str | None) -> StructuredProbeOutput:
     """Run structured_probe logic directly (not through tool registry)."""
-    from rag.agent.primitive_ops import (
-        _file_info,
-        _is_delimited_text_file,
-        _is_excel_file,
-        _probe_delimited_file,
-        _probe_excel_file,
-    )
 
     errors: list[str] = []
-    tables = []
+    tables: list[StructuredTableProbe] = []
     truncated = False
 
     # Determine readable_as_text from file sample

@@ -29,11 +29,7 @@ class AssetContextBindingProvider:
                 if unit.unit_type in {"table_asset", "image_asset", "document_asset"}
                 and isinstance(unit.locator.get("sheet_name"), str)
             ]
-            selected_units = [
-                unit
-                for unit in asset_units
-                if unit.locator.get("asset_id") in selected_asset_ids
-            ]
+            selected_units = [unit for unit in asset_units if unit.locator.get("asset_id") in selected_asset_ids]
             if selected_units:
                 selected = selected_units[-1]
                 matched = _matches_context_title(selected, constraint)
@@ -55,9 +51,7 @@ class AssetContextBindingProvider:
                     )
                 )
                 continue
-            matching_units = [
-                unit for unit in asset_units if _matches_context_title(unit, constraint)
-            ]
+            matching_units = [unit for unit in asset_units if _matches_context_title(unit, constraint)]
             if len(matching_units) == 1:
                 unit = matching_units[0]
                 bindings.append(
@@ -91,10 +85,15 @@ def _matches_context_title(unit: ContextUnit, constraint: GoalConstraint) -> boo
 
 
 def _latest_answer_asset_ids(state: dict[str, Any]) -> set[int]:
-    for candidate in reversed(state.get("answer_candidates", [])):
+    # Derive asset IDs from tool_results instead of deprecated state fields
+    for result in reversed(state.get("tool_results", [])):
+        output = getattr(result, "output", None)
+        if output is None:
+            continue
+        evidence_refs = getattr(output, "evidence_refs", []) or []
         asset_ids = {
             int(evidence_id.split(":", maxsplit=1)[1])
-            for ref in getattr(candidate, "evidence_refs", []) or []
+            for ref in evidence_refs
             if isinstance((evidence_id := getattr(ref, "evidence_id", None)), str)
             and evidence_id.startswith("asset:")
             and evidence_id.split(":", maxsplit=1)[1].isdigit()

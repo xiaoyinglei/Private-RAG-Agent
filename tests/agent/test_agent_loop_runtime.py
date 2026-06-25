@@ -14,7 +14,6 @@ from pydantic import BaseModel
 from rag.agent.core.context import AgentRunConfig, RunRegistry
 from rag.agent.core.definition import AgentDefinition
 from rag.agent.core.finalization import FinishCandidateBuilder
-from rag.agent.core.messages import ModelMessage
 from rag.agent.core.tool_execution import (
     ToolExecutionRecord,
     ToolExecutionService,
@@ -29,6 +28,7 @@ from rag.agent.loop.state import (
     LoopState,
     LoopTransition,
     ModelTurnDraft,
+    PendingToolCall,
     create_loop_state,
 )
 from rag.agent.loop.stop_hooks import (
@@ -304,9 +304,7 @@ async def test_run_streaming_tool_progress_keeps_run_and_turn_context() -> None:
         ),
         timeout=1,
     )
-    progress = [
-        event for event in events if event.type is EventType.TOOL_USE_PROGRESS
-    ]
+    progress = [event for event in events if event.type is EventType.TOOL_USE_PROGRESS]
 
     assert len(progress) == 1
     assert progress[0].run_id == config.run_id
@@ -347,7 +345,7 @@ async def test_model_tool_result_next_turn_and_finish() -> None:
     assert result["final_answer"] == "Final answer."
     assert result["iteration"] == 2
     assert len(result["tool_results"]) == 1
-    assert len(result["structured_observations"]) == 1
+    assert "structured_observations" not in result  # PR3: removed from LoopState
     assert provider.seen_states[1]["tool_results"][0].status == "ok"
     assert [record.status for record in checkpoint.execution_records] == [
         "prepared",
@@ -361,7 +359,7 @@ async def test_model_tool_result_next_turn_and_finish() -> None:
         and snapshot["last_model_turn"] is not None
         and snapshot["last_model_turn"].action == "execute"
     )
-    assert accepted_execute["pending_tool_calls"] == [call]
+    assert accepted_execute["pending_tool_calls"] == [PendingToolCall(plan=call, status="pending")]
     assert "tool_results_recorded" in [reason for reason, _ in checkpoint.snapshots]
     assert events.transitions[-1].reason == "finished"
 
@@ -401,10 +399,8 @@ async def test_multiple_model_tool_turns_run_in_order() -> None:
     assert result["status"] == "completed"
     assert executed == ["one", "two"]
     assert result["iteration"] == 3
-    assert [
-        observation.tool_call_id
-        for observation in result["structured_observations"]
-    ] == [first.tool_call_id, second.tool_call_id]
+    # PR3: structured_observations removed from LoopState
+    assert "structured_observations" not in result
 
 
 @pytest.mark.anyio
@@ -496,9 +492,7 @@ async def test_completed_record_is_removed_from_pending_without_replay() -> None
 
     result = await _loop(
         definition=_definition(allowed_tools=["echo"]),
-        provider=_SequenceProvider(
-            [ModelTurnDraft(action="finish", final_answer="No replay.")]
-        ),
+        provider=_SequenceProvider([ModelTurnDraft(action="finish", final_answer="No replay.")]),
         tool_runner=ToolExecutionService(
             tool_registry=registry,
             record_writer=checkpoint,
@@ -509,15 +503,9 @@ async def test_completed_record_is_removed_from_pending_without_replay() -> None
     assert result["status"] == "completed"
     assert result["pending_tool_calls"] == []
     assert invocations == 0
-    recorded = [
-        snapshot
-        for reason, snapshot in checkpoint.snapshots
-        if reason == "tool_results_recorded"
-    ][0]
+    recorded = [snapshot for reason, snapshot in checkpoint.snapshots if reason == "tool_results_recorded"][0]
     assert recorded["latest_transition"] is not None
-    assert recorded["latest_transition"].detail[
-        "skipped_completed_tool_call_ids"
-    ] == [call.tool_call_id]
+    assert recorded["latest_transition"].detail["skipped_completed_tool_call_ids"] == [call.tool_call_id]
 
 
 @pytest.mark.anyio
@@ -555,9 +543,7 @@ async def test_idempotent_started_recovery_reuses_operation_id() -> None:
 
     result = await _loop(
         definition=_definition(allowed_tools=["read"]),
-        provider=_SequenceProvider(
-            [ModelTurnDraft(action="finish", final_answer="Recovered.")]
-        ),
+        provider=_SequenceProvider([ModelTurnDraft(action="finish", final_answer="Recovered.")]),
         tool_runner=ToolExecutionService(
             tool_registry=registry,
             record_writer=checkpoint,
@@ -707,9 +693,7 @@ async def test_stop_hook_halt_fails_visibly() -> None:
 
     result = await _loop(
         definition=_definition(),
-        provider=_SequenceProvider(
-            [ModelTurnDraft(action="finish", final_answer="Unsafe.")]
-        ),
+        provider=_SequenceProvider([ModelTurnDraft(action="finish", final_answer="Unsafe.")]),
         tool_runner=ToolExecutionService(tool_registry=ToolRegistry()),
         checkpoint=_Checkpoint(),
         stop_runner=StopHookRunner(
@@ -733,12 +717,7 @@ async def test_stop_hook_halt_fails_visibly() -> None:
 @pytest.mark.anyio
 async def test_max_iterations_terminates_blocked_finish_loop() -> None:
     config = _config("loop-max-iterations")
-    hook = _SequenceHook(
-        [
-            StopVerdict(action="block", code="not_ready", message="Continue.")
-            for _ in range(3)
-        ]
-    )
+    hook = _SequenceHook([StopVerdict(action="block", code="not_ready", message="Continue.") for _ in range(3)])
     provider = _SequenceProvider(
         [
             ModelTurnDraft(action="finish", final_answer="Draft one."),
@@ -860,17 +839,12 @@ async def test_context_compaction_runs_before_provider_and_is_checkpointed() -> 
             max_message_tail_count=1,
         ),
     )
-    provider = _SequenceProvider(
-        [ModelTurnDraft(action="finish", final_answer="Compacted.")]
-    )
+    provider = _SequenceProvider([ModelTurnDraft(action="finish", final_answer="Compacted.")])
     checkpoint = _Checkpoint()
     state = create_loop_state(
         task="Summarize history.",
         run_config=config,
-        messages=[
-            HumanMessage(content=f"message {index}", id=f"msg-{index}")
-            for index in range(4)
-        ],
+        messages=[HumanMessage(content=f"message {index}", id=f"msg-{index}") for index in range(4)],
     )
 
     result = await _loop(
@@ -882,9 +856,7 @@ async def test_context_compaction_runs_before_provider_and_is_checkpointed() -> 
     ).run(state)
 
     assert result["status"] == "completed"
-    assert [message.id for message in provider.seen_states[0]["messages"]] == [
-        "msg-3"
-    ]
+    assert [message.id for message in provider.seen_states[0]["messages"]] == ["msg-3"]
     assert "compaction" in [reason for reason, _ in checkpoint.snapshots]
 
 
@@ -913,16 +885,8 @@ async def test_context_overflow_triggers_reactive_compaction_once() -> None:
     state = create_loop_state(
         task="Recover after overflow.",
         run_config=config,
-        messages=[
-            HumanMessage(content=f"message {index}", id=f"msg-{index}")
-            for index in range(5)
-        ],
+        messages=[HumanMessage(content=f"message {index}", id=f"msg-{index}") for index in range(5)],
     )
-    state["loop_messages"] = [
-        ModelMessage(role="user", content=f"loop message {index}")
-        for index in range(5)
-    ]
-
     result = await _loop(
         definition=_definition(),
         provider=provider,
@@ -939,19 +903,8 @@ async def test_context_overflow_triggers_reactive_compaction_once() -> None:
         "msg-3",
         "msg-4",
     ]
-    assert [
-        message.content for message in provider.seen_states[1]["loop_messages"]
-    ] == [
-        "[3 earlier loop messages snipped for context management]",
-        "loop message 3",
-        "loop message 4",
-    ]
     assert "reactive_compaction" in [reason for reason, _ in checkpoint.snapshots]
-    reactive_snapshot = [
-        snapshot
-        for reason, snapshot in checkpoint.snapshots
-        if reason == "reactive_compaction"
-    ][0]
+    reactive_snapshot = [snapshot for reason, snapshot in checkpoint.snapshots if reason == "reactive_compaction"][0]
     assert reactive_snapshot["latest_transition"] is not None
     assert reactive_snapshot["latest_transition"].reason == "compaction"
 

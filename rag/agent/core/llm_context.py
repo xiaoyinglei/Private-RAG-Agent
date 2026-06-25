@@ -9,7 +9,6 @@ from pydantic import BaseModel
 from rag.agent.core.definition import AgentDefinition
 from rag.agent.core.llm_prompts import (
     build_loop_turn_prompt,
-    build_retrieval_hint_prompt,
 )
 from rag.agent.memory.injector import ContextBuilder, ContextTokenAccounting
 from rag.agent.memory.models import (
@@ -23,6 +22,7 @@ from rag.schema.llm import LLMCallStage, LLMStageBudget
 
 if TYPE_CHECKING:
     from rag.agent.loop.state import LoopState
+    from rag.agent.tools.formatter import ToolOutputFormatterResolver
 
 _OPTIONAL_STATE_SECTIONS: frozenset[ContextSectionName] = frozenset(
     {
@@ -34,9 +34,9 @@ _OPTIONAL_STATE_SECTIONS: frozenset[ContextSectionName] = frozenset(
         "message_tail",
     }
 )
-_DECISION_STATE_SECTIONS: frozenset[ContextSectionName] = frozenset[
-    ContextSectionName
-]({"open_decisions", "plan"}).union(_OPTIONAL_STATE_SECTIONS)
+_DECISION_STATE_SECTIONS: frozenset[ContextSectionName] = frozenset[ContextSectionName](
+    {"open_decisions", "plan"}
+).union(_OPTIONAL_STATE_SECTIONS)
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,35 +67,15 @@ class AgentLLMContextAssembler:
         *,
         token_accounting: ContextTokenAccounting,
         stage_budgets: Mapping[LLMCallStage, LLMStageBudget],
+        formatter_resolver: ToolOutputFormatterResolver | None = None,
     ) -> None:
         self._token_accounting = token_accounting
         self._stage_budgets = dict(stage_budgets)
+        self._formatter_resolver = formatter_resolver
 
     @property
     def token_accounting(self) -> ContextTokenAccounting:
         return self._token_accounting
-
-    def assemble_retrieval_hint(
-        self,
-        *,
-        definition: AgentDefinition,
-        state: LoopState,
-        output_schema: type[BaseModel] | None = None,
-    ) -> AssembledAgentLLMContext:
-        del definition
-        return self._assemble(
-            stage=LLMCallStage.RETRIEVAL_HINT,
-            state=state,
-            prefix_sections=[
-                self._required_section(
-                    "instructions",
-                    build_retrieval_hint_prompt(state),
-                )
-            ],
-            included_state_sections=frozenset({"open_decisions"}),
-            required_state_sections=frozenset(),
-            output_schema=output_schema,
-        )
 
     def assemble_loop_turn(
         self,
@@ -233,24 +213,16 @@ class AgentLLMContextAssembler:
         ]
         call_context = self._call_context(
             [
+                (f"Candidate synthesis:\n{candidate_text.strip()}" if candidate_text.strip() else ""),
                 (
-                    "Candidate synthesis:\n"
-                    f"{candidate_text.strip()}"
-                    if candidate_text.strip()
-                    else ""
-                ),
-                (
-                    "Previous validation errors to repair:\n"
-                    f"{validation_feedback.strip()}"
+                    f"Previous validation errors to repair:\n{validation_feedback.strip()}"
                     if validation_feedback and validation_feedback.strip()
                     else ""
                 ),
             ]
         )
         if call_context:
-            prefix.append(
-                self._required_section("call_context", call_context)
-            )
+            prefix.append(self._required_section("call_context", call_context))
         return self._assemble(
             stage=LLMCallStage.FINAL_SYNTHESIS,
             state=state,
@@ -301,15 +273,11 @@ class AgentLLMContextAssembler:
         attempts = 0
         while (
             not state_context.context_budget.overflow
-            and self._token_accounting.count(accounted_prompt)
-            > budget.max_input_tokens
+            and self._token_accounting.count(accounted_prompt) > budget.max_input_tokens
             and state_budget > 0
             and attempts < 4
         ):
-            overflow = (
-                self._token_accounting.count(accounted_prompt)
-                - budget.max_input_tokens
-            )
+            overflow = self._token_accounting.count(accounted_prompt) - budget.max_input_tokens
             state_budget = max(state_budget - overflow - 1, 0)
             state_context = self._assemble_state_context(
                 state=state,
@@ -328,11 +296,7 @@ class AgentLLMContextAssembler:
             max_input_tokens=budget.max_input_tokens,
             output_schema=output_schema,
         )
-        if (
-            combined.context_budget.overflow
-            or self._token_accounting.count(accounted_prompt)
-            > budget.max_input_tokens
-        ):
+        if combined.context_budget.overflow or self._token_accounting.count(accounted_prompt) > budget.max_input_tokens:
             raise AgentLLMContextOverflowError(
                 stage=stage,
                 context_budget=combined.context_budget,
@@ -356,6 +320,7 @@ class AgentLLMContextAssembler:
                 builder = ContextBuilder(
                     max_context_tokens=1,
                     token_accounting=self._token_accounting,
+                    formatter_resolver=self._formatter_resolver,
                 )
                 required_probe = builder.assemble_loop(
                     definition=self._empty_definition(),
@@ -368,10 +333,7 @@ class AgentLLMContextAssembler:
                         dict.fromkeys(
                             [
                                 *required_probe.context_budget.required_truncated,
-                                *(
-                                    section.name
-                                    for section in required_probe.sections
-                                ),
+                                *(section.name for section in required_probe.sections),
                             ]
                         )
                     )
@@ -384,8 +346,7 @@ class AgentLLMContextAssembler:
                             "required_truncated": required_names,
                             "dropped_sections": required_names,
                             "dropped_section_reasons": {
-                                str(name): "required_section_overflow"
-                                for name in required_names
+                                str(name): "required_section_overflow" for name in required_names
                             },
                             "warnings": list(
                                 dict.fromkeys(
@@ -406,6 +367,7 @@ class AgentLLMContextAssembler:
         builder = ContextBuilder(
             max_context_tokens=max_context_tokens,
             token_accounting=self._token_accounting,
+            formatter_resolver=self._formatter_resolver,
         )
         # Inject persistent memories as recalled_memories for the historical_hints section
         recalled = tuple(state.get("persistent_memories", ()))
@@ -440,27 +402,18 @@ class AgentLLMContextAssembler:
         accounted_prompt = self._accounted_prompt(prompt, output_schema)
         section_token_counts = {
             **state_context.context_budget.section_token_counts,
-            **{
-                str(section.name): section.token_count
-                for section in prefix_sections
-            },
+            **{str(section.name): section.token_count for section in prefix_sections},
         }
         if output_schema is not None:
-            section_token_counts["output_schema"] = self._schema_token_count(
-                output_schema
-            )
+            section_token_counts["output_schema"] = self._schema_token_count(output_schema)
         snapshot = state_context.context_budget.model_copy(
             update={
                 "max_context_tokens": max_input_tokens,
-                "used_context_tokens": self._token_accounting.count(
-                    accounted_prompt
-                ),
+                "used_context_tokens": self._token_accounting.count(accounted_prompt),
                 "system_tokens": (
                     state_context.context_budget.system_tokens
                     + sum(
-                        section.token_count
-                        for section in prefix_sections
-                        if section.name in {"instructions", "system"}
+                        section.token_count for section in prefix_sections if section.name in {"instructions", "system"}
                     )
                 ),
                 "section_token_counts": section_token_counts,
@@ -479,10 +432,7 @@ class AgentLLMContextAssembler:
         truncated: list[ContextSectionName] = []
         if (
             output_schema is not None
-            and self._token_accounting.count(
-                self._accounted_prompt("", output_schema)
-            )
-            > max_input_tokens
+            and self._token_accounting.count(self._accounted_prompt("", output_schema)) > max_input_tokens
         ):
             truncated.append("output_schema")
         for section in sections:
@@ -503,30 +453,17 @@ class AgentLLMContextAssembler:
                 )
             ),
             system_tokens=sum(
-                section.token_count
-                for section in selected
-                if section.name in {"instructions", "system"}
+                section.token_count for section in selected if section.name in {"instructions", "system"}
             ),
             dropped_sections=truncated,
             required_truncated=truncated,
-            dropped_section_reasons={
-                str(name): "required_section_overflow" for name in truncated
-            },
+            dropped_section_reasons={str(name): "required_section_overflow" for name in truncated},
             overflow=True,
             degraded=True,
             warnings=["context_overflow"],
             section_token_counts={
-                **{
-                    str(section.name): section.token_count
-                    for section in selected
-                },
-                **(
-                    {
-                        "output_schema": self._schema_token_count(output_schema)
-                    }
-                    if output_schema is not None
-                    else {}
-                ),
+                **{str(section.name): section.token_count for section in selected},
+                **({"output_schema": self._schema_token_count(output_schema)} if output_schema is not None else {}),
             },
         )
 
@@ -539,9 +476,7 @@ class AgentLLMContextAssembler:
         return ContextSection(
             name=name,
             content=normalized,
-            token_count=self._token_accounting.count(
-                f"[{name}]\n{normalized}"
-            ),
+            token_count=self._token_accounting.count(f"[{name}]\n{normalized}"),
             required=True,
         )
 
@@ -549,9 +484,7 @@ class AgentLLMContextAssembler:
         try:
             return self._stage_budgets[stage]
         except KeyError as exc:
-            raise ValueError(
-                f"No Agent LLM context budget configured for {stage.value}"
-            ) from exc
+            raise ValueError(f"No Agent LLM context budget configured for {stage.value}") from exc
 
     @staticmethod
     def _call_context(sections: Sequence[str]) -> str:
@@ -559,9 +492,7 @@ class AgentLLMContextAssembler:
 
     @staticmethod
     def _render(sections: Sequence[ContextSection]) -> str:
-        return "\n\n".join(
-            f"[{section.name}]\n{section.content}" for section in sections
-        )
+        return "\n\n".join(f"[{section.name}]\n{section.content}" for section in sections)
 
     @staticmethod
     def _combine(prefix: str, context: str) -> str:

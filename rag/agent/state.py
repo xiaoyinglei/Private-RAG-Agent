@@ -24,6 +24,15 @@ def create_agent_state(
     runtime_diagnostics: Iterable[RuntimeDiagnostic] = (),
 ) -> AgentState:
     """Compatibility factory returning the canonical LoopState."""
+    import warnings
+
+    warnings.warn(
+        "rag.agent.state is deprecated. Import LoopState and create_loop_state "
+        "directly from rag.agent.loop.state instead. "
+        "This compat module will be removed after 2026-08-24.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
 
     state = create_loop_state(
         task=task,
@@ -39,6 +48,13 @@ def create_agent_state(
 
 def agent_state_to_loop_state(state: AgentState) -> LoopState:
     """Compatibility identity adapter for callers using the former name."""
+    import warnings
+
+    warnings.warn(
+        "rag.agent.state.agent_state_to_loop_state is deprecated. It is now an identity function.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
 
     return state
 

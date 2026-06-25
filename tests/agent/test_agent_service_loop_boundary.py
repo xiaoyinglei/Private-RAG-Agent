@@ -44,11 +44,15 @@ class _FinishFromResultsProvider:
         budget_remaining: int,
     ) -> ModelTurnDraft:
         del definition, budget_remaining
-        if state["answer_candidates"]:
-            return ModelTurnDraft(
-                action="finish",
-                final_answer=state["answer_candidates"][-1].text,
-            )
+        # PR2: answer_candidates no longer written to LoopState; use tool output directly
+        if state["tool_results"]:
+            latest = state["tool_results"][-1]
+            if latest.error is not None:
+                return ModelTurnDraft(action="finish")
+            if latest.output is not None:
+                text = getattr(latest.output, "text", None) or getattr(latest.output, "output_text", None)
+                if text:
+                    return ModelTurnDraft(action="finish", final_answer=text)
         return ModelTurnDraft(
             action="finish",
             final_answer="direct answer",
@@ -203,16 +207,9 @@ async def test_service_resume_uses_loop_checkpoint_and_does_not_replay() -> None
     )
 
     assert paused.status == "paused"
-    request = service.pending_human_input_request(
-        run_id="service-loop-resume"
-    )
+    request = service.pending_human_input_request(run_id="service-loop-resume")
     assert request == paused.human_input_request
-    assert (
-        await service.apending_human_input_request(
-            run_id="service-loop-resume"
-        )
-        == request
-    )
+    assert await service.apending_human_input_request(run_id="service-loop-resume") == request
 
     resumed = await service.resume(
         run_id="service-loop-resume",
@@ -244,16 +241,14 @@ async def test_service_exposes_non_idempotent_unknown_as_reconciliation() -> Non
         run_config=config,
         pending_tool_calls=[call],
     )
-    state["tool_execution_records"][call.tool_call_id] = (
-        ToolExecutionRecord(
-            tool_call_id=call.tool_call_id,
-            tool_name=call.tool_name,
-            operation_id="op-ambiguous",
-            arguments_digest=tool_arguments_digest(call.arguments),
-            idempotent=False,
-            status="started",
-            attempt_count=1,
-        )
+    state["tool_execution_records"][call.tool_call_id] = ToolExecutionRecord(
+        tool_call_id=call.tool_call_id,
+        tool_name=call.tool_name,
+        operation_id="op-ambiguous",
+        arguments_digest=tool_arguments_digest(call.arguments),
+        idempotent=False,
+        status="started",
+        attempt_count=1,
     )
     await store.save_snapshot(state, reason="crash_after_started")
     service = AgentService(
@@ -317,11 +312,7 @@ def test_runtime_boundaries_do_not_import_inner_graph_nodes() -> None:
         "rag/agent/builtin/generic.py",
     ]
 
-    offenders = [
-        relative
-        for relative in runtime_files
-        if "rag.agent.graphs.nodes" in (root / relative).read_text()
-    ]
+    offenders = [relative for relative in runtime_files if "rag.agent.graphs.nodes" in (root / relative).read_text()]
 
     assert offenders == []
 
@@ -336,9 +327,7 @@ def test_runtime_modules_use_loop_state_instead_of_compatibility_state() -> None
     ]
 
     offenders = [
-        relative
-        for relative in runtime_files
-        if "rag.agent.state" in (root / relative).read_text(encoding="utf-8")
+        relative for relative in runtime_files if "rag.agent.state" in (root / relative).read_text(encoding="utf-8")
     ]
 
     assert offenders == []

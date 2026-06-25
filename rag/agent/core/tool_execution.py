@@ -23,7 +23,6 @@ from rag.agent.core.human_input import HumanInputRequest, HumanInputResponse
 from rag.agent.core.llm_context import AgentLLMContextOverflowError
 from rag.agent.core.turn_contracts import ToolCallPlan
 from rag.agent.memory.models import ContextBudgetSnapshot
-from rag.agent.tools.rag_tools import RAG_SIGNAL_AWARE_TOOLS
 from rag.agent.tools.registry import (
     ToolExecutionContext,
     ToolInputValidationError,
@@ -33,7 +32,6 @@ from rag.agent.tools.registry import (
     ToolRunnerMissingError,
 )
 from rag.agent.tools.spec import ToolError, ToolResult, ToolSpec
-from rag.schema.query import RetrievalSignals
 
 if TYPE_CHECKING:
     from rag.agent.loop.state import LoopState
@@ -99,7 +97,6 @@ class ToolBatchRequest(BaseModel):
     approved_tool_call_ids: tuple[str, ...] = ()
     denied_tool_call_ids: tuple[str, ...] = ()
     execution_records: dict[str, ToolExecutionRecord] = Field(default_factory=dict)
-    retrieval_signals: RetrievalSignals | None = None
 
 
 class ToolBatchResult(BaseModel):
@@ -166,10 +163,7 @@ class ToolExecutionService:
         state: ToolState | None,
         definition: AgentDefinition | None = None,
     ) -> ToolBatchResult:
-        records = {
-            call_id: record.model_copy(deep=True)
-            for call_id, record in request.execution_records.items()
-        }
+        records = {call_id: record.model_copy(deep=True) for call_id, record in request.execution_records.items()}
         results: list[ToolResult] = []
         specs: dict[str, ToolSpec] = {}
         candidates: list[ToolCallPlan] = []
@@ -192,13 +186,8 @@ class ToolExecutionService:
                 tool_name=call.tool_name,
                 arguments={**call.arguments, "tool_call_id": call.tool_call_id},
                 spec=spec,
-                requires_confirmation=(
-                    call.tool_name
-                    in request.run_config.tool_policy.require_confirmation_for
-                ),
-                auto_approve_sandboxed=(
-                    request.run_config.tool_policy.auto_approve_sandboxed
-                ),
+                requires_confirmation=(call.tool_name in request.run_config.tool_policy.require_confirmation_for),
+                auto_approve_sandboxed=(request.run_config.tool_policy.auto_approve_sandboxed),
             )
             if decision.action == "deny" or call.tool_call_id in denied_ids:
                 results.append(
@@ -261,14 +250,6 @@ class ToolExecutionService:
             max_parallel_calls=request.run_config.tool_policy.max_parallel_calls,
             require_idempotent=self._require_idempotent_parallel,
         )
-        selected = [
-            _execution_call(
-                call,
-                retrieval_signals=request.retrieval_signals,
-            )
-            for call in selected
-        ]
-
         started_records: dict[str, ToolExecutionRecord] = {}
         for call in selected:
             spec = specs[call.tool_name]
@@ -312,9 +293,7 @@ class ToolExecutionService:
                 and result.error.code == "context_overflow"
                 and isinstance(result.error.detail.get("context_budget"), dict)
             ):
-                context_budget = ContextBudgetSnapshot.model_validate(
-                    result.error.detail["context_budget"]
-                )
+                context_budget = ContextBudgetSnapshot.model_validate(result.error.detail["context_budget"])
 
         run_config = await _committed_run_config(request.run_config)
         if unknown_record is not None and self._pause_on_ambiguous:
@@ -495,14 +474,9 @@ class ToolExecutionService:
                 result = _error_result(
                     call,
                     code="context_overflow",
-                    message=(
-                        f"Required context does not fit the {exc.stage.value} "
-                        "model budget."
-                    ),
+                    message=(f"Required context does not fit the {exc.stage.value} model budget."),
                     retryable=False,
-                    detail={
-                        "context_budget": exc.context_budget.model_dump(mode="json")
-                    },
+                    detail={"context_budget": exc.context_budget.model_dump(mode="json")},
                     retry_count=retry_count,
                     started_at=started_at,
                 )
@@ -530,10 +504,7 @@ class ToolExecutionService:
                 result = _error_result(
                     call,
                     code="timeout",
-                    message=(
-                        f"{call.tool_name} timed out after "
-                        f"{spec.timeout_seconds}s"
-                    ),
+                    message=(f"{call.tool_name} timed out after {spec.timeout_seconds}s"),
                     retryable=True,
                     work_units_used=work_cost,
                     retry_count=retry_count,
@@ -645,9 +616,7 @@ class ToolExecutionService:
             return None
         turn = state["iteration"] if state is not None else 0
 
-        async def progress_callback(
-            progress: str, percent: float | None = None
-        ) -> None:
+        async def progress_callback(progress: str, percent: float | None = None) -> None:
             from rag.agent.streaming.events import tool_use_progress
 
             await self._stream_sink.emit(
@@ -686,11 +655,7 @@ class ToolExecutionService:
             run_config=run_config or request.run_config,
             context_budget=context_budget,
             decision_reason=decision_reason,
-            record_persistence=(
-                "durable"
-                if self._record_writer.durable
-                else "volatile"
-            ),
+            record_persistence=("durable" if self._record_writer.durable else "volatile"),
         )
 
 
@@ -729,9 +694,7 @@ def apply_tool_reconciliation(
                 "last_error": None,
             }
         )
-    raise ValueError(
-        f"unsupported tool reconciliation decision: {response.decision}"
-    )
+    raise ValueError(f"unsupported tool reconciliation decision: {response.decision}")
 
 
 def _validate_record_matches_call(
@@ -739,13 +702,9 @@ def _validate_record_matches_call(
     call: ToolCallPlan,
 ) -> None:
     if record.tool_name != call.tool_name:
-        raise ValueError(
-            f"execution record tool mismatch for {call.tool_call_id}"
-        )
+        raise ValueError(f"execution record tool mismatch for {call.tool_call_id}")
     if record.arguments_digest != tool_arguments_digest(call.arguments):
-        raise ValueError(
-            f"execution record arguments mismatch for {call.tool_call_id}"
-        )
+        raise ValueError(f"execution record arguments mismatch for {call.tool_call_id}")
 
 
 def _reconciliation_request(
@@ -754,10 +713,7 @@ def _reconciliation_request(
     return HumanInputRequest(
         request_id=f"hir_{uuid4().hex[:12]}",
         kind="tool_reconciliation",
-        question=(
-            f"工具 {record.tool_name} 的外部副作用状态不明确，"
-            "请选择恢复方式。"
-        ),
+        question=(f"工具 {record.tool_name} 的外部副作用状态不明确，请选择恢复方式。"),
         context={
             "tool_call_id": record.tool_call_id,
             "tool_name": record.tool_name,
@@ -784,10 +740,7 @@ def _select_execution_batch(
     limit = max(1, max_parallel_calls)
     first = specs[calls[0].tool_name]
     if not _parallel_safe(first, require_idempotent=require_idempotent):
-        return [calls[0]], [
-            call.model_copy(deep=True)
-            for call in calls[1:]
-        ]
+        return [calls[0]], [call.model_copy(deep=True) for call in calls[1:]]
     batch: list[ToolCallPlan] = []
     for call in calls:
         if len(batch) >= limit:
@@ -798,10 +751,7 @@ def _select_execution_batch(
         ):
             break
         batch.append(call)
-    return batch, [
-        call.model_copy(deep=True)
-        for call in calls[len(batch):]
-    ]
+    return batch, [call.model_copy(deep=True) for call in calls[len(batch) :]]
 
 
 def _parallel_safe(
@@ -809,9 +759,7 @@ def _parallel_safe(
     *,
     require_idempotent: bool,
 ) -> bool:
-    return spec.concurrency_safe and (
-        spec.idempotent or not require_idempotent
-    )
+    return spec.concurrency_safe and (spec.idempotent or not require_idempotent)
 
 
 def _enforce_result_size(output: BaseModel, spec: ToolSpec) -> BaseModel:
@@ -823,12 +771,11 @@ def _enforce_result_size(output: BaseModel, spec: ToolSpec) -> BaseModel:
     if len(serialized) <= spec.max_result_size_chars:
         return output
     # Truncate and wrap in a warning envelope
-    truncated_text = serialized[:spec.max_result_size_chars]
+    truncated_text = serialized[: spec.max_result_size_chars]
     return ToolError(
         code="result_truncated",
         message=(
-            f"Tool output exceeded {spec.max_result_size_chars} chars "
-            f"({len(serialized)} chars) and was truncated."
+            f"Tool output exceeded {spec.max_result_size_chars} chars ({len(serialized)} chars) and was truncated."
         ),
         retryable=False,
         detail={
@@ -837,24 +784,6 @@ def _enforce_result_size(output: BaseModel, spec: ToolSpec) -> BaseModel:
             "max_size_chars": spec.max_result_size_chars,
         },
     )
-
-
-def _execution_call(
-    call: ToolCallPlan,
-    *,
-    retrieval_signals: RetrievalSignals | None,
-) -> ToolCallPlan:
-    arguments = dict(call.arguments)
-    if (
-        call.tool_name in RAG_SIGNAL_AWARE_TOOLS
-        and "retrieval_signals" not in arguments
-    ):
-        arguments["retrieval_signals"] = (
-            retrieval_signals.model_dump(mode="json")
-            if retrieval_signals is not None
-            else {}
-        )
-    return call.model_copy(deep=True, update={"arguments": arguments})
 
 
 async def _reserve_work_budget(
@@ -895,9 +824,7 @@ async def _refund_work_budget(
     reserved: bool,
 ) -> None:
     if reserved:
-        await RunRegistry.get(run_config.run_id).tool_work_ledger.refund(
-            call.tool_call_id
-        )
+        await RunRegistry.get(run_config.run_id).tool_work_ledger.refund(call.tool_call_id)
 
 
 async def _commit_work_budget(
@@ -917,9 +844,7 @@ async def _committed_run_config(
     run_config: AgentRunConfig,
 ) -> AgentRunConfig:
     try:
-        committed = await RunRegistry.get(
-            run_config.run_id
-        ).budget_ledger.committed()
+        committed = await RunRegistry.get(run_config.run_id).budget_ledger.committed()
     except KeyError:
         return run_config
     return replace(run_config, budget_committed=committed)
@@ -995,11 +920,7 @@ def _error_result(
     retry_count: int = 0,
     started_at: float | None = None,
 ) -> ToolResult:
-    latency_ms = (
-        0
-        if started_at is None
-        else (time.perf_counter() - started_at) * 1000
-    )
+    latency_ms = 0 if started_at is None else (time.perf_counter() - started_at) * 1000
     return ToolResult(
         tool_call_id=call.tool_call_id,
         tool_name=call.tool_name,

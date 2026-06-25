@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
-from typing import TYPE_CHECKING, Any, Literal, Self
+from typing import TYPE_CHECKING, Literal, Self
 
 from langchain_core.messages import BaseMessage
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -9,15 +9,6 @@ from typing_extensions import TypedDict
 
 from rag.agent.core.context import AgentRunConfig
 from rag.agent.core.human_input import HumanInputRequest, HumanInputResponse
-from rag.agent.core.messages import ModelMessage, PendingToolCall
-from rag.agent.core.observations import (
-    AnswerCandidate,
-    ComputationResult,
-    ContextBinding,
-    ContextUnit,
-    EvidenceRef,
-    StructuredObservation,
-)
 from rag.agent.core.output_models import ValidatedFinalOutput
 from rag.agent.core.runtime_diagnostics import (
     RuntimeDiagnostic,
@@ -34,10 +25,15 @@ from rag.agent.memory.models import (
 )
 from rag.agent.planning import AgentPlan, PlanEvent
 from rag.agent.tools.spec import ToolResult
-from rag.schema.query import AnswerCitation, EvidenceItem, RetrievalSignals
 
 if TYPE_CHECKING:
     from rag.agent.file_manifest import FileManifest
+    from rag.agent.loop.substate import (
+        DeferredToolState,
+        FinishState,
+        MemoryState,
+        PlanState,
+    )
 
 MAX_STOP_HOOK_FEEDBACK = 10
 MAX_LOOP_MEMORY_WARNINGS = 20
@@ -127,31 +123,80 @@ class StopHookFeedback(BaseModel):
     occurrences: int = Field(default=1, ge=1)
 
 
+class PendingToolCall(BaseModel):
+    """Single canonical pending tool call. Replaces ToolCallPlan-as-pending + old PendingToolCall."""
+
+    plan: ToolCallPlan
+    status: Literal["pending", "approved", "denied", "running", "completed", "failed"]
+    approval_request_id: str | None = None
+    operation_id: str | None = None
+    summary: str | None = None
+
+    @property
+    def tool_call_id(self) -> str:
+        return self.plan.tool_call_id
+
+    @property
+    def tool_name(self) -> str:
+        return self.plan.tool_name
+
+
+class ToolCallLedgerEntry(BaseModel):
+    """Transcript source for one tool call — no runtime state, just plan + position."""
+
+    plan: ToolCallPlan
+    turn: int
+    sequence: int
+
+
+class ToolCallLedger(BaseModel):
+    """Bounded ledger of all tool calls for native transcript rebuild.
+    Only cleaned when entries are no longer needed for transcript reconstruction.
+    """
+
+    entries: list[ToolCallLedgerEntry] = Field(default_factory=list)
+    max_entries: int = 128
+
+    def append_plans(self, plans: Iterable[ToolCallPlan], *, turn: int) -> None:
+        """Record model-requested calls idempotently; do not store pending state."""
+        existing = {entry.plan.tool_call_id for entry in self.entries}
+        for plan in plans:
+            if plan.tool_call_id in existing:
+                continue
+            self.entries.append(
+                ToolCallLedgerEntry(
+                    plan=plan,
+                    turn=turn,
+                    sequence=len(self.entries),
+                )
+            )
+            existing.add(plan.tool_call_id)
+
+    def trim(self, *, active_tool_call_ids: set[str]) -> None:
+        """Remove oldest non-active entries when over max_entries."""
+        while len(self.entries) > self.max_entries:
+            for index, entry in enumerate(self.entries):
+                if entry.plan.tool_call_id not in active_tool_call_ids:
+                    self.entries.pop(index)
+                    break
+            else:
+                break
+
+
 class LoopState(TypedDict):
     task: str
     messages: list[BaseMessage]
     run_config: AgentRunConfig
-    retrieval_signals: RetrievalSignals
-    retrieval_signals_debug: dict[str, object] | None
     iteration: int
     status: LoopStatus
-    pending_tool_calls: list[ToolCallPlan]
+    pending_tool_calls: list[PendingToolCall]  # single-track
+    tool_call_ledger: ToolCallLedger  # bounded transcript source
     tool_execution_records: dict[str, ToolExecutionRecord]
     approval_request: HumanInputRequest | None
     approval_response: HumanInputResponse | None
     approved_tool_call_ids: list[str]
     denied_tool_call_ids: list[str]
     tool_results: list[ToolResult]
-    evidence: list[EvidenceItem]
-    citations: list[AnswerCitation]
-    evidence_refs: list[EvidenceRef]
-    answer_candidates: list[AnswerCandidate]
-    computation_results: list[ComputationResult]
-    structured_observations: list[StructuredObservation]
-    context_units: list[ContextUnit]
-    context_bindings: list[ContextBinding]
-    locators: list[dict[str, object]]
-    asset_refs: list[int]
     working_summary: WorkingSummary | None
     extracted_facts: list[ExtractedFact]
     context_budget: ContextBudgetSnapshot | None
@@ -165,18 +210,17 @@ class LoopState(TypedDict):
     stop_hook_warnings: list[StopHookFeedback]
     runtime_diagnostics: list[RuntimeDiagnostic]
     last_model_turn: ModelTurn | None
-    groundedness_flag: bool
-    insufficient_evidence_flag: bool
     final_answer: str | None
     final_output: ValidatedFinalOutput | None
     output_validation_errors: list[dict[str, object]]
     pause: LoopPause | None
     terminal: LoopTerminal | None
     latest_transition: LoopTransition | None
-    # ── PR0: typed messages and tool call state machine ──
-    loop_messages: list[ModelMessage]
-    pending_loop_tool_calls: list[PendingToolCall]
-    tool_result_store: dict[str, Any]
+    # ── PR1-like: typed sub-state convergence (dual-write, no deletions) ──
+    plan_state: PlanState
+    memory_state: MemoryState
+    deferred_tool_state: DeferredToolState
+    finish_state: FinishState
     # ── PR1: tool discovery state ──
     discovery_active_tools: list[str]
     discovery_active_tool_iterations: dict[str, int]
@@ -201,34 +245,35 @@ def create_loop_state(
     pending_tool_calls: Iterable[ToolCallPlan] = (),
     memory_warnings: Iterable[str] = (),
     runtime_diagnostics: Iterable[RuntimeDiagnostic] = (),
-    retrieval_signals: RetrievalSignals | None = None,
     file_manifest: FileManifest | None = None,
 ) -> LoopState:
+    # ── Function-level imports to avoid circular import with substate.py ──
+    from rag.agent.loop.substate import (
+        DeferredToolState,
+        FinishState,
+        MemoryState,
+        PersistentMemorySnapshot,
+        PlanState,
+    )
+
     return {
         "task": task,
         "messages": list(messages),
         "run_config": run_config,
-        "retrieval_signals": retrieval_signals or RetrievalSignals(),
-        "retrieval_signals_debug": None,
         "iteration": 0,
         "status": "running",
-        "pending_tool_calls": list(pending_tool_calls),
+        "pending_tool_calls": [PendingToolCall(plan=call, status="pending") for call in pending_tool_calls],
+        "tool_call_ledger": ToolCallLedger() if not pending_tool_calls
+        else ToolCallLedger(entries=[
+            ToolCallLedgerEntry(plan=call, turn=0, sequence=i)
+            for i, call in enumerate(pending_tool_calls)
+        ]),
         "tool_execution_records": {},
         "approval_request": None,
         "approval_response": None,
         "approved_tool_call_ids": [],
         "denied_tool_call_ids": [],
         "tool_results": [],
-        "evidence": [],
-        "citations": [],
-        "evidence_refs": [],
-        "answer_candidates": [],
-        "computation_results": [],
-        "structured_observations": [],
-        "context_units": [],
-        "context_bindings": [],
-        "locators": [],
-        "asset_refs": [],
         "working_summary": None,
         "extracted_facts": [],
         "context_budget": None,
@@ -245,18 +290,12 @@ def create_loop_state(
         "stop_hook_warnings": [],
         "runtime_diagnostics": merge_runtime_diagnostics([], runtime_diagnostics),
         "last_model_turn": None,
-        "groundedness_flag": False,
-        "insufficient_evidence_flag": False,
         "final_answer": None,
         "final_output": None,
         "output_validation_errors": [],
         "pause": None,
         "terminal": None,
         "latest_transition": None,
-        # ── PR0: typed messages and tool call state machine ──
-        "loop_messages": [],
-        "pending_loop_tool_calls": [],
-        "tool_result_store": {},
         # ── PR1: tool discovery state ──
         "discovery_active_tools": [],
         "discovery_active_tool_iterations": {},
@@ -271,6 +310,26 @@ def create_loop_state(
         # ── Persistent cross-session memory ──
         "persistent_memories": [],
         "memory_index": "",
+        # ── PR1: typed sub-state convergence (dual-write alongside flat fields) ──
+        "plan_state": PlanState(
+            agent_plan=None,
+            plan_events=[],
+        ),
+        "memory_state": MemoryState(
+            working_summary=None,
+            extracted_facts=[],
+            context_budget=None,
+            memory_refs=[],
+            memory_budget=None,
+            memory_warnings=_bounded_unique_strings(
+                memory_warnings,
+                limit=MAX_LOOP_MEMORY_WARNINGS,
+            ),
+            reactive_compact_used=False,
+            persistent=PersistentMemorySnapshot(),
+        ),
+        "deferred_tool_state": DeferredToolState(),
+        "finish_state": FinishState(),
     }
 
 
@@ -305,26 +364,22 @@ def append_stop_hook_feedback(
         (
             item
             for item in state["stop_hook_feedback"]
-            if item.code == feedback.code
-            and item.message == feedback.message
+            if item.code == feedback.code and item.message == feedback.message
         ),
         None,
     )
     updated = feedback.model_copy(
-        update={
-            "occurrences": (
-                feedback.occurrences
-                if existing is None
-                else existing.occurrences + 1
-            )
-        }
+        update={"occurrences": (feedback.occurrences if existing is None else existing.occurrences + 1)}
     )
-    items = [
-        item
-        for item in state["stop_hook_feedback"]
-        if item is not existing
-    ]
+    items = [item for item in state["stop_hook_feedback"] if item is not existing]
     state["stop_hook_feedback"] = [*items, updated][-MAX_STOP_HOOK_FEEDBACK:]
+    # Dual-write to typed finish_state sub-state
+    fs = state.get("finish_state")
+    if fs is not None and hasattr(fs, "model_copy"):
+        try:
+            state["finish_state"] = fs.model_copy(update={"feedback": list(state["stop_hook_feedback"])})
+        except Exception:
+            pass
     return updated
 
 
@@ -333,29 +388,21 @@ def append_stop_hook_warning(
     warning: StopHookFeedback,
 ) -> StopHookFeedback:
     existing = next(
-        (
-            item
-            for item in state["stop_hook_warnings"]
-            if item.code == warning.code
-            and item.message == warning.message
-        ),
+        (item for item in state["stop_hook_warnings"] if item.code == warning.code and item.message == warning.message),
         None,
     )
     updated = warning.model_copy(
-        update={
-            "occurrences": (
-                warning.occurrences
-                if existing is None
-                else existing.occurrences + 1
-            )
-        }
+        update={"occurrences": (warning.occurrences if existing is None else existing.occurrences + 1)}
     )
-    items = [
-        item
-        for item in state["stop_hook_warnings"]
-        if item is not existing
-    ]
+    items = [item for item in state["stop_hook_warnings"] if item is not existing]
     state["stop_hook_warnings"] = [*items, updated][-MAX_STOP_HOOK_FEEDBACK:]
+    # Dual-write to typed finish_state sub-state
+    fs = state.get("finish_state")
+    if fs is not None and hasattr(fs, "model_copy"):
+        try:
+            state["finish_state"] = fs.model_copy(update={"warnings": list(state["stop_hook_warnings"])})
+        except Exception:
+            pass
     return updated
 
 
@@ -364,6 +411,13 @@ def append_memory_warning(state: LoopState, warning: str) -> None:
         [*state["memory_warnings"], warning],
         limit=MAX_LOOP_MEMORY_WARNINGS,
     )
+    # Dual-write to typed memory_state sub-state
+    ms = state.get("memory_state")
+    if ms is not None and hasattr(ms, "model_copy"):
+        try:
+            state["memory_state"] = ms.model_copy(update={"memory_warnings": list(state["memory_warnings"])})
+        except Exception:
+            pass  # non-critical sync, don't crash
 
 
 def append_loop_diagnostic(
@@ -402,7 +456,10 @@ __all__ = [
     "LoopTransitionReason",
     "ModelTurn",
     "ModelTurnDraft",
+    "PendingToolCall",
     "StopHookFeedback",
+    "ToolCallLedger",
+    "ToolCallLedgerEntry",
     "append_loop_diagnostic",
     "append_memory_warning",
     "append_stop_hook_feedback",

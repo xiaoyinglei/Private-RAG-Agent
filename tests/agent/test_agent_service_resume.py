@@ -54,11 +54,19 @@ class _FinishProvider:
         budget_remaining: int,
     ) -> ModelTurnDraft:
         del definition, budget_remaining
-        if state["answer_candidates"]:
-            return ModelTurnDraft(
-                action="finish",
-                final_answer=state["answer_candidates"][-1].text,
-            )
+        # PR2: answer_candidates no longer written to LoopState; use tool output directly
+        if state["tool_results"]:
+            latest = state["tool_results"][-1]
+            if latest.error is not None:
+                return ModelTurnDraft(action="finish")
+            if latest.output is not None:
+                text = (
+                    getattr(latest.output, "text", None)
+                    or getattr(latest.output, "result", None)
+                    or getattr(latest.output, "output_text", None)
+                )
+                if text:
+                    return ModelTurnDraft(action="finish", final_answer=str(text))
         return ModelTurnDraft(
             action="pause",
             pause_reason="No answer candidate is available.",

@@ -15,7 +15,6 @@ from pydantic import BaseModel, ConfigDict, Field
 if TYPE_CHECKING:
     from rag.agent.capabilities.catalog import (
         DeferredToolStore,
-        SearchCandidate,
         ToolCatalog,
     )
 

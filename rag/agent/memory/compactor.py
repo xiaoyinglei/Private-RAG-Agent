@@ -10,7 +10,6 @@ from typing import TYPE_CHECKING, Any, Protocol, cast
 from langchain_core.messages import BaseMessage, HumanMessage
 from pydantic import BaseModel
 
-from rag.agent.core.messages import ModelMessage
 from rag.agent.memory.models import (
     ContextBudgetSnapshot,
     EvictedStateItem,
@@ -124,9 +123,7 @@ class WorkingMemoryCompactor:
     @staticmethod
     def _extend_tail_for_tool_pairs(messages: list[BaseMessage], start: int) -> int:
         required_tool_call_ids = {
-            tool_call_id
-            for message in messages[start:]
-            if (tool_call_id := getattr(message, "tool_call_id", None))
+            tool_call_id for message in messages[start:] if (tool_call_id := getattr(message, "tool_call_id", None))
         }
         if not required_tool_call_ids:
             return start
@@ -232,9 +229,7 @@ class MessageCompactor:
         self._store = store
 
     def compact_initial_state(self, state: dict[str, Any]) -> dict[str, Any]:
-        messages = [
-            message for message in state.get("messages", []) if isinstance(message, BaseMessage)
-        ]
+        messages = [message for message in state.get("messages", []) if isinstance(message, BaseMessage)]
         if len(messages) < self._policy.message_compaction_min_count:
             return state
 
@@ -243,14 +238,8 @@ class MessageCompactor:
             max_summary_chars=self._policy.max_working_summary_chars,
             max_context_tokens=0,
         ).compact(messages)
-        covered_ids = (
-            set(draft.working_summary.covered_message_ids)
-            if draft.working_summary is not None
-            else set()
-        )
-        covered_messages = [
-            message for message in messages if self._message_id(message) in covered_ids
-        ]
+        covered_ids = set(draft.working_summary.covered_message_ids) if draft.working_summary is not None else set()
+        covered_messages = [message for message in messages if self._message_id(message) in covered_ids]
         if not covered_messages:
             return state
 
@@ -262,11 +251,7 @@ class MessageCompactor:
             ),
             "extracted_facts": self._bounded_facts(
                 [
-                    *[
-                        fact
-                        for fact in state.get("extracted_facts", [])
-                        if isinstance(fact, ExtractedFact)
-                    ],
+                    *[fact for fact in state.get("extracted_facts", []) if isinstance(fact, ExtractedFact)],
                     *draft.extracted_facts,
                 ]
             ),
@@ -283,6 +268,23 @@ class MessageCompactor:
                 *[str(item) for item in state.get("memory_warnings", [])],
                 *warnings,
             ]
+        # Dual-write to structured memory_state for checkpoint/restore.
+        from rag.agent.core.checkpointing import _digest_text
+        from rag.agent.loop.substate import MemoryState, PersistentMemorySnapshot
+
+        update["memory_state"] = MemoryState(
+            working_summary=update.get("working_summary", state.get("working_summary")),
+            extracted_facts=list(update.get("extracted_facts", state.get("extracted_facts", []))),
+            context_budget=state.get("context_budget"),
+            memory_refs=list(update.get("memory_refs", state.get("memory_refs", []))),
+            memory_budget=state.get("memory_budget"),
+            memory_warnings=list(update.get("memory_warnings", state.get("memory_warnings", []))),
+            reactive_compact_used=bool(state.get("reactive_compact_used", False)),
+            persistent=PersistentMemorySnapshot(
+                index_digest=_digest_text(state.get("memory_index", "")),
+                selected_count=len(state.get("persistent_memories", [])),
+            ),
+        )
         return {**state, **update}
 
     def compact_update(self, state: dict[str, Any], update: dict[str, Any]) -> dict[str, Any]:
@@ -350,17 +352,11 @@ class MessageCompactor:
         if new_summary is None:
             return existing if isinstance(existing, WorkingSummary) else None
         if not isinstance(existing, WorkingSummary):
-            return new_summary.model_copy(
-                update={"summary": self._truncate_working_summary(new_summary.summary)}
-            )
-        merged_text = "\n".join(
-            text for text in (existing.summary, new_summary.summary) if text.strip()
-        )
+            return new_summary.model_copy(update={"summary": self._truncate_working_summary(new_summary.summary)})
+        merged_text = "\n".join(text for text in (existing.summary, new_summary.summary) if text.strip())
         return WorkingSummary(
             summary=self._truncate_working_summary(merged_text),
-            covered_message_ids=list(
-                dict.fromkeys([*existing.covered_message_ids, *new_summary.covered_message_ids])
-            ),
+            covered_message_ids=list(dict.fromkeys([*existing.covered_message_ids, *new_summary.covered_message_ids])),
             updated_at=new_summary.updated_at,
             token_count=text_unit_count(self._truncate_working_summary(merged_text)),
         )
@@ -393,14 +389,6 @@ class MemoryCompactor:
 
     _CAPPED_CHANNELS: dict[str, str] = {
         "tool_results": "max_tool_results",
-        "structured_observations": "max_structured_observations",
-        "context_units": "max_context_units",
-        "answer_candidates": "max_answer_candidates",
-        "computation_results": "max_computation_results",
-        "evidence_refs": "max_evidence_refs",
-        "evidence": "max_evidence_items",
-        "citations": "max_citations",
-        "locators": "max_locators",
         "memory_refs": "max_memory_refs",
         "plan_events": "max_plan_events",
     }
@@ -473,22 +461,12 @@ class MemoryCompactor:
                 channel_changed = tool_results_changed
             elif channel == "memory_refs" and new_memory_refs:
                 combined = [
-                    *[
-                        ref
-                        for ref in state.get("memory_refs", [])
-                        if isinstance(ref, MemoryRef)
-                    ],
+                    *[ref for ref in state.get("memory_refs", []) if isinstance(ref, MemoryRef)],
                     *new_memory_refs,
                 ]
                 channel_changed = True
             else:
                 combined = self._combined_items(state, compacted, channel)
-            if channel == "structured_observations" and raw_refs_by_tool_call_id:
-                combined, attached = self._attach_observation_raw_refs(
-                    combined,
-                    raw_refs_by_tool_call_id,
-                )
-                channel_changed = channel_changed or attached
             sanitized, sanitized_changed, sanitize_warnings = self._sanitize_channel_items(
                 channel,
                 combined,
@@ -779,27 +757,6 @@ class MemoryCompactor:
         return None
 
     @staticmethod
-    def _attach_observation_raw_refs(
-        observations: list[Any],
-        refs_by_tool_call_id: dict[str, MemoryRef],
-    ) -> tuple[list[Any], bool]:
-        changed = False
-        attached: list[Any] = []
-        for observation in observations:
-            tool_call_id = getattr(observation, "tool_call_id", None)
-            ref = refs_by_tool_call_id.get(str(tool_call_id))
-            if (
-                ref is not None
-                and getattr(observation, "raw_memory_ref", None) is None
-                and hasattr(observation, "model_copy")
-            ):
-                attached.append(observation.model_copy(update={"raw_memory_ref": ref}))
-                changed = True
-            else:
-                attached.append(observation)
-        return attached, changed
-
-    @staticmethod
     def _externalized_error_detail(
         *,
         ref: MemoryRef,
@@ -840,9 +797,7 @@ class MemoryCompactor:
         pinned_keys: set[str],
     ) -> tuple[list[Any], list[EvictedStateItem], int]:
         if len(items) <= limit:
-            pinned_count = sum(
-                1 for item in items if self._is_pinned(channel, item, pinned_keys=pinned_keys)
-            )
+            pinned_count = sum(1 for item in items if self._is_pinned(channel, item, pinned_keys=pinned_keys))
             return list(items), [], pinned_count
 
         selected: list[Any] = []
@@ -911,44 +866,6 @@ class MemoryCompactor:
         return sanitized, changed, list(dict.fromkeys(warnings))
 
     def _sanitize_state_item(self, channel: str, item: Any) -> Any:
-        if channel == "context_units":
-            preview = getattr(item, "preview", None)
-            sanitized_preview = self._sanitized_text(preview)
-            if sanitized_preview is not preview and hasattr(item, "model_copy"):
-                return item.model_copy(update={"preview": sanitized_preview})
-        if channel == "answer_candidates":
-            text = getattr(item, "text", None)
-            sanitized_text = self._sanitized_text(text)
-            if sanitized_text is not text and hasattr(item, "model_copy"):
-                return item.model_copy(update={"text": sanitized_text})
-        if channel == "computation_results":
-            updates: dict[str, object] = {}
-            for attr in ("value_preview", "expression"):
-                value = getattr(item, attr, None)
-                sanitized = self._sanitized_text(value)
-                if sanitized is not value:
-                    updates[attr] = sanitized
-            if updates and hasattr(item, "model_copy"):
-                return item.model_copy(update=updates)
-        if channel == "structured_observations":
-            return self._sanitize_observation(item)
-        return item
-
-    def _sanitize_observation(self, item: Any) -> Any:
-        updates: dict[str, object] = {}
-        answer = getattr(item, "answer_candidate", None)
-        if answer is not None:
-            text = getattr(answer, "text", None)
-            sanitized = self._sanitized_text(text)
-            if sanitized is not text and hasattr(answer, "model_copy"):
-                updates["answer_candidate"] = answer.model_copy(update={"text": sanitized})
-        context_units = getattr(item, "context_units", None)
-        if isinstance(context_units, list):
-            sanitized_units, changed, _ = self._sanitize_channel_items("context_units", context_units)
-            if changed:
-                updates["context_units"] = sanitized_units
-        if updates and hasattr(item, "model_copy"):
-            return item.model_copy(update=updates)
         return item
 
     def _sanitized_text(self, value: object) -> object:
@@ -974,26 +891,10 @@ class MemoryCompactor:
         plan = combined.get("agent_plan")
         active_step = _active_plan_step(plan)
         active_tool_call_ids = set(getattr(active_step, "tool_call_ids", []) or [])
-        active_evidence_refs = set(getattr(active_step, "evidence_refs", []) or [])
 
         for tool_call_id in active_tool_call_ids:
             key = f"tool_call_id:{tool_call_id}"
-            for channel in (
-                "tool_results",
-                "structured_observations",
-                "answer_candidates",
-                "computation_results",
-            ):
-                pins[channel].add(key)
-        for ref in active_evidence_refs:
-            pins["evidence_refs"].add(str(ref))
-            pins["evidence"].add(str(ref))
-            pins["citations"].add(str(ref))
-
-        for unit in self._combined_items(state, update, "context_units"):
-            content_ref = getattr(unit, "content_ref", None)
-            if isinstance(content_ref, str) and content_ref in active_tool_call_ids:
-                pins["context_units"].add(_item_key(unit))
+            pins["tool_results"].add(key)
         for ref_id in self._referenced_memory_ref_ids(state, update, new_memory_refs):
             pins["memory_refs"].add(ref_id)
         return pins
@@ -1006,13 +907,9 @@ class MemoryCompactor:
         new_memory_refs: list[MemoryRef],
     ) -> dict[str, set[str]]:
         combined = {**state, **update}
-        pins: dict[str, set[str]] = {
-            channel: set() for channel in self._CAPPED_CHANNELS
-        }
+        pins: dict[str, set[str]] = {channel: set() for channel in self._CAPPED_CHANNELS}
         active_tool_call_ids = {
-            call.tool_call_id
-            for call in combined.get("pending_tool_calls", [])
-            if getattr(call, "tool_call_id", None)
+            call.tool_call_id for call in combined.get("pending_tool_calls", []) if getattr(call, "tool_call_id", None)
         }
         approval_request = combined.get("approval_request")
         active_tool_call_ids.update(
@@ -1023,62 +920,13 @@ class MemoryCompactor:
         plan = combined.get("agent_plan")
         active_step = _active_plan_step(plan)
         active_tool_call_ids.update(
-            str(tool_call_id)
-            for tool_call_id in getattr(active_step, "tool_call_ids", []) or []
-            if tool_call_id
+            str(tool_call_id) for tool_call_id in getattr(active_step, "tool_call_ids", []) or [] if tool_call_id
         )
 
         for tool_call_id in active_tool_call_ids:
             key = f"tool_call_id:{tool_call_id}"
-            for channel in (
-                "tool_results",
-                "structured_observations",
-                "computation_results",
-            ):
-                pins[channel].add(key)
-            pins["answer_candidates"].add(
-                f"source_tool_call_id:{tool_call_id}"
-            )
+            pins["tool_results"].add(key)
 
-        evidence_refs: list[Any] = []
-        for ref in getattr(active_step, "evidence_refs", []) or []:
-            evidence_refs.append(ref)
-        answer_candidates = self._combined_items(
-            state,
-            update,
-            "answer_candidates",
-        )
-        if answer_candidates:
-            current_candidate = answer_candidates[-1]
-            pins["answer_candidates"].add(_item_key(current_candidate))
-            evidence_refs.extend(
-                getattr(current_candidate, "evidence_refs", []) or []
-            )
-        for observation in self._combined_items(
-            state,
-            update,
-            "structured_observations",
-        ):
-            if getattr(observation, "tool_call_id", None) not in (
-                active_tool_call_ids
-            ):
-                continue
-            evidence_refs.extend(
-                getattr(observation, "evidence_refs", []) or []
-            )
-        for ref in evidence_refs:
-            pins["evidence_refs"].add(_item_key(ref))
-            evidence_id = getattr(ref, "evidence_id", None)
-            if evidence_id:
-                pins["evidence"].add(f"evidence_id:{evidence_id}")
-            citation_id = getattr(ref, "citation_id", None)
-            if citation_id:
-                pins["citations"].add(f"citation_id:{citation_id}")
-
-        for unit in self._combined_items(state, update, "context_units"):
-            content_ref = getattr(unit, "content_ref", None)
-            if isinstance(content_ref, str) and content_ref in active_tool_call_ids:
-                pins["context_units"].add(_item_key(unit))
         for ref_id in self._referenced_memory_ref_ids(
             state,
             update,
@@ -1102,10 +950,6 @@ class MemoryCompactor:
             detail = getattr(error, "detail", None)
             if isinstance(detail, dict) and isinstance(detail.get("externalized_ref"), str):
                 ref_ids.add(str(detail["externalized_ref"]))
-        for observation in self._combined_items(state, update, "structured_observations"):
-            ref = getattr(observation, "raw_memory_ref", None)
-            if isinstance(ref, MemoryRef):
-                ref_ids.add(ref.ref_id)
         return ref_ids
 
     def _bounded(self, channel: str, items: list[Any]) -> list[Any]:
@@ -1337,21 +1181,31 @@ class LoopContextCompactor:
             store=self._store,
             loop_mode=True,
         ).compact_update(state_dict, {})
-        meaningful_memory_update = {
-            key: value
-            for key, value in memory_update.items()
-            if key != "memory_budget"
-        }
+        meaningful_memory_update = {key: value for key, value in memory_update.items() if key != "memory_budget"}
         if meaningful_memory_update:
             changed_channels.extend(meaningful_memory_update)
         self._apply_update(state_dict, memory_update)
 
-        changed = bool(changed_channels)
-        warnings = tuple(
-            warning
-            for warning in state["memory_warnings"]
-            if warning not in initial_warnings
+        # Dual-write to structured memory_state for checkpoint/restore.
+        from rag.agent.core.checkpointing import _digest_text
+        from rag.agent.loop.substate import MemoryState, PersistentMemorySnapshot
+
+        state["memory_state"] = MemoryState(
+            working_summary=state.get("working_summary"),
+            extracted_facts=list(state.get("extracted_facts", [])),
+            context_budget=state.get("context_budget"),
+            memory_refs=list(state.get("memory_refs", [])),
+            memory_budget=state.get("memory_budget"),
+            memory_warnings=list(state.get("memory_warnings", [])),
+            reactive_compact_used=bool(state.get("reactive_compact_used", False)),
+            persistent=PersistentMemorySnapshot(
+                index_digest=_digest_text(state.get("memory_index", "")),
+                selected_count=len(state.get("persistent_memories", [])),
+            ),
         )
+
+        changed = bool(changed_channels)
+        warnings = tuple(warning for warning in state["memory_warnings"] if warning not in initial_warnings)
         channels = tuple(dict.fromkeys(changed_channels))
         if changed:
             replace_latest_transition(
@@ -1407,31 +1261,32 @@ class LoopContextCompactor:
         if tool_layer.changed:
             changed_channels.extend(tool_layer.channels)
 
-        loop_message_layer = self._compact_loop_messages(
-            state_dict,
-            limit=policy.reactive_compact_tail_count,
-        )
-        if loop_message_layer.changed:
-            changed_channels.extend(loop_message_layer.channels)
-
-        for channel, limit in (
-            ("structured_observations", policy.reactive_compact_max_observations),
-            ("evidence", policy.reactive_compact_max_evidence),
-            ("evidence_refs", policy.reactive_compact_max_evidence),
-            ("citations", policy.reactive_compact_max_evidence),
-        ):
-            if self._bound_channel_tail(state_dict, channel, limit=limit):
-                changed_channels.append(channel)
+        # Deprecated channels skipped — no longer cap structured_observations, evidence, etc.
+        pass
 
         if changed_channels:
             self._append_memory_warnings(state_dict, ["reactive_compact"])
             changed_channels.append("memory_warnings")
 
-        warnings = tuple(
-            warning
-            for warning in state["memory_warnings"]
-            if warning not in initial_warnings
+        # Dual-write to structured memory_state for checkpoint/restore.
+        from rag.agent.core.checkpointing import _digest_text
+        from rag.agent.loop.substate import MemoryState, PersistentMemorySnapshot
+
+        state["memory_state"] = MemoryState(
+            working_summary=state.get("working_summary"),
+            extracted_facts=list(state.get("extracted_facts", [])),
+            context_budget=state.get("context_budget"),
+            memory_refs=list(state.get("memory_refs", [])),
+            memory_budget=state.get("memory_budget"),
+            memory_warnings=list(state.get("memory_warnings", [])),
+            reactive_compact_used=bool(state.get("reactive_compact_used", False)),
+            persistent=PersistentMemorySnapshot(
+                index_digest=_digest_text(state.get("memory_index", "")),
+                selected_count=len(state.get("persistent_memories", [])),
+            ),
         )
+
+        warnings = tuple(warning for warning in state["memory_warnings"] if warning not in initial_warnings)
         return LoopCompactionResult(
             changed=bool(changed_channels),
             channels=tuple(dict.fromkeys(changed_channels)),
@@ -1443,9 +1298,7 @@ class LoopContextCompactor:
         state: dict[str, Any],
         policy: MemoryPolicy,
     ) -> _LayerResult:
-        messages = [
-            message for message in state.get("messages", []) if isinstance(message, BaseMessage)
-        ]
+        messages = [message for message in state.get("messages", []) if isinstance(message, BaseMessage)]
         if len(messages) <= policy.snip_compact_threshold:
             return _LayerResult()
 
@@ -1475,9 +1328,7 @@ class LoopContextCompactor:
 
         snipped_count = tail_start - head_count
         placeholder = HumanMessage(
-            content=(
-                f"[{snipped_count} earlier messages snipped for context management]"
-            ),
+            content=(f"[{snipped_count} earlier messages snipped for context management]"),
             id=f"snip_compact_{snipped_count}",
         )
         state["messages"] = [
@@ -1490,66 +1341,6 @@ class LoopContextCompactor:
             channels=tuple(dict.fromkeys(channels)),
             warnings=tuple(dict.fromkeys(warnings)),
         )
-
-    def _compact_loop_messages(
-        self,
-        state: dict[str, Any],
-        *,
-        limit: int,
-    ) -> _LayerResult:
-        messages = [
-            message
-            for message in state.get("loop_messages", [])
-            if isinstance(message, ModelMessage)
-        ]
-        if len(messages) <= limit:
-            return _LayerResult()
-
-        tail_start = max(0, len(messages) - limit)
-        tail_start = self._extend_loop_message_tail_for_tool_pairs(
-            messages,
-            tail_start,
-        )
-        if tail_start <= 0:
-            return _LayerResult()
-
-        snipped_count = tail_start
-        state["loop_messages"] = [
-            ModelMessage(
-                role="user",
-                content=(
-                    f"[{snipped_count} earlier loop messages snipped for context management]"
-                ),
-            ),
-            *messages[tail_start:],
-        ]
-        return _LayerResult(changed=True, channels=("loop_messages",))
-
-    @staticmethod
-    def _extend_loop_message_tail_for_tool_pairs(
-        messages: list[ModelMessage],
-        start: int,
-    ) -> int:
-        required_tool_call_ids = {
-            message.tool_call_id
-            for message in messages[start:]
-            if message.role == "tool" and message.tool_call_id
-        }
-        if not required_tool_call_ids:
-            return start
-        earliest = start
-        for index in range(start - 1, -1, -1):
-            call_ids = {
-                call.id
-                for call in messages[index].tool_calls
-                if call.id
-            }
-            if call_ids & required_tool_call_ids:
-                earliest = index
-                required_tool_call_ids -= call_ids
-                if not required_tool_call_ids:
-                    break
-        return earliest
 
     def _micro_compact(
         self,
@@ -1573,9 +1364,7 @@ class LoopContextCompactor:
             {},
             new_memory_refs=[],
         ).get("tool_results", set())
-        keep_recent_count = (
-            policy.micro_compact_keep_recent if keep_recent is None else keep_recent
-        )
+        keep_recent_count = policy.micro_compact_keep_recent if keep_recent is None else keep_recent
         recent_start = (
             len(tool_results)
             if keep_recent_count <= 0
@@ -1705,11 +1494,7 @@ class LoopContextCompactor:
 
     @staticmethod
     def _append_memory_refs(state: dict[str, Any], refs: list[MemoryRef]) -> None:
-        by_id = {
-            ref.ref_id: ref
-            for ref in state.get("memory_refs", [])
-            if isinstance(ref, MemoryRef)
-        }
+        by_id = {ref.ref_id: ref for ref in state.get("memory_refs", []) if isinstance(ref, MemoryRef)}
         for ref in refs:
             by_id[ref.ref_id] = ref
         state["memory_refs"] = list(by_id.values())
@@ -1750,11 +1535,7 @@ class LoopContextCompactor:
         update: dict[str, Any],
     ) -> None:
         for key, value in update.items():
-            if (
-                isinstance(value, list)
-                and len(value) == 1
-                and isinstance(value[0], StateChannelReplacement)
-            ):
+            if isinstance(value, list) and len(value) == 1 and isinstance(value[0], StateChannelReplacement):
                 state[key] = list(value[0].items)
                 continue
             state[key] = value

@@ -30,9 +30,7 @@ class OutputValidationExhaustedError(RuntimeError):
         attempts: int,
         validation_errors: list[dict[str, object]],
     ) -> None:
-        super().__init__(
-            f"Structured output validation failed after {attempts} attempts"
-        )
+        super().__init__(f"Structured output validation failed after {attempts} attempts")
         self.attempts = attempts
         self.validation_errors = validation_errors
 
@@ -64,6 +62,7 @@ class ModelStructuredOutputFinalizer:
                     kwargs=self._kwargs,
                 )
             },
+            formatter_resolver=None,
         )
 
     @property
@@ -81,13 +80,9 @@ class ModelStructuredOutputFinalizer:
         if output_model is None:
             raise ValueError("AgentDefinition.output_model is not configured")
         try:
-            ledger = RunRegistry.get(
-                state["run_config"].run_id
-            ).budget_ledger
+            ledger = RunRegistry.get(state["run_config"].run_id).budget_ledger
         except KeyError as exc:
-            raise RuntimeError(
-                f"Runtime handles missing for run_id={state['run_config'].run_id}"
-            ) from exc
+            raise RuntimeError(f"Runtime handles missing for run_id={state['run_config'].run_id}") from exc
 
         feedback: str | None = None
         last_errors: list[dict[str, object]] = []
@@ -106,10 +101,7 @@ class ModelStructuredOutputFinalizer:
                     prompt=assembled.prompt,
                     schema=output_model,
                     ledger=ledger,
-                    lease_id=(
-                        f"{state['run_config'].run_id}:final_output:"
-                        f"{attempt_index}:{uuid4().hex}"
-                    ),
+                    lease_id=(f"{state['run_config'].run_id}:final_output:{attempt_index}:{uuid4().hex}"),
                     kwargs=self._kwargs,
                 )
             except Exception as exc:

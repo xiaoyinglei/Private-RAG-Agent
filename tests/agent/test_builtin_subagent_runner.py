@@ -45,9 +45,16 @@ class _ChildDecisionProvider:
                     ),
                 ),
             )
+        # PR2: answer_candidates no longer written to LoopState
+        if state["tool_results"]:
+            latest = state["tool_results"][-1]
+            if latest.output is not None:
+                text = getattr(latest.output, "text", None)
+                if text:
+                    return ModelTurnDraft(action="finish", final_answer=text)
         return ModelTurnDraft(
             action="finish",
-            final_answer=state["answer_candidates"][-1].text,
+            final_answer="summary:Child task",
         )
 
 

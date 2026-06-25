@@ -27,14 +27,6 @@ ContextSectionName = Literal[
 MemoryRefStatus = Literal["available", "deleted", "unavailable", "compacted"]
 StateRetentionChannel = Literal[
     "tool_results",
-    "structured_observations",
-    "context_units",
-    "answer_candidates",
-    "computation_results",
-    "evidence_refs",
-    "evidence",
-    "citations",
-    "locators",
     "memory_refs",
     "plan_events",
 ]
@@ -46,14 +38,6 @@ class MemoryPolicy(BaseModel):
     schema_version: int = 1
     max_tool_output_chars: int = Field(default=64_000, ge=1)
     max_tool_results: int = Field(default=80, ge=1)
-    max_structured_observations: int = Field(default=120, ge=1)
-    max_context_units: int = Field(default=200, ge=1)
-    max_answer_candidates: int = Field(default=40, ge=1)
-    max_computation_results: int = Field(default=80, ge=1)
-    max_evidence_refs: int = Field(default=300, ge=1)
-    max_evidence_items: int = Field(default=300, ge=1)
-    max_citations: int = Field(default=300, ge=1)
-    max_locators: int = Field(default=300, ge=1)
     max_memory_refs: int = Field(default=300, ge=1)
     max_plan_events: int = Field(default=30, ge=1)
     max_memory_summary_chars: int = Field(default=1200, ge=80)
@@ -133,8 +117,7 @@ class MessageBatchPayload(BaseModel):
     @classmethod
     def _restore_messages(cls, value: object) -> object:
         if isinstance(value, list) and all(
-            isinstance(item, dict) and "type" in item and "data" in item
-            for item in value
+            isinstance(item, dict) and "type" in item and "data" in item for item in value
         ):
             return messages_from_dict(value)
         return value
@@ -242,9 +225,7 @@ class InjectedContext(BaseModel):
         raise KeyError(f"context section not found: {name}")
 
     def as_text(self) -> str:
-        return "\n\n".join(
-            f"[{section.name}]\n{section.content}" for section in self.sections
-        )
+        return "\n\n".join(f"[{section.name}]\n{section.content}" for section in self.sections)
 
 
 class WorkingMemoryDraft(BaseModel):

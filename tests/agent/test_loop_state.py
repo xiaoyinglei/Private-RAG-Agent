@@ -25,6 +25,12 @@ from rag.agent.loop.state import (
     materialize_model_turn,
     replace_latest_transition,
 )
+from rag.agent.loop.substate import (
+    DeferredToolState,
+    FinishState,
+    MemoryState,
+    PlanState,
+)
 from rag.agent.state import (
     AgentState,
     ToolCallPlan,
@@ -54,6 +60,12 @@ def test_create_loop_state_populates_focused_required_channels() -> None:
     assert state["pending_tool_calls"] == []
     assert state["tool_execution_records"] == {}
     assert state["latest_transition"] is None
+
+    # ── PR1: new sub-state keys are present ──
+    assert isinstance(state["plan_state"], PlanState)
+    assert isinstance(state["memory_state"], MemoryState)
+    assert isinstance(state["deferred_tool_state"], DeferredToolState)
+    assert isinstance(state["finish_state"], FinishState)
 
     forbidden = {
         "goal_spec",
