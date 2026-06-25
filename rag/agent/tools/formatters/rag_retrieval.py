@@ -283,10 +283,147 @@ class GraphExpandFormatter:
         return None
 
 
+class RAGSearchAnswerFormatter:
+    """Formatter for rag_search_answer tool results."""
+
+    tool_name = "rag_search_answer"
+
+    def format_result(self, result: ToolResult) -> ContextSection | None:
+        if result.status != "ok" or result.output is None:
+            return None
+        text = getattr(result.output, "text", "") or ""
+        citations = getattr(result.output, "citations", []) or []
+        evidence = getattr(result.output, "evidence", []) or []
+        groundedness = getattr(result.output, "groundedness_flag", False)
+        insufficient = getattr(result.output, "insufficient_evidence", False)
+
+        lines: list[str] = []
+        lines.append(f"  answer: {_one_line(str(text)[:800])}")
+        if groundedness:
+            lines.append("  groundedness=True")
+        if insufficient:
+            lines.append("  insufficient_evidence=True")
+        if evidence:
+            lines.append(f"  evidence_count={len(evidence)}")
+            for ev in evidence[:5]:
+                meta = _evidence_meta(ev)
+                if meta:
+                    lines.append(f"    - {meta}")
+        if citations:
+            lines.append(f"  citation_count={len(citations)}")
+        return ContextSection(
+            name="tool_results",
+            content="rag_search_answer results:\n" + "\n".join(lines),
+            token_count=0,
+            required=False,
+        )
+
+    def format_externalized(self, ref: ExternalizedToolOutput) -> ContextSection | None:
+        return None
+
+
+class SearchKnowledgeFormatter:
+    """Formatter for search_knowledge — unified semantic retrieval results."""
+
+    tool_name = "search_knowledge"
+
+    def format_result(self, result: ToolResult) -> ContextSection | None:
+        if result.status != "ok" or result.output is None:
+            return None
+        results = getattr(result.output, "results", []) or []
+        answer_text = getattr(result.output, "answer_text", "") or ""
+        citations = getattr(result.output, "citations", []) or []
+        kg = getattr(result.output, "kg_neighbors", []) or []
+        groundedness = getattr(result.output, "groundedness_flag", False)
+        insufficient = getattr(result.output, "insufficient_evidence", False)
+        total = getattr(result.output, "total_found", len(results))
+
+        lines: list[str] = [f"search_knowledge: {total} results found"]
+        if answer_text:
+            lines.append(f"  answer: {_one_line(str(answer_text)[:800])}")
+        if groundedness:
+            lines.append("  groundedness=True")
+        if insufficient:
+            lines.append("  insufficient_evidence=True")
+        for r in results[:10]:
+            eid = getattr(r, "evidence_id", "")
+            anchor = getattr(r, "citation_anchor", "")
+            score = getattr(r, "score", 0)
+            text = _one_line(str(getattr(r, "text", "")))[:300]
+            lines.append(f"  - {eid} {anchor} score={score:.2f}")
+            if text:
+                lines.append(f"    {text}")
+        if citations:
+            lines.append(f"  citations: {len(citations)} total")
+        if kg:
+            neighbors = [f"{getattr(n, 'entity_label', '')}({getattr(n, 'relation', '')})" for n in kg[:10]]
+            lines.append(f"  kg_neighbors: [{', '.join(neighbors)}]")
+        return ContextSection(
+            name="tool_results",
+            content="\n".join(lines),
+            token_count=0,
+            required=False,
+        )
+
+    def format_externalized(self, ref: ExternalizedToolOutput) -> ContextSection | None:
+        return None
+
+
+class SearchAssetsFormatter:
+    """Formatter for search_assets — unified asset results."""
+
+    tool_name = "search_assets"
+
+    def format_result(self, result: ToolResult) -> ContextSection | None:
+        if result.status != "ok" or result.output is None:
+            return None
+        assets = getattr(result.output, "assets", []) or []
+        total = getattr(result.output, "total_found", len(assets))
+        truncated = getattr(result.output, "truncated", False)
+
+        lines: list[str] = [
+            f"search_assets: {total} assets found{' (truncated)' if truncated else ''}"
+        ]
+        for a in assets[:15]:
+            aid = getattr(a, "asset_id", "?")
+            atype = getattr(a, "asset_type", "")
+            caption = _one_line(str(getattr(a, "caption", "") or ""))[:100]
+            cols = getattr(a, "columns", []) or []
+            rows = getattr(a, "row_count", None)
+            preview_rows = getattr(a, "preview_rows", []) or []
+            caps = getattr(a, "analysis_capabilities", []) or []
+            line = f"  - asset_id={aid} type={atype}"
+            if cols:
+                line += f" columns={cols[:10]}"
+            if rows is not None:
+                line += f" rows={rows}"
+            if caption:
+                line += f" caption={caption}"
+            if caps:
+                line += f" caps={caps}"
+            lines.append(line)
+            if preview_rows:
+                first = preview_rows[0]
+                if isinstance(first, dict):
+                    lines.append(f"    preview: {_one_line(str(first))[:200]}")
+        return ContextSection(
+            name="tool_results",
+            content="\n".join(lines),
+            token_count=0,
+            required=False,
+        )
+
+    def format_externalized(self, ref: ExternalizedToolOutput) -> ContextSection | None:
+        return None
+
+
 __all__ = [
-    "VectorSearchFormatter",
-    "KeywordSearchFormatter",
-    "GroundingFormatter",
-    "RerankFormatter",
     "GraphExpandFormatter",
+    "GroundingFormatter",
+    "KeywordSearchFormatter",
+    "RAGSearchAnswerFormatter",
+    "RerankFormatter",
+    "SearchAssetsFormatter",
+    "SearchKnowledgeFormatter",
+    "VectorSearchFormatter",
 ]
