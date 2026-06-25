@@ -64,6 +64,12 @@ class AgentRuntimePolicy:
     mcp_servers: tuple[str, ...] = ()      # enabled MCP server names
     mcp_allow_all_tools: bool = False      # explicitly allow ALL MCP tools (default: only allowlisted)
 
+    # ── Calling strategy (B2c) ──
+    # Which calling modes are enabled for this agent.
+    enable_native_direct: bool = True       # mode 1: short/stable tools always in context
+    enable_deferred_tools: bool = True      # mode 2: tool_search → activate → call
+    enable_programmatic: bool = True        # mode 3: code-as-tool batch via tool_repl
+
     # ── legacy compatibility metadata (not used for behavior) ──
     agent_type: str = "generic"
     description: str = ""

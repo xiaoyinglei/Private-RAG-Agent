@@ -17,6 +17,7 @@ from rag.agent.core.checkpointing import (
 )
 from rag.agent.core.context import RunRegistry
 from rag.agent.core.turn_contracts import ToolCallPlan
+from rag.agent.tools.spec import ToolResult
 from rag.agent.core.definition import AgentDefinition
 from rag.agent.core.finalization import (
     FinishCandidateBuilder,
@@ -49,6 +50,17 @@ from rag.agent.memory.compactor import LoopCompactionResult
 from rag.agent.planning import MAX_PLAN_EVENTS, PlanEvent, PlanTracker
 
 logger = logging.getLogger(__name__)
+
+# ── B2c: tool classification for metrics ──
+_NATIVE_TOOL_SET = frozenset({
+    "read_file", "write_file", "search_text", "apply_patch",
+    "run_command", "run_python", "list_files", "update_plan",
+    "task", "tool_search", "activate_tools", "tool_repl",
+})
+_DEFERRED_TOOL_SET = frozenset({
+    "search_knowledge", "search_assets", "llm_generate",
+    "llm_summarize", "llm_compare", "structured_probe",
+})
 from rag.agent.streaming.events import StreamEvent
 from rag.agent.streaming.sink import StreamEventSink
 from rag.agent.tools.observation import ToolExecutionObservation
@@ -718,7 +730,51 @@ class AgentLoop:
         for tr in new_results:
             active_ids.add(tr.tool_call_id)
         state["tool_call_ledger"].trim(active_tool_call_ids=active_ids)
+
+        # ── B2c: tool call metrics ──
+        self._record_metrics(state, new_results)
+
         return False
+
+    def _record_metrics(
+        self,
+        state: LoopState,
+        new_results: list[ToolResult],
+    ) -> None:
+        """B2c: record lightweight tool call counters.
+
+        Appends a RuntimeDiagnostic with summary metrics.  The counters
+        track the three calling modes (native, deferred, MCP) and
+        approval behaviour.  Not persisted — rebuilt each run.
+        """
+        native = sum(1 for tr in new_results
+                     if tr.tool_name in _NATIVE_TOOL_SET)
+        deferred = sum(1 for tr in new_results
+                       if tr.tool_name in _DEFERRED_TOOL_SET)
+        mcp = sum(1 for tr in new_results
+                  if tr.tool_name.startswith("mcp__"))
+        native_err = sum(1 for tr in new_results
+                         if tr.tool_name in _NATIVE_TOOL_SET and tr.status == "error")
+        mcp_err = sum(1 for tr in new_results
+                      if tr.tool_name.startswith("mcp__") and tr.status == "error")
+        native_lat = sum(tr.latency_ms for tr in new_results
+                         if tr.tool_name in _NATIVE_TOOL_SET)
+        mcp_lat = sum(tr.latency_ms for tr in new_results
+                      if tr.tool_name.startswith("mcp__"))
+
+        msg = (
+            f"native={native}/{native_err}err/{native_lat:.0f}ms "
+            f"deferred={deferred} "
+            f"mcp={mcp}/{mcp_err}err/{mcp_lat:.0f}ms"
+        )
+        state["runtime_diagnostics"] = [*state["runtime_diagnostics"],
+            RuntimeDiagnostic(
+                code="tool_call_metrics",
+                component="AgentLoop",
+                message=msg[:500],
+                severity="warning",
+                degraded=False,
+            )][-20:]
 
     def _process_tool_batch(self, state: LoopState) -> list[PendingToolCall]:
         """Check for declarative tool batch (tool_calls.jsonl).

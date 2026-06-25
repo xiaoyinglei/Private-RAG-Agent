@@ -46,6 +46,75 @@ class RuntimeDiagnostic(BaseModel):
         )
 
 
+# ── B2c: Tool call metrics ──
+
+
+class ToolCallMetrics(BaseModel):
+    """Lightweight counters for the three calling modes.
+
+    Populated by AgentLoop during tool execution and attached to
+    LoopState.runtime_diagnostics.  Not persisted — rebuilt each run.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    # Mode 1: Native direct calls
+    native_calls: int = 0
+    native_errors: int = 0
+    native_latency_ms_total: float = 0.0
+
+    # Mode 2: Deferred tool calls
+    tool_search_calls: int = 0
+    tool_search_hits: int = 0      # searches that returned ≥1 candidate
+    activate_tools_calls: int = 0
+    deferred_activations: int = 0
+    deferred_calls: int = 0         # calls to activated deferred tools
+
+    # Mode 3: Programmatic / batch
+    tool_repl_calls: int = 0
+    batch_declarations: int = 0    # total tools.declare() calls
+
+    # MCP
+    mcp_calls: int = 0
+    mcp_errors: int = 0
+    mcp_latency_ms_total: float = 0.0
+
+    # Approval
+    approval_allow: int = 0
+    approval_deny: int = 0
+    approval_ask: int = 0
+
+    # Context budget
+    context_tokens_start: int = 0
+    context_tokens_end: int = 0
+
+    @property
+    def token_savings_pct(self) -> float:
+        """Estimated token savings from deferred + programmatic modes."""
+        if self.context_tokens_start == 0:
+            return 0.0
+        return (1.0 - self.context_tokens_end / self.context_tokens_start) * 100
+
+    @property
+    def tool_search_hit_rate(self) -> float:
+        if self.tool_search_calls == 0:
+            return 0.0
+        return self.tool_search_hits / self.tool_search_calls * 100
+
+    @property
+    def mcp_avg_latency_ms(self) -> float:
+        if self.mcp_calls == 0:
+            return 0.0
+        return self.mcp_latency_ms_total / self.mcp_calls
+
+    @property
+    def approval_ask_rate(self) -> float:
+        total = self.approval_allow + self.approval_deny + self.approval_ask
+        if total == 0:
+            return 0.0
+        return self.approval_ask / total * 100
+
+
 def merge_runtime_diagnostics(
     left: Iterable[RuntimeDiagnostic],
     right: Iterable[RuntimeDiagnostic],
@@ -61,5 +130,6 @@ def merge_runtime_diagnostics(
 __all__ = [
     "MAX_RUNTIME_DIAGNOSTICS",
     "RuntimeDiagnostic",
+    "ToolCallMetrics",
     "merge_runtime_diagnostics",
 ]
