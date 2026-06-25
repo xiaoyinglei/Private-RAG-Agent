@@ -284,6 +284,14 @@ def _display_result(result: AgentRunResult, *, verbose: bool) -> None:
             if summary_parts:
                 print(f"\n工具: {', '.join(summary_parts)}")
 
+    if verbose and result.tool_call_metrics:
+        from rag.agent.core.runtime_diagnostics import ToolCallMetrics
+
+        m = result.tool_call_metrics
+        if isinstance(m, ToolCallMetrics):
+            print(f"\n调用统计: native={m.native_calls}({m.native_errors}err/{m.native_latency_ms_total:.0f}ms) "
+                  f"deferred={m.deferred_calls} mcp={m.mcp_calls}({m.mcp_errors}err/{m.mcp_latency_ms_total:.0f}ms)")
+
     if verbose and result.evidence:
         print(f"证据: {len(result.evidence)} 条")
 

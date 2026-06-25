@@ -142,6 +142,7 @@ class AgentRunResult(BaseModel):
     pending_tool_calls_summary: list[dict[str, object]] = Field(default_factory=list)
     workspace_path: str | None = None
     runtime_diagnostics: list[RuntimeDiagnostic] = Field(default_factory=list)
+    tool_call_metrics: object | None = None  # ToolCallMetrics | None
 
     @classmethod
     def from_state(
@@ -219,6 +220,7 @@ class AgentRunResult(BaseModel):
             ],
             workspace_path=workspace_path,
             runtime_diagnostics=list(state["runtime_diagnostics"]),
+            tool_call_metrics=state.get("tool_call_metrics"),
         )
 
 

@@ -744,18 +744,23 @@ class AgentLoop:
         state: LoopState,
         new_results: list[ToolResult],
     ) -> None:
-        """B2c: record lightweight tool call counters.
+        """B2c: accumulate structured ToolCallMetrics across turns.
 
-        Appends a RuntimeDiagnostic with summary metrics.  The counters
-        track the three calling modes (native, deferred, MCP) and
-        approval behaviour.  Not persisted — rebuilt each run.
+        ToolCallMetrics is stored in LoopState and exposed via AgentRunResult.
+        The diagnostic string is kept as a compact summary for inline display.
         """
+        from rag.agent.core.runtime_diagnostics import ToolCallMetrics
+
+        prev = state.get("tool_call_metrics")
+        if not isinstance(prev, ToolCallMetrics):
+            prev = ToolCallMetrics()
+
         native = sum(1 for tr in new_results
                      if tr.tool_name in _NATIVE_TOOL_SET)
         deferred = sum(1 for tr in new_results
                        if tr.tool_name in _DEFERRED_TOOL_SET)
-        mcp = sum(1 for tr in new_results
-                  if tr.tool_name.startswith("mcp__"))
+        mcp_calls = sum(1 for tr in new_results
+                        if tr.tool_name.startswith("mcp__"))
         native_err = sum(1 for tr in new_results
                          if tr.tool_name in _NATIVE_TOOL_SET and tr.status == "error")
         mcp_err = sum(1 for tr in new_results
@@ -765,10 +770,25 @@ class AgentLoop:
         mcp_lat = sum(tr.latency_ms for tr in new_results
                       if tr.tool_name.startswith("mcp__"))
 
+        metrics = prev.model_copy(
+            update={
+                "native_calls": prev.native_calls + native,
+                "native_errors": prev.native_errors + native_err,
+                "native_latency_ms_total": prev.native_latency_ms_total + native_lat,
+                "deferred_calls": prev.deferred_calls + deferred,
+                "mcp_calls": prev.mcp_calls + mcp_calls,
+                "mcp_errors": prev.mcp_errors + mcp_err,
+                "mcp_latency_ms_total": prev.mcp_latency_ms_total + mcp_lat,
+            },
+        )
+        state["tool_call_metrics"] = metrics
+
+        # Keep compact diagnostic summary for inline display
         msg = (
-            f"native={native}/{native_err}err/{native_lat:.0f}ms "
-            f"deferred={deferred} "
-            f"mcp={mcp}/{mcp_err}err/{mcp_lat:.0f}ms"
+            f"native={metrics.native_calls}/{metrics.native_errors}err "
+            f"deferred={metrics.deferred_calls} "
+            f"mcp={metrics.mcp_calls}/{metrics.mcp_errors}err "
+            f"lat={metrics.native_latency_ms_total:.0f}/{metrics.mcp_latency_ms_total:.0f}ms"
         )
         state["runtime_diagnostics"] = [*state["runtime_diagnostics"],
             RuntimeDiagnostic(
