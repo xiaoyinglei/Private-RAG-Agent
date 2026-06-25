@@ -42,10 +42,12 @@ class TestMCPNaming:
 
 class TestMCPAnnotations:
     def test_readonly_hint_maps_to_network_with_idempotent(self) -> None:
-        """readOnlyHint → NETWORK (not READ!), LOW risk, idempotent, concurrency_safe."""
+        """readOnlyHint → NETWORK (not READ!). risk=MEDIUM (NETWORK floor), idempotent, concurrency_safe."""
         behavior = map_mcp_annotations(read_only_hint=True)
         assert behavior["execution_category"] == ExecutionCategory.NETWORK
-        assert behavior["risk_level"] == RiskLevel.LOW
+        # NETWORK has minimum risk MEDIUM (spec.py _minimum_risk_level).
+        # readOnly upgrades idempotent+concurrency_safe, not risk level.
+        assert behavior["risk_level"] == RiskLevel.MEDIUM
         assert behavior["idempotent"] is True
         assert behavior["concurrency_safe"] is True
 
@@ -194,6 +196,42 @@ class TestMCPToolRegistry:
         assert "a" not in registry.adapters
         assert "b" in registry.adapters
         assert "c" not in registry.adapters  # skipped due to empty allowlist
+
+
+class TestMCPErrorPropagation:
+    """P2-4: MCP errors produce ok=False in MCPToolOutput."""
+
+    def test_error_output_has_ok_false(self) -> None:
+        out = MCPToolOutput(ok=False, is_error=True, raw={"error": "timeout"})
+        assert out.ok is False
+        assert out.is_error is True
+
+    def test_ok_output_has_ok_true(self) -> None:
+        out = MCPToolOutput(text="success")
+        assert out.ok is True
+
+
+class TestMCPFallbackInputModel:
+    """P1-3: Fallback input model preserves arguments."""
+
+    def test_fallback_model_preserves_dict_args(self) -> None:
+        """Fallback model has explicit 'arguments' field, not empty."""
+        from rag.agent.tools.mcp_adapter import build_mcp_tool_spec
+
+        # Simulate a MCP tool with a complex schema
+        class MockMCPTool:
+            name = "complex_tool"
+            description = "A tool with complex schema"
+            annotations = None
+            inputSchema = {"type": "object", "properties": {"item": {"$ref": "#/defs/X"}}}
+
+        result = build_mcp_tool_spec(MockMCPTool(), "test_server")
+        spec = result.spec
+        # Should have an 'arguments' field, not be empty
+        assert spec.input_model is not None
+        # Fallback model should accept arbitrary dict
+        instance = spec.input_model(arguments={"x": 1, "y": "hello"})
+        assert instance.arguments == {"x": 1, "y": "hello"}
 
     def test_server_names_empty_by_default(self) -> None:
         registry = MCPToolRegistry()

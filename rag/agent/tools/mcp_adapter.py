@@ -42,12 +42,16 @@ class MCPToolOutput(BaseModel):
 
     MCP content blocks (text/image/resource) are serialized into this model.
     The MCPToolFormatter renders them for the LLM.
+
+    ``ok`` follows the RunPythonOutput convention: when False,
+    ToolExecutionService converts this to a ToolResult(status="failed").
     """
 
     text: str = ""
     images: list[str] = Field(default_factory=list)  # base64 strings
     resources: list[str] = Field(default_factory=list)  # resource URIs
     is_error: bool = False
+    ok: bool = True
     raw: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -145,7 +149,7 @@ def build_input_model(schema: dict[str, Any], tool_name: str) -> type[BaseModel]
             ) from e
 
     model_name = re.sub(r"[^a-zA-Z0-9_]", "_", tool_name)
-    return create_model(model_name, **fields)  # type: ignore[call-overload]
+    return create_model(model_name, **fields)
 
 
 def _map_field(
@@ -172,13 +176,14 @@ def _map_field(
 
     field_type = schema.get("type", "string")
     description = schema.get("description")
+    py_type: Any  # resolved below
 
     if field_type == "string":
         py_type = str
         if "enum" in schema:
             from typing import Literal as L
 
-            py_type = L.__getitem__(tuple(schema["enum"]))  # type: ignore[assignment]
+            py_type = L.__getitem__(tuple(schema["enum"]))
     elif field_type in ("number", "integer"):
         py_type = int if field_type == "integer" else float
     elif field_type == "boolean":
@@ -201,14 +206,14 @@ def _map_field(
                 )
             if inner_fields:
                 inner_model = create_model(
-                    f"{name}_inner", **inner_fields,  # type: ignore[call-overload]
+                    f"{name}_inner", **inner_fields,
                 )
                 if is_required:
                     default = ...
                 else:
                     default = None
                     from typing import Optional
-                    inner_model = Optional[inner_model]  # type: ignore[assignment]
+                    inner_model = Optional[inner_model]
                 if description:
                     return (inner_model, Field(default, description=description))
                 return (inner_model, default)
@@ -228,7 +233,7 @@ def _map_field(
         default = None
         from typing import Optional
 
-        py_type = Optional[py_type]  # type: ignore[assignment]
+        py_type = Optional[py_type]
 
     if description:
         return (py_type, Field(default, description=description))
@@ -265,9 +270,11 @@ def map_mcp_annotations(
         )
 
     if read_only_hint:
+        # NETWORK has minimum risk MEDIUM (spec.py _minimum_risk_level).
+        # readOnly only upgrades idempotent+concurrency_safe — risk stays MEDIUM.
         return dict(
             execution_category=ExecutionCategory.NETWORK,
-            risk_level=RiskLevel.LOW,
+            risk_level=RiskLevel.MEDIUM,
             idempotent=True,
             concurrency_safe=True,
         )
@@ -325,8 +332,13 @@ def build_mcp_tool_spec(
     try:
         input_model = build_input_model(input_schema, canonical)
     except MCPUnsupportedSchemaError:
-        # Fallback: use a simple dict-wrapper model
-        input_model = type(f"{canonical}_input", (BaseModel,), {})
+        # Fallback: explicit dict-wrapper so arguments are preserved.
+        # Without this, an empty BaseModel would silently drop all kwargs
+        # because Pydantic ignores extra fields by default.
+        input_model = create_model(
+            f"{canonical}_input",
+            arguments=(dict, Field(default_factory=dict, description="Raw tool arguments")),
+        )
 
     spec = ToolSpec(
         name=canonical,
@@ -474,7 +486,7 @@ class MCPToolAdapter:
 
         return list(self.tools.values())
 
-    def get_runner(self, canonical_name: str):
+    def get_runner(self, canonical_name: str) -> Any:
         """Return a contextual runner for the given MCP tool.
 
         The runner calls session.call_tool() with the original tool name.
@@ -487,16 +499,21 @@ class MCPToolAdapter:
         async def _run(input_payload: BaseModel, context: Any) -> MCPToolOutput:
             if not adapter._connected:
                 return MCPToolOutput(
-                    text="",
+                    ok=False,
                     is_error=True,
                     raw={"error": f"MCP server '{adapter.config.name}' disconnected"},
                 )
-            args = input_payload.model_dump(exclude_none=True)
+            # Handle dict-wrapper fallback for complex schemas
+            raw_args = input_payload.model_dump(exclude_none=True)
+            if "arguments" in raw_args and isinstance(raw_args["arguments"], dict):
+                args = raw_args["arguments"]
+            else:
+                args = raw_args
             try:
                 result = await adapter.session.call_tool(original_name, arguments=args)
             except Exception as e:
                 return MCPToolOutput(
-                    text="",
+                    ok=False,
                     is_error=True,
                     raw={"error": str(e)},
                 )
@@ -523,6 +540,7 @@ class MCPToolAdapter:
                         resources.append(str(uri))
 
             return MCPToolOutput(
+                ok=not is_error,  # propagate MCP-level errors to ToolExecutionService
                 text="\n".join(text_parts) if text_parts else json.dumps(args),
                 images=images,
                 resources=resources,
@@ -604,7 +622,7 @@ class MCPToolRegistry:
         """Get the adapter responsible for a given canonical tool name."""
         return self._adapter_by_tool.get(canonical_name)
 
-    def get_runner(self, canonical_name: str):
+    def get_runner(self, canonical_name: str) -> Any:
         """Get a contextual runner for a specific MCP tool."""
         adapter = self._adapter_by_tool.get(canonical_name)
         if adapter is None:

@@ -1033,13 +1033,25 @@ class AgentService:
                 pass
 
     def _inject_mcp_tools(self, runtime: ToolRegistry) -> None:
-        """Register MCP tool specs, runners, and formatters in the runtime registry.
+        """Register MCP tool specs, runners, formatters, and catalog entries.
 
         MCP tools are pre-loaded (connected before AgentService creation).
-        This method synchronously registers them in the per-request cloned registry.
+        This method synchronously registers them in:
+        - the per-request cloned registry (spec + runner + formatter)
+        - the ToolCatalog (so tool_search can find them)
         """
         if self._mcp_registry is None:
             return
+
+        # Extend allowed_tools so activate_tools accepts MCP tools.
+        # The activate_tools runner captures allowed_tools at registration time
+        # (before MCP tools are injected).  We append MCP names here so any
+        # subsequent activation check passes.
+        mcp_names = [s.name for s in self._mcp_registry.list_all_tools()]
+        for name in mcp_names:
+            if name not in self._definition.allowed_tools:
+                self._definition.allowed_tools.append(name)
+
         for spec in self._mcp_registry.list_all_tools():
             # Register spec (if not already present)
             try:
@@ -1060,6 +1072,32 @@ class AgentService:
             if runtime.get_formatter(spec.name) is None:
                 from rag.agent.tools.formatters.mcp_tools import MCPToolFormatter
                 runtime.register_formatter(MCPToolFormatter(spec.name))
+
+            # Register in catalog (so tool_search can find it)
+            if self._catalog.get(spec.name) is None:
+                card = spec.aci
+                search_text = ToolCatalog.build_search_text(
+                    spec.name, spec.description, "",
+                    when_to_use=card.when_to_use if card else "",
+                    when_not_to_use=card.when_not_to_use if card else "",
+                    domains=card.domains if card else (),
+                    file_types=card.file_types if card else (),
+                    selection_tags=card.selection_tags if card else (),
+                )
+                self._catalog.register(
+                    ToolCatalogEntry(
+                        name=spec.name,
+                        description=spec.description,
+                        category="deferred",  # MCP tools are always deferred
+                        search_text=search_text,
+                        activation_group=card.activation_group if card else "mcp",
+                        when_to_use=card.when_to_use if card else "",
+                        when_not_to_use=card.when_not_to_use if card else "",
+                        domains=card.domains if card else (),
+                        selection_tags=card.selection_tags if card else (),
+                        source="mcp",
+                    ),
+                )
 
     def _build_catalog(self, registry: ToolRegistry) -> ToolCatalog:
         """Build a ToolCatalog from all tools in the registry.
@@ -1199,7 +1237,7 @@ class AgentService:
                 names=input_data.names,
                 catalog=catalog,
                 store=store,
-                allowed_tools=list(definition.allowed_tools),
+                allowed_tools=definition.allowed_tools,  # mutable list, extended by _inject_mcp_tools
                 deny_tools=definition.tool_policy.deny_tools,
                 iteration=iteration_var.get(0),
                 group=input_data.group,
