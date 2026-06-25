@@ -8,7 +8,7 @@ import mimetypes
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from rag.agent.memory.store import MEMORY_DIR_NAME
 from rag.agent.runner.python_runner import (
@@ -95,9 +95,23 @@ MAX_PYTHON_TIMEOUT = 120.0  # seconds, hard ceiling
 
 
 class RunPythonInput(BaseModel):
-    script_path: str
+    script_path: str = Field(
+        default="",
+        description="Path to a Python script to run. Leave empty if using code parameter.",
+    )
+    code: str = Field(
+        default="",
+        max_length=50000,
+        description="Python code to execute directly. Leave empty if using script_path. At least one must be provided.",
+    )
     args: list[str] = Field(default_factory=list)
     timeout_seconds: float = Field(default=30.0, gt=0, le=MAX_PYTHON_TIMEOUT)
+
+    @model_validator(mode="after")
+    def _require_script_or_code(self) -> "RunPythonInput":
+        if not self.script_path and not self.code:
+            raise ValueError("Either script_path or code must be provided")
+        return self
 
 
 class RunPythonInlineInput(BaseModel):

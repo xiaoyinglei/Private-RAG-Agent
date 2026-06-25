@@ -86,7 +86,11 @@ write_file_spec = ToolSpec(
 
 run_python_spec = ToolSpec(
     name="run_python",
-    description="Execute a Python script from scratch/. Returns exit code, stdout, stderr, and generated files.",
+    description=(
+        "Execute Python code. Provide either script_path (to run a .py file) or "
+        "code (to execute code directly as a string). Returns exit code, stdout, "
+        "stderr, and generated files."
+    ),
     input_model=RunPythonInput,
     output_model=RunPythonOutput,
     error_model=ToolError,
@@ -100,9 +104,8 @@ run_python_spec = ToolSpec(
 run_python_inline_spec = ToolSpec(
     name="run_python_inline",
     description=(
-        "Execute Python code directly. Pass code as a string — no need to write "
-        "a file first. Use for reading files (openpyxl, pandas, json), data analysis, "
-        "computation, and any quick Python task."
+        "DEPRECATED: use run_python with the code= parameter instead. "
+        "Execute Python code directly."
     ),
     input_model=RunPythonInlineInput,
     output_model=RunPythonOutput,
