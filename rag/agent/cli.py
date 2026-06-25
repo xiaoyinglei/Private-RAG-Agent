@@ -130,6 +130,11 @@ def _build_agent_service(
         ContextualToolRunner,
         rag_answer_runner.answer,
     )
+    # Semantic RAG tools (search_knowledge → same runner as rag_search_answer)
+    contextual_runners["search_knowledge"] = cast(
+        ContextualToolRunner,
+        rag_answer_runner.answer,
+    )
 
     from rag.agent.tools.asset_tools import AssetToolRunner
 
@@ -145,6 +150,42 @@ def _build_agent_service(
         runners["asset_inspect"] = cast(ToolRunner, asset_runner.inspect_asset)
         runners["asset_read_slice"] = cast(ToolRunner, asset_runner.read_slice)
         runners["asset_analyze"] = cast(ToolRunner, asset_runner.analyze_asset)
+
+        # Semantic asset tool — composite: list → inspect → read_slice
+        async def _search_assets_runner(payload: Any) -> Any:
+            from rag.agent.tools.rag_semantic_tools import AssetSearchInput, AssetSearchOutput, AssetResult
+
+            if isinstance(payload, dict):
+                inp = AssetSearchInput(**payload)
+            else:
+                inp = payload
+            # List
+            list_out = await asset_runner.list_assets(
+                type("_In", (), {"doc_id": inp.doc_id, "asset_type": inp.asset_type})()
+            )
+            results: list[AssetResult] = []
+            for a in list_out.assets[:inp.max_results]:
+                ar = AssetResult(
+                    asset_id=a.asset_id, doc_id=a.doc_id,
+                    asset_type=a.asset_type, sheet_name=a.sheet_name,
+                    caption=a.caption, columns=list(a.columns or []),
+                    row_count=a.row_count, column_count=a.column_count,
+                )
+                # Inspect if preview requested
+                if inp.include_preview and a.asset_id:
+                    try:
+                        insp = await asset_runner.inspect_asset(
+                            type("_In2", (), {"asset_id": a.asset_id, "head_rows": 3})()
+                        )
+                        if insp.head_rows:
+                            ar.preview_rows = insp.head_rows[:3]
+                        ar.analysis_capabilities = list(insp.analysis_capabilities or [])
+                    except Exception:
+                        pass
+                results.append(ar)
+            return AssetSearchOutput(assets=results, total_found=len(list_out.assets))
+
+        contextual_runners["search_assets"] = cast(ContextualToolRunner, _search_assets_runner)
 
     contextual_runners.update(
         _build_llm_tool_runners(

@@ -36,8 +36,11 @@ def test_generic_agent_includes_llm_tools() -> None:
     assert "llm_summarize" in BUILTIN_AGENT_DEFINITIONS["generic"].allowed_tools
 
 
-def test_generic_agent_includes_rag_answer_tool() -> None:
-    assert "rag_search_answer" in BUILTIN_AGENT_DEFINITIONS["generic"].allowed_tools
+def test_generic_agent_includes_semantic_rag_tools() -> None:
+    """GENERIC_AGENT uses semantic tools (search_knowledge, search_assets)."""
+    allowed = BUILTIN_AGENT_DEFINITIONS["generic"].allowed_tools
+    assert "search_knowledge" in allowed
+    assert "search_assets" in allowed
 
 
 def test_generic_agent_budget_defaults() -> None:

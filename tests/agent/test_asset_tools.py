@@ -98,7 +98,8 @@ def test_builtin_registry_exposes_generic_asset_tools_not_file_type_specific_too
 
     assert {"asset_list", "asset_inspect", "asset_read_slice", "asset_analyze"} <= tool_names
     assert {"table_list", "table_inspect", "table_query_sql"}.isdisjoint(tool_names)
-    assert {"asset_list", "asset_inspect", "asset_read_slice", "asset_analyze"} <= set(GENERIC_AGENT.allowed_tools)
+    # Semantic tool replaces fine-grained asset tools in allowed_tools
+    assert "search_assets" in GENERIC_AGENT.allowed_tools
 
 
 def test_asset_runner_lists_bounded_asset_metadata_and_capabilities() -> None:
