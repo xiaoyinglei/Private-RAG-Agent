@@ -186,7 +186,8 @@ apply_patch_spec = ToolSpec(
         required_context=("exact old_string from the file (copy-paste from read_file output)",),
         input_examples=(
             {"file_path": "src/app.py", "old_string": "debug = False", "new_string": "debug = True"},
-            {"file_path": "README.md", "old_string": "## Usage", "new_string": "## Usage\n\n### Prerequisites", "replace_all": False},
+            {"file_path": "README.md", "old_string": "## Usage",
+             "new_string": "## Usage\n\n### Prerequisites", "replace_all": False},
         ),
         output_examples=("replaced=True occurrences=1", "replaced=False message='old_string not found in file_path'"),
         output_cap_policy="truncate",
@@ -430,7 +431,10 @@ tool_repl_spec = ToolSpec(
         preconditions=("activated tools are available via tools.list_available()",),
         required_context=("which tools to call and with what arguments",),
         input_examples=(
-            {"command": "tools.declare('search_knowledge', query='Q3 revenue', top_k=5)\ntools.declare('search_assets', query='financial tables', max_results=3)"},
+            {"command": (
+                "tools.declare('search_knowledge', query='Q3 revenue', top_k=5)\n"
+                "tools.declare('search_assets', query='financial tables', max_results=3)"
+            )},
         ),
         output_examples=("stdout: 'declared: search_knowledge seq=1\\ndeclared: search_assets seq=2'",),
         output_cap_policy="truncate",

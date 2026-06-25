@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import csv
 import mimetypes
+import os
 from pathlib import Path
 from typing import Any, Literal
 
@@ -336,6 +337,10 @@ class PrimitiveOps:
         """
         import tempfile
 
+        # Resolve scratch dir (must be first — used by _matplotlib_preamble below)
+        scratch = self._workspace.root / "scratch"
+        scratch.mkdir(parents=True, exist_ok=True)
+
         # Load SDK preamble
         sdk_source = _load_sdk_preamble()
 
@@ -344,8 +349,6 @@ class PrimitiveOps:
         full_code = f"{matplot_preamble}\n\n{sdk_source}\n\n{payload.code}"
 
         # Write to temp file in scratch/
-        scratch = self._workspace.root / "scratch"
-        scratch.mkdir(parents=True, exist_ok=True)
         with tempfile.NamedTemporaryFile(
             mode="w",
             suffix=".py",
@@ -356,15 +359,10 @@ class PrimitiveOps:
             tf.write(full_code)
             temp_path = Path(tf.name)
 
-        # Set env vars for the SDK
+        # Set AGENT_SCRATCH_DIR so the SDK knows where to write tool_calls.jsonl
         prev_scratch = os.environ.get("AGENT_SCRATCH_DIR")
-        prev_available = os.environ.get("AGENT_AVAILABLE_TOOLS")
         try:
             os.environ["AGENT_SCRATCH_DIR"] = str(scratch)
-            # Pass available tool names (activated tools set by caller)
-            available = os.environ.get("AGENT_AVAILABLE_TOOLS", "")
-            if not available:
-                os.environ["AGENT_AVAILABLE_TOOLS"] = ""
             return self._execute_python_file(
                 temp_path, payload.args, payload.timeout_seconds,
             )
@@ -373,10 +371,6 @@ class PrimitiveOps:
                 os.environ["AGENT_SCRATCH_DIR"] = prev_scratch
             else:
                 os.environ.pop("AGENT_SCRATCH_DIR", None)
-            if prev_available is not None:
-                os.environ["AGENT_AVAILABLE_TOOLS"] = prev_available
-            else:
-                os.environ.pop("AGENT_AVAILABLE_TOOLS", None)
             # Clean up temp file
             try:
                 temp_path.unlink(missing_ok=True)
@@ -510,7 +504,23 @@ class PrimitiveOps:
             "write_file": self.write_file,
             "run_python": self.run_python,
             "run_python_inline": self.run_python_inline,
+            "tool_repl": self.tool_repl,
         }
+
+    def tool_repl(self, payload: Any) -> RunPythonOutput:
+        """Execute tool_repl — batch tool calling via Python code.
+
+        Adapts RunCommandInput.command → RunPythonInput.code.
+        """
+        from rag.agent.tools.generic_tools import RunCommandInput
+
+        if isinstance(payload, RunCommandInput):
+            code = payload.command
+        elif isinstance(payload, dict):
+            code = payload.get("command", "")
+        else:
+            code = str(getattr(payload, "command", ""))
+        return self.run_python(RunPythonInput(code=code))
 
 
 # ---------------------------------------------------------------------------

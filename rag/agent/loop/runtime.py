@@ -4,6 +4,7 @@ import asyncio
 import logging
 from collections.abc import AsyncGenerator, Awaitable, Sequence
 from inspect import isawaitable
+from pathlib import Path
 from typing import Any, Protocol, cast
 
 from pydantic import BaseModel, ConfigDict, ValidationError
@@ -132,6 +133,7 @@ class AgentLoop:
         max_model_retries: int = 1,
         catalog: ToolCatalog | None = None,
         deferred_store: DeferredToolStore | None = None,
+        scratch_dir: Path | None = None,
     ) -> None:
         if max_model_retries < 0:
             raise ValueError("max_model_retries must be non-negative")
@@ -153,6 +155,7 @@ class AgentLoop:
         self._max_model_retries = max_model_retries
         self._catalog = catalog
         self._deferred_store = deferred_store
+        self._scratch_dir = scratch_dir
 
     async def _emit_stream(self, event: Any) -> None:
         """Emit a stream event if sink is configured."""
@@ -777,42 +780,66 @@ class AgentLoop:
             )][-20:]
 
     def _process_tool_batch(self, state: LoopState) -> list[PendingToolCall]:
-        """Check for declarative tool batch (tool_calls.jsonl).
+        """Check scratch/tool_calls.jsonl for declarative batch declarations.
 
-        Returns PendingToolCall list for validated declarations.
-        The batch file is cleaned up after reading.
+        Validates activation + allowed_tools.  Input schema validation is
+        deferred to ToolExecutionService.  Failed declarations become error
+        ToolResults so the model gets structured feedback.
         """
-        import os as _os
-
-        scratch_dir = _os.environ.get("AGENT_SCRATCH_DIR")
-        if not scratch_dir:
+        if self._scratch_dir is None:
             return []
-        from pathlib import Path
 
-        batch_file = Path(scratch_dir) / "tool_calls.jsonl"
+        batch_file = self._scratch_dir / "tool_calls.jsonl"
         if not batch_file.exists():
             return []
 
         from rag.agent.core.tool_batch_reader import clean_batch_file, read_tool_batch
+        from rag.agent.tools.spec import ToolError, ToolResult
 
-        declarations = read_tool_batch(scratch_dir)
+        declarations = read_tool_batch(str(self._scratch_dir))
         if not declarations:
-            clean_batch_file(scratch_dir)
+            clean_batch_file(str(self._scratch_dir))
             return []
 
         allowed = self._definition.allowed_tools
         new_pending: list[PendingToolCall] = []
         for decl in declarations:
             name = decl.tool_name
-            # Basic validation: activation + allowed_tools
+
             if name not in allowed:
-                logger.warning(f"Batch tool '{name}' not in allowed_tools — skipped")
+                state["tool_results"].append(
+                    ToolResult(
+                        tool_call_id=f"batch_err__{name}__{decl.line_number}",
+                        tool_name=name,
+                        status="error",
+                        error=ToolError(
+                            code="batch_not_allowed",
+                            message=f"'{name}' not in allowed_tools",
+                            retryable=False,
+                        ),
+                        latency_ms=0.0,
+                    )
+                )
                 continue
+
             if name not in CORE_TOOLS and (
                 self._deferred_store is None or not self._deferred_store.is_active(name)
             ):
-                logger.warning(f"Batch tool '{name}' not activated — skipped")
+                state["tool_results"].append(
+                    ToolResult(
+                        tool_call_id=f"batch_err__{name}__{decl.line_number}",
+                        tool_name=name,
+                        status="error",
+                        error=ToolError(
+                            code="batch_not_activated",
+                            message=f"'{name}' is not activated — use tool_search + activate_tools",
+                            retryable=True,
+                        ),
+                        latency_ms=0.0,
+                    )
+                )
                 continue
+
             plan = ToolCallPlan(
                 tool_call_id=f"batch__{name}__{decl.line_number}",
                 tool_name=name,
@@ -822,9 +849,9 @@ class AgentLoop:
 
         if new_pending:
             logger.info(
-                f"Batch: {len(new_pending)} tool(s) queued from tool_calls.jsonl"
+                f"Batch: {len(new_pending)}/{len(declarations)} tool(s) queued"
             )
-        clean_batch_file(scratch_dir)
+        clean_batch_file(str(self._scratch_dir))
         return new_pending
 
     async def _evaluate_finish(

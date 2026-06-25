@@ -520,6 +520,7 @@ class AgentService:
             goal_spec=goal_spec,
             state=state,
             auto_activate_tools=file_tools_to_activate,
+            scratch_dir=workspace.root / "scratch",
         )
         try:
             result_state = await loop.run(state)
@@ -606,6 +607,7 @@ class AgentService:
             goal_spec=request.goal_spec,
             state=state,
             auto_activate_tools=file_tools_to_activate,
+            scratch_dir=workspace.root / "scratch",
         )
 
         try:
@@ -658,6 +660,7 @@ class AgentService:
         goal_spec: GoalSpec | None,
         state: LoopState | None = None,
         auto_activate_tools: set[str] | None = None,
+        scratch_dir: Path | None = None,
     ) -> AgentLoop:
         # Create and bind DeferredToolStore BEFORE resolving provider
         # (provider needs store for tool filtering)
@@ -709,6 +712,7 @@ class AgentService:
             catalog=self._catalog,
             deferred_store=store,
             stream_sink=self._stream_sink,
+            scratch_dir=scratch_dir,
         )
 
     def _resolve_model_turn_provider(
