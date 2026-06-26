@@ -20,7 +20,7 @@ from langgraph.checkpoint.serde.base import SerializerProtocol
 from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
-from rag.agent.compat.goal_contract import GoalCompatibilityConfig
+from rag.agent.core.goal_contract import GoalCompatibilityConfig
 from rag.agent.core.context import AgentRunConfig
 from rag.agent.core.human_input import (
     HumanInputRequest,
@@ -69,12 +69,12 @@ AGENT_CHECKPOINT_MSGPACK_ALLOWLIST: tuple[tuple[str, ...], ...] = (
     ("rag.agent.core.tool_execution", "ToolExecutionRecord"),
     ("rag.agent.core.tool_execution", "ToolExecutionSummary"),
     ("rag.agent.core.turn_contracts", "ToolCallPlan"),
-    ("rag.agent.compat.goal_contract", "GoalConstraint"),
-    ("rag.agent.compat.goal_contract", "GoalCompatibilityConfig"),
-    ("rag.agent.compat.goal_contract", "GoalContractEvaluation"),
-    ("rag.agent.compat.goal_contract", "GoalContractIssue"),
-    ("rag.agent.compat.goal_contract", "GoalDeliverable"),
-    ("rag.agent.compat.goal_contract", "GoalSpec"),
+    ("rag.agent.core.goal_contract", "GoalConstraint"),
+    ("rag.agent.core.goal_contract", "GoalCompatibilityConfig"),
+    ("rag.agent.core.goal_contract", "GoalContractEvaluation"),
+    ("rag.agent.core.goal_contract", "GoalContractIssue"),
+    ("rag.agent.core.goal_contract", "GoalDeliverable"),
+    ("rag.agent.core.goal_contract", "GoalSpec"),
     ("rag.agent.memory.models", "ContextBudgetSnapshot"),
     ("rag.agent.memory.models", "EvictedStateItem"),
     ("rag.agent.memory.models", "ExtractedFact"),

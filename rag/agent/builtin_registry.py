@@ -41,7 +41,6 @@ from rag.agent.tools.formatters.rag_retrieval import (
 )
 from rag.agent.tools.generic_tools import ALL_GENERIC_TOOLS
 from rag.agent.tools.llm_tools import ALL_LLM_TOOLS
-from rag.agent.tools.primitive_tools import ALL_PRIMITIVE_TOOLS
 from rag.agent.tools.rag_answer_tools import ALL_RAG_ANSWER_TOOLS
 from rag.agent.tools.rag_semantic_tools import ALL_RAG_SEMANTIC_TOOLS
 from rag.agent.tools.rag_tools import ALL_RAG_TOOLS
@@ -60,7 +59,6 @@ def create_builtin_tool_registry(
         *ALL_LLM_TOOLS,
         *ALL_RAG_ANSWER_TOOLS,
         *ALL_RAG_SEMANTIC_TOOLS,
-        *ALL_PRIMITIVE_TOOLS,
         *ALL_GENERIC_TOOLS,
     ]
 

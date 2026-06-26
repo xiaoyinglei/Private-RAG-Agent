@@ -6,7 +6,7 @@ import pytest
 from langgraph.checkpoint.memory import MemorySaver
 from pydantic import BaseModel
 
-from rag.agent.compat.goal_contract import GoalDeliverable, GoalSpec
+from rag.agent.core.goal_contract import GoalDeliverable, GoalSpec
 from rag.agent.core.agent_service_factory import AgentServiceFactory
 from rag.agent.core.checkpointing import (
     LangGraphCheckpointStore,
@@ -21,7 +21,7 @@ from rag.agent.core.tool_execution import (
 )
 from rag.agent.loop.state import LoopState, ModelTurnDraft, create_loop_state
 from rag.agent.service import AgentRunRequest, AgentService
-from rag.agent.state import ToolCallPlan
+from rag.agent.core.turn_contracts import ToolCallPlan
 from rag.agent.tools.registry import ToolRegistry
 from rag.agent.tools.spec import ToolError, ToolPermissions, ToolSpec
 from rag.schema.runtime import AccessPolicy

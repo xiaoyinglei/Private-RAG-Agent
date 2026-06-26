@@ -17,7 +17,7 @@ from rag.agent.core.definition import AgentRuntimePolicy
 from rag.agent.core.llm_registry import ModelRegistry
 from rag.agent.core.runtime_diagnostics import RuntimeDiagnostic
 from rag.agent.service import AgentRunRequest, AgentRunResult
-from rag.agent.state import AgentState
+from rag.agent.loop.state import LoopState as AgentState
 from rag.agent.capabilities.tool_search import ToolSearchInput, ToolSearchOutput
 from rag.agent.tools.llm_tools import LLMCompareInput, LLMGenerateInput
 from rag.agent.tools.registry import ToolExecutionContext

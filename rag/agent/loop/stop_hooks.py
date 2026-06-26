@@ -5,7 +5,7 @@ from typing import Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from rag.agent.compat.goal_contract import GoalContractEvaluator, GoalSpec
+from rag.agent.core.goal_contract import GoalContractEvaluator, GoalSpec
 from rag.agent.core.definition import AgentRuntimePolicy
 from rag.agent.core.observations import ComputationResult, ContextBinding, EvidenceRef
 from rag.agent.core.output_finalizer import (

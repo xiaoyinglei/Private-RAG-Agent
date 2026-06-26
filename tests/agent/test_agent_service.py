@@ -7,14 +7,14 @@ from pydantic import BaseModel
 
 from rag.agent.builtin.generic import GENERIC_AGENT
 from rag.agent.builtin_registry import create_builtin_tool_registry
-from rag.agent.compat.goal_contract import GoalDeliverable, GoalSpec
+from rag.agent.core.goal_contract import GoalDeliverable, GoalSpec
 from rag.agent.core.context import AgentRunConfig, RunRegistry
 from rag.agent.core.definition import AgentRuntimePolicy
 from rag.agent.loop.state import LoopState, ModelTurnDraft
 from rag.agent.primitive_ops import PrimitiveOps
 from rag.agent.runner.python_runner import LocalSubprocessPythonRunner
 from rag.agent.service import AgentRunRequest, AgentRunResult, AgentService
-from rag.agent.state import ToolCallPlan
+from rag.agent.core.turn_contracts import ToolCallPlan
 from rag.agent.tools.llm_tools import LLMTextOutput
 from rag.agent.workspace import WorkspaceRuntime
 from rag.schema.query import RetrievalSignals

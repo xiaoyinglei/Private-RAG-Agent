@@ -8,7 +8,7 @@ from rag.agent.loop.state import LoopState, create_loop_state
 from rag.agent.memory.injector import ContextBuilder
 from rag.agent.memory.models import ExternalizedToolOutput, ExtractedFact, MemoryRef, WorkingSummary
 from rag.agent.planning import AgentPlan, PlanStep
-from rag.agent.state import ToolCallPlan
+from rag.agent.core.turn_contracts import ToolCallPlan
 from rag.agent.tools.llm_tools import LLMTextOutput
 from rag.agent.tools.spec import ToolError, ToolResult
 from rag.schema.query import AnswerCitation, EvidenceItem

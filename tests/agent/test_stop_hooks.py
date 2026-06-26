@@ -5,7 +5,7 @@ from dataclasses import dataclass
 import pytest
 from pydantic import BaseModel
 
-from rag.agent.compat.goal_contract import GoalDeliverable, GoalSpec
+from rag.agent.core.goal_contract import GoalDeliverable, GoalSpec
 from rag.agent.core.context import AgentRunConfig
 from rag.agent.core.definition import AgentRuntimePolicy
 from rag.agent.core.finalization import (

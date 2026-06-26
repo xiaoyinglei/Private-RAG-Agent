@@ -234,31 +234,10 @@ def test_legacy_checkpoint_fields_dropped() -> None:
 # ── Test 6 ──
 
 
-def test_compat_module_deprecation_warning() -> None:
-    """Calling deprecated compat functions must trigger DeprecationWarning."""
-    from rag.agent.core.context import AgentRunConfig
-
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always", DeprecationWarning)
-        from rag.agent.state import create_agent_state
-
-        create_agent_state(
-            task="test",
-            run_config=AgentRunConfig(
-                run_id="test-warning",
-                thread_id="test-warning",
-                budget_total=1,
-                max_depth=1,
-                access_policy=AccessPolicy.default(),
-            ),
-        )
-
-    deprecation_messages = [
-        str(w.message)
-        for w in caught
-        if issubclass(w.category, DeprecationWarning) and "rag.agent.state is deprecated" in str(w.message)
-    ]
-    assert len(deprecation_messages) > 0, "Expected DeprecationWarning when calling deprecated create_agent_state"
+def test_agent_state_module_is_gone() -> None:
+    """rag.agent.state has been removed — use rag.agent.loop.state instead."""
+    with pytest.raises(ModuleNotFoundError):
+        import rag.agent.state  # noqa: F811
 
 
 # ── Test 7 (from Task 5 Step 1) ──

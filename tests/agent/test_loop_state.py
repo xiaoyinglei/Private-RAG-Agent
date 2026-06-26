@@ -31,12 +31,11 @@ from rag.agent.loop.substate import (
     MemoryState,
     PlanState,
 )
-from rag.agent.state import (
-    AgentState,
-    ToolCallPlan,
-    agent_state_to_loop_state,
-    create_agent_state,
-)
+from rag.agent.core.turn_contracts import ToolCallPlan
+from rag.agent.loop.state import LoopState as AgentState, create_loop_state as create_agent_state
+
+def agent_state_to_loop_state(state: AgentState) -> AgentState:
+    return state  # was identity function, now explicit
 from rag.schema.runtime import AccessPolicy
 
 

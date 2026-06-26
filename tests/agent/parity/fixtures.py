@@ -10,7 +10,7 @@ from rag.agent.core.definition import AgentRuntimePolicy, ModelSelectionPolicy, 
 from rag.agent.core.delegation import ParentAgentContext
 from rag.agent.loop.state import LoopState, create_loop_state
 from rag.agent.memory.models import MemoryPolicy
-from rag.agent.state import ToolCallPlan
+from rag.agent.core.turn_contracts import ToolCallPlan
 from rag.agent.tools.spec import ToolError, ToolPermissions, ToolResult, ToolSpec
 from rag.schema.query import AnswerCitation, EvidenceItem
 from rag.schema.runtime import AccessPolicy

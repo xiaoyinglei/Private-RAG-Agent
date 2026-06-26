@@ -18,7 +18,7 @@ from rag.agent.core.tool_execution import (
     apply_tool_reconciliation,
     tool_arguments_digest,
 )
-from rag.agent.state import ToolCallPlan
+from rag.agent.core.turn_contracts import ToolCallPlan
 from rag.agent.tools.registry import ToolExecutionContext, ToolRegistry
 from rag.agent.tools.spec import ToolError, ToolPermissions, ToolSpec
 from rag.schema.runtime import AccessPolicy

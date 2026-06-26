@@ -10,7 +10,7 @@ from langgraph.checkpoint.memory import MemorySaver
 from pydantic import BaseModel
 
 from rag.agent.builtin.generic import GENERIC_AGENT
-from rag.agent.compat.goal_contract import GoalDeliverable, GoalSpec
+from rag.agent.core.goal_contract import GoalDeliverable, GoalSpec
 from rag.agent.core.agent_as_tool import (
     AgentAsToolAdapter,
     AgentToolInput,
@@ -38,7 +38,7 @@ from rag.agent.loop.stop_hooks import StopHookRunner, build_stop_hooks
 from rag.agent.memory.compactor import LoopContextCompactor
 from rag.agent.memory.models import MemoryPolicy
 from rag.agent.memory.store import WorkspaceMemoryStore
-from rag.agent.state import ToolCallPlan
+from rag.agent.core.turn_contracts import ToolCallPlan
 from rag.agent.tools.rag_answer_tools import (
     RAGSearchAnswerOutput,
     rag_search_answer,

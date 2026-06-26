@@ -31,7 +31,7 @@ from rag.agent.capabilities.tool_search import (
     execute_activate_tools,
     execute_tool_search,
 )
-from rag.agent.compat.goal_contract import GoalCompatibilityConfig, GoalSpec
+from rag.agent.core.goal_contract import GoalCompatibilityConfig, GoalSpec
 from rag.agent.core.checkpointing import (
     LangGraphCheckpointStore,
     _digest_text,

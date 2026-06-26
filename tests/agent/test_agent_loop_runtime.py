@@ -38,7 +38,7 @@ from rag.agent.loop.stop_hooks import (
 )
 from rag.agent.memory.compactor import LoopCompactionResult, LoopContextCompactor
 from rag.agent.memory.models import MemoryPolicy
-from rag.agent.state import ToolCallPlan
+from rag.agent.core.turn_contracts import ToolCallPlan
 from rag.agent.streaming.events import EventType, StreamEvent, text_delta
 from rag.agent.tools.registry import ToolExecutionContext, ToolRegistry
 from rag.agent.tools.spec import ToolError, ToolPermissions, ToolSpec

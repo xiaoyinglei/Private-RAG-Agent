@@ -7,14 +7,14 @@ from pydantic import BaseModel
 
 from rag.agent.builtin.generic import GENERIC_AGENT
 from rag.agent.builtin_registry import create_builtin_tool_registry
-from rag.agent.compat.goal_contract import GoalDeliverable, GoalSpec
+from rag.agent.core.goal_contract import GoalDeliverable, GoalSpec
 from rag.agent.core.checkpointing import agent_checkpoint_serde
 from rag.agent.core.context import RunRegistry
 from rag.agent.core.definition import AgentRuntimePolicy
 from rag.agent.core.human_input import HumanInputResponse
 from rag.agent.loop.state import LoopState, ModelTurnDraft
 from rag.agent.service import AgentRunRequest, AgentService
-from rag.agent.state import ToolCallPlan
+from rag.agent.core.turn_contracts import ToolCallPlan
 from rag.agent.tools.registry import ToolRegistry
 from rag.agent.tools.spec import ToolError, ToolPermissions, ToolSpec
 

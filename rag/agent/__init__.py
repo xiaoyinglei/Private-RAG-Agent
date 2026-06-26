@@ -28,10 +28,8 @@ from rag.agent.planning import (
     PlanUpdate,
 )
 from rag.agent.service import AgentRunRequest, AgentRunResult, AgentService
-from rag.agent.state import (
-    AgentState,
-    ToolCallPlan,
-)
+from rag.agent.core.turn_contracts import ToolCallPlan
+from rag.agent.loop.state import LoopState as AgentState  # backward compat alias
 from rag.agent.tools.registry import ToolRegistry
 from rag.agent.tools.spec import (
     ExecutionCategory,

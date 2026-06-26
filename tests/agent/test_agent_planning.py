@@ -8,7 +8,7 @@ from rag.agent.planning import (
     PlanTracker,
     PlanUpdate,
 )
-from rag.agent.state import ToolCallPlan
+from rag.agent.core.turn_contracts import ToolCallPlan
 
 
 def test_initialize_plan_is_task_based_without_tool_routing() -> None:

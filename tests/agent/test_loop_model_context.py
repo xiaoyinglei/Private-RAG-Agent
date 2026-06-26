@@ -35,7 +35,7 @@ from rag.agent.memory.models import (
     StateChannelReplacement,
 )
 from rag.agent.planning import PlanStep, PlanTracker, PlanUpdate
-from rag.agent.state import ToolCallPlan
+from rag.agent.core.turn_contracts import ToolCallPlan
 from rag.agent.tools.spec import ToolResult
 from rag.assembly.tokenizer import TokenAccountingService, TokenizerContract
 from rag.schema.llm import LLMCallStage, LLMStageBudget
