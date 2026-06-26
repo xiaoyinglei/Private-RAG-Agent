@@ -978,6 +978,41 @@ class AgentService:
                 except KeyError:
                     pass
 
+        # Register update_plan as contextual runner (needs LoopState)
+        def _update_plan_runner(payload: Any, context: Any) -> Any:
+            from rag.agent.tools.generic_tools import PlanStep, UpdatePlanInput, UpdatePlanOutput
+
+            if isinstance(payload, dict):
+                inp = UpdatePlanInput(**payload)
+            else:
+                inp = payload
+            state = getattr(context, "state", {}) or {}
+            plan_state = state.get("plan_state")
+            existing = []
+            if plan_state and hasattr(plan_state, "agent_plan") and plan_state.agent_plan:
+                existing = list(plan_state.agent_plan.steps)
+            steps = list(existing)
+            if inp.action == "add":
+                for s in inp.steps:
+                    sid = s.id or f"step-{len(steps) + 1}"
+                    steps.append(PlanStep(id=sid, description=s.description, status=s.status))
+            elif inp.action == "complete":
+                ids = set(inp.step_ids)
+                steps = [PlanStep(id=s.id, description=s.description,
+                         status="completed" if s.id in ids else s.status) for s in steps]
+            elif inp.action == "update":
+                by_id = {s.id: s for s in inp.steps if s.id}
+                steps = []
+                for old in existing:
+                    new = by_id.get(old.id)
+                    if new:
+                        steps.append(new)
+                    else:
+                        steps.append(old)
+            return UpdatePlanOutput(steps=steps, summary=inp.summary, message="plan updated")
+
+        runtime.register_contextual_runner("update_plan", _update_plan_runner)
+
         # Assemble full tool pool (builtin + MCP + deny rules)
         self._assemble_tool_pool(runtime)
 

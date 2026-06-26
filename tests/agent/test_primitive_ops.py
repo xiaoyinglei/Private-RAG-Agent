@@ -555,6 +555,9 @@ class TestRunners:
             "run_python",
             "run_python_inline",
             "tool_repl",
+            "search_text",
+            "apply_patch",
+            "run_command",
         }
 
     def test_runners_are_callable(self, ops: PrimitiveOps) -> None:

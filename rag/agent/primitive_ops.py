@@ -494,6 +494,109 @@ class PrimitiveOps:
             errors=errors,
         )
 
+    # -- generic tool runners -----------------------------------------------
+
+    def search_text(self, payload: Any) -> Any:
+        """Search workspace files with grep -rn."""
+        from rag.agent.tools.generic_tools import SearchTextInput, SearchTextMatch, SearchTextOutput
+
+        if isinstance(payload, dict):
+            inp = SearchTextInput(**payload)
+        else:
+            inp = payload
+        args = ["grep", "-rn", "--include=*"]
+        if inp.file_types:
+            # Convert comma-sep to --include globs
+            for ext in inp.file_types.split(","):
+                ext = ext.strip()
+                if ext:
+                    args = args[:-1] + [f"--include=*{ext}", "--include=*"]
+            args.pop()  # remove trailing --include=*
+        if inp.regex:
+            args.append("-E")
+        else:
+            args.append("-F")
+        args.extend([inp.pattern, inp.path])
+        try:
+            result = self._python_runner._execute_command(args, timeout=inp.timeout_seconds or 15.0)
+        except Exception:
+            result = type("_R", (), {"stdout": "", "stderr": "grep failed", "exit_code": 1})()
+        matches: list[SearchTextMatch] = []
+        for line in result.stdout.split("\n")[:inp.max_results]:
+            line = line.strip()
+            if not line:
+                continue
+            parts = line.split(":", 2)
+            if len(parts) >= 3:
+                matches.append(SearchTextMatch(
+                    file_path=parts[0], line_number=int(parts[1]) if parts[1].isdigit() else 0,
+                    line_content=parts[2],
+                ))
+        return SearchTextOutput(matches=matches, total_matches=len(matches),
+                                truncated=len(result.stdout.split("\n")) > inp.max_results)
+
+    def apply_patch(self, payload: Any) -> Any:
+        """Apply a string replacement to a file."""
+        from rag.agent.tools.generic_tools import ApplyPatchInput, ApplyPatchOutput
+
+        if isinstance(payload, dict):
+            inp = ApplyPatchInput(**payload)
+        else:
+            inp = payload
+        file_path = self._workspace.resolve_path(inp.file_path)
+        if not file_path.is_file():
+            return ApplyPatchOutput(file_path=inp.file_path, replaced=False,
+                                    occurrences=0, message="file not found")
+        content = file_path.read_text(encoding="utf-8")
+        count = content.count(inp.old_string) if inp.replace_all else 1 if inp.old_string in content else 0
+        if count == 0:
+            return ApplyPatchOutput(file_path=inp.file_path, replaced=False,
+                                    occurrences=0, message="old_string not found")
+        if count > 1 and not inp.replace_all:
+            return ApplyPatchOutput(file_path=inp.file_path, replaced=False,
+                                    occurrences=count, message="not unique, use replace_all=True")
+        new_content = content.replace(inp.old_string, inp.new_string) if inp.replace_all else content.replace(inp.old_string, inp.new_string, 1)
+        file_path.write_text(new_content, encoding="utf-8")
+        return ApplyPatchOutput(file_path=inp.file_path, replaced=True,
+                                occurrences=count, message="ok")
+
+    def run_command(self, payload: Any) -> Any:
+        """Execute a shell command."""
+        from rag.agent.tools.generic_tools import RunCommandInput, RunCommandOutput
+
+        if isinstance(payload, dict):
+            inp = RunCommandInput(**payload)
+        else:
+            inp = payload
+        import subprocess, time
+
+        cwd = self._workspace.resolve_path(inp.working_dir)
+        start = time.monotonic()
+        try:
+            proc = subprocess.run(
+                inp.command, shell=True, cwd=str(cwd),
+                capture_output=True, text=True,
+                timeout=inp.timeout_seconds,
+            )
+            ok = proc.returncode == 0
+            stdout = proc.stdout or ""
+            stderr = proc.stderr or ""
+            timed_out = False
+            exit_code = proc.returncode
+        except subprocess.TimeoutExpired:
+            ok = False
+            stdout = ""
+            stderr = "command timed out"
+            timed_out = True
+            exit_code = -1
+        duration = (time.monotonic() - start) * 1000
+        return RunCommandOutput(
+            stdout=stdout[:50000], stderr=stderr[:50000],
+            exit_code=exit_code, timed_out=timed_out,
+            truncated=len(stdout) > 50000 or len(stderr) > 50000,
+            duration_ms=duration,
+        )
+
     # -- runners registry --------------------------------------------------
 
     def runners(self) -> dict[str, Any]:
@@ -505,6 +608,9 @@ class PrimitiveOps:
             "run_python": self.run_python,
             "run_python_inline": self.run_python_inline,
             "tool_repl": self.tool_repl,
+            "search_text": self.search_text,
+            "apply_patch": self.apply_patch,
+            "run_command": self.run_command,
         }
 
     def tool_repl(self, payload: Any) -> RunPythonOutput:
