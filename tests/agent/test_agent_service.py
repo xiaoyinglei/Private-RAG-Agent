@@ -350,18 +350,19 @@ async def test_agent_service_run_with_config_uses_supplied_runtime_contract() ->
 
 
 @pytest.mark.anyio
-async def test_agent_service_run_creates_workspace_and_injects_primitive_ops() -> None:
-    """Verify AgentService.run() creates workspace and PrimitiveOps runners are available."""
+async def test_agent_service_run_creates_workspace_and_injects_workspace_tools() -> None:
+    """Verify AgentService.run() creates workspace and BaseTool instances are registered."""
     from rag.agent.builtin_registry import create_builtin_tool_registry
-    from rag.agent.primitive_ops import PrimitiveOps
+    from rag.agent.tools.workspace_tools import create_workspace_tools
     from rag.agent.workspace import create_temp_workspace
 
-    # Create service with PrimitiveOps-capable registry
     workspace = create_temp_workspace(prefix="test_integ_")
-    ops = PrimitiveOps(workspace=workspace)
-    registry = create_builtin_tool_registry(runners=ops.runners())
+    tools = create_workspace_tools(workspace)
+    registry = create_builtin_tool_registry()
+    for tool in tools:
+        registry.register_tool(tool)
 
-    # Verify primitive tools have runners
+    # Verify workspace tools have runners
     assert registry.has_runner("list_files")
     assert registry.has_runner("read_file")
     assert registry.has_runner("write_file")

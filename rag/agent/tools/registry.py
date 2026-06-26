@@ -88,6 +88,22 @@ class ToolRegistry:
             self._runners[spec.name] = runner
             self._contextual_runners.pop(spec.name, None)
 
+    def register_tool(self, tool: Any) -> None:
+        """Register a BaseTool instance: spec + runner in one call.
+
+        Extracts ToolSpec via tool.to_spec(), registers the spec,
+        then registers a runner closure over tool.execute().
+        Equivalent to Claude Code's self-contained tool classes.
+        """
+        from rag.agent.tools.base import BaseTool
+
+        if not isinstance(tool, BaseTool):
+            raise TypeError(f"Expected BaseTool instance, got {type(tool).__name__}")
+        spec = tool.to_spec()
+        self._tools[spec.name] = spec
+        self._runners[spec.name] = tool.as_runner()
+        self._contextual_runners.pop(spec.name, None)
+
     def get(self, name: str) -> ToolSpec:
         if name not in self._tools:
             raise KeyError(f"Tool '{name}' not found in registry")

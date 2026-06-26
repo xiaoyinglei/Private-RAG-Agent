@@ -597,22 +597,6 @@ class PrimitiveOps:
             duration_ms=duration,
         )
 
-    # -- runners registry --------------------------------------------------
-
-    def runners(self) -> dict[str, Any]:
-        return {
-            "list_files": self.list_files,
-            "read_file": self.read_file,
-            "structured_probe": self.structured_probe,
-            "write_file": self.write_file,
-            "run_python": self.run_python,
-            "run_python_inline": self.run_python_inline,
-            "tool_repl": self.tool_repl,
-            "search_text": self.search_text,
-            "apply_patch": self.apply_patch,
-            "run_command": self.run_command,
-        }
-
     def tool_repl(self, payload: Any) -> RunPythonOutput:
         """Execute tool_repl — batch tool calling via Python code.
 

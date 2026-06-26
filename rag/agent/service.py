@@ -77,6 +77,7 @@ from rag.agent.memory.persistent import PersistentMemoryStore
 from rag.agent.memory.store import WorkspaceMemoryStore
 from rag.agent.tools.mcp_adapter import MCPToolRegistry
 from rag.agent.tools.registry import ContextualToolRunner, ToolRegistry, ToolRunner
+from rag.agent.tools.workspace_tools import create_workspace_tools
 from rag.agent.tools.spec import ExecutionCategory, ToolPermissions, ToolResult, ToolSpec
 from rag.schema.query import AnswerCitation, EvidenceItem
 from rag.schema.runtime import AccessPolicy
@@ -464,7 +465,6 @@ class AgentService:
         workspace_path: str | None = None,
     ) -> AgentRunResult:
         from rag.agent.file_manifest import build_file_manifest
-        from rag.agent.primitive_ops import PrimitiveOps
         from rag.agent.workspace import create_temp_workspace, import_files, open_workspace
 
         # 1. Create workspace
@@ -480,8 +480,8 @@ class AgentService:
         # 3. Build file manifest (file-first processing)
         manifest = build_file_manifest(workspace)
 
-        # 4. Create PrimitiveOps and inject runners
-        ops = PrimitiveOps(workspace=workspace)
+        # 4. Create workspace tool instances (BaseTool: spec + runner in one class)
+        workspace_tools = create_workspace_tools(workspace)
         memory_store = WorkspaceMemoryStore(
             workspace=workspace,
             policy=run_config.memory_policy,
@@ -491,7 +491,7 @@ class AgentService:
         file_tools_to_activate: set[str] = {"structured_probe"} if manifest.has_probeable_files else set()
         runtime_registry = self._runtime_tool_registry(
             run_config,
-            runners=ops.runners(),
+            tools=workspace_tools,
         )
         self._validate_allowed_tools(runtime_registry)
 
@@ -557,7 +557,6 @@ class AgentService:
 
         # 复用 run_with_config 的 setup 逻辑
         from rag.agent.file_manifest import build_file_manifest
-        from rag.agent.primitive_ops import PrimitiveOps
         from rag.agent.workspace import create_temp_workspace, import_files, open_workspace
 
         if request.workspace_path:
@@ -569,7 +568,7 @@ class AgentService:
             import_files(workspace, [Path(f) for f in request.input_files])
 
         manifest = build_file_manifest(workspace)
-        ops = PrimitiveOps(workspace=workspace)
+        workspace_tools = create_workspace_tools(workspace)
         memory_store = WorkspaceMemoryStore(
             workspace=workspace,
             policy=run_config.memory_policy,
@@ -578,7 +577,7 @@ class AgentService:
         file_tools_to_activate: set[str] = {"structured_probe"} if manifest.has_probeable_files else set()
         runtime_registry = self._runtime_tool_registry(
             run_config,
-            runners=ops.runners(),
+            tools=workspace_tools,
         )
         self._validate_allowed_tools(runtime_registry)
 
@@ -958,8 +957,9 @@ class AgentService:
         run_config: AgentRunConfig,
         *,
         runners: Mapping[str, ToolRunner] | None = None,
+        tools: list[Any] | None = None,  # list[BaseTool] instances
     ) -> ToolRegistry:
-        """Clone base registry and inject AgentAsToolAdapter runners for this request.
+        """Clone base registry and inject per-request tool instances.
 
         Agent-as-tool adapters are request-scoped — each run_config gets fresh adapters
         to prevent concurrent request pollution of depth/budget/access_policy.
@@ -970,7 +970,17 @@ class AgentService:
 
         from rag.agent.core.agent_as_tool import AgentAsToolAdapter
 
-        # Inject runtime runners (e.g. PrimitiveOps) — override existing runners
+        # Register workspace tool instances (BaseTool: spec + runner in one call)
+        if tools:
+            for tool in tools:
+                try:
+                    runtime.register_tool(tool)
+                except Exception:
+                    logger.warning(
+                        f"Failed to register tool '{getattr(tool, 'name', '?')}'", exc_info=True
+                    )
+
+        # Legacy: plain runners dict (backward compat for CLI)
         if runners:
             for extra_name, extra_runner in runners.items():
                 try:
@@ -1330,7 +1340,6 @@ class AgentService:
         如果原始 run 使用了 PrimitiveOps（write_file / run_python 等），
         调用方必须传入 workspace_path 以恢复 request-scoped runners。
         """
-        from rag.agent.primitive_ops import PrimitiveOps
         from rag.agent.workspace import open_workspace
 
         lookup_config = self._checkpoint_lookup_config(run_id)
@@ -1345,12 +1354,11 @@ class AgentService:
         run_config = state["run_config"]
         await self._restore_runtime_handles_from_checkpoint(run_config)
 
-        runners: Mapping[str, ToolRunner] | None = None
+        workspace_tools: list[Any] | None = None
         memory_store: WorkspaceMemoryStore | None = None
         if workspace_path:
             workspace = open_workspace(workspace_path)
-            ops = PrimitiveOps(workspace=workspace)
-            runners = ops.runners()
+            workspace_tools = create_workspace_tools(workspace)
             memory_store = WorkspaceMemoryStore(
                 workspace=workspace,
                 policy=run_config.memory_policy,
@@ -1359,7 +1367,7 @@ class AgentService:
 
         runtime_registry = self._runtime_tool_registry(
             run_config,
-            runners=runners,
+            tools=workspace_tools,
         )
         self._validate_allowed_tools(runtime_registry)
         loop = self._build_loop(

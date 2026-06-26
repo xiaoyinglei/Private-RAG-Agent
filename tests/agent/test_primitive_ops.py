@@ -544,26 +544,30 @@ class TestRunPython:
 # ===================================================================
 
 
-class TestRunners:
-    def test_returns_all_runners(self, ops: PrimitiveOps) -> None:
-        r = ops.runners()
-        assert set(r.keys()) == {
-            "list_files",
-            "read_file",
-            "structured_probe",
-            "write_file",
-            "run_python",
-            "run_python_inline",
-            "tool_repl",
-            "search_text",
-            "apply_patch",
-            "run_command",
-        }
+class TestWorkspaceTools:
+    """All workspace tools are self-contained BaseTool classes."""
 
-    def test_runners_are_callable(self, ops: PrimitiveOps) -> None:
-        r = ops.runners()
-        assert callable(r["list_files"])
-        assert callable(r["read_file"])
-        assert callable(r["structured_probe"])
-        assert callable(r["write_file"])
-        assert callable(r["run_python"])
+    def test_all_tool_classes_registered(self) -> None:
+        from rag.agent.tools.workspace_tools import WORKSPACE_TOOL_CLASSES
+
+        names = {cls.name for cls in WORKSPACE_TOOL_CLASSES}
+        assert "list_files" in names
+        assert "read_file" in names
+        assert "write_file" in names
+        assert "run_python" in names
+        assert "search_text" in names
+        assert "apply_patch" in names
+        assert "run_command" in names
+        assert "tool_repl" in names
+        assert "structured_probe" in names
+
+    def test_create_workspace_tools(self, ops: PrimitiveOps) -> None:
+        from rag.agent.tools.workspace_tools import create_workspace_tools
+
+        tools = create_workspace_tools(ops._workspace)
+        assert len(tools) == 9
+        for tool in tools:
+            spec = tool.to_spec()
+            assert spec.name
+            assert spec.description
+            assert tool.aci is not None  # every tool has a ToolCard
