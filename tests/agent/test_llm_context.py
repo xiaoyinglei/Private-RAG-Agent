@@ -31,7 +31,7 @@ class _CharacterTokenAccounting:
 
 
 def _definition() -> AgentRuntimePolicy:
-    return AgentRuntimePolicy.from_legacy(
+    return AgentRuntimePolicy.test_factory(
         agent_type="research",
         description="Research",
         system_prompt="SYSTEM_POLICY",

@@ -136,7 +136,7 @@ class TestToolRegistry:
             access_policy=AccessPolicy.default(),
         )
         state = {"task": "trusted task", "run_config": run_config}
-        definition = AgentRuntimePolicy.from_legacy(
+        definition = AgentRuntimePolicy.test_factory(
             agent_type="test",
             description="test",
             system_prompt="trusted policy",

@@ -94,7 +94,7 @@ class _Registry:
 
 
 def _definition() -> AgentRuntimePolicy:
-    return AgentRuntimePolicy.from_legacy(
+    return AgentRuntimePolicy.test_factory(
         agent_type="research",
         description="research",
         system_prompt="Use trusted context.",

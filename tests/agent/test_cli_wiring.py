@@ -103,7 +103,7 @@ def _trusted_llm_execution_context(
             "run_config": config,
         },
     )
-    definition = AgentRuntimePolicy.from_legacy(
+    definition = AgentRuntimePolicy.test_factory(
         agent_type="test",
         description="CLI model tool test",
         system_prompt="Use only trusted supplied context.",

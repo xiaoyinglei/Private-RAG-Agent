@@ -173,7 +173,7 @@ def _definition(
     allowed_tools: list[str] | None = None,
     max_iterations: int = 10,
 ) -> AgentRuntimePolicy:
-    return AgentRuntimePolicy.from_legacy(
+    return AgentRuntimePolicy.test_factory(
         agent_type="research",
         description="Loop runtime test",
         system_prompt="Use trusted tools and finish with a candidate.",

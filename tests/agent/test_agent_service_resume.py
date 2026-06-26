@@ -106,7 +106,7 @@ def _write_spec() -> ToolSpec:
 
 
 def _definition() -> AgentRuntimePolicy:
-    return AgentRuntimePolicy.from_legacy(
+    return AgentRuntimePolicy.test_factory(
         agent_type="resume_test",
         description="Resume test",
         system_prompt="Run tools.",

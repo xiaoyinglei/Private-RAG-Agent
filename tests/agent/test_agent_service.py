@@ -174,7 +174,7 @@ def test_agent_run_result_clears_stale_human_input_when_done() -> None:
 
 
 def test_agent_run_result_restores_configured_concrete_final_output() -> None:
-    definition = AgentRuntimePolicy.from_legacy(
+    definition = AgentRuntimePolicy.test_factory(
         agent_type="structured",
         description="Structured",
         system_prompt="Return structured output.",
@@ -423,7 +423,7 @@ async def test_agent_service_run_python_nonzero_exit_is_tool_error(
 
     monkeypatch.setattr(primitive_ops_module, "PrimitiveOps", _local_primitive_ops)
     service = AgentService(
-        definition=AgentRuntimePolicy.from_legacy(
+        definition=AgentRuntimePolicy.test_factory(
             agent_type="python_test",
             description="Python test",
             system_prompt="Run Python.",

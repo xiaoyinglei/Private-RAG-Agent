@@ -83,7 +83,7 @@ class AgentRuntimePolicy:
             raise ValueError("max_stop_hook_blocks must be positive")
 
     @classmethod
-    def from_legacy(
+    def test_factory(
         cls,
         *,
         agent_type: str = "generic",
@@ -100,19 +100,13 @@ class AgentRuntimePolicy:
         max_iterations: int = 10,
         max_depth: int = 2,
         tool_policy: Any = None,
-        **__: Any,
     ) -> AgentRuntimePolicy:
-        """Backward-compat factory — accepts old AgentDefinition kwargs.
-
-        Tests and legacy callers use this to construct AgentRuntimePolicy
-        with old field names.  Will be removed after test migration.
-        """
+        """Convenience factory — flat tool list + sensible defaults for tests."""
         from rag.agent.capabilities.catalog import CORE_TOOLS, DEFERRED_TOOLS
 
         tools = allowed_tools or []
         core = tuple(t for t in tools if t in CORE_TOOLS)
         deferred = tuple(t for t in tools if t in DEFERRED_TOOLS)
-        # Unknown tools → core (test tools like "dummy", "echo", "write_tool")
         core = core + tuple(t for t in tools if t not in CORE_TOOLS and t not in DEFERRED_TOOLS)
 
         return cls(

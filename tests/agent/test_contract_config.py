@@ -110,7 +110,7 @@ class TestDeriveChildConfig:
             access_policy=AccessPolicy.default(),
             source_scope=("doc-a", "doc-b"),
         )
-        child_def = AgentRuntimePolicy.from_legacy(
+        child_def = AgentRuntimePolicy.test_factory(
             agent_type="research",
             description="Research",
             system_prompt="Research",
@@ -145,7 +145,7 @@ class TestDeriveChildConfig:
         )
         child = derive_child_config(
             parent,
-            AgentRuntimePolicy.from_legacy(
+            AgentRuntimePolicy.test_factory(
                 agent_type="research",
                 description="Research",
                 system_prompt="Research",
@@ -172,7 +172,7 @@ class TestDeriveChildConfig:
             max_depth=2,
             access_policy=AccessPolicy.default(),
         )
-        child_def = AgentRuntimePolicy.from_legacy(
+        child_def = AgentRuntimePolicy.test_factory(
             agent_type="local_research",
             description="Local only",
             system_prompt="Local only",
@@ -192,7 +192,7 @@ class TestDeriveChildConfig:
             max_depth=0,
             access_policy=AccessPolicy.default(),
         )
-        child_def = AgentRuntimePolicy.from_legacy(
+        child_def = AgentRuntimePolicy.test_factory(
             agent_type="research",
             description="Research",
             system_prompt="Research",
@@ -248,7 +248,7 @@ class TestRunRegistry:
 
 class TestAgentRuntimePolicy:
     def test_minimal_definition(self) -> None:
-        ad = AgentRuntimePolicy.from_legacy(
+        ad = AgentRuntimePolicy.test_factory(
             agent_type="research",
             description="Deep research agent",
             system_prompt="You are a research agent.",
@@ -267,7 +267,7 @@ class TestAgentRuntimePolicy:
             ValueError,
             match="output_validation_max_retries must be non-negative",
         ):
-            AgentRuntimePolicy.from_legacy(
+            AgentRuntimePolicy.test_factory(
                 agent_type="invalid_output_retry",
                 description="Invalid",
                 system_prompt="Invalid",
@@ -277,7 +277,7 @@ class TestAgentRuntimePolicy:
 
     def test_definition_with_access_policy(self) -> None:
         policy = AccessPolicy.default()
-        ad = AgentRuntimePolicy.from_legacy(
+        ad = AgentRuntimePolicy.test_factory(
             agent_type="compare",
             description="Comparison agent",
             system_prompt="You compare documents.",
@@ -318,7 +318,7 @@ class TestAgentRuntimePolicy:
 class TestAgentRegistry:
     def test_register_and_get(self) -> None:
         registry = AgentRegistry()
-        ad = AgentRuntimePolicy.from_legacy(
+        ad = AgentRuntimePolicy.test_factory(
             agent_type="test_research",
             description="Test agent",
             system_prompt="You are a test agent.",
@@ -335,7 +335,7 @@ class TestAgentRegistry:
 
     def test_list_all(self) -> None:
         registry = AgentRegistry()
-        ad1 = AgentRuntimePolicy.from_legacy(
+        ad1 = AgentRuntimePolicy.test_factory(
             agent_type="agent_a",
             description="A",
             system_prompt="A",
@@ -348,7 +348,7 @@ class TestAgentRegistry:
     def test_instances_are_isolated(self) -> None:
         first = AgentRegistry()
         second = AgentRegistry()
-        ad = AgentRuntimePolicy.from_legacy(
+        ad = AgentRuntimePolicy.test_factory(
             agent_type="isolated_agent",
             description="A",
             system_prompt="A",
@@ -363,13 +363,13 @@ class TestAgentRegistry:
 
     def test_duplicate_registration_fails_unless_replace_is_explicit(self) -> None:
         registry = AgentRegistry()
-        first = AgentRuntimePolicy.from_legacy(
+        first = AgentRuntimePolicy.test_factory(
             agent_type="dup_agent",
             description="A",
             system_prompt="A",
             allowed_tools=[],
         )
-        replacement = AgentRuntimePolicy.from_legacy(
+        replacement = AgentRuntimePolicy.test_factory(
             agent_type="dup_agent",
             description="B",
             system_prompt="B",

@@ -66,7 +66,7 @@ def _minimal_run_config(run_id: str = "pr2-t10") -> AgentRunConfig:
 
 
 def _definition() -> AgentRuntimePolicy:
-    return AgentRuntimePolicy.from_legacy(
+    return AgentRuntimePolicy.test_factory(
         agent_type="research",
         description="Research agent",
         system_prompt="You are a research assistant.",

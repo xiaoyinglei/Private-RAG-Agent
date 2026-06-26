@@ -86,7 +86,7 @@ def _gateway(
 
 
 def _definition(*, retries: int = 2) -> AgentRuntimePolicy:
-    return AgentRuntimePolicy.from_legacy(
+    return AgentRuntimePolicy.test_factory(
         agent_type="structured",
         description="Structured output",
         system_prompt="Return grounded structured output.",

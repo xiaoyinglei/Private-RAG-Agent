@@ -51,7 +51,7 @@ def _minimal_state() -> LoopState:
 
 
 def _minimal_policy() -> AgentRuntimePolicy:
-    return AgentRuntimePolicy.from_legacy(
+    return AgentRuntimePolicy.test_factory(
         system_instructions="You are a test agent",
         core_tool_names=(
             "read_file", "write_file", "run_python", "list_files",
@@ -213,7 +213,7 @@ class TestProcessToolBatch:
             from rag.agent.loop.runtime import AgentLoop
 
             loop = AgentLoop(  # type: ignore[call-arg]
-                definition=AgentRuntimePolicy.from_legacy(
+                definition=AgentRuntimePolicy.test_factory(
                     agent_type="test",
                     description="test agent",
                     system_prompt="test",
@@ -267,7 +267,7 @@ class TestProcessToolBatch:
             )
 
             loop = AgentLoop(  # type: ignore[call-arg]
-                definition=AgentRuntimePolicy.from_legacy(
+                definition=AgentRuntimePolicy.test_factory(
                     agent_type="test",
                     description="test agent",
                     system_prompt="test",
@@ -309,7 +309,7 @@ class TestProcessToolBatch:
             from rag.agent.loop.runtime import AgentLoop
 
             loop = AgentLoop(  # type: ignore[call-arg]
-                definition=AgentRuntimePolicy.from_legacy(
+                definition=AgentRuntimePolicy.test_factory(
                     agent_type="test",
                     description="test agent",
                     system_prompt="test",
@@ -339,7 +339,7 @@ class TestProcessToolBatch:
         from rag.agent.loop.runtime import AgentLoop
 
         loop = AgentLoop(  # type: ignore[call-arg]
-            definition=AgentRuntimePolicy.from_legacy(
+            definition=AgentRuntimePolicy.test_factory(
                 agent_type="test",
                 description="test agent",
                 system_prompt="test",

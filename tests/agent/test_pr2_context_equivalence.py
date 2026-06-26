@@ -78,7 +78,7 @@ def _token_accounting() -> _CharacterTokenAccounting:
 
 
 def _definition() -> AgentRuntimePolicy:
-    return AgentRuntimePolicy.from_legacy(
+    return AgentRuntimePolicy.test_factory(
         agent_type="research",
         description="Research agent",
         system_prompt="You are a research assistant.",

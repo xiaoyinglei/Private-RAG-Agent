@@ -75,7 +75,7 @@ def _parent_state(run_id: str = "parent-run", *, max_depth: int = 2) -> LoopStat
 
 @pytest.mark.anyio
 async def test_builtin_subagent_runner_returns_agent_run_result_with_derived_config() -> None:
-    child_def = AgentRuntimePolicy.from_legacy(
+    child_def = AgentRuntimePolicy.test_factory(
         agent_type="child_research_runner",
         description="Child research",
         system_prompt="Research child task",
@@ -125,7 +125,7 @@ async def test_builtin_subagent_runner_returns_agent_run_result_with_derived_con
 
 @pytest.mark.anyio
 async def test_builtin_subagent_runner_rejects_exhausted_parent_depth() -> None:
-    child_def = AgentRuntimePolicy.from_legacy(
+    child_def = AgentRuntimePolicy.test_factory(
         agent_type="child_depth_runner",
         description="Child depth",
         system_prompt="Depth",

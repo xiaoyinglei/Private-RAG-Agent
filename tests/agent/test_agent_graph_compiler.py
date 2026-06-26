@@ -89,7 +89,7 @@ def _registry() -> ToolRegistry:
 
 
 def _definition(*, allowed_tools: list[str]) -> AgentRuntimePolicy:
-    return AgentRuntimePolicy.from_legacy(
+    return AgentRuntimePolicy.test_factory(
         agent_type="research",
         description="Research agent",
         system_prompt="Use grounded evidence.",

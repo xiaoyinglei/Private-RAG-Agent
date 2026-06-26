@@ -190,7 +190,7 @@ def _definition(
     output_model: type[BaseModel] | None = None,
     model_selection: ModelSelectionPolicy | None = None,
 ) -> AgentRuntimePolicy:
-    return AgentRuntimePolicy.from_legacy(
+    return AgentRuntimePolicy.test_factory(
         agent_type=name,
         description=f"{name} parity definition",
         system_prompt="Use typed tools and preserve evidence.",

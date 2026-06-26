@@ -245,7 +245,7 @@ class _ExhaustedFinalizer:
 
 @pytest.mark.anyio
 async def test_structured_output_hook_is_critical_and_returns_validated_output() -> None:
-    definition = AgentRuntimePolicy.from_legacy(
+    definition = AgentRuntimePolicy.test_factory(
         agent_type="structured",
         description="structured",
         system_prompt="Return structured output.",
@@ -276,7 +276,7 @@ async def test_structured_output_hook_is_critical_and_returns_validated_output()
 
 @pytest.mark.anyio
 async def test_structured_output_exhaustion_halts_with_validation_details() -> None:
-    definition = AgentRuntimePolicy.from_legacy(
+    definition = AgentRuntimePolicy.test_factory(
         agent_type="structured",
         description="structured",
         system_prompt="Return structured output.",
@@ -382,7 +382,7 @@ async def test_explicit_goal_contract_accepts_traceable_evidence() -> None:
 
 
 def test_stop_hook_factory_installs_goal_hook_only_when_explicitly_supplied() -> None:
-    definition = AgentRuntimePolicy.from_legacy(
+    definition = AgentRuntimePolicy.test_factory(
         agent_type="plain",
         description="plain",
         system_prompt="Answer.",

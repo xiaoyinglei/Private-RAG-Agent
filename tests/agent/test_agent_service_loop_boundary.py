@@ -81,7 +81,7 @@ class _PauseAfterGoalFeedbackProvider:
 
 def _definition(*, requires_confirmation: bool = False) -> AgentRuntimePolicy:
     del requires_confirmation
-    return AgentRuntimePolicy.from_legacy(
+    return AgentRuntimePolicy.test_factory(
         agent_type="service_loop",
         description="Service loop boundary",
         system_prompt="Use the loop.",
