@@ -124,7 +124,7 @@ class TestFileManifestModel:
         assert "100 rows" in block
         assert "5 columns" in block
         assert "Available Tools" in block
-        assert "run_python_inline" in block
+        assert "run_python" in block
 
     def test_context_block_shows_warnings(self) -> None:
         entry = FileManifestEntry(
@@ -510,7 +510,7 @@ class TestFileFirstPath:
         # Context block should be usable
         block = manifest.to_context_block()
         assert "orders.csv" in block
-        assert "run_python_inline" in block
+        assert "run_python" in block
 
     def test_xlsx_manifest_shows_all_sheets(
         self, ws: WorkspaceRuntime,

@@ -186,7 +186,7 @@ class FileManifest(BaseModel):
         lines.append("")
         lines.append("── Available Tools ──")
         lines.append(
-            "structured_probe, run_python_inline, list_files, read_file, write_file"
+            "structured_probe, run_python, list_files, read_file, write_file"
         )
 
         # Available packages

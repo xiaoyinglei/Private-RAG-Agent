@@ -65,8 +65,6 @@ INTERNAL_TOOLS: frozenset[str] = frozenset({
     "asset_inspect",
     "asset_read_slice",
     "asset_analyze",
-    # Deprecated / merged
-    "run_python_inline",
 })
 
 # ── Activation groups (PR7: supplementary metadata, NOT a visibility switch) ──

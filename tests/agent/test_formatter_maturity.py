@@ -39,7 +39,7 @@ _FALLBACK_TOOLS = frozenset({
     "tool_search",
     "activate_tools",
     "task",
-    "run_python_inline",
+    # run_python_inline removed — use run_python with code= parameter
 })
 
 
