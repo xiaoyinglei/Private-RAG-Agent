@@ -63,12 +63,19 @@ class TestFormatterMaturity:
         )
 
     def test_formatter_registry_consistency(self) -> None:
-        """Registered formatter tool_names match a known ToolSpec name."""
+        """Registered formatter tool_names match known ToolSpec or runtime tools."""
         registry = _build_registry()
         spec_names = {spec.name for spec in registry.list_all()}
+        # Tools registered at runtime (workspace tools, discovery tools)
+        runtime_tools = {
+            "list_files", "read_file", "write_file", "run_python",
+            "structured_probe", "search_text", "apply_patch",
+            "run_command", "tool_repl",
+            "tool_search", "activate_tools", "task",
+        }
         mismatches: list[str] = []
         for formatter_tool_name in sorted(registry._formatters):
-            if formatter_tool_name not in spec_names:
+            if formatter_tool_name not in spec_names and formatter_tool_name not in runtime_tools:
                 mismatches.append(formatter_tool_name)
         assert mismatches == [], (
             f"Formatters with no matching ToolSpec: {mismatches}"

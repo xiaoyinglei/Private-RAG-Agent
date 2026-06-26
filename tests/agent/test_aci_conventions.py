@@ -32,15 +32,7 @@ _MATURE_TOOLS = [
     # Semantic RAG tools
     "search_knowledge",
     "search_assets",
-    # Core file/workspace tools
-    "list_files",
-    "read_file",
-    "write_file",
-    "run_python",
-    # Generic coding tools
-    "search_text",
-    "apply_patch",
-    "run_command",
+    # update_plan (contextual, no BaseTool)
     "update_plan",
 ]
 

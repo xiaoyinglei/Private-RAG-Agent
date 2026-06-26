@@ -28,6 +28,14 @@ from rag.agent.primitive_ops import (
 )
 from rag.agent.tools.base import BaseTool
 from rag.agent.tools.card import ToolCard
+from rag.agent.tools.generic_tools import (
+    ApplyPatchInput,
+    ApplyPatchOutput,
+    RunCommandInput,
+    RunCommandOutput,
+    SearchTextInput,
+    SearchTextOutput,
+)
 from rag.agent.tools.spec import ExecutionCategory, ToolPermissions
 from rag.agent.workspace import WorkspaceRuntime
 
@@ -129,27 +137,8 @@ class StructuredProbeTool(BaseTool):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# generic tools (own I/O models, implemented in PrimitiveOps methods)
+# generic tools (I/O models imported from generic_tools.py)
 # ═══════════════════════════════════════════════════════════════════════════════
-
-class SearchTextInput(BaseModel):
-    pattern: str
-    path: str = "."
-    file_types: str | None = None
-    max_results: int = 40
-    regex: bool = False
-    context_lines: int = 0
-
-class SearchTextMatch(BaseModel):
-    file_path: str = ""
-    line_number: int = 0
-    line_content: str = ""
-
-class SearchTextOutput(BaseModel):
-    matches: list[SearchTextMatch] = []
-    total_matches: int = 0
-    truncated: bool = False
-
 
 class SearchTextTool(BaseTool):
     name = "search_text"
@@ -170,19 +159,6 @@ class SearchTextTool(BaseTool):
         return PrimitiveOps(workspace=self._workspace).search_text(i)
 
 
-class ApplyPatchInput(BaseModel):
-    file_path: str
-    old_string: str
-    new_string: str
-    replace_all: bool = False
-
-class ApplyPatchOutput(BaseModel):
-    file_path: str = ""
-    replaced: bool = False
-    occurrences: int = 0
-    message: str = ""
-
-
 class ApplyPatchTool(BaseTool):
     name = "apply_patch"
     description = "Apply precise string replacement in a file."
@@ -198,20 +174,6 @@ class ApplyPatchTool(BaseTool):
     async def execute(self, i: BaseModel, c: Any = None) -> BaseModel:
         from rag.agent.primitive_ops import PrimitiveOps
         return PrimitiveOps(workspace=self._workspace).apply_patch(i)
-
-
-class RunCommandInput(BaseModel):
-    command: str
-    working_dir: str = "."
-    timeout_seconds: int = 120
-
-class RunCommandOutput(BaseModel):
-    stdout: str = ""
-    stderr: str = ""
-    exit_code: int = -1
-    timed_out: bool = False
-    truncated: bool = False
-    duration_ms: float = 0.0
 
 
 class RunCommandTool(BaseTool):

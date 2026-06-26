@@ -24,7 +24,13 @@ def test_builtin_agent_allowed_tools_exist_in_builtin_tool_registry() -> None:
 
     # These tools are registered dynamically by AgentService,
     # not in the static tool registry.
-    dynamically_registered = {"tool_search", "activate_tools", "task"}
+    dynamically_registered = {
+        "tool_search", "activate_tools", "task",
+        # Workspace tools — registered at runtime via create_workspace_tools()
+        "list_files", "read_file", "write_file", "run_python",
+        "search_text", "apply_patch", "run_command", "tool_repl",
+        "structured_probe",
+    }
 
     for definition in BUILTIN_AGENT_DEFINITIONS.values():
         assert set(definition.allowed_tools) <= tool_names | dynamically_registered

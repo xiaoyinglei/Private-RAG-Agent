@@ -148,11 +148,13 @@ class TestToolReplRunner:
     """Verify tool_repl runner and integration."""
 
     def test_tool_repl_registered_with_card(self) -> None:
-        from rag.agent.builtin_registry import create_builtin_tool_registry
+        from rag.agent.tools.workspace_tools import ToolReplTool
+        from rag.agent.workspace import create_temp_workspace
 
-        reg = create_builtin_tool_registry()
-        spec = reg.get("tool_repl")
-        assert spec is not None
+        ws = create_temp_workspace()
+        tool = ToolReplTool(ws)
+        spec = tool.to_spec()
+        assert spec.name == "tool_repl"
         assert spec.aci is not None
         assert spec.aci.when_to_use != ""
         assert spec.aci.activation_group == "workspace"
@@ -162,6 +164,8 @@ class TestToolReplRunner:
 
         reg = create_builtin_tool_registry()
         fmt = reg.get_formatter("tool_repl")
+        # Formatter is registered via builtin_registry even though
+        # the tool spec itself is registered at runtime
         assert fmt is not None
         assert fmt.tool_name == "tool_repl"
 

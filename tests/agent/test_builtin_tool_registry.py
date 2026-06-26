@@ -19,10 +19,8 @@ def test_builtin_tool_registry_contains_rag_and_llm_specs() -> None:
         "llm_generate", "llm_summarize", "llm_compare",
         "rag_search_answer",
     } <= names
-    # PrimitiveOps tools
-    assert {
-        "list_files", "read_file", "structured_probe", "write_file", "run_python", "run_python_inline",
-    } <= names
+    # Workspace tools are registered at runtime via create_workspace_tools(),
+    # not in the static builtin registry.
 
 
 def test_legacy_builtin_registry_import_remains_compatible() -> None:
