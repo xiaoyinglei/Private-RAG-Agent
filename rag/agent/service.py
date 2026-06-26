@@ -485,6 +485,7 @@ class AgentService:
             tools=workspace_tools,
         )
         self._validate_allowed_tools(runtime_registry)
+        self._validate_workspace_core_runners(runtime_registry)
 
         enriched_task = self._inject_manifest_into_task(task, manifest)
 
@@ -781,6 +782,29 @@ class AgentService:
         missing = [name for name in self._policy.allowed_tools if name not in registered]
         if missing:
             raise ValueError(f"unregistered tools: {', '.join(dict.fromkeys(missing))}")
+
+    @staticmethod
+    def _validate_workspace_core_runners(registry: ToolRegistry) -> None:
+        """Verify workspace-dependent core tools have runners registered.
+
+        These tools (search_text, apply_patch, run_command, etc.) depend on
+        create_workspace_tools() for their runners.  If someone changes the
+        workspace tool creation, this assertion catches the regression before
+        a model call fails silently at runtime.
+        """
+        _WORKSPACE_CORE_TOOLS = frozenset({
+            "list_files", "read_file", "write_file", "run_python",
+            "search_text", "apply_patch", "run_command",
+        })
+        missing_runners = sorted(
+            name for name in _WORKSPACE_CORE_TOOLS
+            if not registry.has_runner(name)
+        )
+        if missing_runners:
+            raise RuntimeError(
+                f"Workspace core tools missing runners: {', '.join(missing_runners)}. "
+                f"Ensure create_workspace_tools() includes all workspace-dependent core tools."
+            )
 
     @staticmethod
     def _inject_manifest_into_task(task: str, manifest: FileManifest) -> str:
@@ -1366,6 +1390,7 @@ class AgentService:
             tools=workspace_tools,
         )
         self._validate_allowed_tools(runtime_registry)
+        self._validate_workspace_core_runners(runtime_registry)
         loop = self._build_loop(
             runtime_registry=runtime_registry,
             checkpoint_store=checkpoint_store,

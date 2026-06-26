@@ -18,6 +18,7 @@ from rag.agent.core.llm_registry import ModelRegistry
 from rag.agent.core.runtime_diagnostics import RuntimeDiagnostic
 from rag.agent.service import AgentRunRequest, AgentRunResult
 from rag.agent.state import AgentState
+from rag.agent.capabilities.tool_search import ToolSearchInput, ToolSearchOutput
 from rag.agent.tools.llm_tools import LLMCompareInput, LLMGenerateInput
 from rag.agent.tools.registry import ToolExecutionContext
 from rag.schema.runtime import AccessPolicy, RuntimeMode
@@ -302,3 +303,52 @@ async def test_build_agent_service_registers_rag_runner_with_execution_context()
 def test_build_agent_service_rejects_unknown_agent() -> None:
     with pytest.raises(ValueError, match="not a supported CLI agent"):
         _build_agent_service(_Runtime(), agent_type="unknown")
+
+
+def test_validate_workspace_core_runners_detects_missing_runner() -> None:
+    """search_text/apply_patch/run_command must have runners after workspace setup."""
+    from rag.agent.service import AgentService
+    from rag.agent.tools.registry import ToolRegistry
+    from rag.agent.tools.spec import ExecutionCategory, ToolPermissions
+
+    # Registry without any runners — should fail
+    registry = ToolRegistry()
+    # Register a bare spec without runner (simulating a bug where workspace tool creation skips search_text)
+    from rag.agent.tools.spec import ToolSpec
+    registry.register(ToolSpec(
+        name="search_text",
+        description="Search files",
+        input_model=ToolSearchInput,
+        output_model=ToolSearchOutput,
+        error_model=ToolSearchOutput,
+        permissions=ToolPermissions(),
+        execution_category=ExecutionCategory.READ,
+        timeout_seconds=5,
+    ))
+
+    with pytest.raises(RuntimeError, match="search_text"):
+        AgentService._validate_workspace_core_runners(registry)
+
+
+def test_validate_workspace_core_runners_passes_when_runners_present() -> None:
+    """No error when all workspace core tools have runners."""
+    from rag.agent.service import AgentService
+    from rag.agent.tools.registry import ToolRegistry
+    from rag.agent.tools.spec import ExecutionCategory, ToolPermissions, ToolSpec
+
+    registry = ToolRegistry()
+    for name in ("search_text", "apply_patch", "run_command", "list_files", "read_file", "write_file", "run_python"):
+        registry.register(ToolSpec(
+            name=name,
+            description=f"Tool: {name}",
+            input_model=ToolSearchInput,
+            output_model=ToolSearchOutput,
+            error_model=ToolSearchOutput,
+            permissions=ToolPermissions(),
+            execution_category=ExecutionCategory.READ,
+            timeout_seconds=5,
+        ))
+        registry.register_runner(name, lambda **kw: None)
+
+    # Should not raise
+    AgentService._validate_workspace_core_runners(registry)
