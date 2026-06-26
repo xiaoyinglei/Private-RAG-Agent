@@ -3,7 +3,7 @@ from __future__ import annotations
 from langchain_core.messages import HumanMessage
 
 from rag.agent.core.context import AgentRunConfig
-from rag.agent.core.definition import AgentDefinition
+from rag.agent.core.definition import AgentRuntimePolicy
 from rag.agent.loop.state import LoopState, create_loop_state
 from rag.agent.memory.injector import ContextBuilder
 from rag.agent.memory.models import ExternalizedToolOutput, ExtractedFact, MemoryRef, WorkingSummary
@@ -32,8 +32,8 @@ class _CharacterTokenAccounting:
         return clipped
 
 
-def _definition() -> AgentDefinition:
-    return AgentDefinition(
+def _definition() -> AgentRuntimePolicy:
+    return AgentRuntimePolicy.from_legacy(
         agent_type="research",
         description="Research agent",
         system_prompt="System prompt",
@@ -270,7 +270,7 @@ def test_required_section_overflow_never_replaces_real_content_with_hash() -> No
     state["citations"] = []
     state["tool_results"] = []
     state["messages"] = []
-    definition = AgentDefinition(
+    definition = AgentRuntimePolicy.from_legacy(
         agent_type="research",
         description="Research agent",
         system_prompt="SYSTEM_REAL_CONTENT",
@@ -323,7 +323,7 @@ def test_optional_section_is_real_text_clipped_or_dropped() -> None:
 def test_context_hard_budget_compacts_required_sections_without_overrun() -> None:
     state = _state()
     state["task"] = "TASK_RAW " * 400
-    definition = AgentDefinition(
+    definition = AgentRuntimePolicy.from_legacy(
         agent_type="research",
         description="Research agent",
         system_prompt="SYSTEM_RAW " * 400,
@@ -345,7 +345,7 @@ def test_context_hard_budget_compacts_required_sections_without_overrun() -> Non
 def test_context_overflow_marks_budget_when_minimal_snapshot_cannot_fit() -> None:
     state = _state()
     state["task"] = "irreducible task"
-    definition = AgentDefinition(
+    definition = AgentRuntimePolicy.from_legacy(
         agent_type="research",
         description="Research agent",
         system_prompt="irreducible system",

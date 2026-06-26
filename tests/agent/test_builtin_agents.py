@@ -50,4 +50,4 @@ def test_generic_agent_includes_semantic_rag_tools() -> None:
 
 
 def test_generic_agent_budget_defaults() -> None:
-    assert BUILTIN_AGENT_DEFINITIONS["generic"].estimated_token_budget == 96_000
+    assert BUILTIN_AGENT_DEFINITIONS["generic"].token_budget == 96_000

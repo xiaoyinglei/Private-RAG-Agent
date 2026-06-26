@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Any
 
 from pydantic import BaseModel
 
@@ -33,7 +34,7 @@ class ToolPolicy:
 
 @dataclass(frozen=True)
 class AgentRuntimePolicy:
-    """Root runtime contract — replaces AgentDefinition as the primary entry point.
+    """Root runtime contract — replaces AgentRuntimePolicy as the primary entry point.
 
     ``allowed_tools`` is a derived convenience property: it returns
     ``core_tool_names`` plus all deferred tool names that pass the filter.
@@ -81,68 +82,55 @@ class AgentRuntimePolicy:
         if self.max_stop_hook_blocks < 1:
             raise ValueError("max_stop_hook_blocks must be positive")
 
+    @classmethod
+    def from_legacy(
+        cls,
+        *,
+        agent_type: str = "generic",
+        description: str = "",
+        system_prompt: str = "",
+        allowed_tools: list[str] | None = None,
+        access_policy: Any = None,
+        estimated_token_budget: int = 8000,
+        estimated_work_budget: int = 20000,
+        model_selection: Any = None,
+        output_model: type[BaseModel] | None = None,
+        output_validation_max_retries: int = 2,
+        max_stop_hook_blocks: int = 3,
+        max_iterations: int = 10,
+        max_depth: int = 2,
+        tool_policy: Any = None,
+        **__: Any,
+    ) -> AgentRuntimePolicy:
+        """Backward-compat factory — accepts old AgentDefinition kwargs.
 
-@dataclass(frozen=True)
-class AgentDefinition:
-    """Compatibility adapter — converts to AgentRuntimePolicy via ``to_runtime_policy()``.
-
-    New callers should use AgentRuntimePolicy directly.
-    """
-
-    agent_type: str
-    description: str
-    system_prompt: str
-    allowed_tools: list[str]
-    access_policy: AccessPolicy | None = None
-    estimated_token_budget: int = 8000
-    estimated_work_budget: int = 20_000
-    model_selection: ModelSelectionPolicy = field(default_factory=ModelSelectionPolicy)
-    output_model: type[BaseModel] | None = None
-    output_validation_max_retries: int = 2
-    max_stop_hook_blocks: int = 3
-    max_iterations: int = 10
-    max_depth: int = 2
-    tool_policy: ToolPolicy = field(default_factory=ToolPolicy)
-
-    def __post_init__(self) -> None:
-        if self.output_validation_max_retries < 0:
-            raise ValueError(
-                "output_validation_max_retries must be non-negative"
-            )
-        if self.max_stop_hook_blocks < 1:
-            raise ValueError("max_stop_hook_blocks must be positive")
-
-    def to_runtime_policy(self) -> AgentRuntimePolicy:
-        """Convert legacy AgentDefinition to AgentRuntimePolicy."""
+        Tests and legacy callers use this to construct AgentRuntimePolicy
+        with old field names.  Will be removed after test migration.
+        """
         from rag.agent.capabilities.catalog import CORE_TOOLS, DEFERRED_TOOLS
 
-        core = tuple(
-            t for t in self.allowed_tools if t in CORE_TOOLS
-        )
-        deferred = tuple(
-            t for t in self.allowed_tools if t in DEFERRED_TOOLS
-        )
-        return AgentRuntimePolicy(
-            system_instructions=self.system_prompt,
+        tools = allowed_tools or []
+        core = tuple(t for t in tools if t in CORE_TOOLS)
+        deferred = tuple(t for t in tools if t in DEFERRED_TOOLS)
+        # Unknown tools → core (test tools like "dummy", "echo", "write_tool")
+        core = core + tuple(t for t in tools if t not in CORE_TOOLS and t not in DEFERRED_TOOLS)
+
+        return cls(
+            system_instructions=system_prompt,
             core_tool_names=core,
             deferred_tool_names=deferred,
-            token_budget=self.estimated_token_budget,
-            work_budget=self.estimated_work_budget,
-            max_iterations=self.max_iterations,
-            max_depth=self.max_depth,
-            access_policy_ceiling=self.access_policy,
-            model_selection=self.model_selection,
-            tool_policy=self.tool_policy,
-            output_model=self.output_model,
-            output_validation_max_retries=self.output_validation_max_retries,
-            max_stop_hook_blocks=self.max_stop_hook_blocks,
-            agent_type=self.agent_type,
-            description=self.description,
+            token_budget=estimated_token_budget,
+            work_budget=estimated_work_budget,
+            max_iterations=max_iterations,
+            max_depth=max_depth,
+            agent_type=agent_type,
+            description=description,
+            access_policy_ceiling=access_policy,
+            model_selection=model_selection or ModelSelectionPolicy(),
+            tool_policy=tool_policy or ToolPolicy(),
+            output_model=output_model,
+            output_validation_max_retries=output_validation_max_retries,
+            max_stop_hook_blocks=max_stop_hook_blocks,
         )
 
-    # ── backward compat: expose runtime_policy as a property ──
 
-    @property
-    def runtime_policy(self) -> AgentRuntimePolicy:
-        """Proxy to runtime_policy sub-fields for legacy callers."""
-        return self.to_runtime_policy()

@@ -12,7 +12,7 @@ from langchain_core.messages import HumanMessage
 from pydantic import BaseModel
 
 from rag.agent.core.context import AgentRunConfig, RunRegistry
-from rag.agent.core.definition import AgentDefinition
+from rag.agent.core.definition import AgentRuntimePolicy
 from rag.agent.core.finalization import FinishCandidateBuilder
 from rag.agent.core.tool_execution import (
     ToolExecutionRecord,
@@ -67,7 +67,7 @@ class _SequenceProvider:
         self,
         state: LoopState,
         *,
-        definition: AgentDefinition,
+        definition: AgentRuntimePolicy,
         budget_remaining: int,
     ) -> ModelTurnDraft | ModelTurnEnvelope:
         del definition, budget_remaining
@@ -88,7 +88,7 @@ class _SinkAwareFinishProvider:
         self,
         state: LoopState,
         *,
-        definition: AgentDefinition,
+        definition: AgentRuntimePolicy,
         budget_remaining: int,
     ) -> ModelTurnDraft:
         del definition, budget_remaining
@@ -172,8 +172,8 @@ def _definition(
     *,
     allowed_tools: list[str] | None = None,
     max_iterations: int = 10,
-) -> AgentDefinition:
-    return AgentDefinition(
+) -> AgentRuntimePolicy:
+    return AgentRuntimePolicy.from_legacy(
         agent_type="research",
         description="Loop runtime test",
         system_prompt="Use trusted tools and finish with a candidate.",
@@ -210,7 +210,7 @@ def _accepting_stop_runner() -> StopHookRunner:
 
 def _loop(
     *,
-    definition: AgentDefinition,
+    definition: AgentRuntimePolicy,
     provider: _SequenceProvider,
     tool_runner: ToolExecutionService,
     checkpoint: _Checkpoint,

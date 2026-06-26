@@ -20,7 +20,7 @@ from rag.agent.core.checkpointing import (
     LangGraphCheckpointStore,
     agent_checkpoint_serde,
 )
-from rag.agent.core.definition import AgentDefinition
+from rag.agent.core.definition import AgentRuntimePolicy
 from rag.agent.core.finalization import FinishCandidateBuilder
 from rag.agent.core.human_input import HumanInputResponse
 from rag.agent.core.tool_execution import ToolExecutionService
@@ -82,7 +82,7 @@ class _CandidateProvider:
         self,
         state: LoopState,
         *,
-        definition: AgentDefinition,
+        definition: AgentRuntimePolicy,
         budget_remaining: int,
     ) -> ModelTurnDraft | ModelTurnEnvelope:
         del definition, budget_remaining
@@ -129,7 +129,7 @@ class _EventRecorder(LoopEventSink):
 
 async def _run_loop(
     *,
-    definition: AgentDefinition,
+    definition: AgentRuntimePolicy,
     registry: ToolRegistry,
     state: LoopState,
     provider: _CandidateProvider,

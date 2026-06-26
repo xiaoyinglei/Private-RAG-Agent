@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 
 from pydantic import BaseModel
 
-from rag.agent.core.definition import AgentDefinition
+from rag.agent.core.definition import AgentRuntimePolicy
 from rag.agent.core.llm_prompts import (
     build_loop_turn_prompt,
 )
@@ -80,7 +80,7 @@ class AgentLLMContextAssembler:
     def assemble_loop_turn(
         self,
         *,
-        definition: AgentDefinition,
+        definition: AgentRuntimePolicy,
         state: LoopState,
         budget_remaining: int,
         output_schema: type[BaseModel] | None = None,
@@ -89,7 +89,7 @@ class AgentLLMContextAssembler:
             stage=LLMCallStage.TOOL_DECISION,
             state=state,
             prefix_sections=[
-                self._required_section("system", definition.system_prompt),
+                self._required_section("system", definition.system_instructions),
                 self._required_section(
                     "instructions",
                     build_loop_turn_prompt(
@@ -107,14 +107,14 @@ class AgentLLMContextAssembler:
     def assemble_generate(
         self,
         *,
-        definition: AgentDefinition,
+        definition: AgentRuntimePolicy,
         state: LoopState,
         prompt: str,
         context_sections: Sequence[str],
         stage: LLMCallStage = LLMCallStage.LLM_GENERATE,
     ) -> AssembledAgentLLMContext:
         prefix = [
-            self._required_section("system", definition.system_prompt),
+            self._required_section("system", definition.system_instructions),
             self._required_section("task", prompt),
         ]
         if call_context := self._call_context(context_sections):
@@ -130,7 +130,7 @@ class AgentLLMContextAssembler:
     def assemble_summarize(
         self,
         *,
-        definition: AgentDefinition,
+        definition: AgentRuntimePolicy,
         state: LoopState,
         task: str,
         context_sections: Sequence[str],
@@ -143,7 +143,7 @@ class AgentLLMContextAssembler:
         prefix = [
             self._required_section(
                 "system",
-                f"{definition.system_prompt}\n\n{instruction}".strip(),
+                f"{definition.system_instructions}\n\n{instruction}".strip(),
             ),
             self._required_section("task", task),
         ]
@@ -160,7 +160,7 @@ class AgentLLMContextAssembler:
     def assemble_compare(
         self,
         *,
-        definition: AgentDefinition,
+        definition: AgentRuntimePolicy,
         state: LoopState,
         question: str,
         left_context_sections: Sequence[str],
@@ -172,7 +172,7 @@ class AgentLLMContextAssembler:
         if right := self._call_context(right_context_sections):
             context_parts.append(f"Right context:\n{right}")
         prefix = [
-            self._required_section("system", definition.system_prompt),
+            self._required_section("system", definition.system_instructions),
             self._required_section("task", question),
         ]
         if context_parts:
@@ -193,7 +193,7 @@ class AgentLLMContextAssembler:
     def assemble_final_output(
         self,
         *,
-        definition: AgentDefinition,
+        definition: AgentRuntimePolicy,
         state: LoopState,
         candidate_text: str,
         validation_feedback: str | None,
@@ -205,7 +205,7 @@ class AgentLLMContextAssembler:
             "Do not add unsupported claims."
         )
         prefix = [
-            self._required_section("system", definition.system_prompt),
+            self._required_section("system", definition.system_instructions),
             self._required_section(
                 "task",
                 f"{instructions}\n\nUser task:\n{state.get('task', '').strip()}",
@@ -380,12 +380,17 @@ class AgentLLMContextAssembler:
         )
 
     @staticmethod
-    def _empty_definition() -> AgentDefinition:
-        empty_definition = AgentDefinition(
+    def _empty_definition() -> AgentRuntimePolicy:
+        empty_definition = AgentRuntimePolicy(
             agent_type="context_only",
             description="Context-only assembly",
-            system_prompt="",
-            allowed_tools=[],
+            system_instructions="",
+            core_tool_names=(),
+            deferred_tool_names=(),
+            token_budget=8000,
+            work_budget=20_000,
+            max_iterations=10,
+            max_depth=2,
         )
         return empty_definition
 

@@ -10,13 +10,13 @@ from rag.agent.core.context import (
     RunRegistry,
     derive_child_config,
 )
-from rag.agent.core.definition import AgentDefinition, ModelSelectionPolicy, ToolPolicy
+from rag.agent.core.definition import AgentRuntimePolicy, ModelSelectionPolicy, ToolPolicy
 from rag.agent.core.delegation import AgentDelegationRequest, DelegatedAgentRunner
 from rag.agent.core.registry import AgentRegistry
 from rag.agent.core.subagent_runner import BuiltinSubAgentRunner
 
 __all__ = [
-    "AgentDefinition",
+    "AgentRuntimePolicy",
     "GraphCompiler",
     "AgentRegistry",
     "AgentRunConfig",

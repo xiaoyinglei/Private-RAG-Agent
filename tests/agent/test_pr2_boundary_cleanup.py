@@ -12,7 +12,7 @@ from unittest.mock import MagicMock
 from pydantic import BaseModel
 
 from rag.agent.core.context import AgentRunConfig
-from rag.agent.core.definition import AgentDefinition
+from rag.agent.core.definition import AgentRuntimePolicy
 from rag.agent.core.llm_context import AgentLLMContextAssembler
 from rag.agent.core.observations import ObservationBatch, StructuredObservation
 from rag.agent.loop.runtime import AgentLoop
@@ -65,8 +65,8 @@ def _minimal_run_config(run_id: str = "pr2-t10") -> AgentRunConfig:
     )
 
 
-def _definition() -> AgentDefinition:
-    return AgentDefinition(
+def _definition() -> AgentRuntimePolicy:
+    return AgentRuntimePolicy.from_legacy(
         agent_type="research",
         description="Research agent",
         system_prompt="You are a research assistant.",

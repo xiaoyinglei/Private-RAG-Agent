@@ -19,7 +19,7 @@ from rag.providers.llm_gateway import LLMGateway, TokenAccounting
 from rag.schema.llm import DEFAULT_LLM_STAGE_BUDGETS, LLMCallStage
 
 if TYPE_CHECKING:
-    from rag.agent.core.definition import AgentDefinition
+    from rag.agent.core.definition import AgentRuntimePolicy
     from rag.agent.loop.state import LoopState
 
 
@@ -39,7 +39,7 @@ class StructuredOutputFinalizer(Protocol):
     def finalize(
         self,
         *,
-        definition: AgentDefinition,
+        definition: AgentRuntimePolicy,
         state: LoopState,
         candidate_text: str,
     ) -> BaseModel | Awaitable[BaseModel]: ...
@@ -72,13 +72,13 @@ class ModelStructuredOutputFinalizer:
     async def finalize(
         self,
         *,
-        definition: AgentDefinition,
+        definition: AgentRuntimePolicy,
         state: LoopState,
         candidate_text: str,
     ) -> BaseModel:
         output_model = definition.output_model
         if output_model is None:
-            raise ValueError("AgentDefinition.output_model is not configured")
+            raise ValueError("AgentRuntimePolicy.output_model is not configured")
         try:
             ledger = RunRegistry.get(state["run_config"].run_id).budget_ledger
         except KeyError as exc:

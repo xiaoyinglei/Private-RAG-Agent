@@ -4,7 +4,7 @@ from collections.abc import Sequence
 
 from langgraph.checkpoint.base import BaseCheckpointSaver
 
-from rag.agent.core.definition import AgentDefinition
+from rag.agent.core.definition import AgentRuntimePolicy
 from rag.agent.core.delegation import DelegatedAgentRunner
 from rag.agent.core.llm_registry import ModelRegistry
 from rag.agent.core.runtime_diagnostics import RuntimeDiagnostic
@@ -36,7 +36,7 @@ class AgentServiceFactory:
     def bind_subagent_runner(self, runner: DelegatedAgentRunner) -> None:
         self._subagent_runner = runner
 
-    def create(self, definition: AgentDefinition) -> AgentService:
+    def create(self, definition: AgentRuntimePolicy) -> AgentService:
         return AgentService(
             definition=definition,
             tool_registry=self._tool_registry,

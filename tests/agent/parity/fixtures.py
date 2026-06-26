@@ -6,7 +6,7 @@ from langchain_core.messages import HumanMessage
 from pydantic import BaseModel
 
 from rag.agent.core.context import AgentRunConfig, RunRegistry
-from rag.agent.core.definition import AgentDefinition, ModelSelectionPolicy, ToolPolicy
+from rag.agent.core.definition import AgentRuntimePolicy, ModelSelectionPolicy, ToolPolicy
 from rag.agent.core.delegation import ParentAgentContext
 from rag.agent.loop.state import LoopState, create_loop_state
 from rag.agent.memory.models import MemoryPolicy
@@ -101,7 +101,7 @@ class _StructuredFinalizer:
     def finalize(
         self,
         *,
-        definition: AgentDefinition,
+        definition: AgentRuntimePolicy,
         state: LoopState,
         candidate_text: str,
     ) -> _StructuredAnswer:
@@ -135,7 +135,7 @@ def _state(
     *,
     task: str,
     pending_tool_calls: list[ToolCallPlan] | None = None,
-    definition: AgentDefinition | None = None,
+    definition: AgentRuntimePolicy | None = None,
     tool_policy: ToolPolicy | None = None,
     memory_policy: MemoryPolicy | None = None,
     messages: list[HumanMessage] | None = None,
@@ -189,8 +189,8 @@ def _definition(
     *,
     output_model: type[BaseModel] | None = None,
     model_selection: ModelSelectionPolicy | None = None,
-) -> AgentDefinition:
-    return AgentDefinition(
+) -> AgentRuntimePolicy:
+    return AgentRuntimePolicy.from_legacy(
         agent_type=name,
         description=f"{name} parity definition",
         system_prompt="Use typed tools and preserve evidence.",

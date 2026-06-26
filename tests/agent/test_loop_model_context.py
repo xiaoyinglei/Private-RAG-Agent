@@ -7,7 +7,7 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from pydantic import BaseModel
 
 from rag.agent.core.context import AgentRunConfig
-from rag.agent.core.definition import AgentDefinition
+from rag.agent.core.definition import AgentRuntimePolicy
 from rag.agent.core.human_input import HumanInputRequest, ToolCallSummary
 from rag.agent.core.llm_context import AgentLLMContextAssembler
 from rag.agent.core.llm_prompts import build_loop_turn_prompt
@@ -87,8 +87,8 @@ class _RecordingMemoryStore:
         )
 
 
-def _definition() -> AgentDefinition:
-    return AgentDefinition(
+def _definition() -> AgentRuntimePolicy:
+    return AgentRuntimePolicy.from_legacy(
         agent_type="research",
         description="Research",
         system_prompt="Use tools when they help and preserve citations.",

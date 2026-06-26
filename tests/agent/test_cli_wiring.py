@@ -13,7 +13,7 @@ from rag.agent.cli import (
     _resolve_cli_agent_definition,
 )
 from rag.agent.core.context import AgentRunConfig, RunRegistry
-from rag.agent.core.definition import AgentDefinition
+from rag.agent.core.definition import AgentRuntimePolicy
 from rag.agent.core.llm_registry import ModelRegistry
 from rag.agent.core.runtime_diagnostics import RuntimeDiagnostic
 from rag.agent.service import AgentRunRequest, AgentRunResult
@@ -102,7 +102,7 @@ def _trusted_llm_execution_context(
             "run_config": config,
         },
     )
-    definition = AgentDefinition(
+    definition = AgentRuntimePolicy.from_legacy(
         agent_type="test",
         description="CLI model tool test",
         system_prompt="Use only trusted supplied context.",

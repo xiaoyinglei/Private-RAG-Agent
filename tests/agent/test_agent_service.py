@@ -9,7 +9,7 @@ from rag.agent.builtin.generic import GENERIC_AGENT
 from rag.agent.builtin_registry import create_builtin_tool_registry
 from rag.agent.compat.goal_contract import GoalDeliverable, GoalSpec
 from rag.agent.core.context import AgentRunConfig, RunRegistry
-from rag.agent.core.definition import AgentDefinition
+from rag.agent.core.definition import AgentRuntimePolicy
 from rag.agent.loop.state import LoopState, ModelTurnDraft
 from rag.agent.primitive_ops import PrimitiveOps
 from rag.agent.runner.python_runner import LocalSubprocessPythonRunner
@@ -70,7 +70,7 @@ class _FinishFromResultsProvider:
         self,
         state: LoopState,
         *,
-        definition: AgentDefinition,
+        definition: AgentRuntimePolicy,
         budget_remaining: int,
     ) -> ModelTurnDraft:
         del definition, budget_remaining
@@ -119,7 +119,7 @@ def test_agent_service_initial_state_creates_runtime_handles() -> None:
 
     assert state["task"] == "Explain policy"
     assert state["run_config"].run_id == "svc-state"
-    assert state["run_config"].budget_total == GENERIC_AGENT.estimated_token_budget
+    assert state["run_config"].budget_total == GENERIC_AGENT.token_budget
     assert "tool_action_proposals" not in state
     assert "plan" not in state
     assert "subtask_results" not in state
@@ -174,7 +174,7 @@ def test_agent_run_result_clears_stale_human_input_when_done() -> None:
 
 
 def test_agent_run_result_restores_configured_concrete_final_output() -> None:
-    definition = AgentDefinition(
+    definition = AgentRuntimePolicy.from_legacy(
         agent_type="structured",
         description="Structured",
         system_prompt="Return structured output.",
@@ -423,7 +423,7 @@ async def test_agent_service_run_python_nonzero_exit_is_tool_error(
 
     monkeypatch.setattr(primitive_ops_module, "PrimitiveOps", _local_primitive_ops)
     service = AgentService(
-        definition=AgentDefinition(
+        definition=AgentRuntimePolicy.from_legacy(
             agent_type="python_test",
             description="Python test",
             system_prompt="Run Python.",

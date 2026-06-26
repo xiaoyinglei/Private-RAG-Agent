@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 from pydantic import BaseModel
 
-from rag.agent.core.definition import AgentDefinition
+from rag.agent.core.definition import AgentRuntimePolicy
 from rag.agent.memory.models import (
     ContextBudgetSnapshot,
     ContextSection,
@@ -104,7 +104,7 @@ class ContextBuilder:
     def assemble_loop(
         self,
         *,
-        definition: AgentDefinition,
+        definition: AgentRuntimePolicy,
         state: LoopState,
         policy_hints: Sequence[str] = (),
         recalled_memories: Sequence[str] = (),
@@ -130,7 +130,7 @@ class ContextBuilder:
                 required=(required if required_sections is None else name in required_sections),
             )
 
-        add("system", definition.system_prompt, required=True)
+        add("system", definition.system_instructions, required=True)
         add("policy_hints", self._format_policy_hints(policy_hints))
         add("task", self._format_task(state.get("task", "")), required=True)
         add(

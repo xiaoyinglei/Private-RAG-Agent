@@ -19,7 +19,7 @@ from rag.agent.core.checkpointing import (
 from rag.agent.core.context import RunRegistry
 from rag.agent.core.turn_contracts import ToolCallPlan
 from rag.agent.tools.spec import ToolResult
-from rag.agent.core.definition import AgentDefinition
+from rag.agent.core.definition import AgentRuntimePolicy
 from rag.agent.core.finalization import (
     FinishCandidateBuilder,
     FinishCandidateBuildError,
@@ -82,7 +82,7 @@ class ModelTurnProvider(Protocol):
         self,
         state: LoopState,
         *,
-        definition: AgentDefinition,
+        definition: AgentRuntimePolicy,
         budget_remaining: int,
     ) -> ModelTurnDraft | ModelTurnEnvelope: ...
 
@@ -100,7 +100,7 @@ class LoopToolRunner(Protocol):
         request: ToolBatchRequest,
         *,
         state: LoopState | None,
-        definition: AgentDefinition | None = None,
+        definition: AgentRuntimePolicy | None = None,
     ) -> ToolBatchResult | Awaitable[ToolBatchResult]: ...
 
 
@@ -119,7 +119,7 @@ class AgentLoop:
     def __init__(
         self,
         *,
-        definition: AgentDefinition,
+        definition: AgentRuntimePolicy,
         model_provider: ModelTurnProvider,
         context_manager: LoopContextManager,
         tool_runner: LoopToolRunner,

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import AsyncGenerator, Mapping, Sequence
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, cast
 from uuid import uuid4
@@ -38,7 +38,7 @@ from rag.agent.core.checkpointing import (
     create_agent_checkpointer,
 )
 from rag.agent.core.context import AgentRunConfig, RunRegistry, derive_child_config
-from rag.agent.core.definition import AgentDefinition, AgentRuntimePolicy
+from rag.agent.core.definition import AgentRuntimePolicy
 from rag.agent.core.delegation import AgentDelegationRequest, DelegatedAgentRunner, ParentAgentContext
 from rag.agent.core.finalization import FinishCandidateBuilder
 from rag.agent.core.human_input import HumanInputRequest, HumanInputResponse
@@ -106,17 +106,17 @@ class AgentRunRequest(BaseModel):
     memory_policy: MemoryPolicy | None = None
     goal_spec: GoalSpec | None = None
 
-    def to_run_config(self, definition: AgentDefinition) -> AgentRunConfig:
+    def to_run_config(self, definition: AgentRuntimePolicy) -> AgentRunConfig:
         run_id = self.run_id or f"run_{uuid4().hex[:12]}"
         return AgentRunConfig(
             run_id=run_id,
             thread_id=self.thread_id or run_id,
-            budget_total=self.budget_total or definition.estimated_token_budget,
-            work_budget_total=definition.estimated_work_budget,
+            budget_total=self.budget_total or definition.token_budget,
+            work_budget_total=definition.work_budget,
             agent_type=definition.agent_type,
             max_context_tokens=self.max_context_tokens,
             max_depth=definition.max_depth if self.max_depth is None else self.max_depth,
-            access_policy=definition.access_policy or AccessPolicy.default(),
+            access_policy=definition.access_policy_ceiling or AccessPolicy.default(),
             tool_policy=definition.tool_policy,
             memory_policy=self.memory_policy or MemoryPolicy(),
         )
@@ -150,7 +150,7 @@ class AgentRunResult(BaseModel):
         cls,
         state: LoopState,
         *,
-        definition: AgentDefinition | None = None,
+        definition: AgentRuntimePolicy | None = None,
         workspace_path: str | None = None,
     ) -> AgentRunResult:
         return cls.from_loop_result(
@@ -164,7 +164,7 @@ class AgentRunResult(BaseModel):
         cls,
         state: LoopState,
         *,
-        definition: AgentDefinition | None = None,
+        definition: AgentRuntimePolicy | None = None,
         workspace_path: str | None = None,
     ) -> AgentRunResult:
         run_config = state["run_config"]
@@ -225,12 +225,30 @@ class AgentRunResult(BaseModel):
         )
 
 
+@dataclass
+class _RunContext:
+    """Prepared per-run context — the single source of truth for a run's setup.
+
+    Extracted from the duplicated setup logic in run_with_config / run_streaming.
+    Following Claude Code's "thin wrapper" philosophy: one path, clean assembly.
+    """
+
+    task: str
+    workspace: Any
+    manifest: Any  # FileManifest | None
+    workspace_tools: list[Any]  # list[BaseTool]
+    file_tools_to_activate: set[str]
+    runtime_registry: ToolRegistry
+    memory_store: WorkspaceMemoryStore
+    persistent_store: PersistentMemoryStore
+
+
 class _ResultDrivenModelTurnProvider:
     async def next_turn(
         self,
         state: LoopState,
         *,
-        definition: AgentDefinition,
+        definition: AgentRuntimePolicy,
         budget_remaining: int,
     ) -> ModelTurnDraft:
         del definition, budget_remaining
@@ -314,13 +332,14 @@ class _TaskChildRunner:
         child_policy: AgentRuntimePolicy,
         request: AgentDelegationRequest,
     ) -> AgentRunConfig:
-        child_definition = AgentDefinition(
+        child_definition = AgentRuntimePolicy(
             agent_type="task_child",
             description="Generic task child",
-            system_prompt=child_policy.system_instructions,
-            allowed_tools=child_policy.allowed_tools,
-            estimated_token_budget=(request.estimated_tokens or child_policy.token_budget),
-            estimated_work_budget=child_policy.work_budget,
+            system_instructions=child_policy.system_instructions,
+            core_tool_names=child_policy.core_tool_names,
+            deferred_tool_names=child_policy.deferred_tool_names,
+            token_budget=(request.estimated_tokens or child_policy.token_budget),
+            work_budget=child_policy.work_budget,
             max_iterations=child_policy.max_iterations,
             max_depth=child_policy.max_depth,
             model_selection=child_policy.model_selection,
@@ -339,7 +358,7 @@ class AgentService:
     def __init__(
         self,
         *,
-        definition: AgentDefinition | None = None,
+        definition: AgentRuntimePolicy | None = None,
         policy: AgentRuntimePolicy | None = None,
         tool_registry: ToolRegistry,
         model_turn_provider: ModelTurnProvider | None = None,
@@ -355,30 +374,12 @@ class AgentService:
     ) -> None:
         if definition is not None and policy is not None:
             raise ValueError("Provide either 'definition' or 'policy', not both")
-        if policy is not None:
-            # Convert AgentRuntimePolicy → AgentDefinition for internal compat.
-            # Remove this when service internals migrate to AgentRuntimePolicy.
-            core = [t for t in policy.core_tool_names]
-            deferred = [t for t in policy.deferred_tool_names]
-            definition = AgentDefinition(
-                agent_type=policy.agent_type,
-                description=policy.description,
-                system_prompt=policy.system_instructions,
-                allowed_tools=core + deferred,
-                access_policy=policy.access_policy_ceiling,
-                estimated_token_budget=policy.token_budget,
-                estimated_work_budget=policy.work_budget,
-                model_selection=policy.model_selection,
-                output_model=policy.output_model,
-                output_validation_max_retries=policy.output_validation_max_retries,
-                max_stop_hook_blocks=policy.max_stop_hook_blocks,
-                max_iterations=policy.max_iterations,
-                max_depth=policy.max_depth,
-                tool_policy=policy.tool_policy,
-            )
-        if definition is None:
+        if definition is not None:
+            self._policy = definition
+        elif policy is not None:
+            self._policy = policy
+        else:
             raise ValueError("Provide either 'definition' or 'policy'")
-        self._definition = definition
         self._base_tool_registry = tool_registry
         self._catalog = catalog or self._build_catalog(tool_registry)
         self._model_turn_provider = model_turn_provider
@@ -395,7 +396,7 @@ class AgentService:
         self._register_task_tool()
 
     def initial_state(self, request: AgentRunRequest) -> LoopState:
-        run_config = request.to_run_config(self._definition)
+        run_config = request.to_run_config(self._policy)
         return self.initial_state_from_config(
             task=request.task,
             run_config=run_config,
@@ -438,7 +439,7 @@ class AgentService:
         )
 
     async def run(self, request: AgentRunRequest) -> AgentRunResult:
-        run_config = request.to_run_config(self._definition)
+        run_config = request.to_run_config(self._policy)
         return await self.run_with_config(
             task=request.task,
             run_config=run_config,
@@ -449,6 +450,53 @@ class AgentService:
             goal_spec=request.goal_spec,
             input_files=request.input_files,
             workspace_path=request.workspace_path,
+        )
+
+    def _prepare_run(
+        self,
+        *,
+        task: str,
+        run_config: AgentRunConfig,
+        input_files: list[str] | None = None,
+        workspace_path: str | None = None,
+    ) -> _RunContext:
+        """Single entry point for per-run setup.  One path, no duplication."""
+        from rag.agent.file_manifest import build_file_manifest
+        from rag.agent.workspace import create_temp_workspace, import_files, open_workspace
+
+        if workspace_path:
+            workspace = open_workspace(workspace_path, create=True)
+        else:
+            workspace = create_temp_workspace()
+
+        if input_files:
+            import_files(workspace, [Path(f) for f in input_files])
+
+        manifest = build_file_manifest(workspace)
+        workspace_tools = create_workspace_tools(workspace)
+        memory_store = WorkspaceMemoryStore(
+            workspace=workspace,
+            policy=run_config.memory_policy,
+        )
+
+        file_tools_to_activate: set[str] = {"structured_probe"} if manifest.has_probeable_files else set()
+        runtime_registry = self._runtime_tool_registry(
+            run_config,
+            tools=workspace_tools,
+        )
+        self._validate_allowed_tools(runtime_registry)
+
+        enriched_task = self._inject_manifest_into_task(task, manifest)
+
+        return _RunContext(
+            task=enriched_task,
+            workspace=workspace,
+            manifest=manifest,
+            workspace_tools=workspace_tools,
+            file_tools_to_activate=file_tools_to_activate,
+            runtime_registry=runtime_registry,
+            memory_store=memory_store,
+            persistent_store=PersistentMemoryStore(workspace),
         )
 
     async def run_with_config(
@@ -464,65 +512,38 @@ class AgentService:
         input_files: list[str] | None = None,
         workspace_path: str | None = None,
     ) -> AgentRunResult:
-        from rag.agent.file_manifest import build_file_manifest
-        from rag.agent.workspace import create_temp_workspace, import_files, open_workspace
-
-        # 1. Create workspace
-        if workspace_path:
-            workspace = open_workspace(workspace_path, create=True)
-        else:
-            workspace = create_temp_workspace()
-
-        # 2. Import input files
-        if input_files:
-            import_files(workspace, [Path(f) for f in input_files])
-
-        # 3. Build file manifest (file-first processing)
-        manifest = build_file_manifest(workspace)
-
-        # 4. Create workspace tool instances (BaseTool: spec + runner in one class)
-        workspace_tools = create_workspace_tools(workspace)
-        memory_store = WorkspaceMemoryStore(
-            workspace=workspace,
-            policy=run_config.memory_policy,
+        ctx = self._prepare_run(
+            task=task,
+            run_config=run_config,
+            input_files=input_files,
+            workspace_path=workspace_path,
         )
-
-        # 5. Promote structured_probe to core if we have probeable files
-        file_tools_to_activate: set[str] = {"structured_probe"} if manifest.has_probeable_files else set()
-        runtime_registry = self._runtime_tool_registry(
-            run_config,
-            tools=workspace_tools,
-        )
-        self._validate_allowed_tools(runtime_registry)
-
-        # 6. Inject manifest context into task
-        enriched_task = self._inject_manifest_into_task(task, manifest)
 
         state = self._initial_loop_state_from_config(
-            task=enriched_task,
+            task=ctx.task,
             run_config=run_config,
             pending_tool_calls=pending_tool_calls,
             approved_tool_call_ids=approved_tool_call_ids,
             denied_tool_call_ids=denied_tool_call_ids,
             messages=messages,
-            memory_store=memory_store,
-            file_manifest=manifest,
+            memory_store=ctx.memory_store,
+            file_manifest=ctx.manifest,
         )
-        persistent_store = PersistentMemoryStore(workspace)
-        await self._load_persistent_memories(state, persistent_store, task=enriched_task)
+        await self._load_persistent_memories(state, ctx.persistent_store, task=ctx.task)
+
         checkpoint_store = LangGraphCheckpointStore(
             self._checkpointer,
             run_config=run_config,
             compatibility_config=GoalCompatibilityConfig(goal_spec=goal_spec),
         )
         loop = self._build_loop(
-            runtime_registry=runtime_registry,
+            runtime_registry=ctx.runtime_registry,
             checkpoint_store=checkpoint_store,
-            memory_store=memory_store,
+            memory_store=ctx.memory_store,
             goal_spec=goal_spec,
             state=state,
-            auto_activate_tools=file_tools_to_activate,
-            scratch_dir=workspace.root / "scratch",
+            auto_activate_tools=ctx.file_tools_to_activate,
+            scratch_dir=ctx.workspace.root / "scratch",
         )
         try:
             result_state = await loop.run(state)
@@ -532,17 +553,16 @@ class AgentService:
         if result_state["status"] in {"completed", "failed"}:
             RunRegistry.remove(run_config.run_id)
 
-        # 8. Extract persistent memories from completed conversation
         if result_state["status"] == "completed":
             try:
-                await self._extract_persistent_memories(result_state, persistent_store)
+                await self._extract_persistent_memories(result_state, ctx.persistent_store)
             except Exception:
                 logger.warning("Persistent memory extraction failed", exc_info=True)
 
         return AgentRunResult.from_loop_result(
             result_state,
-            definition=self._definition,
-            workspace_path=str(workspace.root),
+            definition=self._policy,
+            workspace_path=str(ctx.workspace.root),
         )
 
     async def run_streaming(self, request: AgentRunRequest) -> AsyncGenerator[Any, None]:
@@ -553,48 +573,25 @@ class AgentService:
                 handle(event)
         """
 
-        run_config = request.to_run_config(self._definition)
-
-        # 复用 run_with_config 的 setup 逻辑
-        from rag.agent.file_manifest import build_file_manifest
-        from rag.agent.workspace import create_temp_workspace, import_files, open_workspace
-
-        if request.workspace_path:
-            workspace = open_workspace(request.workspace_path, create=True)
-        else:
-            workspace = create_temp_workspace()
-
-        if request.input_files:
-            import_files(workspace, [Path(f) for f in request.input_files])
-
-        manifest = build_file_manifest(workspace)
-        workspace_tools = create_workspace_tools(workspace)
-        memory_store = WorkspaceMemoryStore(
-            workspace=workspace,
-            policy=run_config.memory_policy,
+        run_config = request.to_run_config(self._policy)
+        ctx = self._prepare_run(
+            task=request.task,
+            run_config=run_config,
+            input_files=request.input_files,
+            workspace_path=request.workspace_path,
         )
-
-        file_tools_to_activate: set[str] = {"structured_probe"} if manifest.has_probeable_files else set()
-        runtime_registry = self._runtime_tool_registry(
-            run_config,
-            tools=workspace_tools,
-        )
-        self._validate_allowed_tools(runtime_registry)
-
-        enriched_task = self._inject_manifest_into_task(request.task, manifest)
 
         state = self._initial_loop_state_from_config(
-            task=enriched_task,
+            task=ctx.task,
             run_config=run_config,
             pending_tool_calls=request.pending_tool_calls,
             approved_tool_call_ids=request.approved_tool_call_ids,
             denied_tool_call_ids=request.denied_tool_call_ids,
             messages=request.messages,
-            memory_store=memory_store,
-            file_manifest=manifest,
+            memory_store=ctx.memory_store,
+            file_manifest=ctx.manifest,
         )
-        persistent_store = PersistentMemoryStore(workspace)
-        await self._load_persistent_memories(state, persistent_store, task=enriched_task)
+        await self._load_persistent_memories(state, ctx.persistent_store, task=ctx.task)
 
         checkpoint_store = LangGraphCheckpointStore(
             self._checkpointer,
@@ -602,13 +599,13 @@ class AgentService:
             compatibility_config=GoalCompatibilityConfig(goal_spec=request.goal_spec),
         )
         loop = self._build_loop(
-            runtime_registry=runtime_registry,
+            runtime_registry=ctx.runtime_registry,
             checkpoint_store=checkpoint_store,
-            memory_store=memory_store,
+            memory_store=ctx.memory_store,
             goal_spec=request.goal_spec,
             state=state,
-            auto_activate_tools=file_tools_to_activate,
-            scratch_dir=workspace.root / "scratch",
+            auto_activate_tools=ctx.file_tools_to_activate,
+            scratch_dir=ctx.workspace.root / "scratch",
         )
 
         try:
@@ -617,10 +614,9 @@ class AgentService:
         finally:
             if state["status"] in {"completed", "failed"}:
                 RunRegistry.remove(run_config.run_id)
-            # Extract persistent memories from completed conversation
             if state["status"] == "completed":
                 try:
-                    await self._extract_persistent_memories(state, persistent_store)
+                    await self._extract_persistent_memories(state, ctx.persistent_store)
                 except Exception:
                     logger.warning("Persistent memory extraction failed", exc_info=True)
 
@@ -666,7 +662,7 @@ class AgentService:
         # Create and bind DeferredToolStore BEFORE resolving provider
         # (provider needs store for tool filtering)
         store = DeferredToolStore(
-            max_active=self._definition.runtime_policy.max_active_deferred_tools,
+            max_active=self._policy.max_active_deferred_tools,
         )
         deferred_store_var.set(store)
         if state is not None:
@@ -692,7 +688,7 @@ class AgentService:
         provider = self._resolve_model_turn_provider(state, tool_registry=runtime_registry)
         output_finalizer = self._resolve_output_finalizer(state)
         return AgentLoop(
-            definition=self._definition,
+            definition=self._policy,
             model_provider=provider,
             context_manager=LoopContextCompactor(store=memory_store),
             tool_runner=ToolExecutionService(
@@ -703,11 +699,11 @@ class AgentService:
             checkpoint_store=checkpoint_store,
             stop_hook_runner=StopHookRunner(
                 hooks=build_stop_hooks(
-                    definition=self._definition,
+                    definition=self._policy,
                     output_finalizer=output_finalizer,
                     goal_spec=goal_spec,
                 ),
-                max_blocks=self._definition.max_stop_hook_blocks,
+                max_blocks=self._policy.max_stop_hook_blocks,
             ),
             finish_candidate_builder=FinishCandidateBuilder(),
             catalog=self._catalog,
@@ -738,9 +734,9 @@ class AgentService:
                 )
                 return create_loop_model_turn_provider(
                     self._model_registry,
-                    self._definition.model_selection,
+                    self._policy.model_selection,
                     tool_registry=effective_registry,
-                    definition=self._definition,
+                    definition=self._policy,
                     catalog=self._catalog,
                     deferred_store=store,
                     stream_sink=self._stream_sink,
@@ -764,7 +760,7 @@ class AgentService:
     ) -> StructuredOutputFinalizer | None:
         if self._output_finalizer is not None:
             return self._output_finalizer
-        if self._definition.output_model is None or self._model_registry is None:
+        if self._policy.output_model is None or self._model_registry is None:
             return None
         try:
             return create_model_structured_output_finalizer(self._model_registry)
@@ -782,7 +778,7 @@ class AgentService:
 
     def _validate_allowed_tools(self, registry: ToolRegistry) -> None:
         registered = {tool.name for tool in registry.list_all()}
-        missing = [name for name in self._definition.allowed_tools if name not in registered]
+        missing = [name for name in self._policy.allowed_tools if name not in registered]
         if missing:
             raise ValueError(f"unregistered tools: {', '.join(dict.fromkeys(missing))}")
 
@@ -1031,12 +1027,12 @@ class AgentService:
             from rag.agent.tools.task_tool import TaskOutput, TaskToolRunner
 
             task_runner = TaskToolRunner(
-                policy=self._definition.to_runtime_policy(),
+                policy=self._policy,
                 tool_registry=runtime,
                 model_turn_provider=self._model_turn_provider,
                 retrieval_hint_provider=self._retrieval_hint_provider,
                 delegated_runner=_TaskChildRunner(
-                    policy=self._definition.to_runtime_policy(),
+                    policy=self._policy,
                     tool_registry=runtime,
                     model_turn_provider=self._model_turn_provider,
                     retrieval_hint_provider=self._retrieval_hint_provider,
@@ -1096,11 +1092,11 @@ class AgentService:
         self._inject_mcp_tools(runtime)
 
         # 2. Deny rules — apply ToolCatalogFilter to MCP tools as well
-        deny = self._definition.runtime_policy.tool_catalog_filter.deny
+        deny = self._policy.tool_catalog_filter.deny
         if deny:
             for tool_name in sorted(deny):
-                if tool_name in self._definition.allowed_tools:
-                    self._definition.allowed_tools.remove(tool_name)
+                if tool_name in self._policy.allowed_tools:
+                    self._policy.allowed_tools.remove(tool_name)
                 # Remove from catalog if present
                 if self._catalog.get(tool_name) is not None:
                     logger.info(f"Tool '{tool_name}' removed by deny rule")
@@ -1119,8 +1115,8 @@ class AgentService:
         # Extend allowed_tools so activate_tools accepts MCP tools.
         mcp_names = [s.name for s in self._mcp_registry.list_all_tools()]
         for name in mcp_names:
-            if name not in self._definition.allowed_tools:
-                self._definition.allowed_tools.append(name)
+            if name not in self._policy.allowed_tools:
+                self._policy.allowed_tools.append(name)
 
         for spec in self._mcp_registry.list_all_tools():
             # Register spec (if not already present)
@@ -1178,7 +1174,7 @@ class AgentService:
         PR5: ToolCard fields (if present) are appended to search_text
         and stored in ToolCatalogEntry for enriched search results.
         """
-        filt = self._definition.runtime_policy.tool_catalog_filter
+        filt = self._policy.tool_catalog_filter
         catalog = ToolCatalog()
         for spec in registry.list_all():
             if spec.name in filt.deny:
@@ -1242,7 +1238,7 @@ class AgentService:
             return
 
         catalog = self._catalog
-        definition = self._definition
+        definition = self._policy
 
         # ── tool_search ──
         search_spec = ToolSpec(
@@ -1382,7 +1378,7 @@ class AgentService:
             RunRegistry.remove(run_config.run_id)
         return AgentRunResult.from_loop_result(
             result_state,
-            definition=self._definition,
+            definition=self._policy,
             workspace_path=workspace_path,
         )
 
@@ -1439,12 +1435,12 @@ class AgentService:
         return AgentRunConfig(
             run_id=run_id,
             thread_id=run_id,
-            budget_total=self._definition.estimated_token_budget,
-            work_budget_total=self._definition.estimated_work_budget,
-            agent_type=self._definition.agent_type,
-            max_depth=self._definition.max_depth,
-            access_policy=(self._definition.access_policy or AccessPolicy.default()),
-            tool_policy=self._definition.tool_policy,
+            budget_total=self._policy.token_budget,
+            work_budget_total=self._policy.work_budget,
+            agent_type=self._policy.agent_type,
+            max_depth=self._policy.max_depth,
+            access_policy=(self._policy.access_policy_ceiling or AccessPolicy.default()),
+            tool_policy=self._policy.tool_policy,
         )
 
 
@@ -1471,14 +1467,14 @@ def _derive_insufficient_evidence(tool_results: list[ToolResult]) -> bool:
 def _restore_final_output(
     raw_output: ValidatedFinalOutput | dict[str, object] | None,
     *,
-    definition: AgentDefinition | None,
+    definition: AgentRuntimePolicy | None,
 ) -> BaseModel | None:
     if raw_output is None or definition is None or definition.output_model is None:
         return None
     envelope = ValidatedFinalOutput.model_validate(raw_output)
     expected_path = output_model_path(definition.output_model)
     if envelope.model_path != expected_path:
-        raise ValueError("Checkpoint final output model does not match AgentDefinition.output_model")
+        raise ValueError("Checkpoint final output model does not match AgentRuntimePolicy.output_model")
     return definition.output_model.model_validate(envelope.data)
 
 

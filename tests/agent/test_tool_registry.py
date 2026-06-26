@@ -4,7 +4,7 @@ import pytest
 from pydantic import BaseModel
 
 from rag.agent.core.context import AgentRunConfig
-from rag.agent.core.definition import AgentDefinition
+from rag.agent.core.definition import AgentRuntimePolicy
 from rag.agent.tools.registry import (
     ToolInputValidationError,
     ToolOutputValidationError,
@@ -136,7 +136,7 @@ class TestToolRegistry:
             access_policy=AccessPolicy.default(),
         )
         state = {"task": "trusted task", "run_config": run_config}
-        definition = AgentDefinition(
+        definition = AgentRuntimePolicy.from_legacy(
             agent_type="test",
             description="test",
             system_prompt="trusted policy",

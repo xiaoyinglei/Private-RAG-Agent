@@ -13,7 +13,7 @@ from rag.agent.core.checkpointing import (
     agent_checkpoint_serde,
 )
 from rag.agent.core.context import AgentRunConfig, RunRegistry
-from rag.agent.core.definition import AgentDefinition
+from rag.agent.core.definition import AgentRuntimePolicy
 from rag.agent.core.human_input import HumanInputResponse
 from rag.agent.core.tool_execution import (
     ToolExecutionRecord,
@@ -40,7 +40,7 @@ class _FinishFromResultsProvider:
         self,
         state: LoopState,
         *,
-        definition: AgentDefinition,
+        definition: AgentRuntimePolicy,
         budget_remaining: int,
     ) -> ModelTurnDraft:
         del definition, budget_remaining
@@ -64,7 +64,7 @@ class _PauseAfterGoalFeedbackProvider:
         self,
         state: LoopState,
         *,
-        definition: AgentDefinition,
+        definition: AgentRuntimePolicy,
         budget_remaining: int,
     ) -> ModelTurnDraft:
         del definition, budget_remaining
@@ -79,9 +79,9 @@ class _PauseAfterGoalFeedbackProvider:
         )
 
 
-def _definition(*, requires_confirmation: bool = False) -> AgentDefinition:
+def _definition(*, requires_confirmation: bool = False) -> AgentRuntimePolicy:
     del requires_confirmation
-    return AgentDefinition(
+    return AgentRuntimePolicy.from_legacy(
         agent_type="service_loop",
         description="Service loop boundary",
         system_prompt="Use the loop.",

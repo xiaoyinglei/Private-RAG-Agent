@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
-from rag.agent.core.definition import AgentDefinition, ToolPolicy
+from rag.agent.core.definition import AgentRuntimePolicy, ToolPolicy
 from rag.agent.memory.models import MemoryPolicy
 from rag.schema.runtime import AccessPolicy
 
@@ -33,7 +33,7 @@ class AgentRunConfig:
     memory_policy: MemoryPolicy = field(default_factory=MemoryPolicy)
 
 
-def derive_child_config(parent: AgentRunConfig, child_def: AgentDefinition) -> AgentRunConfig:
+def derive_child_config(parent: AgentRunConfig, child_def: AgentRuntimePolicy) -> AgentRunConfig:
     if parent.max_depth <= 0:
         raise RuntimeError(f"Agent nesting depth exceeded for {child_def.agent_type}")
     child_id = str(uuid4())
@@ -44,8 +44,8 @@ def derive_child_config(parent: AgentRunConfig, child_def: AgentDefinition) -> A
         access_policy=parent.access_policy,
         source_scope=parent.source_scope,
         max_depth=parent.max_depth - 1,
-        budget_total=child_def.estimated_token_budget,
-        work_budget_total=child_def.estimated_work_budget,
+        budget_total=child_def.token_budget,
+        work_budget_total=child_def.work_budget,
         agent_type=child_def.agent_type,
         max_context_tokens=parent.max_context_tokens,
         tool_policy=child_def.tool_policy,

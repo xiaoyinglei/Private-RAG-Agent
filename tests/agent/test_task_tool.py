@@ -132,7 +132,7 @@ class TestTaskOutput:
 
 class TestTaskToolRunner:
     def test_child_policy_removes_task(self) -> None:
-        policy = GENERIC_AGENT.to_runtime_policy()
+        policy = GENERIC_AGENT
         runner = _TaskChildRunner(
             policy=policy,
             tool_registry=ToolRegistry(),
@@ -148,7 +148,7 @@ class TestTaskToolRunner:
     def test_child_policy_at_zero_depth(self) -> None:
         from dataclasses import replace
 
-        policy = replace(GENERIC_AGENT.to_runtime_policy(), max_depth=0)
+        policy = replace(GENERIC_AGENT, max_depth=0)
         runner = _TaskChildRunner(
             policy=policy,
             tool_registry=ToolRegistry(),
@@ -161,7 +161,7 @@ class TestTaskToolRunner:
 
     @pytest.mark.anyio
     async def test_uses_injected_delegated_runner(self) -> None:
-        policy = GENERIC_AGENT.to_runtime_policy()
+        policy = GENERIC_AGENT
         delegated_runner = _CapturingDelegatedRunner()
         parent_config = _make_run_config(max_depth=2)
         runner = TaskToolRunner(

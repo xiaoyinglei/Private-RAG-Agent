@@ -5,7 +5,7 @@ from collections.abc import Sequence
 from langgraph.checkpoint.base import BaseCheckpointSaver
 
 from rag.agent.core.checkpointing import create_agent_checkpointer
-from rag.agent.core.definition import AgentDefinition
+from rag.agent.core.definition import AgentRuntimePolicy
 from rag.agent.core.delegation import DelegatedAgentRunner
 from rag.agent.core.llm_registry import ModelRegistry
 from rag.agent.core.output_finalizer import StructuredOutputFinalizer
@@ -43,7 +43,7 @@ class GraphCompiler:
         )
         self._runtime_diagnostics = tuple(runtime_diagnostics)
 
-    def compile(self, definition: AgentDefinition) -> object:
+    def compile(self, definition: AgentRuntimePolicy) -> object:
         missing_tools = self._missing_allowed_tools(definition)
         if missing_tools:
             raise ValueError(
@@ -75,7 +75,7 @@ class GraphCompiler:
 
     def _missing_allowed_tools(
         self,
-        definition: AgentDefinition,
+        definition: AgentRuntimePolicy,
     ) -> list[str]:
         registered_tools = {
             tool.name for tool in self._tool_registry.list_all()

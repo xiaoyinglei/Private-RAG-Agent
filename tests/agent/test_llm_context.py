@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 from rag.agent.core.context import AgentRunConfig
-from rag.agent.core.definition import AgentDefinition
+from rag.agent.core.definition import AgentRuntimePolicy
 from rag.agent.core.llm_context import (
     AgentLLMContextAssembler,
     AgentLLMContextOverflowError,
@@ -30,8 +30,8 @@ class _CharacterTokenAccounting:
         return clipped
 
 
-def _definition() -> AgentDefinition:
-    return AgentDefinition(
+def _definition() -> AgentRuntimePolicy:
+    return AgentRuntimePolicy.from_legacy(
         agent_type="research",
         description="Research",
         system_prompt="SYSTEM_POLICY",

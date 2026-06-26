@@ -4,7 +4,7 @@ from __future__ import annotations
 def test_agent_package_exports_new_contract_surface_only() -> None:
     import rag.agent as agent
 
-    assert hasattr(agent, "AgentDefinition")
+    assert hasattr(agent, "AgentRuntimePolicy")
     assert hasattr(agent, "GraphCompiler")
     assert hasattr(agent, "AgentRegistry")
     assert hasattr(agent, "AgentRunConfig")
@@ -28,7 +28,7 @@ def test_agent_package_exports_new_contract_surface_only() -> None:
 
 def test_root_package_exports_new_agent_contract_surface() -> None:
     from rag import (
-        AgentDefinition,
+        AgentRuntimePolicy,
         AgentRunConfig,
         AgentRunRequest,
         AgentService,
@@ -37,7 +37,7 @@ def test_root_package_exports_new_agent_contract_surface() -> None:
         ToolSpec,
     )
 
-    assert AgentDefinition is not None
+    assert AgentRuntimePolicy is not None
     assert AgentRunConfig is not None
     assert AgentRunRequest is not None
     assert AgentService is not None

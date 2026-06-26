@@ -57,7 +57,7 @@ class AgentMessageAssembler:
     def build_system_message(
         self,
         *,
-        definition: Any,  # AgentDefinition
+        definition: Any,  # AgentRuntimePolicy
         state: LoopState,
         budget_remaining: int | None,
         visible_tool_names: list[str] | None = None,
@@ -100,7 +100,7 @@ class AgentMessageAssembler:
         """Merged identity + behavior + output style."""
         agent_type = getattr(definition, "agent_type", "agent")
         description = getattr(definition, "description", "")
-        system_prompt = getattr(definition, "system_prompt", "")
+        system_prompt = getattr(definition, "system_instructions", "")
 
         parts = [f"You are {agent_type}."]
         if description:

@@ -7,7 +7,7 @@ from pydantic import BaseModel
 
 from rag.agent.compat.goal_contract import GoalDeliverable, GoalSpec
 from rag.agent.core.context import AgentRunConfig
-from rag.agent.core.definition import AgentDefinition
+from rag.agent.core.definition import AgentRuntimePolicy
 from rag.agent.core.finalization import (
     FinishCandidateBuilder,
     FinishCandidateBuildError,
@@ -214,7 +214,7 @@ class _StructuredFinalizer:
     async def finalize(
         self,
         *,
-        definition: AgentDefinition,
+        definition: AgentRuntimePolicy,
         state: object,
         candidate_text: str,
     ) -> BaseModel:
@@ -226,7 +226,7 @@ class _ExhaustedFinalizer:
     async def finalize(
         self,
         *,
-        definition: AgentDefinition,
+        definition: AgentRuntimePolicy,
         state: object,
         candidate_text: str,
     ) -> BaseModel:
@@ -245,7 +245,7 @@ class _ExhaustedFinalizer:
 
 @pytest.mark.anyio
 async def test_structured_output_hook_is_critical_and_returns_validated_output() -> None:
-    definition = AgentDefinition(
+    definition = AgentRuntimePolicy.from_legacy(
         agent_type="structured",
         description="structured",
         system_prompt="Return structured output.",
@@ -276,7 +276,7 @@ async def test_structured_output_hook_is_critical_and_returns_validated_output()
 
 @pytest.mark.anyio
 async def test_structured_output_exhaustion_halts_with_validation_details() -> None:
-    definition = AgentDefinition(
+    definition = AgentRuntimePolicy.from_legacy(
         agent_type="structured",
         description="structured",
         system_prompt="Return structured output.",
@@ -382,7 +382,7 @@ async def test_explicit_goal_contract_accepts_traceable_evidence() -> None:
 
 
 def test_stop_hook_factory_installs_goal_hook_only_when_explicitly_supplied() -> None:
-    definition = AgentDefinition(
+    definition = AgentRuntimePolicy.from_legacy(
         agent_type="plain",
         description="plain",
         system_prompt="Answer.",

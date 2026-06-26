@@ -11,7 +11,7 @@ from __future__ import annotations
 from langchain_core.messages import HumanMessage
 
 from rag.agent.core.context import AgentRunConfig
-from rag.agent.core.definition import AgentDefinition
+from rag.agent.core.definition import AgentRuntimePolicy
 from rag.agent.core.observations import ContextUnit, EvidenceRef
 from rag.agent.loop.state import LoopState, create_loop_state
 from rag.agent.memory.injector import ContextBuilder
@@ -77,8 +77,8 @@ def _token_accounting() -> _CharacterTokenAccounting:
     return _CharacterTokenAccounting()
 
 
-def _definition() -> AgentDefinition:
-    return AgentDefinition(
+def _definition() -> AgentRuntimePolicy:
+    return AgentRuntimePolicy.from_legacy(
         agent_type="research",
         description="Research agent",
         system_prompt="You are a research assistant.",

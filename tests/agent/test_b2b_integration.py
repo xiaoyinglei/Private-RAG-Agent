@@ -22,7 +22,7 @@ from rag.agent.capabilities.catalog import (
     DeferredToolStore,
     ToolCatalog,
 )
-from rag.agent.core.definition import AgentDefinition, AgentRuntimePolicy
+from rag.agent.core.definition import AgentRuntimePolicy, AgentRuntimePolicy
 from rag.agent.core.tool_batch_reader import clean_batch_file, read_tool_batch
 from rag.agent.loop.state import (
     LoopState,
@@ -51,7 +51,7 @@ def _minimal_state() -> LoopState:
 
 
 def _minimal_policy() -> AgentRuntimePolicy:
-    return AgentRuntimePolicy(
+    return AgentRuntimePolicy.from_legacy(
         system_instructions="You are a test agent",
         core_tool_names=(
             "read_file", "write_file", "run_python", "list_files",
@@ -213,7 +213,7 @@ class TestProcessToolBatch:
             from rag.agent.loop.runtime import AgentLoop
 
             loop = AgentLoop(  # type: ignore[call-arg]
-                definition=AgentDefinition(
+                definition=AgentRuntimePolicy.from_legacy(
                     agent_type="test",
                     description="test agent",
                     system_prompt="test",
@@ -267,7 +267,7 @@ class TestProcessToolBatch:
             )
 
             loop = AgentLoop(  # type: ignore[call-arg]
-                definition=AgentDefinition(
+                definition=AgentRuntimePolicy.from_legacy(
                     agent_type="test",
                     description="test agent",
                     system_prompt="test",
@@ -309,7 +309,7 @@ class TestProcessToolBatch:
             from rag.agent.loop.runtime import AgentLoop
 
             loop = AgentLoop(  # type: ignore[call-arg]
-                definition=AgentDefinition(
+                definition=AgentRuntimePolicy.from_legacy(
                     agent_type="test",
                     description="test agent",
                     system_prompt="test",
@@ -339,7 +339,7 @@ class TestProcessToolBatch:
         from rag.agent.loop.runtime import AgentLoop
 
         loop = AgentLoop(  # type: ignore[call-arg]
-            definition=AgentDefinition(
+            definition=AgentRuntimePolicy.from_legacy(
                 agent_type="test",
                 description="test agent",
                 system_prompt="test",

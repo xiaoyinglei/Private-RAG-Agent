@@ -13,7 +13,7 @@ from rag.agent.capabilities.catalog import (
     resolve_visible_tools,
 )
 from rag.agent.core.context import RunRegistry
-from rag.agent.core.definition import AgentDefinition, ModelSelectionPolicy
+from rag.agent.core.definition import AgentRuntimePolicy, ModelSelectionPolicy
 from rag.agent.core.llm_context import (
     AgentLLMContextAssembler,
 )
@@ -124,7 +124,7 @@ class LLMLoopModelTurnProvider:
         self,
         state: LoopState,
         *,
-        definition: AgentDefinition,
+        definition: AgentRuntimePolicy,
         budget_remaining: int,
     ) -> ModelTurnDraft:
         if self._tool_specs:
@@ -143,7 +143,7 @@ class LLMLoopModelTurnProvider:
         self,
         state: LoopState,
         *,
-        definition: AgentDefinition,
+        definition: AgentRuntimePolicy,
         budget_remaining: int,
     ) -> ModelTurnDraft:
         """OpenAI-compatible native tool calling path.
@@ -268,7 +268,7 @@ class LLMLoopModelTurnProvider:
 
     def _filter_visible_tools(
         self,
-        definition: AgentDefinition,
+        definition: AgentRuntimePolicy,
     ) -> list[ToolSpec]:
         """Return only the tool specs currently visible to the model.
 
@@ -290,7 +290,7 @@ class LLMLoopModelTurnProvider:
         self,
         state: LoopState,
         *,
-        definition: AgentDefinition,
+        definition: AgentRuntimePolicy,
         budget_remaining: int,
     ) -> ModelTurnDraft:
         """Legacy structured-output path (no native tool calling)."""
@@ -464,7 +464,7 @@ def create_loop_model_turn_provider(
     selection: ModelSelectionPolicy,
     *,
     tool_registry: Any | None = None,
-    definition: AgentDefinition | None = None,
+    definition: AgentRuntimePolicy | None = None,
     catalog: ToolCatalog | None = None,
     deferred_store: DeferredToolStore | None = None,
     stream_sink: Any = None,

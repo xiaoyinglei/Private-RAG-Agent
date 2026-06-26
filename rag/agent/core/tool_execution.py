@@ -17,7 +17,7 @@ from rag.agent.core.approval_policy import (
     merge_approval_requests,
 )
 from rag.agent.core.context import AgentRunConfig, RunRegistry
-from rag.agent.core.definition import AgentDefinition
+from rag.agent.core.definition import AgentRuntimePolicy
 from rag.agent.core.delegation import AgentAsToolExecutionError
 from rag.agent.core.human_input import HumanInputRequest, HumanInputResponse
 from rag.agent.core.llm_context import AgentLLMContextOverflowError
@@ -161,7 +161,7 @@ class ToolExecutionService:
         request: ToolBatchRequest,
         *,
         state: ToolState | None,
-        definition: AgentDefinition | None = None,
+        definition: AgentRuntimePolicy | None = None,
     ) -> ToolBatchResult:
         records = {call_id: record.model_copy(deep=True) for call_id, record in request.execution_records.items()}
         results: list[ToolResult] = []
@@ -379,7 +379,7 @@ class ToolExecutionService:
         spec: ToolSpec,
         run_config: AgentRunConfig,
         state: ToolState | None,
-        definition: AgentDefinition | None,
+        definition: AgentRuntimePolicy | None,
     ) -> tuple[ToolResult, ToolExecutionRecord]:
         started_at = time.perf_counter()
         work_cost = max(0, spec.work_budget_cost)

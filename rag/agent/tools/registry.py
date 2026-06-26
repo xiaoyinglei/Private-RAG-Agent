@@ -13,7 +13,7 @@ from rag.agent.tools.spec import ToolSpec
 
 if TYPE_CHECKING:
     from rag.agent.core.context import AgentRunConfig
-    from rag.agent.core.definition import AgentDefinition
+    from rag.agent.core.definition import AgentRuntimePolicy
     from rag.agent.loop.state import LoopState
 
 
@@ -31,7 +31,7 @@ class ToolExecutionContext:
     operation_id: str | None = None
     tool_call_id: str | None = None
     state: LoopState | None = None
-    definition: AgentDefinition | None = None
+    definition: AgentRuntimePolicy | None = None
     # 进度回调：工具可以调用它来报告执行进度
     # callback(tool_call_id, progress_text, percent)
     progress_callback: ToolProgressCallback | None = None

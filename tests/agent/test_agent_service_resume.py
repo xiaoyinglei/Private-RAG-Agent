@@ -10,7 +10,7 @@ from rag.agent.builtin_registry import create_builtin_tool_registry
 from rag.agent.compat.goal_contract import GoalDeliverable, GoalSpec
 from rag.agent.core.checkpointing import agent_checkpoint_serde
 from rag.agent.core.context import RunRegistry
-from rag.agent.core.definition import AgentDefinition
+from rag.agent.core.definition import AgentRuntimePolicy
 from rag.agent.core.human_input import HumanInputResponse
 from rag.agent.loop.state import LoopState, ModelTurnDraft
 from rag.agent.service import AgentRunRequest, AgentService
@@ -50,7 +50,7 @@ class _FinishProvider:
         self,
         state: LoopState,
         *,
-        definition: AgentDefinition,
+        definition: AgentRuntimePolicy,
         budget_remaining: int,
     ) -> ModelTurnDraft:
         del definition, budget_remaining
@@ -78,7 +78,7 @@ class _PauseAfterGoalFeedbackProvider:
         self,
         state: LoopState,
         *,
-        definition: AgentDefinition,
+        definition: AgentRuntimePolicy,
         budget_remaining: int,
     ) -> ModelTurnDraft:
         del definition, budget_remaining
@@ -105,8 +105,8 @@ def _write_spec() -> ToolSpec:
     )
 
 
-def _definition() -> AgentDefinition:
-    return AgentDefinition(
+def _definition() -> AgentRuntimePolicy:
+    return AgentRuntimePolicy.from_legacy(
         agent_type="resume_test",
         description="Resume test",
         system_prompt="Run tools.",

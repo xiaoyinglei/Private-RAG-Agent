@@ -6,7 +6,7 @@ from typing import Literal, Protocol
 from pydantic import BaseModel, ConfigDict, Field
 
 from rag.agent.compat.goal_contract import GoalContractEvaluator, GoalSpec
-from rag.agent.core.definition import AgentDefinition
+from rag.agent.core.definition import AgentRuntimePolicy
 from rag.agent.core.observations import ComputationResult, ContextBinding, EvidenceRef
 from rag.agent.core.output_finalizer import (
     OutputValidationExhaustedError,
@@ -179,7 +179,7 @@ class StructuredOutputStopHook:
     def __init__(
         self,
         *,
-        definition: AgentDefinition,
+        definition: AgentRuntimePolicy,
         finalizer: StructuredOutputFinalizer | None,
     ) -> None:
         self._definition = definition
@@ -305,7 +305,7 @@ class GoalContractStopHook:
 
 def build_stop_hooks(
     *,
-    definition: AgentDefinition,
+    definition: AgentRuntimePolicy,
     output_finalizer: StructuredOutputFinalizer | None = None,
     goal_spec: GoalSpec | None = None,
 ) -> tuple[StopHookBinding, ...]:

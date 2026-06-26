@@ -8,7 +8,7 @@ from pydantic import BaseModel
 from typing_extensions import TypedDict
 
 from rag.agent.core.compiler import GraphCompiler
-from rag.agent.core.definition import AgentDefinition
+from rag.agent.core.definition import AgentRuntimePolicy
 from rag.agent.loop.state import LoopState, ModelTurnDraft
 from rag.agent.service import AgentRunRequest, AgentRunResult
 from rag.agent.tools.registry import ToolRegistry
@@ -35,7 +35,7 @@ class _DirectProvider:
         self,
         state: LoopState,
         *,
-        definition: AgentDefinition,
+        definition: AgentRuntimePolicy,
         budget_remaining: int,
     ) -> ModelTurnDraft:
         del state, definition, budget_remaining
@@ -50,7 +50,7 @@ class _PauseProvider:
         self,
         state: LoopState,
         *,
-        definition: AgentDefinition,
+        definition: AgentRuntimePolicy,
         budget_remaining: int,
     ) -> ModelTurnDraft:
         del state, definition, budget_remaining
@@ -65,7 +65,7 @@ class _FailingProvider:
         self,
         state: LoopState,
         *,
-        definition: AgentDefinition,
+        definition: AgentRuntimePolicy,
         budget_remaining: int,
     ) -> ModelTurnDraft:
         del state, definition, budget_remaining
@@ -88,8 +88,8 @@ def _registry() -> ToolRegistry:
     return registry
 
 
-def _definition(*, allowed_tools: list[str]) -> AgentDefinition:
-    return AgentDefinition(
+def _definition(*, allowed_tools: list[str]) -> AgentRuntimePolicy:
+    return AgentRuntimePolicy.from_legacy(
         agent_type="research",
         description="Research agent",
         system_prompt="Use grounded evidence.",

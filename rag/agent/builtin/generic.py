@@ -16,7 +16,7 @@ Tool categories:
 
 from __future__ import annotations
 
-from rag.agent.core.definition import AgentDefinition, ModelSelectionPolicy, ToolPolicy
+from rag.agent.core.definition import AgentRuntimePolicy, ModelSelectionPolicy, ToolPolicy
 
 GENERIC_SYSTEM_PROMPT = """\
 You are a research assistant that works with tools to answer questions and
@@ -72,12 +72,11 @@ processing mode. Follow these rules:
 """
 
 
-GENERIC_AGENT = AgentDefinition(
+GENERIC_AGENT = AgentRuntimePolicy(
     agent_type="generic",
     description="General-purpose research assistant with tool discovery.",
-    system_prompt=GENERIC_SYSTEM_PROMPT,
-    allowed_tools=[
-        # core — always visible
+    system_instructions=GENERIC_SYSTEM_PROMPT,
+    core_tool_names=(
         "tool_search",
         "activate_tools",
         "task",
@@ -90,16 +89,17 @@ GENERIC_AGENT = AgentDefinition(
         "run_command",
         "update_plan",
         "tool_repl",
-        # deferred — visible after tool_search + activate_tools
+    ),
+    deferred_tool_names=(
         "search_knowledge",
         "search_assets",
         "llm_summarize",
         "llm_compare",
         "llm_generate",
         "structured_probe",
-    ],
-    estimated_token_budget=96_000,
-    estimated_work_budget=20_000,
+    ),
+    token_budget=96_000,
+    work_budget=20_000,
     model_selection=ModelSelectionPolicy(
         thinking=True,
         retrieval_hint_max_tokens=256,

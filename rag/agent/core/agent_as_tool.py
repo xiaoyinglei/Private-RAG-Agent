@@ -8,7 +8,7 @@ from uuid import uuid4
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from rag.agent.core.context import AgentRunConfig, derive_child_config
-from rag.agent.core.definition import AgentDefinition
+from rag.agent.core.definition import AgentRuntimePolicy
 from rag.agent.core.delegation import (
     DEFAULT_DELEGATION_TOKEN_BUDGET,
     AgentAsToolExecutionError,
@@ -32,7 +32,7 @@ if TYPE_CHECKING:
 @dataclass(frozen=True)
 class AgentToolSpec:
     tool_spec: ToolSpec
-    agent_definition: AgentDefinition
+    agent_definition: AgentRuntimePolicy
     inherits_context: bool = True
 
 
@@ -261,8 +261,8 @@ _AGENT_TOOL_BLOCKLIST: frozenset[str] = frozenset({
 })
 
 
-def build_agent_tool_spec(agent_definition: AgentDefinition) -> AgentToolSpec:
-    """将 AgentDefinition 包装为 AgentToolSpec（含 ToolSpec）。
+def build_agent_tool_spec(agent_definition: AgentRuntimePolicy) -> AgentToolSpec:
+    """将 AgentRuntimePolicy 包装为 AgentToolSpec（含 ToolSpec）。
 
     白名单检查：只有 research/compare/factcheck/synthesize 可以注册。
     黑名单检查：orchestrator 禁止注册，避免递归调用。
@@ -307,7 +307,7 @@ def build_agent_tool_spec(agent_definition: AgentDefinition) -> AgentToolSpec:
     )
 
 
-def _make_tool_description(definition: AgentDefinition) -> str:
+def _make_tool_description(definition: AgentRuntimePolicy) -> str:
     return (
         f"Delegate bounded work to the {definition.agent_type} agent. "
         f"{definition.description} "

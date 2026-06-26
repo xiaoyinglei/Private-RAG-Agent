@@ -1,10 +1,10 @@
 """Built-in agent definitions."""
 
 from rag.agent.builtin.generic import GENERIC_AGENT
-from rag.agent.core.definition import AgentDefinition
+from rag.agent.core.definition import AgentRuntimePolicy
 from rag.agent.core.registry import AgentRegistry
 
-BUILTIN_AGENT_DEFINITIONS: dict[str, AgentDefinition] = {
+BUILTIN_AGENT_DEFINITIONS: dict[str, AgentRuntimePolicy] = {
     "generic": GENERIC_AGENT,
 }
 

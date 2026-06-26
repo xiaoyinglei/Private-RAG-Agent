@@ -5,7 +5,7 @@ from typing import Any
 import pytest
 
 from rag.agent.core.context import AgentRunConfig, RunRegistry
-from rag.agent.core.definition import AgentDefinition
+from rag.agent.core.definition import AgentRuntimePolicy
 from rag.agent.core.llm_context import AgentLLMContextOverflowError
 from rag.agent.core.llm_registry import ResolvedModel
 from rag.agent.core.llm_tool_runners import create_model_llm_tool_runners
@@ -93,8 +93,8 @@ class _Registry:
         return self.resolved
 
 
-def _definition() -> AgentDefinition:
-    return AgentDefinition(
+def _definition() -> AgentRuntimePolicy:
+    return AgentRuntimePolicy.from_legacy(
         agent_type="research",
         description="research",
         system_prompt="Use trusted context.",

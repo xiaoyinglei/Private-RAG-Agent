@@ -10,7 +10,7 @@ from rag.agent.builtin import create_builtin_agent_registry
 from rag.agent.builtin_registry import create_builtin_tool_registry
 from rag.agent.core.agent_service_factory import AgentServiceFactory
 from rag.agent.core.checkpointing import create_agent_checkpointer
-from rag.agent.core.definition import AgentDefinition
+from rag.agent.core.definition import AgentRuntimePolicy
 from rag.agent.core.human_input import HumanInputRequest, HumanInputResponse
 from rag.agent.core.llm_registry import ModelRegistry, ResolvedModel
 from rag.agent.core.llm_tool_runners import create_model_llm_tool_runners
@@ -84,7 +84,7 @@ def _build_llm_tool_runners(
 def _resolve_cli_agent_definition(
     agent_registry: AgentRegistry,
     agent_type: str,
-) -> AgentDefinition:
+) -> AgentRuntimePolicy:
     if agent_type not in CLI_AGENT_CHOICES:
         allowed = ", ".join(CLI_AGENT_CHOICES)
         raise ValueError(f"{agent_type!r} is not a supported CLI agent. Allowed: {allowed}")

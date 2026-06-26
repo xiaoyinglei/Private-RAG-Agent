@@ -4,7 +4,7 @@ import pytest
 from pydantic import BaseModel
 
 from rag.agent.core.context import AgentRunConfig, RunRegistry
-from rag.agent.core.definition import AgentDefinition
+from rag.agent.core.definition import AgentRuntimePolicy
 from rag.agent.core.llm_context import AgentLLMContextOverflowError
 from rag.agent.core.output_finalizer import (
     ModelStructuredOutputFinalizer,
@@ -85,8 +85,8 @@ def _gateway(
     )
 
 
-def _definition(*, retries: int = 2) -> AgentDefinition:
-    return AgentDefinition(
+def _definition(*, retries: int = 2) -> AgentRuntimePolicy:
+    return AgentRuntimePolicy.from_legacy(
         agent_type="structured",
         description="Structured output",
         system_prompt="Return grounded structured output.",

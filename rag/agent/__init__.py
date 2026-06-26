@@ -9,7 +9,7 @@ from rag.agent.core.context import (
     RunRegistry,
     derive_child_config,
 )
-from rag.agent.core.definition import AgentDefinition, ModelSelectionPolicy, ToolPolicy
+from rag.agent.core.definition import AgentRuntimePolicy, ModelSelectionPolicy, ToolPolicy
 from rag.agent.core.delegation import AgentDelegationRequest, DelegatedAgentRunner
 from rag.agent.core.registry import AgentRegistry
 from rag.agent.core.subagent_runner import BuiltinSubAgentRunner
@@ -44,7 +44,7 @@ from rag.agent.tools.spec import (
 )
 
 __all__ = [
-    "AgentDefinition",
+    "AgentRuntimePolicy",
     "ExecutionCategory",
     "GraphCompiler",
     "AgentRegistry",

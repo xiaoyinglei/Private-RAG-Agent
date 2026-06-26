@@ -181,7 +181,7 @@ class _OpenAICompatibleChatGenerator:
     ) -> str:
         return self.generate_text_with_usage(
             prompt=prompt,
-            system_prompt=system_prompt,
+            system_instructions=system_prompt,
             **kwargs,
         ).value
 
@@ -214,7 +214,7 @@ class _OpenAICompatibleChatGenerator:
         return self.generate_structured_with_usage(
             prompt=prompt,
             schema=schema,
-            system_prompt=system_prompt,
+            system_instructions=system_prompt,
             **kwargs,
         ).value
 
@@ -239,7 +239,7 @@ User task:
 """.strip()
         generated = self.generate_text_with_usage(
             prompt=structured_prompt,
-            system_prompt=system_prompt,
+            system_instructions=system_prompt,
             **kwargs,
         )
         raw_output = generated.value

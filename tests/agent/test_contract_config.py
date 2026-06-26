@@ -11,7 +11,7 @@ from rag.agent.core.context import (
     RunRegistry,
     derive_child_config,
 )
-from rag.agent.core.definition import AgentDefinition, ModelSelectionPolicy, ToolPolicy
+from rag.agent.core.definition import AgentRuntimePolicy, ModelSelectionPolicy, ToolPolicy
 from rag.agent.core.registry import AgentRegistry
 from rag.schema.runtime import AccessPolicy, RuntimeMode
 
@@ -110,7 +110,7 @@ class TestDeriveChildConfig:
             access_policy=AccessPolicy.default(),
             source_scope=("doc-a", "doc-b"),
         )
-        child_def = AgentDefinition(
+        child_def = AgentRuntimePolicy.from_legacy(
             agent_type="research",
             description="Research",
             system_prompt="Research",
@@ -145,7 +145,7 @@ class TestDeriveChildConfig:
         )
         child = derive_child_config(
             parent,
-            AgentDefinition(
+            AgentRuntimePolicy.from_legacy(
                 agent_type="research",
                 description="Research",
                 system_prompt="Research",
@@ -172,7 +172,7 @@ class TestDeriveChildConfig:
             max_depth=2,
             access_policy=AccessPolicy.default(),
         )
-        child_def = AgentDefinition(
+        child_def = AgentRuntimePolicy.from_legacy(
             agent_type="local_research",
             description="Local only",
             system_prompt="Local only",
@@ -192,7 +192,7 @@ class TestDeriveChildConfig:
             max_depth=0,
             access_policy=AccessPolicy.default(),
         )
-        child_def = AgentDefinition(
+        child_def = AgentRuntimePolicy.from_legacy(
             agent_type="research",
             description="Research",
             system_prompt="Research",
@@ -246,9 +246,9 @@ class TestRunRegistry:
         assert h_new is not None
 
 
-class TestAgentDefinition:
+class TestAgentRuntimePolicy:
     def test_minimal_definition(self) -> None:
-        ad = AgentDefinition(
+        ad = AgentRuntimePolicy.from_legacy(
             agent_type="research",
             description="Deep research agent",
             system_prompt="You are a research agent.",
@@ -259,7 +259,7 @@ class TestAgentDefinition:
         assert ad.model_selection.retrieval_hint_model is None  # 默认不绑定特定模型
         assert ad.max_iterations == 10
         assert ad.max_depth == 2
-        assert ad.estimated_token_budget == 8000
+        assert ad.token_budget == 8000
         assert ad.output_validation_max_retries == 2
 
     def test_definition_rejects_negative_output_validation_retries(self) -> None:
@@ -267,7 +267,7 @@ class TestAgentDefinition:
             ValueError,
             match="output_validation_max_retries must be non-negative",
         ):
-            AgentDefinition(
+            AgentRuntimePolicy.from_legacy(
                 agent_type="invalid_output_retry",
                 description="Invalid",
                 system_prompt="Invalid",
@@ -277,7 +277,7 @@ class TestAgentDefinition:
 
     def test_definition_with_access_policy(self) -> None:
         policy = AccessPolicy.default()
-        ad = AgentDefinition(
+        ad = AgentRuntimePolicy.from_legacy(
             agent_type="compare",
             description="Comparison agent",
             system_prompt="You compare documents.",
@@ -285,8 +285,8 @@ class TestAgentDefinition:
             access_policy=policy,
             estimated_token_budget=12000,
         )
-        assert ad.access_policy is policy
-        assert ad.estimated_token_budget == 12000
+        assert ad.access_policy_ceiling is policy
+        assert ad.token_budget == 12000
 
     def test_tool_policy_defaults(self) -> None:
         tp = ToolPolicy()
@@ -318,7 +318,7 @@ class TestAgentDefinition:
 class TestAgentRegistry:
     def test_register_and_get(self) -> None:
         registry = AgentRegistry()
-        ad = AgentDefinition(
+        ad = AgentRuntimePolicy.from_legacy(
             agent_type="test_research",
             description="Test agent",
             system_prompt="You are a test agent.",
@@ -335,7 +335,7 @@ class TestAgentRegistry:
 
     def test_list_all(self) -> None:
         registry = AgentRegistry()
-        ad1 = AgentDefinition(
+        ad1 = AgentRuntimePolicy.from_legacy(
             agent_type="agent_a",
             description="A",
             system_prompt="A",
@@ -348,7 +348,7 @@ class TestAgentRegistry:
     def test_instances_are_isolated(self) -> None:
         first = AgentRegistry()
         second = AgentRegistry()
-        ad = AgentDefinition(
+        ad = AgentRuntimePolicy.from_legacy(
             agent_type="isolated_agent",
             description="A",
             system_prompt="A",
@@ -363,13 +363,13 @@ class TestAgentRegistry:
 
     def test_duplicate_registration_fails_unless_replace_is_explicit(self) -> None:
         registry = AgentRegistry()
-        first = AgentDefinition(
+        first = AgentRuntimePolicy.from_legacy(
             agent_type="dup_agent",
             description="A",
             system_prompt="A",
             allowed_tools=[],
         )
-        replacement = AgentDefinition(
+        replacement = AgentRuntimePolicy.from_legacy(
             agent_type="dup_agent",
             description="B",
             system_prompt="B",

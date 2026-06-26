@@ -13,7 +13,7 @@ from rag.agent.core.agent_as_tool import (
     AgentToolOutput,
 )
 from rag.agent.core.context import AgentRunConfig, RunRegistry
-from rag.agent.core.definition import AgentDefinition
+from rag.agent.core.definition import AgentRuntimePolicy
 from rag.agent.core.delegation import AgentDelegationRequest
 from rag.agent.core.registry import AgentRegistry
 from rag.agent.core.turn_contracts import ToolCallPlan
@@ -44,7 +44,7 @@ class _ChildDecisionProvider:
         self,
         state: LoopState,
         *,
-        definition: AgentDefinition,
+        definition: AgentRuntimePolicy,
         budget_remaining: int,
     ) -> ModelTurnDraft:
         del definition, budget_remaining
@@ -87,7 +87,7 @@ def _parent_state(run_id: str = "parent-run", *, max_depth: int = 2) -> LoopStat
 
 @pytest.mark.anyio
 async def test_agent_as_tool_runner_executes_registered_child_with_derived_config() -> None:
-    child_def = AgentDefinition(
+    child_def = AgentRuntimePolicy.from_legacy(
         agent_type="child_research_runner",
         description="Child research",
         system_prompt="Research child task",
@@ -135,7 +135,7 @@ async def test_agent_as_tool_runner_executes_registered_child_with_derived_confi
 
 @pytest.mark.anyio
 async def test_agent_as_tool_runner_rejects_exhausted_parent_depth() -> None:
-    child_def = AgentDefinition(
+    child_def = AgentRuntimePolicy.from_legacy(
         agent_type="child_depth_runner",
         description="Child depth",
         system_prompt="Depth",

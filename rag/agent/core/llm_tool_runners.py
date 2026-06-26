@@ -4,7 +4,7 @@ from typing import cast
 from uuid import uuid4
 
 from rag.agent.core.context import RunRegistry
-from rag.agent.core.definition import AgentDefinition
+from rag.agent.core.definition import AgentRuntimePolicy
 from rag.agent.core.llm_context import AgentLLMContextAssembler
 from rag.agent.core.llm_registry import ModelRegistry, ResolvedModel
 from rag.agent.loop.state import LoopState
@@ -212,9 +212,9 @@ def _model_boundary(
 
 def _trusted_agent_context(
     execution_context: ToolExecutionContext,
-) -> tuple[LoopState, AgentDefinition]:
+) -> tuple[LoopState, AgentRuntimePolicy]:
     if execution_context.state is None or execution_context.definition is None:
-        raise RuntimeError("Agent LLM tools require trusted LoopState and AgentDefinition")
+        raise RuntimeError("Agent LLM tools require trusted LoopState and AgentRuntimePolicy")
     return execution_context.state, execution_context.definition
 
 
