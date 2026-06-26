@@ -1,0 +1,499 @@
+# 运行手册
+
+> 从 [README.md](../README.md) 拆分出来。安装、服务管理、端到端运行命令。
+
+## 安装
+
+安装依赖：
+
+```bash
+uv sync
+```
+
+准备 `.env`：
+
+```bash
+cat > .env <<'EOF'
+MIMO_API_KEY=your_mimo_key
+DEEPSEEK_API_KEY=your_deepseek_key_optional
+EOF
+```
+
+确认基础设施：
+
+```bash
+lsof -nP -iTCP:19530 -sTCP:LISTEN
+lsof -nP -iTCP:5432 -sTCP:LISTEN
+lsof -nP -iTCP:6379 -sTCP:LISTEN
+```
+
+默认本地端口：
+
+| 服务 | 端口 | 说明 |
+| --- | ---: | --- |
+| Milvus | `19530` | 向量索引 |
+| Milvus Web/metrics | `9091` | 已被 Milvus docker 占用，不要给 rerank 用 |
+| Postgres | `5432` | metadata |
+| Redis | `6379` | cache |
+| Optional local Qwen generation service | `8080` | 本地 OpenAI-compatible chat |
+| Embedding service | `9090` | `mlx-community/Qwen3-Embedding-4B-4bit-DWQ` |
+| Rerank service | `9092` | `BAAI/bge-reranker-v2-m3` |
+
+## 模型服务管理
+
+当前默认模型配置在 `configs/models.yaml`：
+
+| 能力 | 默认别名 | 实际模型 / 服务 |
+| --- | --- | --- |
+| 生成 / 摘要 / Agent tool decision | `mimo_cloud` | `mimo-v2.5-pro`，OpenAI-compatible，`MIMO_API_KEY` |
+| Embedding | `qwen3_embedding_4b_4bit_dwq` | `mlx-community/Qwen3-Embedding-4B-4bit-DWQ`，HTTP service，`127.0.0.1:9090` |
+| Rerank | `bge_reranker_v2_m3` | `BAAI/bge-reranker-v2-m3`，HTTP service，`127.0.0.1:9092` |
+
+内存策略：
+
+- 默认 chat 走 Mimo 云服务，不需要本地常驻 Qwen。
+- 入库和查询需要 embedding；建议启动 embedding HTTP 服务，避免每条命令重复加载模型。
+- rerank 是可选服务，默认省内存时关闭。
+- 切换 embedding 模型后必须换新的 Milvus collection prefix，旧向量不能混用。
+
+先检查是否已经有同模型服务，避免重复常驻占内存：
+
+```bash
+ps aux | rg -i 'embedding-service|rerank-service|Qwen3-Embedding|bge-reranker|mlx_lm|vllm|ollama|uvicorn' \
+  | rg -v 'rg -i|exec_command'
+
+lsof -nP -iTCP -sTCP:LISTEN \
+  | rg ':(8080|8081|8000|8001|9090|9091|9092|11434|19530|5432|6379)\b' || true
+```
+
+启动 embedding 服务。内存紧张时用 `--batch-size 1`，更稳；内存充足时可以调到 `2/4/8`：
+
+```bash
+screen -S rag_embedding_9090 -X quit >/dev/null 2>&1 || true
+screen -dmS rag_embedding_9090 zsh -lc '
+cd "/Users/leixiaoying/LLM/RAG学习"
+uv run rag embedding-service \
+  --model mlx-community/Qwen3-Embedding-4B-4bit-DWQ \
+  --port 9090 \
+  --batch-size 1
+'
+
+export RAG_EMBEDDING_SERVICE_URL="http://127.0.0.1:9090"
+```
+
+rerank 是可选服务。需要重排时再启动。注意 `9091` 被 Milvus 占用，rerank 用 `9092`：
+
+```bash
+screen -S rag_rerank_9092 -X quit >/dev/null 2>&1 || true
+screen -dmS rag_rerank_9092 zsh -lc '
+cd "/Users/leixiaoying/LLM/RAG学习"
+uv run rag rerank-service \
+  --model BAAI/bge-reranker-v2-m3 \
+  --port 9092 \
+  --batch-size 4 \
+  --max-length 1024
+'
+```
+
+如果你要改用本地 Qwen chat 服务，可以启动本地 OpenAI-compatible server，并在命令里用 `--model qwen3_8b_mlx_4bit`：
+
+```bash
+screen -S rag_qwen_8080 -X quit >/dev/null 2>&1 || true
+screen -dmS rag_qwen_8080 zsh -lc '
+cd "/Users/leixiaoying/LLM/RAG学习"
+uv run python -m mlx_lm.server \
+  --model Qwen/Qwen3-8B-MLX-4bit \
+  --host 127.0.0.1 \
+  --port 8080 \
+  --chat-template-args '"'"'{"enable_thinking": false}'"'"'
+'
+```
+
+健康检查：
+
+```bash
+curl -sS http://127.0.0.1:9090/health
+curl -sS http://127.0.0.1:9092/health
+curl -sS http://127.0.0.1:8080/v1/models
+screen -ls
+```
+
+关闭服务：
+
+```bash
+screen -S rag_qwen_8080 -X quit >/dev/null 2>&1 || true
+screen -S rag_embedding_9090 -X quit >/dev/null 2>&1 || true
+screen -S rag_rerank_9092 -X quit >/dev/null 2>&1 || true
+```
+
+## 私有文档端到端运行手册
+
+先启动 embedding 服务；rerank 默认不开，需要时再按"常用开关"打开。默认 chat 走 `configs/models.yaml` 中的 `mimo_cloud`，需要 `.env` 里有 `MIMO_API_KEY`。
+
+### 统一变量
+
+入库和查询必须使用同一套 `STORAGE_ROOT / VECTOR_DSN / VECTOR_PREFIX`。切换 embedding 模型或想重建干净索引时，换新的 `STORAGE_ROOT` 和 `VECTOR_PREFIX`。
+
+```bash
+cd "/Users/leixiaoying/LLM/RAG学习"
+
+# 数据位置：按实际数据改这两个变量。
+export INPUT_PATH="/absolute/path/to/one-file.docx"
+export INPUT_DIR="/absolute/path/to/private-docs"
+
+# 索引位置：同一批入库和查询必须保持一致。
+export STORAGE_ROOT="data/indexes/private_docs_v1"
+export VECTOR_DSN="http://127.0.0.1:19530"
+export VECTOR_PREFIX="private_docs_v1"
+
+# 复用常驻 embedding 服务，避免每条命令重新加载 embedding 模型。
+export RAG_EMBEDDING_SERVICE_URL="http://127.0.0.1:9090"
+
+# 默认省内存：不开 rerank。
+unset RAG_RERANK_SERVICE_URL
+```
+
+### 入库
+
+入库会做：解析文档 -> 切分 section / asset -> 生成摘要 -> embedding -> 写 Milvus。入库阶段不需要 rerank。
+
+单个文档：
+
+```bash
+unset RAG_RERANK_SERVICE_URL
+
+uv run python scripts/ingest_private_documents.py \
+  --input "$INPUT_PATH" \
+  --storage-root "$STORAGE_ROOT" \
+  --batch-size 1 \
+  --embedding-batch-size 1 \
+  --strict-summary-generation \
+  --vector-backend milvus \
+  --vector-dsn "$VECTOR_DSN" \
+  --vector-collection-prefix "$VECTOR_PREFIX" \
+  --output "$STORAGE_ROOT/ingest_result.json"
+```
+
+批量目录：
+
+```bash
+unset RAG_RERANK_SERVICE_URL
+
+uv run python scripts/ingest_private_documents.py \
+  --input "$INPUT_DIR" \
+  --storage-root "$STORAGE_ROOT" \
+  --batch-size 1 \
+  --embedding-batch-size 1 \
+  --strict-summary-generation \
+  --vector-backend milvus \
+  --vector-dsn "$VECTOR_DSN" \
+  --vector-collection-prefix "$VECTOR_PREFIX" \
+  --output "$STORAGE_ROOT/ingest_result.json"
+```
+
+入库结果检查：
+
+```bash
+cat "$STORAGE_ROOT/ingest_result.json"
+
+uv run python - <<'PY'
+import os
+from pymilvus import connections, utility
+
+prefix = os.environ["VECTOR_PREFIX"]
+connections.connect(alias="check", uri=os.environ["VECTOR_DSN"])
+try:
+    print([name for name in utility.list_collections(using="check") if name.startswith(prefix)])
+finally:
+    connections.disconnect("check")
+PY
+```
+
+### RAG 查询
+
+普通制度/流程问答用 `auto`：
+
+```bash
+unset RAG_RERANK_SERVICE_URL
+
+uv run rag query \
+  --query "单笔国内差旅报销金额超过 12000 元需要谁审批？请给出处" \
+  --storage-root "$STORAGE_ROOT" \
+  --vector-backend milvus \
+  --vector-dsn "$VECTOR_DSN" \
+  --vector-collection-prefix "$VECTOR_PREFIX" \
+  --reranker-model none \
+  --retrieval-profile auto
+```
+
+Excel / 表格 / PPT 表格 / 图片 OCR 这类资产问题优先用 `asset`，并建议加 `--json` 看证据和计算结果：
+
+```bash
+unset RAG_RERANK_SERVICE_URL
+
+uv run rag query \
+  --query "日提货总量是多少？请给出处" \
+  --storage-root "$STORAGE_ROOT" \
+  --vector-backend milvus \
+  --vector-dsn "$VECTOR_DSN" \
+  --vector-collection-prefix "$VECTOR_PREFIX" \
+  --reranker-model none \
+  --retrieval-profile asset \
+  --json
+```
+
+JSON 重点字段：
+
+- `answer.answer_text`
+- `answer.answer_sections[].evidence_ids`
+- `answer.citations`
+- `context.evidence`
+- `retrieval_diagnostics.operator_plan`
+- `retrieval_diagnostics.rerank_skipped`
+- `generation_attempts`
+
+### 批量检索评测
+
+适合已有 golden JSONL 时看 doc / section 命中、MRR 和 misses。不开 rerank：
+
+```bash
+unset RAG_RERANK_SERVICE_URL
+
+uv run python scripts/evaluate_private_retrieval.py \
+  --golden-path data/eval_private/golden_eval_dataset.jsonl \
+  --storage-root "$STORAGE_ROOT" \
+  --retrieval-profile auto \
+  --top-k 10 \
+  --retrieval-pool-k 20 \
+  --neighbor-radius 1 \
+  --no-rerank \
+  --vector-backend milvus \
+  --vector-dsn "$VECTOR_DSN" \
+  --vector-collection-prefix "$VECTOR_PREFIX" \
+  --output "$STORAGE_ROOT/retrieval_eval_no_rerank.json" \
+  --misses-output "$STORAGE_ROOT/retrieval_misses_no_rerank.jsonl"
+```
+
+开启 rerank 时，先启动 rerank 服务，再改两处：设置 `RAG_RERANK_SERVICE_URL`，把 `--no-rerank` 换成 `--rerank`。
+
+### Agent 测试
+
+普通制度问答：
+
+```bash
+unset RAG_RERANK_SERVICE_URL
+
+uv run rag agent run \
+  "单笔国内差旅报销金额超过 12000 元需要谁审批？请给出处" \
+  --agent generic \
+  --storage-root "$STORAGE_ROOT" \
+  --vector-backend milvus \
+  --vector-dsn "$VECTOR_DSN" \
+  --vector-collection-prefix "$VECTOR_PREFIX" \
+  --reranker-model none \
+  --verbose
+```
+
+已入库资产问题：
+
+```bash
+uv run rag agent run \
+  "日提货总量是多少？请检查相关表格并给出处" \
+  --agent generic \
+  --storage-root "$STORAGE_ROOT" \
+  --vector-backend milvus \
+  --vector-dsn "$VECTOR_DSN" \
+  --vector-collection-prefix "$VECTOR_PREFIX" \
+  --reranker-model none \
+  --verbose
+```
+
+本地文件直接分析，不需要先入 RAG：
+
+```bash
+uv run rag agent run \
+  "读取这个 Excel，汇总关键指标，并写一个简短摘要" \
+  --agent generic \
+  --input-file "/absolute/path/to/report.xlsx" \
+  --verbose
+```
+
+期望工具链：
+
+```text
+本地文件：
+  list_files -> structured_probe 或 run_python_inline -> final answer / write_file
+
+知识库问题：
+  tool_search -> activate_tools -> rag_search_answer 或 asset_inspect / asset_analyze -> final answer
+```
+
+交互式：
+
+```bash
+uv run rag agent chat \
+  --agent generic \
+  --storage-root "$STORAGE_ROOT" \
+  --vector-backend milvus \
+  --vector-dsn "$VECTOR_DSN" \
+  --vector-collection-prefix "$VECTOR_PREFIX" \
+  --reranker-model none
+```
+
+### 常用开关
+
+| 需求 | 做法 |
+| --- | --- |
+| 关闭 rerank 省内存 | `unset RAG_RERANK_SERVICE_URL`，查询命令加 `--reranker-model none` |
+| 开启 HTTP rerank | 启动 `rag_rerank_9092`，`export RAG_RERANK_SERVICE_URL=http://127.0.0.1:9092`，命令里不要传 `--reranker-model none` |
+| 看 evidence / diagnostics | `rag query` 加 `--json` |
+| 普通制度问答 | `--retrieval-profile auto` |
+| Excel/PPT 表格/图片 OCR 资产问题 | `--retrieval-profile asset` |
+| Agent 直接读本地文件 | `rag agent run ... --input-file "/path/to/file.xlsx"` |
+| 一次性指定模型 | `--model mimo_cloud` 或 `--model qwen3_8b_mlx_4bit` |
+| 恢复常驻 embedding | `export RAG_EMBEDDING_SERVICE_URL=http://127.0.0.1:9090` |
+
+### 快速 smoke 测试
+
+```bash
+uv run rag ingest \
+  --storage-root data/smoke_milvus \
+  --vector-backend milvus \
+  --vector-dsn "$VECTOR_DSN" \
+  --vector-collection-prefix smoke_milvus_v1 \
+  --source-type plain_text \
+  --location memory://smoke/support-sla \
+  --title "示例客服 SLA Smoke" \
+  --owner smoke \
+  --content "示例客服 SLA：P1 工单首次响应目标为 30 分钟，解决目标为 4 小时。"
+
+uv run rag query \
+  --query "P1 工单首次响应目标是多少？" \
+  --storage-root data/smoke_milvus \
+  --vector-backend milvus \
+  --vector-dsn "$VECTOR_DSN" \
+  --vector-collection-prefix smoke_milvus_v1 \
+  --reranker-model none \
+  --retrieval-profile auto
+```
+
+说明：CLI 默认 metadata 仍可用本地 metadata repo 做快速验证。正式端到端可以使用下面的 `Postgres + parquet object + Milvus` runtime 配置。
+
+## 真实 Postgres + Milvus 端到端
+
+用正式链路时，显式构造 `StorageConfig`：
+
+```python
+from pathlib import Path
+
+from rag import AssemblyRequest, CapabilityRequirements, RAGRuntime, StorageComponentConfig, StorageConfig
+from rag.ingest.pipeline import IngestRequest
+from rag.models.assembly_adapter import to_assembly_overrides
+from rag.models.runtime import resolve_runtime_config
+from rag.retrieval.models import QueryOptions
+from rag.schema.core import SourceType
+from rag.utils.text import load_env_file
+
+load_env_file(".env")
+
+run_id = "manual_run_v1"
+root = Path("data/manual_pq_milvus") / run_id
+schema = f"rag_{run_id}"
+collection_prefix = f"rag_{run_id}"
+
+cfg = resolve_runtime_config()
+storage = StorageConfig(
+    backend="postgres",
+    root=root,
+    metadata=StorageComponentConfig(
+        backend="postgres",
+        dsn="postgresql://user:password@127.0.0.1:5432/postgres",
+        namespace=schema,
+    ),
+    vectors=StorageComponentConfig(
+        backend="milvus",
+        dsn="http://127.0.0.1:19530",
+        collection=collection_prefix,
+    ),
+    cache=StorageComponentConfig(
+        backend="redis",
+        dsn="redis://127.0.0.1:6379/0",
+        namespace=collection_prefix,
+    ),
+    object_store=StorageComponentConfig(backend="local"),
+)
+
+request = AssemblyRequest(
+    requirements=CapabilityRequirements(
+        require_chat=True,
+        require_rerank=False,
+        allow_degraded=False,
+    ),
+    overrides=to_assembly_overrides(cfg),
+)
+
+with RAGRuntime.from_request(storage=storage, request=request) as runtime:
+    runtime.insert(
+        IngestRequest(
+            location="memory://demo/support-sla",
+            source_type=SourceType.PLAIN_TEXT,
+            owner="demo",
+            title="示例客服 SLA",
+            content_text="示例客服 SLA：P1 工单首次响应目标为 30 分钟，解决目标为 4 小时。",
+        )
+    )
+
+    runtime.insert(
+        IngestRequest(
+            location="/absolute/path/to/sample_sales.xlsx",
+            source_type=SourceType.XLSX,
+            owner="demo",
+            title="示例销售明细",
+            file_path=Path("/absolute/path/to/sample_sales.xlsx"),
+        )
+    )
+
+    result = runtime.query_public(
+        "请计算示例销售明细中华北区域 2026-05 的销售额合计是多少？",
+        options=QueryOptions(retrieval_profile="asset", top_k=6, retrieval_pool_k=12),
+    )
+    print(result.answer.answer_text)
+```
+
+检查真实后端：
+
+```bash
+uv run python - <<'PY'
+from pymilvus import connections, utility
+
+prefix = "rag_manual_run_v1"
+connections.connect(alias="check", uri="http://127.0.0.1:19530")
+try:
+    print([name for name in utility.list_collections(using="check") if name.startswith(prefix)])
+finally:
+    connections.disconnect("check")
+PY
+```
+
+## 运行注意事项
+
+- 入库和查询必须使用同一个 embedding space；切换 embedding 模型后必须重建 Milvus collection。
+- 每次真实实验建议使用新的 `STORAGE_ROOT` 和 Milvus collection prefix，避免不同 embedding 维度或旧 schema 污染结果。
+- `9091` 被 Milvus 占用，rerank 服务使用 `9092`。
+- RAG 是 Agent 的一个工具，不是所有文件任务的默认入口。本地文件分析优先用 `--input-file`、workspace、`structured_probe` 和 `run_python_inline`。
+- 对表格真实值问题，不要信任 `sample_rows`；正确路径是资产 inspect/read/analyze 或本地 Python 计算。
+- OpenAI-compatible chat provider 的结构化输出能力依赖后端；降级必须可见，不能静默吞掉失败。
+- 批量入库脚本支持 `--summary-provider none`，可跳过 LLM 摘要生成，直接用原文进入 summary index；质量会低于严格摘要链路。
+- Agent CLI 当前默认 `--agent generic`。旧的 `research`、`orchestrator`、`compare`、`factcheck`、`synthesize` 不再是内置默认入口。
+
+DOCX 图形转换可选配置：
+
+```bash
+export DOCLING_LIBREOFFICE_CMD="/Applications/LibreOffice.app/Contents/MacOS/soffice"
+```
+
+Excel 入库耗时诊断：
+
+```bash
+uv run python scripts/diagnose_ingest_timing.py "$INPUT_PATH"
+```
