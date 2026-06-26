@@ -141,10 +141,8 @@ class AgentLoop:
         self._stop_hook_runner = stop_hook_runner
         self._finish_candidate_builder = finish_candidate_builder
         self._event_sink = event_sink or NullLoopEventSink()
-        self._stream_sink = stream_sink
-        # 把 stream_sink 注入到 model provider（如果支持）
-        if stream_sink is not None and hasattr(model_provider, "_stream_sink"):
-            model_provider._stream_sink = stream_sink
+        self._stream_sink: StreamEventSink | None = None
+        self._set_stream_sink(stream_sink)
         self._observation_extractor = observation_extractor or ObservationExtractor()
         self._observed_tool_call_ids: set[str] = set()
         self._plan_tracker = plan_tracker or PlanTracker()
@@ -153,53 +151,42 @@ class AgentLoop:
         self._deferred_store = deferred_store
         self._scratch_dir = scratch_dir
 
+    def _set_stream_sink(self, sink: StreamEventSink | None) -> None:
+        """Set the active stream sink, propagating to sub-components that support it."""
+        self._stream_sink = sink
+        for target in (self._model_provider, self._tool_runner):
+            if hasattr(target, "_stream_sink"):
+                target._stream_sink = sink
+
     async def _emit_stream(self, event: Any) -> None:
         """Emit a stream event if sink is configured."""
         if self._stream_sink is not None:
             await self._stream_sink.emit(event)
 
     async def run_streaming(self, state: LoopState) -> AsyncGenerator[StreamEvent, None]:
-        """流式运行 AgentLoop，yield 每一个 StreamEvent。
-
-        如果 run() 异常，会 yield 一个 ERROR 事件然后关闭 sink。
-        消费者不会挂死。
-
-        用法：
-            async for event in agent_loop.run_streaming(state):
-                handle(event)
-        """
+        """Yield StreamEvents as the loop runs.  One queue sink, no monkey patches."""
         from rag.agent.streaming.sink import QueueStreamEventSink
 
         sink = QueueStreamEventSink()
-        sink_targets: list[tuple[Any, StreamEventSink | None]] = [(self, self._stream_sink)]
-        self._stream_sink = sink
-        for target in (self._model_provider, self._tool_runner):
-            if hasattr(target, "_stream_sink"):
-                target_with_sink = cast(Any, target)
-                sink_targets.append((target_with_sink, target_with_sink._stream_sink))
-                target_with_sink._stream_sink = sink
+        original = self._stream_sink
+        self._set_stream_sink(sink)
 
         run_task: asyncio.Task[LoopState] | None = None
         try:
             run_task = asyncio.create_task(self.run(state))
 
-            # Always close the queue when run() returns, including normal
-            # completion paths that already emitted LOOP_END.
             def _on_run_done(t: asyncio.Task[LoopState]) -> None:
                 del t
                 asyncio.create_task(sink.close())
 
             run_task.add_done_callback(_on_run_done)
 
-            # 消费事件
             async for event in sink.stream():
                 yield event
 
-            # stream 正常结束，等 run 完成（检查异常）
             await run_task
 
         except BaseException:
-            # 消费者被取消或出错，确保 sink 关闭
             await sink.close()
             if run_task is not None and not run_task.done():
                 run_task.cancel()
@@ -210,8 +197,7 @@ class AgentLoop:
             raise
 
         finally:
-            for target, original_sink in sink_targets:
-                target._stream_sink = original_sink
+            self._set_stream_sink(original)
 
     async def run(self, state: LoopState) -> LoopState:
         if state["status"] != "running":
