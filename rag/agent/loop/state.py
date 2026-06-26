@@ -221,15 +221,6 @@ class LoopState(TypedDict):
     memory_state: MemoryState
     deferred_tool_state: DeferredToolState
     finish_state: FinishState
-    # ── PR1: tool discovery state ──
-    discovery_active_tools: list[str]
-    discovery_active_tool_iterations: dict[str, int]
-    discovery_last_candidates: list[dict[str, object]]
-    discovery_last_search_query: str
-    discovery_search_history: list[dict[str, object]]
-    discovery_pinned_tools: list[str]
-    active_deferred_tools: list[str]  # backward compat alias
-    capability_diagnostics: list[RuntimeDiagnostic]
     # ── File manifest (file-first processing) ──
     file_manifest: FileManifest | None
     # ── Persistent cross-session memory ──
@@ -296,15 +287,6 @@ def create_loop_state(
         "pause": None,
         "terminal": None,
         "latest_transition": None,
-        # ── PR1: tool discovery state ──
-        "discovery_active_tools": [],
-        "discovery_active_tool_iterations": {},
-        "discovery_last_candidates": [],
-        "discovery_last_search_query": "",
-        "discovery_search_history": [],
-        "discovery_pinned_tools": [],
-        "active_deferred_tools": [],
-        "capability_diagnostics": [],
         # ── File manifest (file-first processing) ──
         "file_manifest": file_manifest,
         # ── Persistent cross-session memory ──

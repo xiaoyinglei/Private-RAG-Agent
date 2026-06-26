@@ -486,50 +486,89 @@ class DeferredToolStore:
     # ── LoopState sync ──
 
     def sync_to_state(self, state: dict[str, Any]) -> None:
-        """Write current state to LoopState discovery_* fields."""
-        state["discovery_active_tools"] = list(self._active.keys())
-        state["discovery_active_tool_iterations"] = {
-            name: ref.activated_at_iteration
-            for name, ref in self._active.items()
-        }
-        state["discovery_last_candidates"] = [
-            {"name": c.name, "description": c.description, "reason": c.reason}
-            for c in self._pending_candidates.values()
-        ]
-        state["discovery_last_search_query"] = self._last_search_query
-        state["discovery_pinned_tools"] = list(self._pinned)
-        # Append to search history (bounded to last 50 entries)
-        history: list[dict[str, Any]] = state.get("discovery_search_history", [])
+        """Write current state to LoopState deferred_tool_state (single typed field)."""
+        from rag.agent.loop.substate import DeferredToolState, DiscoveryCandidate, DiscoveryEvent
+
+        # Append to search history if there's a new query
+        history: list[DiscoveryEvent] = []
+        existing = state.get("deferred_tool_state")
+        if isinstance(existing, DeferredToolState):
+            history = list(existing.search_history)
         if self._last_search_query and self._pending_candidates:
-            history.append({
-                "query": self._last_search_query,
-                "candidates": list(self._pending_candidates.keys()),
-                "activated": list(self._active.keys()),
-            })
-            state["discovery_search_history"] = history[-50:]
+            history.append(DiscoveryEvent(
+                query=self._last_search_query,
+                candidates=list(self._pending_candidates.keys()),
+                activated=list(self._active.keys()),
+            ))
+
+        state["deferred_tool_state"] = DeferredToolState(
+            active_tools=list(self._active.keys()),
+            active_tool_iterations={
+                name: ref.activated_at_iteration
+                for name, ref in self._active.items()
+            },
+            last_candidates=[
+                DiscoveryCandidate(
+                    name=c.name,
+                    description=c.description,
+                    reason=c.reason,
+                )
+                for c in self._pending_candidates.values()
+            ],
+            last_search_query=self._last_search_query,
+            search_history=history[-50:],
+            pinned_tools=list(self._pinned),
+            capability_diagnostics=list(
+                state.get("deferred_tool_state", DeferredToolState()).capability_diagnostics
+            ),
+        )
 
     def sync_from_state(self, state: dict[str, Any]) -> None:
-        """Restore state from LoopState discovery_* fields."""
-        active_names = state.get("discovery_active_tools", [])
-        iterations = state.get("discovery_active_tool_iterations", {})
+        """Restore state from LoopState deferred_tool_state."""
+        from rag.agent.loop.substate import DeferredToolState
+
+        dts = state.get("deferred_tool_state")
+        if not isinstance(dts, DeferredToolState):
+            # Fallback for checkpoint migration: read old discovery_* flat fields
+            active_names: list[str] = state.get("discovery_active_tools", [])
+            iterations: dict[str, int] = state.get("discovery_active_tool_iterations", {})
+            self._active = OrderedDict()
+            for name in active_names:
+                self._active[name] = ActivatedToolRef(
+                    tool_name=name,
+                    activated_at_iteration=iterations.get(name, 0),
+                    source_query=state.get("discovery_last_search_query", ""),
+                )
+            candidates_raw = state.get("discovery_last_candidates", [])
+            self._pending_candidates = {
+                c["name"]: SearchCandidate(
+                    name=c["name"],
+                    description=c.get("description", ""),
+                    reason=c.get("reason", ""),
+                )
+                for c in candidates_raw
+            }
+            self._last_search_query = state.get("discovery_last_search_query", "")
+            self._pinned = set(state.get("discovery_pinned_tools", []))
+            return
+
         self._active = OrderedDict()
-        for name in active_names:
+        for name in dts.active_tools:
             self._active[name] = ActivatedToolRef(
                 tool_name=name,
-                activated_at_iteration=iterations.get(name, 0),
-                source_query=state.get("discovery_last_search_query", ""),
+                activated_at_iteration=dts.active_tool_iterations.get(name, 0),
+                source_query=dts.last_search_query,
             )
-        candidates_raw = state.get("discovery_last_candidates", [])
         self._pending_candidates = {
-            c["name"]: SearchCandidate(
-                name=c["name"],
-                description=c.get("description", ""),
-                reason=c.get("reason", ""),
+            c.name: SearchCandidate(
+                name=c.name,
+                description=c.description,
+                reason=c.reason,
             )
-            for c in candidates_raw
+            for c in dts.last_candidates
         }
-        self._last_search_query = state.get("discovery_last_search_query", "")
-        self._pinned = set(state.get("discovery_pinned_tools", []))
+        self._last_search_query = dts.last_search_query
+        self._pinned = set(dts.pinned_tools)
 
 
 # ── Visible Tool Resolver ──

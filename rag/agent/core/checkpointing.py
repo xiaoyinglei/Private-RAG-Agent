@@ -479,15 +479,10 @@ def _normalize_loaded_state(state: LoopState) -> LoopState:
             run_config,
             source_scope=tuple(run_config.source_scope),
         )
-    # Backfill PR0/PR1 fields missing from older checkpoints
-    state.setdefault("discovery_active_tools", [])
-    state.setdefault("discovery_active_tool_iterations", {})
-    state.setdefault("discovery_last_candidates", [])
-    state.setdefault("discovery_last_search_query", "")
-    state.setdefault("discovery_search_history", [])
-    state.setdefault("discovery_pinned_tools", [])
-    state.setdefault("active_deferred_tools", [])
-    state.setdefault("capability_diagnostics", [])
+    # Backfill typed sub-state for old checkpoints (flat discovery fields deprecated)
+    from rag.agent.loop.substate import DeferredToolState
+
+    state.setdefault("deferred_tool_state", DeferredToolState())
     # ── PR1: migrate legacy flat fields into typed sub-states ──
     state = _migrate_legacy_state(cast(dict[str, Any], state))
     return state

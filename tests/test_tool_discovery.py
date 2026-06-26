@@ -389,10 +389,11 @@ class TestEdgeCases:
         state: dict = {}
         store.sync_to_state(state)
 
-        # Verify state structure
-        assert state["discovery_active_tools"] == ["excel_analyze"]
-        assert state["discovery_active_tool_iterations"] == {"excel_analyze": 5}
-        assert state["discovery_pinned_tools"] == ["excel_analyze"]
+        # Verify state structure — discovery fields now live in typed deferred_tool_state
+        dts = state["deferred_tool_state"]
+        assert dts.active_tools == ["excel_analyze"]
+        assert dts.active_tool_iterations == {"excel_analyze": 5}
+        assert dts.pinned_tools == ["excel_analyze"]
 
         # Restore from state
         store2 = DeferredToolStore(max_active=10)

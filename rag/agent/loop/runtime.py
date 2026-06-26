@@ -11,11 +11,7 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 
 from rag.agent.capabilities.catalog import CORE_TOOLS, DeferredToolStore, ToolCatalog
 from rag.agent.capabilities.context import iteration_var
-from rag.agent.core.checkpointing import (
-    CheckpointStore,
-    _migrate_discovery_candidates,
-    _migrate_discovery_events,
-)
+from rag.agent.core.checkpointing import CheckpointStore
 from rag.agent.core.context import RunRegistry
 from rag.agent.core.turn_contracts import ToolCallPlan
 from rag.agent.tools.spec import ToolResult
@@ -584,21 +580,9 @@ class AgentLoop:
         return state
 
     def _sync_discovery_to_state(self, state: LoopState) -> None:
-        """Sync deferred store state to LoopState discovery_* fields + DeferredToolState."""
+        """Sync deferred store state to LoopState deferred_tool_state."""
         if self._deferred_store is not None:
             self._deferred_store.sync_to_state(cast(dict[Any, Any], state))
-            # Backward compat alias
-            state["active_deferred_tools"] = list(self._deferred_store.active_names())
-            # ── PR1 dual-write: typed DeferredToolState ──
-            state["deferred_tool_state"] = DeferredToolState(
-                active_tools=list(state.get("discovery_active_tools", [])),
-                active_tool_iterations=dict(state.get("discovery_active_tool_iterations", {})),
-                last_candidates=_migrate_discovery_candidates(state.get("discovery_last_candidates", [])),
-                last_search_query=str(state.get("discovery_last_search_query", "")),
-                search_history=_migrate_discovery_events(state.get("discovery_search_history", [])),
-                pinned_tools=list(state.get("discovery_pinned_tools", [])),
-                capability_diagnostics=list(state.get("capability_diagnostics", [])),
-            )
 
     async def _execute_pending_tools(self, state: LoopState) -> bool:
         # ── 流式事件：工具开始执行 ──

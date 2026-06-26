@@ -432,4 +432,4 @@ def test_full_legacy_checkpoint_roundtrip_preserves_all_data() -> None:
     assert result["agent_plan"].objective == "Roundtrip test"
     assert result["memory_warnings"] == ["old checkpoint"]
     assert result["stop_hook_feedback"][0].code == "g1"
-    assert result["discovery_active_tools"] == ["vector_search"]
+    assert result["deferred_tool_state"].active_tools == ["vector_search"]
