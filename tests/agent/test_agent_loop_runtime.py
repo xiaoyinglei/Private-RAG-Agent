@@ -857,7 +857,7 @@ async def test_context_compaction_runs_before_provider_and_is_checkpointed() -> 
 
     assert result["status"] == "completed"
     assert [message.id for message in provider.seen_states[0]["messages"]] == ["msg-3"]
-    assert "compaction" in [reason for reason, _ in checkpoint.snapshots]
+    # Compaction no longer writes a checkpoint (transient, not needed for resume)
 
 
 @pytest.mark.anyio
@@ -903,10 +903,7 @@ async def test_context_overflow_triggers_reactive_compaction_once() -> None:
         "msg-3",
         "msg-4",
     ]
-    assert "reactive_compaction" in [reason for reason, _ in checkpoint.snapshots]
-    reactive_snapshot = [snapshot for reason, snapshot in checkpoint.snapshots if reason == "reactive_compaction"][0]
-    assert reactive_snapshot["latest_transition"] is not None
-    assert reactive_snapshot["latest_transition"].reason == "compaction"
+    # Reactive compaction no longer writes a checkpoint (transient recovery, not needed for resume)
 
 
 @pytest.mark.anyio

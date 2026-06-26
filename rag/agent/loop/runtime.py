@@ -308,7 +308,7 @@ class AgentLoop:
             reason="compaction", iteration=state["iteration"],
             detail={"channels": list(result.channels), "warnings": list(result.warnings)})
         replace_latest_transition(state, transition)
-        await self._emit_and_save(state, transition, checkpoint_reason="compaction")
+        await self._event_sink.emit(transition)
         await self._emit_stream(_stream_compact_layer(
             channels=list(result.channels), warnings=list(result.warnings),
             run_id=state["run_config"].run_id, turn=state["iteration"]))
@@ -324,9 +324,9 @@ class AgentLoop:
                 state, definition=self._definition, budget_remaining=budget_remaining)
             envelope = provided if isinstance(provided, ModelTurnEnvelope) else ModelTurnEnvelope(draft=provided)
             for t in envelope.transitions:
-                await self._set_transition(state,
-                    t.model_copy(update={"iteration": state["iteration"]}),
-                    checkpoint_reason=f"provider_{t.reason}")
+                tr = t.model_copy(update={"iteration": state["iteration"]})
+                replace_latest_transition(state, tr)
+                await self._event_sink.emit(tr)
             turn = await self._finish_candidate_builder.build(envelope.draft, state=state)
             return turn, 0  # success resets retry count
 
@@ -380,11 +380,12 @@ class AgentLoop:
             return None, 0
 
         state["iteration"] = max(0, state["iteration"] - 1)
-        await self._set_transition(state, LoopTransition(
+        tr = LoopTransition(
             reason="compaction", iteration=state["iteration"],
             detail={"mode": "reactive", "channels": list(result.channels),
-                "warnings": list(result.warnings)}),
-            checkpoint_reason="reactive_compaction")
+                "warnings": list(result.warnings)})
+        replace_latest_transition(state, tr)
+        await self._event_sink.emit(tr)
         await self._emit_stream(_stream_compact_layer(
             channels=list(result.channels), warnings=list(result.warnings),
             run_id=state["run_config"].run_id, turn=state["iteration"]))
@@ -872,44 +873,20 @@ class AgentLoop:
         reason: LoopTransitionReason,
         detail: dict[str, object],
         checkpoint_reason: str,
+        checkpoint: bool = True,
     ) -> None:
         transition = LoopTransition(
             reason=reason,
             iteration=state["iteration"],
             detail=detail,
         )
-        await self._set_transition(
-            state,
-            transition,
-            checkpoint_reason=checkpoint_reason,
-        )
-
-    async def _set_transition(
-        self,
-        state: LoopState,
-        transition: LoopTransition,
-        *,
-        checkpoint_reason: str,
-    ) -> None:
         replace_latest_transition(state, transition)
-        await self._emit_and_save(
-            state,
-            transition,
-            checkpoint_reason=checkpoint_reason,
-        )
-
-    async def _emit_and_save(
-        self,
-        state: LoopState,
-        transition: LoopTransition,
-        *,
-        checkpoint_reason: str,
-    ) -> None:
         await self._event_sink.emit(transition)
-        await self._checkpoint_store.save_snapshot(
-            state,
-            reason=checkpoint_reason,
-        )
+        if checkpoint:
+            await self._checkpoint_store.save_snapshot(
+                state,
+                reason=checkpoint_reason,
+            )
 
     def _record_plan_decision(
         self,
