@@ -221,357 +221,242 @@ class AgentLoop:
             plan, events = self._plan_tracker.initialize_task(task=state["task"])
             state["plan_state"].agent_plan = plan
             state["plan_state"].plan_events = list(events)
-            self._append_plan_events(state, events)
-        await self._checkpoint_store.save_snapshot(
-            state,
-            reason="loop_start",
-        )
+        await self._checkpoint_store.save_snapshot(state, reason="loop_start")
 
-        consecutive_model_failures = 0
+        retries = 0
         while state["status"] == "running":
-            # ── 流式事件：turn 开始 ──
             await self._emit_stream(
-                _stream_turn_start(
-                    run_id=state["run_config"].run_id,
-                    turn=state["iteration"] + 1,
-                )
+                _stream_turn_start(run_id=state["run_config"].run_id, turn=state["iteration"] + 1)
             )
+
+            # Execute any pending tool calls first
             if state["pending_tool_calls"]:
                 token = iteration_var.set(state["iteration"])
                 try:
-                    paused = await self._execute_pending_tools(state)
+                    if await self._execute_pending_tools(state):
+                        return state
                 finally:
                     iteration_var.reset(token)
-                if paused:
-                    return state
                 continue
 
+            # Guard rails
             if state["iteration"] >= self._definition.max_iterations:
-                await self._fail(
-                    state,
-                    stop_reason="max_iterations",
-                    error=("Agent loop reached the configured maximum number of model turns."),
-                    transition_reason="max_iterations",
-                    checkpoint_reason="max_iterations",
-                )
+                await self._fail(state, stop_reason="max_iterations",
+                    error="Max turns reached.", transition_reason="max_iterations",
+                    checkpoint_reason="max_iterations")
                 return state
 
-            try:
-                compaction = await _await_value(self._context_manager.prepare(state))
-            except Exception as exc:
-                await self._fail(
-                    state,
-                    stop_reason="context_compaction_failed",
-                    error=str(exc) or type(exc).__name__,
-                    transition_reason="failed",
-                    checkpoint_reason="context_compaction_failed",
-                )
+            if not await self._compact(state):
                 return state
-            if compaction.changed:
-                transition = state["latest_transition"] or LoopTransition(
-                    reason="compaction",
-                    iteration=state["iteration"],
-                    detail={
-                        "channels": list(compaction.channels),
-                        "warnings": list(compaction.warnings),
-                    },
-                )
-                replace_latest_transition(state, transition)
-                await self._emit_and_save(
-                    state,
-                    transition,
-                    checkpoint_reason="compaction",
-                )
-                # ── 流式事件：压缩完成 ──
-                await self._emit_stream(
-                    _stream_compact_layer(
-                        channels=list(compaction.channels),
-                        warnings=list(compaction.warnings),
-                        run_id=state["run_config"].run_id,
-                        turn=state["iteration"],
-                    )
-                )
 
             remaining = await handles.budget_ledger.remaining()
             if remaining <= 0:
-                await self._fail(
-                    state,
-                    stop_reason="budget_exhausted",
-                    error="The model token budget is exhausted.",
-                    transition_reason="failed",
-                    checkpoint_reason="budget_exhausted",
-                )
+                await self._fail(state, stop_reason="budget_exhausted",
+                    error="Token budget exhausted.", transition_reason="failed",
+                    checkpoint_reason="budget_exhausted")
                 return state
 
+            # Model turn — call the LLM, handle errors, return (turn | None)
             state["iteration"] += 1
-            try:
-                provided = await self._model_provider.next_turn(
-                    state,
-                    definition=self._definition,
-                    budget_remaining=remaining,
-                )
-                envelope = provided if isinstance(provided, ModelTurnEnvelope) else ModelTurnEnvelope(draft=provided)
-                for provider_transition in envelope.transitions:
-                    transition = provider_transition.model_copy(update={"iteration": state["iteration"]})
-                    await self._set_transition(
-                        state,
-                        transition,
-                        checkpoint_reason=(f"provider_{provider_transition.reason}"),
-                    )
-                turn = await self._finish_candidate_builder.build(
-                    envelope.draft,
-                    state=state,
-                )
-            except (AgentLLMContextOverflowError, LLMContextOverflowError) as exc:
-                if not state["memory_state"].reactive_compact_used:
-                    state["memory_state"].reactive_compact_used = True
-                    reactive_compact = getattr(
-                        self._context_manager,
-                        "reactive_compact",
-                        None,
-                    )
-                    if reactive_compact is not None:
-                        try:
-                            compaction = await _await_value(reactive_compact(state))
-                        except Exception as compact_exc:
-                            await self._fail(
-                                state,
-                                stop_reason="context_compaction_failed",
-                                error=str(compact_exc) or type(compact_exc).__name__,
-                                transition_reason="failed",
-                                checkpoint_reason="context_compaction_failed",
-                            )
-                            return state
-                        append_loop_diagnostic(
-                            state,
-                            RuntimeDiagnostic.from_exception(
-                                code="context_overflow_recovered",
-                                component="agent_loop",
-                                error=exc,
-                                severity="warning",
-                            ),
-                        )
-                        if compaction.changed:
-                            state["iteration"] = max(0, state["iteration"] - 1)
-                            transition = LoopTransition(
-                                reason="compaction",
-                                iteration=state["iteration"],
-                                detail={
-                                    "mode": "reactive",
-                                    "channels": list(compaction.channels),
-                                    "warnings": list(compaction.warnings),
-                                },
-                            )
-                            await self._set_transition(
-                                state,
-                                transition,
-                                checkpoint_reason="reactive_compaction",
-                            )
-                            await self._emit_stream(
-                                _stream_compact_layer(
-                                    channels=list(compaction.channels),
-                                    warnings=list(compaction.warnings),
-                                    run_id=state["run_config"].run_id,
-                                    turn=state["iteration"],
-                                )
-                            )
-                            continue
-                append_loop_diagnostic(
-                    state,
-                    RuntimeDiagnostic.from_exception(
-                        code="context_overflow",
-                        component="agent_loop",
-                        error=exc,
-                        severity="error",
-                    ),
-                )
-                await self._fail(
-                    state,
-                    stop_reason="context_overflow",
-                    error=str(exc) or type(exc).__name__,
-                    transition_reason="failed",
-                    checkpoint_reason="context_overflow",
-                )
-                return state
-            except (FinishCandidateBuildError, ValidationError, ValueError) as exc:
-                if isinstance(exc, FinishCandidateBuildError) and _has_tool_error(state):
-                    append_loop_diagnostic(
-                        state,
-                        RuntimeDiagnostic.from_exception(
-                            code="tool_error",
-                            component="agent_loop",
-                            error=exc,
-                            severity="error",
-                        ),
-                    )
-                    await self._fail(
-                        state,
-                        stop_reason="tool_error",
-                        error=_latest_tool_error_message(state),
-                        transition_reason="failed",
-                        checkpoint_reason="tool_error",
-                    )
-                    return state
-                append_loop_diagnostic(
-                    state,
-                    RuntimeDiagnostic.from_exception(
-                        code="invalid_model_turn",
-                        component="agent_loop",
-                        error=exc,
-                        severity="error",
-                    ),
-                )
-                if consecutive_model_failures < self._max_model_retries:
-                    consecutive_model_failures += 1
-                    # ── 流式事件：恢复重试 ──
-                    await self._emit_stream(
-                        _stream_recovery(
-                            strategy="model_retry",
-                            detail=f"attempt={consecutive_model_failures}, error={str(exc)[:200]}",
-                            run_id=state["run_config"].run_id,
-                            turn=state["iteration"],
-                        )
-                    )
-                    await self._transition(
-                        state,
-                        reason="retry",
-                        detail={
-                            "component": "model",
-                            "attempt": consecutive_model_failures,
-                            "error": str(exc),
-                        },
-                        checkpoint_reason="model_retry",
-                    )
-                    continue
-                await self._fail(
-                    state,
-                    stop_reason="invalid_model_turn",
-                    error=str(exc) or type(exc).__name__,
-                    transition_reason="failed",
-                    checkpoint_reason="invalid_model_turn",
-                )
-                return state
-            except Exception as exc:
-                append_loop_diagnostic(
-                    state,
-                    RuntimeDiagnostic.from_exception(
-                        code="model_provider_failed",
-                        component="agent_loop",
-                        error=exc,
-                        severity="error",
-                    ),
-                )
-                if consecutive_model_failures < self._max_model_retries:
-                    consecutive_model_failures += 1
-                    # ── 流式事件：恢复重试 ──
-                    await self._emit_stream(
-                        _stream_recovery(
-                            strategy="model_retry",
-                            detail=f"attempt={consecutive_model_failures}, error={str(exc)[:200]}",
-                            run_id=state["run_config"].run_id,
-                            turn=state["iteration"],
-                        )
-                    )
-                    await self._transition(
-                        state,
-                        reason="retry",
-                        detail={
-                            "component": "model",
-                            "attempt": consecutive_model_failures,
-                            "error": str(exc) or type(exc).__name__,
-                        },
-                        checkpoint_reason="model_retry",
-                    )
-                    continue
-                await self._fail(
-                    state,
-                    stop_reason="model_provider_failed",
-                    error=str(exc) or type(exc).__name__,
-                    transition_reason="failed",
-                    checkpoint_reason="model_provider_failed",
-                )
-                return state
+            turn, retries = await self._model_turn(state, retries, remaining)
+            if turn is None:
+                if state["status"] != "running":
+                    return state  # terminal
+                continue  # retry
 
-            consecutive_model_failures = 0
+            # Dispatch
             state["last_model_turn"] = turn
             if turn.action == "execute":
-                state["tool_call_ledger"].append_plans(
-                    turn.tool_calls,
-                    turn=state["iteration"],
-                )
-                state["pending_tool_calls"] = [PendingToolCall(plan=call, status="pending") for call in turn.tool_calls]
-                self._record_plan_decision(state, turn)
-                # Trim ledger after new pending state: active = just-created calls
+                state["tool_call_ledger"].append_plans(turn.tool_calls, turn=state["iteration"])
+                state["pending_tool_calls"] = [
+                    PendingToolCall(plan=call, status="pending") for call in turn.tool_calls
+                ]
                 state["tool_call_ledger"].trim(
                     active_tool_call_ids={p.tool_call_id for p in state["pending_tool_calls"]},
                 )
-            await self._transition(
-                state,
-                reason="next_turn",
-                detail={"action": turn.action},
-                checkpoint_reason="model_turn",
-            )
-
-            if turn.action == "execute":
-                await self._transition(
-                    state,
-                    reason="tool_execution",
-                    detail={
-                        "phase": "scheduled",
-                        "tool_call_ids": [call.tool_call_id for call in turn.tool_calls],
-                    },
-                    checkpoint_reason="tool_calls_scheduled",
-                )
-                # ── 流式事件：turn 结束（工具调度） ──
-                await self._emit_stream(
-                    _stream_turn_end(
-                        run_id=state["run_config"].run_id,
-                        turn=state["iteration"],
-                        stop_reason="tool_use",
-                    )
-                )
+                self._record_plan_decision(state, turn)
+                await self._transition(state, reason="next_turn", detail={"action": turn.action},
+                    checkpoint_reason="model_turn")
+                await self._transition(state, reason="tool_execution",
+                    detail={"phase": "scheduled",
+                        "tool_call_ids": [c.tool_call_id for c in turn.tool_calls]},
+                    checkpoint_reason="tool_calls_scheduled")
+                await self._emit_stream(_stream_turn_end(
+                    run_id=state["run_config"].run_id, turn=state["iteration"], stop_reason="tool_use"))
                 continue
+
+            await self._transition(state, reason="next_turn", detail={"action": turn.action},
+                checkpoint_reason="model_turn")
+
             if turn.action == "pause":
-                # ── 流式事件：turn 结束（暂停） ──
-                await self._emit_stream(
-                    _stream_turn_end(
-                        run_id=state["run_config"].run_id,
-                        turn=state["iteration"],
-                        stop_reason="pause",
-                    )
-                )
-                await self._pause(
-                    state,
-                    reason=cast(str, turn.pause_reason),
-                    request=None,
-                    checkpoint_reason="model_pause",
-                    transition_reason="paused",
-                )
+                await self._emit_stream(_stream_turn_end(
+                    run_id=state["run_config"].run_id, turn=state["iteration"], stop_reason="pause"))
+                await self._pause(state, reason=cast(str, turn.pause_reason), request=None,
+                    checkpoint_reason="model_pause", transition_reason="paused")
                 return state
 
-            # ── 流式事件：turn 结束（完成） ──
-            await self._emit_stream(
-                _stream_turn_end(
-                    run_id=state["run_config"].run_id,
-                    turn=state["iteration"],
-                    stop_reason="end_turn",
-                )
-            )
-            finished = await self._evaluate_finish(state, turn)
-            if finished:
+            # finish
+            await self._emit_stream(_stream_turn_end(
+                run_id=state["run_config"].run_id, turn=state["iteration"], stop_reason="end_turn"))
+            if await self._evaluate_finish(state, turn):
                 return state
 
-        # ── 流式事件：loop 结束（正常退出 while） ──
-        await self._emit_stream(
-            _stream_loop_end(
-                run_id=state["run_config"].run_id,
-                reason=state.get("terminal", {}) and state["terminal"].stop_reason
-                if state.get("terminal")
-                else "loop_exited",
-                total_turns=state["iteration"],
-            )
-        )
+        await self._emit_stream(_stream_loop_end(
+            run_id=state["run_config"].run_id,
+            reason=state["terminal"].stop_reason if state.get("terminal") else "loop_exited",
+            total_turns=state["iteration"]))
         return state
+
+    async def _compact(self, state: LoopState) -> bool:
+        """Run proactive compaction.  Returns False if compaction itself failed (state is terminal)."""
+        try:
+            result = await _await_value(self._context_manager.prepare(state))
+        except Exception as exc:
+            await self._fail(state, stop_reason="context_compaction_failed",
+                error=str(exc) or type(exc).__name__,
+                transition_reason="failed", checkpoint_reason="context_compaction_failed")
+            return False
+        if not result.changed:
+            return True
+        transition = LoopTransition(
+            reason="compaction", iteration=state["iteration"],
+            detail={"channels": list(result.channels), "warnings": list(result.warnings)})
+        replace_latest_transition(state, transition)
+        await self._emit_and_save(state, transition, checkpoint_reason="compaction")
+        await self._emit_stream(_stream_compact_layer(
+            channels=list(result.channels), warnings=list(result.warnings),
+            run_id=state["run_config"].run_id, turn=state["iteration"]))
+        return True
+
+    async def _model_turn(
+        self, state: LoopState, retries: int, budget_remaining: int,
+    ) -> tuple[ModelTurn | None, int]:
+        """Call the model, handle errors.  Returns (turn, retries) or (None, _) on terminal failure."""
+        turn: ModelTurn | None = None
+        try:
+            provided = await self._model_provider.next_turn(
+                state, definition=self._definition, budget_remaining=budget_remaining)
+            envelope = provided if isinstance(provided, ModelTurnEnvelope) else ModelTurnEnvelope(draft=provided)
+            for t in envelope.transitions:
+                await self._set_transition(state,
+                    t.model_copy(update={"iteration": state["iteration"]}),
+                    checkpoint_reason=f"provider_{t.reason}")
+            turn = await self._finish_candidate_builder.build(envelope.draft, state=state)
+            return turn, 0  # success resets retry count
+
+        except (AgentLLMContextOverflowError, LLMContextOverflowError) as exc:
+            turn, _ = await self._handle_overflow(state, exc)
+            return turn, retries
+
+        except (FinishCandidateBuildError, ValidationError, ValueError) as exc:
+            turn, retries = await self._handle_invalid_turn(state, exc, retries)
+            return turn, retries
+
+        except Exception as exc:
+            turn, retries = await self._handle_provider_error(state, exc, retries)
+            return turn, retries
+
+    async def _handle_overflow(
+        self, state: LoopState, exc: Exception,
+    ) -> tuple[ModelTurn | None, int]:
+        """Reactive compaction on context overflow.  Returns (turn, 0) to retry, (None, _) if failed."""
+        if state["memory_state"].reactive_compact_used:
+            append_loop_diagnostic(state, RuntimeDiagnostic.from_exception(
+                code="context_overflow", component="agent_loop", error=exc, severity="error"))
+            await self._fail(state, stop_reason="context_overflow",
+                error=str(exc) or type(exc).__name__,
+                transition_reason="failed", checkpoint_reason="context_overflow")
+            return None, 0
+
+        state["memory_state"].reactive_compact_used = True
+        compact = getattr(self._context_manager, "reactive_compact", None)
+        if compact is None:
+            await self._fail(state, stop_reason="context_overflow",
+                error="Context overflow, no reactive compaction available.",
+                transition_reason="failed", checkpoint_reason="context_overflow")
+            return None, 0
+
+        try:
+            result = await _await_value(compact(state))
+        except Exception as compact_exc:
+            await self._fail(state, stop_reason="context_compaction_failed",
+                error=str(compact_exc) or type(compact_exc).__name__,
+                transition_reason="failed", checkpoint_reason="context_compaction_failed")
+            return None, 0
+
+        append_loop_diagnostic(state, RuntimeDiagnostic.from_exception(
+            code="context_overflow_recovered", component="agent_loop", error=exc, severity="warning"))
+
+        if not result.changed:
+            await self._fail(state, stop_reason="context_overflow",
+                error="Reactive compaction did not free context space.",
+                transition_reason="failed", checkpoint_reason="context_overflow")
+            return None, 0
+
+        state["iteration"] = max(0, state["iteration"] - 1)
+        await self._set_transition(state, LoopTransition(
+            reason="compaction", iteration=state["iteration"],
+            detail={"mode": "reactive", "channels": list(result.channels),
+                "warnings": list(result.warnings)}),
+            checkpoint_reason="reactive_compaction")
+        await self._emit_stream(_stream_compact_layer(
+            channels=list(result.channels), warnings=list(result.warnings),
+            run_id=state["run_config"].run_id, turn=state["iteration"]))
+        return None, 0  # caller will retry (turn is None, but state is still running)
+
+    async def _handle_invalid_turn(
+        self, state: LoopState, exc: Exception, retries: int,
+    ) -> tuple[ModelTurn | None, int]:
+        """Validation error or bad model output.  Retry or fail."""
+        if isinstance(exc, FinishCandidateBuildError) and _has_tool_error(state):
+            append_loop_diagnostic(state, RuntimeDiagnostic.from_exception(
+                code="tool_error", component="agent_loop", error=exc, severity="error"))
+            await self._fail(state, stop_reason="tool_error",
+                error=_latest_tool_error_message(state),
+                transition_reason="failed", checkpoint_reason="tool_error")
+            return None, retries
+
+        append_loop_diagnostic(state, RuntimeDiagnostic.from_exception(
+            code="invalid_model_turn", component="agent_loop", error=exc, severity="error"))
+
+        if retries >= self._max_model_retries:
+            await self._fail(state, stop_reason="invalid_model_turn",
+                error=str(exc) or type(exc).__name__,
+                transition_reason="failed", checkpoint_reason="invalid_model_turn")
+            return None, retries
+
+        retries += 1
+        await self._emit_stream(_stream_recovery(
+            strategy="model_retry",
+            detail=f"attempt={retries}, error={str(exc)[:200]}",
+            run_id=state["run_config"].run_id, turn=state["iteration"]))
+        await self._transition(state, reason="retry",
+            detail={"component": "model", "attempt": retries, "error": str(exc)},
+            checkpoint_reason="model_retry")
+        return None, retries  # caller will retry
+
+    async def _handle_provider_error(
+        self, state: LoopState, exc: Exception, retries: int,
+    ) -> tuple[ModelTurn | None, int]:
+        """Model provider failure.  Retry or fail."""
+        append_loop_diagnostic(state, RuntimeDiagnostic.from_exception(
+            code="model_provider_failed", component="agent_loop", error=exc, severity="error"))
+
+        if retries >= self._max_model_retries:
+            await self._fail(state, stop_reason="model_provider_failed",
+                error=str(exc) or type(exc).__name__,
+                transition_reason="failed", checkpoint_reason="model_provider_failed")
+            return None, retries
+
+        retries += 1
+        await self._emit_stream(_stream_recovery(
+            strategy="model_retry",
+            detail=f"attempt={retries}, error={str(exc)[:200]}",
+            run_id=state["run_config"].run_id, turn=state["iteration"]))
+        await self._transition(state, reason="retry",
+            detail={"component": "model", "attempt": retries, "error": str(exc)},
+            checkpoint_reason="model_retry")
+        return None, retries  # caller will retry
 
     def _sync_discovery_to_state(self, state: LoopState) -> None:
         """Sync deferred store state to LoopState deferred_tool_state."""
