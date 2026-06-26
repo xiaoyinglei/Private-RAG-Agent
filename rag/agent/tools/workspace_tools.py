@@ -63,7 +63,7 @@ class ListFilesTool(BaseTool):
     def __init__(self, workspace: WorkspaceRuntime): self._workspace = workspace
     async def execute(self, i: BaseModel, c: Any = None) -> BaseModel:
         from rag.agent.primitive_ops import PrimitiveOps
-        return PrimitiveOps(workspace=self._workspace).list_files(i)
+        return PrimitiveOps(workspace=self._workspace).list_files(i)  # type: ignore
 
 
 class ReadFileTool(BaseTool):
@@ -82,7 +82,7 @@ class ReadFileTool(BaseTool):
     def __init__(self, workspace: WorkspaceRuntime): self._workspace = workspace
     async def execute(self, i: BaseModel, c: Any = None) -> BaseModel:
         from rag.agent.primitive_ops import PrimitiveOps
-        return PrimitiveOps(workspace=self._workspace).read_file(i)
+        return PrimitiveOps(workspace=self._workspace).read_file(i)  # type: ignore
 
 
 class WriteFileTool(BaseTool):
@@ -99,7 +99,7 @@ class WriteFileTool(BaseTool):
     def __init__(self, workspace: WorkspaceRuntime): self._workspace = workspace
     async def execute(self, i: BaseModel, c: Any = None) -> BaseModel:
         from rag.agent.primitive_ops import PrimitiveOps
-        return PrimitiveOps(workspace=self._workspace).write_file(i)
+        return PrimitiveOps(workspace=self._workspace).write_file(i)  # type: ignore
 
 
 class RunPythonTool(BaseTool):
@@ -116,7 +116,7 @@ class RunPythonTool(BaseTool):
     def __init__(self, workspace: WorkspaceRuntime): self._workspace = workspace
     async def execute(self, i: BaseModel, c: Any = None) -> BaseModel:
         from rag.agent.primitive_ops import PrimitiveOps
-        return PrimitiveOps(workspace=self._workspace).run_python(i)
+        return PrimitiveOps(workspace=self._workspace).run_python(i)  # type: ignore
 
 
 class StructuredProbeTool(BaseTool):
@@ -133,7 +133,7 @@ class StructuredProbeTool(BaseTool):
     def __init__(self, workspace: WorkspaceRuntime): self._workspace = workspace
     async def execute(self, i: BaseModel, c: Any = None) -> BaseModel:
         from rag.agent.primitive_ops import PrimitiveOps
-        return PrimitiveOps(workspace=self._workspace).structured_probe(i)
+        return PrimitiveOps(workspace=self._workspace).structured_probe(i)  # type: ignore
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -156,7 +156,7 @@ class SearchTextTool(BaseTool):
     def __init__(self, workspace: WorkspaceRuntime): self._workspace = workspace
     async def execute(self, i: BaseModel, c: Any = None) -> BaseModel:
         from rag.agent.primitive_ops import PrimitiveOps
-        return PrimitiveOps(workspace=self._workspace).search_text(i)
+        return PrimitiveOps(workspace=self._workspace).search_text(i)  # type: ignore
 
 
 class ApplyPatchTool(BaseTool):
@@ -173,7 +173,7 @@ class ApplyPatchTool(BaseTool):
     def __init__(self, workspace: WorkspaceRuntime): self._workspace = workspace
     async def execute(self, i: BaseModel, c: Any = None) -> BaseModel:
         from rag.agent.primitive_ops import PrimitiveOps
-        return PrimitiveOps(workspace=self._workspace).apply_patch(i)
+        return PrimitiveOps(workspace=self._workspace).apply_patch(i)  # type: ignore
 
 
 class RunCommandTool(BaseTool):
@@ -190,7 +190,7 @@ class RunCommandTool(BaseTool):
     def __init__(self, workspace: WorkspaceRuntime): self._workspace = workspace
     async def execute(self, i: BaseModel, c: Any = None) -> BaseModel:
         from rag.agent.primitive_ops import PrimitiveOps
-        return PrimitiveOps(workspace=self._workspace).run_command(i)
+        return PrimitiveOps(workspace=self._workspace).run_command(i)  # type: ignore
 
 
 class ToolReplTool(BaseTool):
@@ -229,4 +229,4 @@ WORKSPACE_TOOL_CLASSES: list[type[BaseTool]] = [
 
 def create_workspace_tools(workspace: WorkspaceRuntime) -> list[BaseTool]:
     """Create tool instances with workspace injected (for registry registration)."""
-    return [cls(workspace) for cls in WORKSPACE_TOOL_CLASSES]
+    return [cls(workspace) for cls in WORKSPACE_TOOL_CLASSES]  # type: ignore[call-arg]

@@ -5,6 +5,7 @@ Kept as a stub for import compatibility during transition.
 
 from __future__ import annotations
 
-ALL_PRIMITIVE_TOOLS: list = []
+from typing import Any
+ALL_PRIMITIVE_TOOLS: list[Any] = []
 
 __all__ = ["ALL_PRIMITIVE_TOOLS"]

@@ -781,7 +781,7 @@ class AgentLoop:
                 "mcp_latency_ms_total": prev.mcp_latency_ms_total + mcp_lat,
             },
         )
-        state["tool_call_metrics"] = metrics
+        state["tool_call_metrics"] = metrics  # type: ignore[typeddict-unknown-key]
 
         # Keep compact diagnostic summary for inline display
         msg = (

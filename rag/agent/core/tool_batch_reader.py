@@ -79,7 +79,7 @@ def read_tool_batch(
                     declarations.append(
                         ToolBatchDeclaration(
                             tool_name=str(tool_name),
-                            arguments=arguments,  # type: ignore[arg-type]
+                            arguments=arguments,
                             line_number=lineno,
                         )
                     )

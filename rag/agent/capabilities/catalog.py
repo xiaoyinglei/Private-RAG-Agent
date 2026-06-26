@@ -485,7 +485,7 @@ class DeferredToolStore:
 
     # ── LoopState sync ──
 
-    def sync_to_state(self, state: dict) -> None:
+    def sync_to_state(self, state: dict[str, Any]) -> None:
         """Write current state to LoopState discovery_* fields."""
         state["discovery_active_tools"] = list(self._active.keys())
         state["discovery_active_tool_iterations"] = {
@@ -499,7 +499,7 @@ class DeferredToolStore:
         state["discovery_last_search_query"] = self._last_search_query
         state["discovery_pinned_tools"] = list(self._pinned)
         # Append to search history (bounded to last 50 entries)
-        history: list = state.get("discovery_search_history", [])
+        history: list[dict[str, Any]] = state.get("discovery_search_history", [])
         if self._last_search_query and self._pending_candidates:
             history.append({
                 "query": self._last_search_query,
@@ -508,7 +508,7 @@ class DeferredToolStore:
             })
             state["discovery_search_history"] = history[-50:]
 
-    def sync_from_state(self, state: dict) -> None:
+    def sync_from_state(self, state: dict[str, Any]) -> None:
         """Restore state from LoopState discovery_* fields."""
         active_names = state.get("discovery_active_tools", [])
         iterations = state.get("discovery_active_tool_iterations", {})

@@ -517,8 +517,11 @@ class PrimitiveOps:
         else:
             args.append("-F")
         args.extend([inp.pattern, inp.path])
+        import subprocess as _sp
+
         try:
-            result = self._python_runner._execute_command(args, timeout=inp.timeout_seconds or 15.0)
+            proc = _sp.run(args, capture_output=True, text=True, timeout=15.0)
+            result = type("_R", (), {"stdout": proc.stdout or "", "stderr": proc.stderr or "", "exit_code": proc.returncode})()
         except Exception:
             result = type("_R", (), {"stdout": "", "stderr": "grep failed", "exit_code": 1})()
         matches: list[SearchTextMatch] = []

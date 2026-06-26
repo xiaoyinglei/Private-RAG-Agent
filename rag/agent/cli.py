@@ -160,7 +160,7 @@ def _build_agent_service(
             else:
                 inp = payload
             # List
-            list_out = await asset_runner.list_assets(
+            list_out = asset_runner.list_assets(
                 type("_In", (), {"doc_id": inp.doc_id, "asset_type": inp.asset_type})()
             )
             results: list[AssetResult] = []
@@ -174,7 +174,7 @@ def _build_agent_service(
                 # Inspect if preview requested
                 if inp.include_preview and a.asset_id:
                     try:
-                        insp = await asset_runner.inspect_asset(
+                        insp = asset_runner.inspect_asset(
                             type("_In2", (), {"asset_id": a.asset_id, "head_rows": 3})()
                         )
                         if insp.head_rows:
