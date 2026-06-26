@@ -102,7 +102,7 @@ def test_required_call_context_overflow_raises_without_hash_replacement() -> Non
 
 def test_optional_state_context_can_be_reduced_without_overflow() -> None:
     state = _state()
-    state["memory_warnings"] = ["OPTIONAL_WARNING " * 100]
+    state["memory_state"].memory_warnings = ["OPTIONAL_WARNING " * 100]
 
     assembled = _assembler(180).assemble_generate(
         definition=_definition(),

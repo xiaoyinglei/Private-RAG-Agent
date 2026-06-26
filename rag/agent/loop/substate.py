@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from pydantic import BaseModel, Field
 
+from rag.agent.core.output_models import ValidatedFinalOutput
 from rag.agent.core.runtime_diagnostics import RuntimeDiagnostic
 from rag.agent.loop.state import StopHookFeedback
 from rag.agent.memory.models import (
@@ -85,10 +86,13 @@ class DeferredToolState(BaseModel):
 
 
 class FinishState(BaseModel):
-    """Stop-hook gate state — feedback / warnings injected into the next turn."""
+    """Stop-hook gate + terminal output state."""
 
     feedback: list[StopHookFeedback] = Field(default_factory=list)
     warnings: list[StopHookFeedback] = Field(default_factory=list)
+    final_answer: str | None = None
+    final_output: ValidatedFinalOutput | None = None
+    output_validation_errors: list[dict[str, object]] = Field(default_factory=list)
 
 
 __all__ = [

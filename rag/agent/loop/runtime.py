@@ -217,13 +217,10 @@ class AgentLoop:
         if state["status"] != "running":
             return state
         handles = RunRegistry.get_or_create(state["run_config"])
-        if state["agent_plan"] is None:
+        if state["plan_state"].agent_plan is None:
             plan, events = self._plan_tracker.initialize_task(task=state["task"])
-            state["agent_plan"] = plan
-            state["plan_state"] = PlanState(
-                agent_plan=plan,
-                plan_events=list(state.get("plan_events", [])),
-            )
+            state["plan_state"].agent_plan = plan
+            state["plan_state"].plan_events = list(events)
             self._append_plan_events(state, events)
         await self._checkpoint_store.save_snapshot(
             state,
@@ -326,11 +323,8 @@ class AgentLoop:
                     state=state,
                 )
             except (AgentLLMContextOverflowError, LLMContextOverflowError) as exc:
-                if not state.get("reactive_compact_used"):
-                    state["reactive_compact_used"] = True
-                    ms = state.get("memory_state")
-                    if isinstance(ms, MemoryState):
-                        state["memory_state"] = ms.model_copy(update={"reactive_compact_used": True})
+                if not state["memory_state"].reactive_compact_used:
+                    state["memory_state"].reactive_compact_used = True
                     reactive_compact = getattr(
                         self._context_manager,
                         "reactive_compact",
@@ -648,10 +642,7 @@ class AgentLoop:
                 )
 
         if result.context_budget is not None:
-            state["context_budget"] = result.context_budget
-            ms = state.get("memory_state")
-            if isinstance(ms, MemoryState):
-                state["memory_state"] = ms.model_copy(update={"context_budget": result.context_budget})
+            state["memory_state"].context_budget = result.context_budget
 
         batch = self._observation_extractor.extract(
             new_results,
@@ -904,8 +895,8 @@ class AgentLoop:
         outcome: StopHookOutcome,
     ) -> None:
         state["status"] = "completed"
-        state["final_answer"] = candidate
-        state["final_output"] = outcome.final_output
+        state["finish_state"].final_answer = candidate
+        state["finish_state"].final_output = outcome.final_output
         state["pause"] = None
         state["terminal"] = LoopTerminal(
             status="completed",
@@ -913,13 +904,9 @@ class AgentLoop:
             final_answer=candidate,
             final_output=outcome.final_output,
         )
-        plan, events = self._plan_tracker.record_completion(state["agent_plan"])
-        state["agent_plan"] = plan
-        state["plan_state"] = PlanState(
-            agent_plan=plan,
-            plan_events=list(state.get("plan_events", [])),
-        )
-        self._append_plan_events(state, events)
+        plan, events = self._plan_tracker.record_completion(state["plan_state"].agent_plan)
+        state["plan_state"].agent_plan = plan
+        state["plan_state"].plan_events = [*state["plan_state"].plan_events, *events][-MAX_PLAN_EVENTS:]
         await self._transition(
             state,
             reason="finished",
@@ -953,15 +940,11 @@ class AgentLoop:
             error=error,
         )
         plan, events = self._plan_tracker.record_completion(
-            state["agent_plan"],
+            state["plan_state"].agent_plan,
             blocked=True,
         )
-        state["agent_plan"] = plan
-        state["plan_state"] = PlanState(
-            agent_plan=plan,
-            plan_events=list(state.get("plan_events", [])),
-        )
-        self._append_plan_events(state, events)
+        state["plan_state"].agent_plan = plan
+        state["plan_state"].plan_events = [*state["plan_state"].plan_events, *events][-MAX_PLAN_EVENTS:]
         await self._transition(
             state,
             reason=transition_reason,
@@ -1062,7 +1045,7 @@ class AgentLoop:
         state: LoopState,
         turn: ModelTurn,
     ) -> None:
-        plan = state["agent_plan"]
+        plan = state["plan_state"].agent_plan
         if plan is None:
             return
         updated, events = self._plan_tracker.record_decision_progress(
@@ -1070,12 +1053,8 @@ class AgentLoop:
             tool_call_ids=[call.tool_call_id for call in turn.tool_calls],
             tool_names=[call.tool_name for call in turn.tool_calls],
         )
-        state["agent_plan"] = updated
-        state["plan_state"] = PlanState(
-            agent_plan=updated,
-            plan_events=list(state.get("plan_events", [])),
-        )
-        self._append_plan_events(state, events)
+        state["plan_state"].agent_plan = updated
+        state["plan_state"].plan_events = [*state["plan_state"].plan_events, *events][-MAX_PLAN_EVENTS:]
 
     def _record_plan_observations(
         self,
@@ -1093,31 +1072,22 @@ class AgentLoop:
             for obs in batch.structured_observations
         ]
         plan, events = self._plan_tracker.record_observation_progress(
-            plan=state["agent_plan"],
+            plan=state["plan_state"].agent_plan,
             observations=typed_observations,
         )
         if plan is not None:
-            state["agent_plan"] = plan
-            state["plan_events"] = [*state["plan_events"], *events][-MAX_PLAN_EVENTS:]
-            # PR1 dual-write
-            if hasattr(state["plan_state"], "model_copy"):
-                state["plan_state"] = state["plan_state"].model_copy(
-                    update={"agent_plan": plan, "plan_events": list(state["plan_events"])}
-                )
+            state["plan_state"].agent_plan = plan
+            state["plan_state"].plan_events = [*state["plan_state"].plan_events, *events][-MAX_PLAN_EVENTS:]
 
     @staticmethod
     def _append_plan_events(
         state: LoopState,
         events: Sequence[PlanEvent],
     ) -> None:
-        state["plan_events"] = [
-            *state["plan_events"],
+        state["plan_state"].plan_events = [
+            *state["plan_state"].plan_events,
             *events,
         ][-MAX_PLAN_EVENTS:]
-        state["plan_state"] = PlanState(
-            agent_plan=state.get("agent_plan"),
-            plan_events=list(state["plan_events"]),
-        )
 
     @staticmethod
     def _merge_observations(

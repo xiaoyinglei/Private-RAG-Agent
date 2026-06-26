@@ -331,13 +331,13 @@ def _build_golden_state() -> LoopState:
     state["asset_refs"] = [101]
 
     # -- memory / working memory ------------------------------------------------
-    state["working_summary"] = WorkingSummary(
+    state["memory_state"].working_summary = WorkingSummary(
         summary="Preliminary search over policy documents.",
         covered_message_ids=["msg-tail"],
         updated_at="2026-06-24T00:00:00Z",
         token_count=5,
     )
-    state["extracted_facts"] = [
+    state["memory_state"].extracted_facts = [
         ExtractedFact(
             fact_id="fact-1",
             text="Prior approval required for external data sharing.",
@@ -345,7 +345,7 @@ def _build_golden_state() -> LoopState:
             source_message_ids=["msg-tail"],
         ),
     ]
-    state["memory_refs"] = [
+    state["memory_state"].memory_refs = [
         MemoryRef(
             ref_id="mem-1",
             path="/workspace/.agent_memory/records/mem-1.json",

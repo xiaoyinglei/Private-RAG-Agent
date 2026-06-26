@@ -246,12 +246,12 @@ class MessageCompactor:
         update: dict[str, Any] = {
             "messages": list(draft.tail_messages),
             "working_summary": self._merge_summary(
-                state.get("working_summary"),
+                state["memory_state"].working_summary,
                 draft.working_summary,
             ),
             "extracted_facts": self._bounded_facts(
                 [
-                    *[fact for fact in state.get("extracted_facts", []) if isinstance(fact, ExtractedFact)],
+                    *[fact for fact in state["memory_state"].extracted_facts if isinstance(fact, ExtractedFact)],
                     *draft.extracted_facts,
                 ]
             ),
@@ -260,12 +260,12 @@ class MessageCompactor:
         ref = self._write_message_batch(covered_messages, warnings=warnings)
         if ref is not None:
             update["memory_refs"] = [
-                *[ref for ref in state.get("memory_refs", []) if isinstance(ref, MemoryRef)],
+                *[ref for ref in state["memory_state"].memory_refs if isinstance(ref, MemoryRef)],
                 ref,
             ]
         if warnings:
             update["memory_warnings"] = [
-                *[str(item) for item in state.get("memory_warnings", [])],
+                *[str(item) for item in state["memory_state"].memory_warnings],
                 *warnings,
             ]
         # Dual-write to structured memory_state for checkpoint/restore.
@@ -273,13 +273,13 @@ class MessageCompactor:
         from rag.agent.loop.substate import MemoryState, PersistentMemorySnapshot
 
         update["memory_state"] = MemoryState(
-            working_summary=update.get("working_summary", state.get("working_summary")),
-            extracted_facts=list(update.get("extracted_facts", state.get("extracted_facts", []))),
-            context_budget=state.get("context_budget"),
-            memory_refs=list(update.get("memory_refs", state.get("memory_refs", []))),
-            memory_budget=state.get("memory_budget"),
-            memory_warnings=list(update.get("memory_warnings", state.get("memory_warnings", []))),
-            reactive_compact_used=bool(state.get("reactive_compact_used", False)),
+            working_summary=update.get("working_summary", state["memory_state"].working_summary),
+            extracted_facts=list(update.get("extracted_facts", state["memory_state"].extracted_facts)),
+            context_budget=state["memory_state"].context_budget,
+            memory_refs=list(update.get("memory_refs", state["memory_state"].memory_refs)),
+            memory_budget=state["memory_state"].memory_budget,
+            memory_warnings=list(update.get("memory_warnings", state["memory_state"].memory_warnings)),
+            reactive_compact_used=bool(state["memory_state"].reactive_compact_used),
             persistent=PersistentMemorySnapshot(
                 index_digest=_digest_text(state.get("memory_index", "")),
                 selected_count=len(state.get("persistent_memories", [])),
@@ -461,7 +461,7 @@ class MemoryCompactor:
                 channel_changed = tool_results_changed
             elif channel == "memory_refs" and new_memory_refs:
                 combined = [
-                    *[ref for ref in state.get("memory_refs", []) if isinstance(ref, MemoryRef)],
+                    *[ref for ref in state["memory_state"].memory_refs if isinstance(ref, MemoryRef)],
                     *new_memory_refs,
                 ]
                 channel_changed = True
@@ -1153,7 +1153,7 @@ class LoopContextCompactor:
 
         state_dict = cast(dict[str, Any], state)
         policy = state["run_config"].memory_policy
-        initial_warnings = list(state["memory_warnings"])
+        initial_warnings = list(state["memory_state"].memory_warnings)
         changed_channels: list[str] = []
 
         for layer in (
@@ -1191,13 +1191,13 @@ class LoopContextCompactor:
         from rag.agent.loop.substate import MemoryState, PersistentMemorySnapshot
 
         state["memory_state"] = MemoryState(
-            working_summary=state.get("working_summary"),
-            extracted_facts=list(state.get("extracted_facts", [])),
-            context_budget=state.get("context_budget"),
-            memory_refs=list(state.get("memory_refs", [])),
-            memory_budget=state.get("memory_budget"),
-            memory_warnings=list(state.get("memory_warnings", [])),
-            reactive_compact_used=bool(state.get("reactive_compact_used", False)),
+            working_summary=state["memory_state"].working_summary,
+            extracted_facts=list(state["memory_state"].extracted_facts),
+            context_budget=state["memory_state"].context_budget,
+            memory_refs=list(state["memory_state"].memory_refs),
+            memory_budget=state["memory_state"].memory_budget,
+            memory_warnings=list(state["memory_state"].memory_warnings),
+            reactive_compact_used=bool(state["memory_state"].reactive_compact_used),
             persistent=PersistentMemorySnapshot(
                 index_digest=_digest_text(state.get("memory_index", "")),
                 selected_count=len(state.get("persistent_memories", [])),
@@ -1205,7 +1205,7 @@ class LoopContextCompactor:
         )
 
         changed = bool(changed_channels)
-        warnings = tuple(warning for warning in state["memory_warnings"] if warning not in initial_warnings)
+        warnings = tuple(warning for warning in state["memory_state"].memory_warnings if warning not in initial_warnings)
         channels = tuple(dict.fromkeys(changed_channels))
         if changed:
             replace_latest_transition(
@@ -1230,7 +1230,7 @@ class LoopContextCompactor:
 
         state_dict = cast(dict[str, Any], state)
         policy = state["run_config"].memory_policy
-        initial_warnings = list(state["memory_warnings"])
+        initial_warnings = list(state["memory_state"].memory_warnings)
         changed_channels: list[str] = []
 
         message_policy = policy.model_copy(
@@ -1273,20 +1273,20 @@ class LoopContextCompactor:
         from rag.agent.loop.substate import MemoryState, PersistentMemorySnapshot
 
         state["memory_state"] = MemoryState(
-            working_summary=state.get("working_summary"),
-            extracted_facts=list(state.get("extracted_facts", [])),
-            context_budget=state.get("context_budget"),
-            memory_refs=list(state.get("memory_refs", [])),
-            memory_budget=state.get("memory_budget"),
-            memory_warnings=list(state.get("memory_warnings", [])),
-            reactive_compact_used=bool(state.get("reactive_compact_used", False)),
+            working_summary=state["memory_state"].working_summary,
+            extracted_facts=list(state["memory_state"].extracted_facts),
+            context_budget=state["memory_state"].context_budget,
+            memory_refs=list(state["memory_state"].memory_refs),
+            memory_budget=state["memory_state"].memory_budget,
+            memory_warnings=list(state["memory_state"].memory_warnings),
+            reactive_compact_used=bool(state["memory_state"].reactive_compact_used),
             persistent=PersistentMemorySnapshot(
                 index_digest=_digest_text(state.get("memory_index", "")),
                 selected_count=len(state.get("persistent_memories", [])),
             ),
         )
 
-        warnings = tuple(warning for warning in state["memory_warnings"] if warning not in initial_warnings)
+        warnings = tuple(warning for warning in state["memory_state"].memory_warnings if warning not in initial_warnings)
         return LoopCompactionResult(
             changed=bool(changed_channels),
             channels=tuple(dict.fromkeys(changed_channels)),
@@ -1494,17 +1494,17 @@ class LoopContextCompactor:
 
     @staticmethod
     def _append_memory_refs(state: dict[str, Any], refs: list[MemoryRef]) -> None:
-        by_id = {ref.ref_id: ref for ref in state.get("memory_refs", []) if isinstance(ref, MemoryRef)}
+        by_id = {ref.ref_id: ref for ref in state["memory_state"].memory_refs if isinstance(ref, MemoryRef)}
         for ref in refs:
             by_id[ref.ref_id] = ref
-        state["memory_refs"] = list(by_id.values())
+        state["memory_state"].memory_refs = list(by_id.values())
 
     @staticmethod
     def _append_memory_warnings(state: dict[str, Any], warnings: list[str]) -> None:
-        state["memory_warnings"] = list(
+        state["memory_state"].memory_warnings = list(
             dict.fromkeys(
                 [
-                    *[str(item) for item in state.get("memory_warnings", [])],
+                    *[str(item) for item in state["memory_state"].memory_warnings],
                     *[warning for warning in warnings if warning],
                 ]
             )

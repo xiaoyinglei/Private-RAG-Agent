@@ -120,10 +120,6 @@ class StopHookRunner:
                         message=verdict.message or verdict.code,
                     ),
                 )
-                state["finish_state"] = FinishState(
-                    feedback=list(state.get("stop_hook_feedback", [])),
-                    warnings=list(state.get("stop_hook_warnings", [])),
-                )
                 continue
             if verdict.action == "block":
                 feedback = append_stop_hook_feedback(
@@ -132,10 +128,6 @@ class StopHookRunner:
                         code=verdict.code,
                         message=verdict.message or verdict.code,
                     ),
-                )
-                state["finish_state"] = FinishState(
-                    feedback=list(state.get("stop_hook_feedback", [])),
-                    warnings=list(state.get("stop_hook_warnings", [])),
                 )
                 if feedback.occurrences >= self._max_blocks:
                     return StopHookOutcome(

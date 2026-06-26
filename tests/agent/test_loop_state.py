@@ -95,7 +95,7 @@ def test_loop_state_factory_copies_mutable_inputs() -> None:
     warnings.append("later")
 
     assert len(state["pending_tool_calls"]) == 1
-    assert state["memory_warnings"] == ["initial"]
+    assert state["memory_state"].memory_warnings == ["initial"]
 
 
 def test_model_turn_draft_accepts_explicit_finish_candidate() -> None:
@@ -182,10 +182,10 @@ def test_bounded_append_helpers_keep_only_recent_unique_values() -> None:
             ),
         )
 
-    assert len(state["stop_hook_feedback"]) == MAX_STOP_HOOK_FEEDBACK
-    assert state["stop_hook_feedback"][0].code == "hook_3"
-    assert len(state["memory_warnings"]) == MAX_LOOP_MEMORY_WARNINGS
-    assert state["memory_warnings"][-1] == "warning 2"
+    assert len(state["finish_state"].feedback) == MAX_STOP_HOOK_FEEDBACK
+    assert state["finish_state"].feedback[0].code == "hook_3"
+    assert len(state["memory_state"].memory_warnings) == MAX_LOOP_MEMORY_WARNINGS
+    assert state["memory_state"].memory_warnings[-1] == "warning 2"
     assert len(state["runtime_diagnostics"]) == 20
 
 

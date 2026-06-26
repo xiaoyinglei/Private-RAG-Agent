@@ -86,7 +86,7 @@ class _CandidateProvider:
         budget_remaining: int,
     ) -> ModelTurnDraft | ModelTurnEnvelope:
         del definition, budget_remaining
-        if state["stop_hook_feedback"] and self._pause_after_feedback:
+        if state["finish_state"].feedback and self._pause_after_feedback:
             return ModelTurnDraft(
                 action="pause",
                 pause_reason=self._pause_after_feedback,

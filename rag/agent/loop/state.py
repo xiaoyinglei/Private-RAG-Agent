@@ -197,26 +197,12 @@ class LoopState(TypedDict):
     approved_tool_call_ids: list[str]
     denied_tool_call_ids: list[str]
     tool_results: list[ToolResult]
-    working_summary: WorkingSummary | None
-    extracted_facts: list[ExtractedFact]
-    context_budget: ContextBudgetSnapshot | None
-    memory_refs: list[MemoryRef]
-    memory_budget: MemoryBudgetSnapshot | None
-    memory_warnings: list[str]
-    reactive_compact_used: bool
-    agent_plan: AgentPlan | None
-    plan_events: list[PlanEvent]
-    stop_hook_feedback: list[StopHookFeedback]
-    stop_hook_warnings: list[StopHookFeedback]
     runtime_diagnostics: list[RuntimeDiagnostic]
     last_model_turn: ModelTurn | None
-    final_answer: str | None
-    final_output: ValidatedFinalOutput | None
-    output_validation_errors: list[dict[str, object]]
     pause: LoopPause | None
     terminal: LoopTerminal | None
     latest_transition: LoopTransition | None
-    # ── PR1-like: typed sub-state convergence (dual-write, no deletions) ──
+    # ── Typed sub-state containers ──
     plan_state: PlanState
     memory_state: MemoryState
     deferred_tool_state: DeferredToolState
@@ -265,25 +251,8 @@ def create_loop_state(
         "approved_tool_call_ids": [],
         "denied_tool_call_ids": [],
         "tool_results": [],
-        "working_summary": None,
-        "extracted_facts": [],
-        "context_budget": None,
-        "memory_refs": [],
-        "memory_budget": None,
-        "memory_warnings": _bounded_unique_strings(
-            memory_warnings,
-            limit=MAX_LOOP_MEMORY_WARNINGS,
-        ),
-        "reactive_compact_used": False,
-        "agent_plan": None,
-        "plan_events": [],
-        "stop_hook_feedback": [],
-        "stop_hook_warnings": [],
         "runtime_diagnostics": merge_runtime_diagnostics([], runtime_diagnostics),
         "last_model_turn": None,
-        "final_answer": None,
-        "final_output": None,
-        "output_validation_errors": [],
         "pause": None,
         "terminal": None,
         "latest_transition": None,
@@ -292,7 +261,7 @@ def create_loop_state(
         # ── Persistent cross-session memory ──
         "persistent_memories": [],
         "memory_index": "",
-        # ── PR1: typed sub-state convergence (dual-write alongside flat fields) ──
+        # ── Typed sub-state containers ──
         "plan_state": PlanState(
             agent_plan=None,
             plan_events=[],
@@ -311,7 +280,11 @@ def create_loop_state(
             persistent=PersistentMemorySnapshot(),
         ),
         "deferred_tool_state": DeferredToolState(),
-        "finish_state": FinishState(),
+        "finish_state": FinishState(
+            final_answer=None,
+            final_output=None,
+            output_validation_errors=[],
+        ),
     }
 
 
@@ -345,7 +318,7 @@ def append_stop_hook_feedback(
     existing = next(
         (
             item
-            for item in state["stop_hook_feedback"]
+            for item in state["finish_state"].feedback
             if item.code == feedback.code and item.message == feedback.message
         ),
         None,
@@ -353,15 +326,8 @@ def append_stop_hook_feedback(
     updated = feedback.model_copy(
         update={"occurrences": (feedback.occurrences if existing is None else existing.occurrences + 1)}
     )
-    items = [item for item in state["stop_hook_feedback"] if item is not existing]
-    state["stop_hook_feedback"] = [*items, updated][-MAX_STOP_HOOK_FEEDBACK:]
-    # Dual-write to typed finish_state sub-state
-    fs = state.get("finish_state")
-    if fs is not None and hasattr(fs, "model_copy"):
-        try:
-            state["finish_state"] = fs.model_copy(update={"feedback": list(state["stop_hook_feedback"])})
-        except Exception:
-            pass
+    items = [item for item in state["finish_state"].feedback if item is not existing]
+    state["finish_state"].feedback = [*items, updated][-MAX_STOP_HOOK_FEEDBACK:]
     return updated
 
 
@@ -370,36 +336,22 @@ def append_stop_hook_warning(
     warning: StopHookFeedback,
 ) -> StopHookFeedback:
     existing = next(
-        (item for item in state["stop_hook_warnings"] if item.code == warning.code and item.message == warning.message),
+        (item for item in state["finish_state"].warnings if item.code == warning.code and item.message == warning.message),
         None,
     )
     updated = warning.model_copy(
         update={"occurrences": (warning.occurrences if existing is None else existing.occurrences + 1)}
     )
-    items = [item for item in state["stop_hook_warnings"] if item is not existing]
-    state["stop_hook_warnings"] = [*items, updated][-MAX_STOP_HOOK_FEEDBACK:]
-    # Dual-write to typed finish_state sub-state
-    fs = state.get("finish_state")
-    if fs is not None and hasattr(fs, "model_copy"):
-        try:
-            state["finish_state"] = fs.model_copy(update={"warnings": list(state["stop_hook_warnings"])})
-        except Exception:
-            pass
+    items = [item for item in state["finish_state"].warnings if item is not existing]
+    state["finish_state"].warnings = [*items, updated][-MAX_STOP_HOOK_FEEDBACK:]
     return updated
 
 
 def append_memory_warning(state: LoopState, warning: str) -> None:
-    state["memory_warnings"] = _bounded_unique_strings(
-        [*state["memory_warnings"], warning],
+    state["memory_state"].memory_warnings = _bounded_unique_strings(
+        [*state["memory_state"].memory_warnings, warning],
         limit=MAX_LOOP_MEMORY_WARNINGS,
     )
-    # Dual-write to typed memory_state sub-state
-    ms = state.get("memory_state")
-    if ms is not None and hasattr(ms, "model_copy"):
-        try:
-            state["memory_state"] = ms.model_copy(update={"memory_warnings": list(state["memory_warnings"])})
-        except Exception:
-            pass  # non-critical sync, don't crash
 
 
 def append_loop_diagnostic(

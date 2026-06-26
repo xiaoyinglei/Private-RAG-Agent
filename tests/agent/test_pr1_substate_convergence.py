@@ -102,10 +102,10 @@ def test_create_loop_state_populates_substates() -> None:
     assert isinstance(state["deferred_tool_state"], DeferredToolState)
     assert isinstance(state["finish_state"], FinishState)
 
-    # Old flat fields still present (dual-write)
-    assert "agent_plan" in state
-    assert "working_summary" in state
-    assert "stop_hook_feedback" in state
+    # Sub-state containers are the sole source of truth
+    assert state["plan_state"].agent_plan is None
+    assert state["memory_state"].working_summary is None
+    assert state["finish_state"].feedback == []
 
 
 def test_create_loop_state_memory_warnings_in_both_channels() -> None:
@@ -115,7 +115,7 @@ def test_create_loop_state_memory_warnings_in_both_channels() -> None:
         memory_warnings=["low budget"],
     )
 
-    assert state["memory_warnings"] == ["low budget"]
+    assert state["memory_state"].memory_warnings == ["low budget"]
     assert state["memory_state"].memory_warnings == ["low budget"]
 
 
@@ -155,7 +155,7 @@ def test_migrate_legacy_state_populates_plan_state() -> None:
     assert result["plan_state"].agent_plan == plan
     assert result["plan_state"].plan_events == events
     # Old fields remain
-    assert result["agent_plan"] == plan
+    assert result["plan_state"].agent_plan == plan
 
 
 def test_migrate_legacy_state_populates_memory_state() -> None:
@@ -182,7 +182,7 @@ def test_migrate_legacy_state_populates_memory_state() -> None:
     assert len(ms.persistent.index_digest) <= 503  # 500 + "…"
     assert ms.persistent.selected_count == 2
     # Old fields remain
-    assert result["memory_warnings"] == ["test warning"]
+    assert result["memory_state"].memory_warnings == ["test warning"]
 
 
 def test_migrate_legacy_state_populates_finish_state() -> None:
@@ -429,7 +429,7 @@ def test_full_legacy_checkpoint_roundtrip_preserves_all_data() -> None:
     assert isinstance(result["deferred_tool_state"].last_candidates[0], DiscoveryCandidate)
 
     # Old fields STILL present (dual-read safe)
-    assert result["agent_plan"].objective == "Roundtrip test"
-    assert result["memory_warnings"] == ["old checkpoint"]
+    assert result["plan_state"].agent_plan.objective == "Roundtrip test"
+    assert result["memory_state"].memory_warnings == ["old checkpoint"]
     assert result["stop_hook_feedback"][0].code == "g1"
     assert result["deferred_tool_state"].active_tools == ["vector_search"]

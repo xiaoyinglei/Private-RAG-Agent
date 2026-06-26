@@ -139,7 +139,7 @@ def _assembler() -> AgentLLMContextAssembler:
 
 def test_loop_prompt_has_no_goal_gap_completion_authority() -> None:
     state = _state()
-    state["agent_plan"] = PlanTracker().initialize_task(task=state["task"])[0]
+    state["plan_state"].agent_plan = PlanTracker().initialize_task(task=state["task"])[0]
 
     prompt = build_loop_turn_prompt(
         state,
@@ -225,13 +225,13 @@ def test_loop_context_keeps_approval_and_feedback_without_goal_fields() -> None:
             )
         ],
     )
-    state["stop_hook_feedback"] = [
+    state["finish_state"].feedback = [
         StopHookFeedback(
             code="citation_required",
             message="Add a traceable citation.",
         )
     ]
-    state["agent_plan"] = PlanTracker().initialize_task(
+    state["plan_state"].agent_plan = PlanTracker().initialize_task(
         task=state["task"],
     )[0]
 
@@ -391,10 +391,10 @@ def test_loop_context_compaction_is_observable_before_model_turn() -> None:
     assert result.changed is True
     assert "messages" in result.channels
     assert [message.id for message in state["messages"]] == ["msg-3"]
-    assert state["working_summary"] is not None
+    assert state["memory_state"].working_summary is not None
     assert state["latest_transition"] is not None
     assert state["latest_transition"].reason == "compaction"
-    assert "memory_unavailable" in state["memory_warnings"]
+    assert "memory_unavailable" in state["memory_state"].memory_warnings
 
 
 def test_loop_context_snips_messages_without_splitting_tool_pairs() -> None:

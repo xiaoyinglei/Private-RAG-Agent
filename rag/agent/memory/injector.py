@@ -143,18 +143,19 @@ class ContextBuilder:
             self._format_plan(state.get("agent_plan")),
             required=True,
         )
+        ms = state.get("memory_state")
         add(
             "memory",
             self._format_memory_refs(
-                state.get("memory_refs", []),
-                state.get("memory_warnings", []),
+                ms.memory_refs if ms is not None else [],
+                ms.memory_warnings if ms is not None else [],
             ),
         )
         add(
             "working_memory",
             self._format_working_memory(
-                state.get("working_summary"),
-                state.get("extracted_facts", []),
+                ms.working_summary if ms is not None else None,
+                ms.extracted_facts if ms is not None else [],
             ),
         )
         add(
@@ -295,9 +296,14 @@ class ContextBuilder:
             required_truncated=selection.required_truncated,
             section_token_counts={str(key): value for key, value in by_name.items()},
             dropped_section_reasons=selection.dropped_section_reasons,
-            memory_ref_count=len(state.get("memory_refs", [])),
+            memory_ref_count=len(
+                state["memory_state"].memory_refs if "memory_state" in state else []
+            ),
             externalized_record_count=self._externalized_tool_output_count(state.get("tool_results", [])),
-            warnings=list(dict.fromkeys([*state.get("memory_warnings", []), *selection.warnings])),
+            warnings=list(dict.fromkeys([
+                *(state["memory_state"].memory_warnings if "memory_state" in state else []),
+                *selection.warnings,
+            ])),
         )
 
     def _clip_optional_section(
@@ -597,14 +603,16 @@ class ContextBuilder:
                     f"tool_name={pending_call.tool_name} "
                     f"arguments={self._one_line(str(pending_call.plan.arguments))}"
                 )
-        feedback = state.get("stop_hook_feedback", [])
+        fs = state.get("finish_state")
+        feedback = fs.feedback if fs is not None else []
         if feedback:
             lines.append("finish_feedback:")
             for item in feedback:
                 lines.append(
                     f"- code={item.code} occurrences={item.occurrences} message={self._one_line(item.message)}"
                 )
-        warnings = state.get("stop_hook_warnings", [])
+        fs = state.get("finish_state")
+        warnings = fs.warnings if fs is not None else []
         if warnings:
             lines.append("finish_warnings:")
             for item in warnings:

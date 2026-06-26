@@ -342,7 +342,7 @@ async def test_model_tool_result_next_turn_and_finish() -> None:
     ).run(state)
 
     assert result["status"] == "completed"
-    assert result["final_answer"] == "Final answer."
+    assert result["finish_state"].final_answer == "Final answer."
     assert result["iteration"] == 2
     assert len(result["tool_results"]) == 1
     assert "structured_observations" not in result  # PR3: removed from LoopState
@@ -668,9 +668,9 @@ async def test_stop_hook_block_feedback_then_accept() -> None:
     ).run(create_loop_state(task="Answer with citation.", run_config=config))
 
     assert result["status"] == "completed"
-    assert result["final_answer"] == "Draft with citation [1]."
-    assert result["stop_hook_feedback"][0].code == "needs_citation"
-    assert provider.seen_states[1]["stop_hook_feedback"][0].message == "Add a citation."
+    assert result["finish_state"].final_answer == "Draft with citation [1]."
+    assert result["finish_state"].feedback[0].code == "needs_citation"
+    assert provider.seen_states[1]["finish_state"].feedback[0].message == "Add a citation."
     assert "stop_hook_blocked" in [
         snapshot["latest_transition"].reason
         for _, snapshot in checkpoint.snapshots
@@ -898,7 +898,7 @@ async def test_context_overflow_triggers_reactive_compaction_once() -> None:
 
     assert result["status"] == "completed"
     assert len(provider.seen_states) == 2
-    assert provider.seen_states[1]["reactive_compact_used"] is True
+    assert provider.seen_states[1]["memory_state"].reactive_compact_used is True
     assert [message.id for message in provider.seen_states[1]["messages"]] == [
         "msg-3",
         "msg-4",

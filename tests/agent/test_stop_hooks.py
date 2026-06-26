@@ -99,9 +99,9 @@ async def test_runner_supports_all_verdict_actions(
     assert outcome.accepted is accepted
     assert outcome.halted is halted
     if action == "warn":
-        assert state["stop_hook_warnings"][0].code == "static_warn"
+        assert state["finish_state"].warnings[0].code == "static_warn"
     if action == "block":
-        assert state["stop_hook_feedback"][0].code == "static_block"
+        assert state["finish_state"].feedback[0].code == "static_block"
 
 
 @pytest.mark.anyio
@@ -138,7 +138,7 @@ async def test_hooks_run_in_stable_order_and_warning_does_not_block() -> None:
 
     assert outcome.accepted is True
     assert calls == ["candidate", "candidate"]
-    assert [item.code for item in state["stop_hook_warnings"]] == ["warning"]
+    assert [item.code for item in state["finish_state"].warnings] == ["warning"]
 
 
 @pytest.mark.anyio
@@ -167,7 +167,7 @@ async def test_repeated_equivalent_block_halts_at_configured_limit() -> None:
     assert first.blocked is True
     assert second.halted is True
     assert second.code == "stop_hook_block_limit"
-    assert state["stop_hook_feedback"][0].occurrences == 2
+    assert state["finish_state"].feedback[0].occurrences == 2
 
 
 @pytest.mark.anyio
@@ -205,7 +205,7 @@ async def test_advisory_failure_warns_but_critical_failure_halts() -> None:
     )
 
     assert advisory_outcome.accepted is True
-    assert advisory_state["stop_hook_warnings"][0].code == "advisory_failed"
+    assert advisory_state["finish_state"].warnings[0].code == "advisory_failed"
     assert critical_outcome.halted is True
     assert critical_outcome.code == "critical_failed"
 

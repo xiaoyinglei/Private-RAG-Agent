@@ -84,13 +84,13 @@ def _state() -> LoopState:
             latency_ms=0,
         )
     ]
-    state["working_summary"] = WorkingSummary(
+    state["memory_state"].working_summary = WorkingSummary(
         summary="Prior working summary",
         covered_message_ids=["h1"],
         updated_at="2026-05-08T00:00:00Z",
         token_count=3,
     )
-    state["extracted_facts"] = [
+    state["memory_state"].extracted_facts = [
         ExtractedFact(
             fact_id="f1",
             text="Memory fact",
@@ -159,7 +159,7 @@ def test_budget_priority_keeps_pending_decisions_before_memory_and_tail() -> Non
             status="pending",
         )
     ]
-    state["memory_refs"] = [
+    state["memory_state"].memory_refs = [
         MemoryRef(
             ref_id=f"mem_{index}",
             path=f".agent_memory/records/mem_{index}.json",
@@ -212,7 +212,7 @@ def test_context_injects_memory_summaries_and_refs_not_raw_payload() -> None:
             latency_ms=0,
         )
     ]
-    state["memory_refs"] = [state["tool_results"][0].output.ref]  # type: ignore[union-attr]
+    state["memory_state"].memory_refs = [state["tool_results"][0].output.ref]  # type: ignore[union-attr]
 
     context = ContextBuilder(max_context_tokens=1000).assemble_loop(
         definition=_definition(),
@@ -387,7 +387,7 @@ def test_context_renders_tool_results_via_fallback() -> None:
 
 def test_context_includes_bounded_agent_plan_without_raw_scratchpad() -> None:
     state = _state()
-    state["agent_plan"] = AgentPlan(
+    state["plan_state"].agent_plan = AgentPlan(
         objective="Analyze the spreadsheet and answer with evidence.",
         active_step_id="step_probe",
         steps=[

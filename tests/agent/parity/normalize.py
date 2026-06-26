@@ -84,12 +84,12 @@ def normalize_loop_state(
         "satisfied_requirements": [],
         "open_gap_ids": [],
         "messages": [_normalize_message(message) for message in state.get("messages", [])],
-        "working_summary": _normalize_value(state.get("working_summary")),
-        "memory_refs": _normalize_value(state.get("memory_refs", [])),
+        "working_summary": _normalize_value(state["memory_state"].working_summary),
+        "memory_refs": _normalize_value(state["memory_state"].memory_refs),
         "memory_budget": _normalize_value(state.get("memory_budget")),
-        "memory_warnings": list(state.get("memory_warnings", [])),
+        "memory_warnings": list(state["memory_state"].memory_warnings),
         "runtime_diagnostics": _normalize_value(state.get("runtime_diagnostics", [])),
-        "stop_hook_feedback": _normalize_value(state.get("stop_hook_feedback", [])),
+        "stop_hook_feedback": _normalize_value(state["finish_state"].feedback),
     }
     if observed is not None:
         normalized["observed"] = _normalize_value(observed)

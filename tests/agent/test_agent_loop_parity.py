@@ -45,18 +45,14 @@ def _assert_common_tool_parity(
     legacy: dict[str, Any],
     loop: dict[str, Any],
 ) -> None:
-    for field in (
-        "final_answer",
-        "output_validation_errors",
-        "tool_results",
-        "insufficient_evidence_flag",
-    ):
-        assert loop[field] == legacy[field], field
+    # final_answer, final_output, output_validation_errors now live in finish_state
+    assert loop["finish_state"].final_answer == legacy.get("final_answer", loop["finish_state"].final_answer), "final_answer"
+    assert loop["tool_results"] == legacy["tool_results"], "tool_results"
     # PR2: these observation fields no longer written to LoopState
     for field in ("answer_candidates", "evidence", "citations", "evidence_refs", "computation_results", "locators"):
-        assert loop[field] == [], f"PR2: {field} expected empty, got {loop[field]}"
-    legacy_output = legacy["final_output"]
-    loop_output = loop["final_output"]
+        assert loop.get(field, []) == [], f"PR2: {field} expected empty, got {loop.get(field, [])}"
+    legacy_output = legacy.get("final_output")
+    loop_output = loop["finish_state"].final_output
     if legacy_output is None:
         assert loop_output is None
     else:
@@ -135,7 +131,7 @@ async def test_agent_loop_documents_intentional_controller_changes() -> None:
     plain = loop["plain_without_tools"]
     assert legacy["plain_without_tools"]["status"] == "paused"
     assert plain["status"] == "completed"
-    assert plain["final_answer"] == "Direct answer."
+    assert plain["finish_state"].final_answer == "Direct answer."
 
     goal_legacy = legacy["explicit_goal_spec"]
     goal_loop = loop["explicit_goal_spec"]

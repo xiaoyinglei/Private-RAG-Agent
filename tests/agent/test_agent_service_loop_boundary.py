@@ -68,7 +68,7 @@ class _PauseAfterGoalFeedbackProvider:
         budget_remaining: int,
     ) -> ModelTurnDraft:
         del definition, budget_remaining
-        if state["stop_hook_feedback"]:
+        if state["finish_state"].feedback:
             return ModelTurnDraft(
                 action="pause",
                 pause_reason="Explicit goal still needs evidence.",

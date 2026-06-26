@@ -197,12 +197,12 @@ class AgentRunResult(BaseModel):
             run_id=run_config.run_id,
             thread_id=run_config.thread_id,
             status=("done" if state["status"] == "completed" else state["status"]),
-            final_answer=state["final_answer"],
+            final_answer=state["finish_state"].final_answer,
             final_output=_restore_final_output(
-                state["final_output"],
+                state["finish_state"].final_output,
                 definition=definition,
             ),
-            output_validation_errors=list(state["output_validation_errors"]),
+            output_validation_errors=list(state["finish_state"].output_validation_errors),
             stop_reason=(None if terminal is None else terminal.stop_reason),
             tool_results=list(state["tool_results"]),
             evidence=evidence,
@@ -252,7 +252,7 @@ class _ResultDrivenModelTurnProvider:
         budget_remaining: int,
     ) -> ModelTurnDraft:
         del definition, budget_remaining
-        if state["stop_hook_feedback"]:
+        if state["finish_state"].feedback:
             return ModelTurnDraft(
                 action="pause",
                 pause_reason=("No model turn provider is available to address stop-hook feedback."),

@@ -193,7 +193,7 @@ def test_agent_run_result_restores_configured_concrete_final_output() -> None:
         )
     )
     state["status"] = "done"
-    state["final_output"] = {
+    state["finish_state"].final_output = {
         "model_path": f"{_StructuredAnswer.__module__}.{_StructuredAnswer.__qualname__}",
         "data": {"answer": "validated", "confidence": 0.9},
     }
