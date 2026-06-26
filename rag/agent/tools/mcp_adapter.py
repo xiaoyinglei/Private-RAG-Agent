@@ -555,6 +555,8 @@ class MCPToolAdapter:
 # MCP Tool Registry (multi-server manager)
 # ═══════════════════════════════════════════════════════════════════════════════
 
+from pathlib import Path
+
 import json  # noqa: E402
 
 
@@ -573,6 +575,29 @@ class MCPToolRegistry:
     adapters: dict[str, MCPToolAdapter] = field(default_factory=dict)
     _all_tools: list[ToolSpec] = field(default_factory=list)
     _adapter_by_tool: dict[str, MCPToolAdapter] = field(default_factory=dict)
+
+    @classmethod
+    def from_yaml(cls, path: str | Path) -> MCPToolRegistry:
+        """Load MCP server configs from a YAML file.
+
+        Reads configs/mcp_servers.yaml format:
+          servers:
+            - name: github
+              transport: stdio
+              command: npx
+              args: [...]
+              env: {...}
+              tools_allowlist: [...]
+              enabled: false
+        """
+        import yaml
+
+        with open(path) as f:
+            data = yaml.safe_load(f) or {}
+        configs = [MCPToolConfig(**s) for s in data.get("servers", [])]
+        registry = cls()
+        registry.load_configs(configs)
+        return registry
 
     def load_configs(self, configs: list[MCPToolConfig]) -> None:
         """Load MCP server configs; create adapters for enabled ones."""

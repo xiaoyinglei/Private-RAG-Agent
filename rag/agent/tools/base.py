@@ -104,7 +104,7 @@ class BaseTool(ABC):
 
     # ── Runner adapter ──
 
-    def as_runner(self):
+    def as_runner(self) -> Any:
         """Return a callable suitable for ToolRegistry.register_runner().
 
         The runner is a closure over self.execute().
