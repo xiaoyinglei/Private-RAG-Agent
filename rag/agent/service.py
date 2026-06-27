@@ -806,11 +806,11 @@ class AgentService:
 
     @staticmethod
     def _inject_manifest_into_task(task: str, manifest: FileManifest) -> str:
-        """Prepend file manifest context to the task string.
+        """Inject file manifest + processing instructions before the user task.
 
-        The task becomes the first HumanMessage. By prepending the manifest,
-        the model sees file info before the user's question, enabling
-        file-first processing on turn 1.
+        Only activates when input files are present.  Injects both the manifest
+        and file processing instructions so the model knows: probes already ran,
+        go straight to run_python, cite everything.
         """
         if not manifest.files:
             return task
@@ -819,7 +819,19 @@ class AgentService:
         if not block:
             return task
 
-        return f"{block}\n\n── User Task ──\n{task}"
+        instructions = """\
+Input files detected — you are in file processing mode:
+
+- File manifest and structured_probe results are shown above.
+  Do NOT call list_files or structured_probe again for these files.
+- Use run_python with pandas for computation. Never guess column
+  names, sheet names, or data values.
+- Cite: file path, sheet/table name, columns, row count, method.
+- For numerical answers, cross-validate (e.g. groupby-sum vs raw-sum).
+- If the manifest shows ambiguity, report it before computing.
+- For charts, use matplotlib; plt.savefig() to scratch/."""
+
+        return f"{block}\n\n{instructions}\n\n── User Task ──\n{task}"
 
     # ── Persistent memory helpers ──
 
