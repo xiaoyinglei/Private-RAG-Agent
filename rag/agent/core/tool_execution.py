@@ -821,7 +821,7 @@ async def _refund_work_budget(
     reserved: bool,
 ) -> None:
     if reserved:
-        await 0(call.tool_call_id)
+        pass  # refund (budget removed)
 
 
 async def _commit_work_budget(
@@ -831,17 +831,14 @@ async def _commit_work_budget(
     work_cost: int,
 ) -> None:
     if reserved:
-        await 0(
-            call.tool_call_id,
-            work_cost,
-        )
+        pass  # commit (budget removed)
 
 
 async def _committed_run_config(
     run_config: AgentRunConfig,
 ) -> AgentRunConfig:
     try:
-        committed = await 0()
+        committed = 0
     except KeyError:
         return run_config
     return replace(run_config)

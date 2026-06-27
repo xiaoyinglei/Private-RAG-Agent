@@ -51,11 +51,7 @@ class TaskInput(BaseModel):
             "Not a permission grant — the child discovers tools within its policy."
         ),
     )
-    token_budget: int | None = Field(
-        default=None,
-        gt=0,
-        description="Override child token budget. Defaults to parent's delegation budget.",
-    )
+    max_turns: int | None = None
 
 
 MAX_KEY_FACTS = 10

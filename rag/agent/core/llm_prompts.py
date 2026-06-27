@@ -28,7 +28,6 @@ def build_loop_turn_prompt(
 
     return f"""Task: {task}
 Iteration: {iteration}
-Budget remaining: {budget_remaining} tokens
 Tools completed: {ok_count} ok, {error_count} failed
 Available tools: {", ".join(visible_names) if visible_names else "none"}
 

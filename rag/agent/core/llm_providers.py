@@ -11,6 +11,7 @@ from rag.agent.capabilities.catalog import (
     ToolCatalog,
     resolve_visible_tools,
 )
+from rag.agent.core.context import RunRegistry
 from rag.agent.core.definition import AgentRuntimePolicy, ModelSelectionPolicy
 from rag.agent.core.llm_context import (
     AgentLLMContextAssembler,
@@ -279,17 +280,11 @@ class LLMLoopModelTurnProvider:
             output_schema=LoopModelDecision,
         )
         run_id = state["run_config"].run_id
-        try:
-            ledger = RunRegistry.get(run_id).budget_ledger
-        except KeyError:
-            ledger = None
         result = await self._gateway.agenerate_structured(
             stage=LLMCallStage.TOOL_DECISION,
             prompt=assembled.prompt,
             schema=LoopModelDecision,
-            ledger=ledger,
-            lease_id=(f"{run_id}:loop_turn:{state.get('iteration', 0)}:{uuid4().hex}"),
-            kwargs=self._kwargs,
+kwargs=self._kwargs,
         )
         return parse_loop_model_turn(result.value)
 
@@ -307,7 +302,7 @@ def _base_messages_to_model_messages(
             for tc in getattr(msg, "tool_calls", []) or []:
                 tool_calls.append(
                     ToolCall(
-                        id=tc.get("id", f"tc_{uuid4().hex[:12]}"),
+                        id=tc.get("id", f"tc_{id(tc)}"),
                         name=tc.get("name", ""),
                         input=tc.get("args", {}),
                     )

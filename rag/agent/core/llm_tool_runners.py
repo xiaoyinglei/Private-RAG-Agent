@@ -160,7 +160,7 @@ async def _generate_text(
 ) -> str:
     run_config = execution_context.run_config
     try:
-        ledger = RunRegistry.get(run_config.run_id).budget_ledger
+        ledger = None
     except KeyError as exc:
         raise RuntimeError(f"Runtime handles missing for run_id={run_config.run_id}") from exc
     result = await gateway.agenerate_text(

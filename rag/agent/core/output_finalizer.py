@@ -80,7 +80,7 @@ class ModelStructuredOutputFinalizer:
         if output_model is None:
             raise ValueError("AgentRuntimePolicy.output_model is not configured")
         try:
-            ledger = RunRegistry.get(state["run_config"].run_id).budget_ledger
+            ledger = None
         except KeyError as exc:
             raise RuntimeError(f"Runtime handles missing for run_id={state['run_config'].run_id}") from exc
 

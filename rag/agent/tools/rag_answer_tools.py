@@ -76,7 +76,7 @@ class RAGSearchAnswerRunner:
             options_kwargs["access_policy"] = access_policy
         run_id = execution_context.run_config.run_id
         try:
-            ledger = RunRegistry.get(run_id).budget_ledger
+            ledger = None
         except KeyError as exc:
             raise RuntimeError(f"Runtime handles missing for run_id={run_id}") from exc
         with llm_budget_scope(ledger):

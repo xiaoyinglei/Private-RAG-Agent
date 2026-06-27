@@ -337,7 +337,6 @@ class _TaskChildRunner:
             system_instructions=child_policy.system_instructions,
             core_tool_names=child_policy.core_tool_names,
             deferred_tool_names=child_policy.deferred_tool_names,
-            max_turns=parent_config.max_turns,
             max_iterations=child_policy.max_iterations,
             max_depth=child_policy.max_depth,
             model_selection=child_policy.model_selection,
@@ -347,8 +346,7 @@ class _TaskChildRunner:
         if request.max_turns is not None:
             child_config = replace(
                 child_config,
-                max_turns=request.max_turns,
-            )
+                )
         return child_config
 
 

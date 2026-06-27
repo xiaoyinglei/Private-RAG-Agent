@@ -385,8 +385,6 @@ class AgentLLMContextAssembler:
             system_instructions="",
             core_tool_names=(),
             deferred_tool_names=(),
-            token_budget=8000,
-            work_budget=20_000,
             max_iterations=10,
             max_depth=2,
         )
