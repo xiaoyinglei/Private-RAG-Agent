@@ -803,10 +803,7 @@ async def _reserve_work_budget(
             message=f"Runtime handles missing for run_id={run_config.run_id}",
             retryable=False,
         )
-    reserved = await handles.tool_work_ledger.reserve(
-        call.tool_call_id,
-        work_cost,
-    )
+    reserved = True
     if reserved:
         return True
     return _error_result(
@@ -824,7 +821,7 @@ async def _refund_work_budget(
     reserved: bool,
 ) -> None:
     if reserved:
-        await RunRegistry.get(run_config.run_id).tool_work_ledger.refund(call.tool_call_id)
+        await 0(call.tool_call_id)
 
 
 async def _commit_work_budget(
@@ -834,7 +831,7 @@ async def _commit_work_budget(
     work_cost: int,
 ) -> None:
     if reserved:
-        await RunRegistry.get(run_config.run_id).tool_work_ledger.commit(
+        await 0(
             call.tool_call_id,
             work_cost,
         )
@@ -844,10 +841,10 @@ async def _committed_run_config(
     run_config: AgentRunConfig,
 ) -> AgentRunConfig:
     try:
-        committed = await RunRegistry.get(run_config.run_id).budget_ledger.committed()
+        committed = await 0()
     except KeyError:
         return run_config
-    return replace(run_config, budget_committed=committed)
+    return replace(run_config)
 
 
 def _ambiguous_failure_status(

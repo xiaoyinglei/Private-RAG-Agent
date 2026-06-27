@@ -42,7 +42,7 @@ class AgentDelegationRequest(BaseModel):
     delegation_id: str
     agent_type: str
     prompt: str
-    estimated_tokens: int | None = Field(default=DEFAULT_DELEGATION_TOKEN_BUDGET, gt=0)
+    max_turns: int | None = None
 
 
 class DelegatedAgentResult(Protocol):

@@ -59,7 +59,6 @@ class AgentMessageAssembler:
         *,
         definition: Any,  # AgentRuntimePolicy
         state: LoopState,
-        budget_remaining: int | None,
         visible_tool_names: list[str] | None = None,
     ) -> ModelMessage:
         sections = [
@@ -74,9 +73,7 @@ class AgentMessageAssembler:
                 cache_scope="dynamic",
             ),
             self._runtime_state_section(
-                state=state,
-                budget_remaining=budget_remaining,
-            ),
+                state=state),
         ]
 
         # Inject persistent memories if available
@@ -175,7 +172,6 @@ class AgentMessageAssembler:
     def _runtime_state_section(
         *,
         state: dict[str, Any] | Any,
-        budget_remaining: int | None,
     ) -> SystemPromptSection:
         iteration = state.get("iteration", 0)
         task = state.get("task", "")
@@ -190,8 +186,6 @@ class AgentMessageAssembler:
             f"Task: {task}",
             f"Iteration: {iteration}",
         ]
-        if budget_remaining is not None:
-            lines.append(f"Remaining token budget: {budget_remaining}")
         lines.append(f"Tool results: {ok_count} successful, {error_count} failed")
         return SystemPromptSection(
             name="runtime_state",

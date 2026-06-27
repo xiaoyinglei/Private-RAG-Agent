@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from typing import Any, Literal
-from uuid import uuid4
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 from pydantic import BaseModel, Field
@@ -12,7 +11,6 @@ from rag.agent.capabilities.catalog import (
     ToolCatalog,
     resolve_visible_tools,
 )
-from rag.agent.core.context import RunRegistry
 from rag.agent.core.definition import AgentRuntimePolicy, ModelSelectionPolicy
 from rag.agent.core.llm_context import (
     AgentLLMContextAssembler,
@@ -125,18 +123,15 @@ class LLMLoopModelTurnProvider:
         state: LoopState,
         *,
         definition: AgentRuntimePolicy,
-        budget_remaining: int,
     ) -> ModelTurnDraft:
         if self._tool_specs:
             return await self._next_turn_with_tools(
                 state,
                 definition=definition,
-                budget_remaining=budget_remaining,
             )
         return await self._next_turn_legacy(
             state,
             definition=definition,
-            budget_remaining=budget_remaining,
         )
 
     async def _next_turn_with_tools(
@@ -144,7 +139,6 @@ class LLMLoopModelTurnProvider:
         state: LoopState,
         *,
         definition: AgentRuntimePolicy,
-        budget_remaining: int,
     ) -> ModelTurnDraft:
         """OpenAI-compatible native tool calling path.
 
@@ -162,7 +156,6 @@ class LLMLoopModelTurnProvider:
         system_msg = self._assembler.build_system_message(
             definition=definition,
             state=state,
-            budget_remaining=budget_remaining,
             visible_tool_names=visible_tool_names,
         )
 
@@ -173,30 +166,18 @@ class LLMLoopModelTurnProvider:
         openai_messages = OpenAIAdapter.messages(all_messages)
         openai_tools = OpenAIAdapter.tools(visible_specs)
 
-        # 5. Call gateway
-        run_id = state["run_config"].run_id
-        try:
-            ledger = RunRegistry.get(run_id).budget_ledger
-        except KeyError:
-            ledger = None
-
-        lease_id = f"{run_id}:loop_turn:{state.get('iteration', 0)}:{uuid4().hex}"
-
+        # 5. Call gateway (no budget — Claude Code uses max_turns as the only cap)
         if self._stream_sink is not None:
             result_value = await self._streaming_call(
                 state=state,
                 messages=openai_messages,
                 tools=openai_tools,
-                ledger=ledger,
-                lease_id=lease_id,
             )
         else:
             result = await self._gateway.agenerate_with_tools(
                 stage=LLMCallStage.TOOL_DECISION,
                 messages=openai_messages,
                 tools=openai_tools,
-                ledger=ledger,
-                lease_id=lease_id,
                 kwargs=self._kwargs,
             )
             result_value = result.value
@@ -213,8 +194,6 @@ class LLMLoopModelTurnProvider:
         state: LoopState,
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]],
-        ledger: Any,
-        lease_id: str,
     ) -> Any:
         """流式调用 LLM，emit TEXT_DELTA 事件。
 
@@ -235,8 +214,6 @@ class LLMLoopModelTurnProvider:
             stage=LLMCallStage.TOOL_DECISION,
             messages=messages,
             tools=tools,
-            ledger=ledger,
-            lease_id=lease_id,
             kwargs=self._kwargs,
         ):
             if chunk.type == "text_delta" and chunk.content:
@@ -291,7 +268,6 @@ class LLMLoopModelTurnProvider:
         state: LoopState,
         *,
         definition: AgentRuntimePolicy,
-        budget_remaining: int,
     ) -> ModelTurnDraft:
         """Legacy structured-output path (no native tool calling)."""
         assembler = self._context_assembler
@@ -300,7 +276,6 @@ class LLMLoopModelTurnProvider:
         assembled = assembler.assemble_loop_turn(
             definition=definition,
             state=state,
-            budget_remaining=budget_remaining,
             output_schema=LoopModelDecision,
         )
         run_id = state["run_config"].run_id

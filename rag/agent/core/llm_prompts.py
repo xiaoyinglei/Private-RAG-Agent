@@ -10,7 +10,6 @@ if TYPE_CHECKING:
 def build_loop_turn_prompt(
     state: LoopState,
     *,
-    budget_remaining: int,
     allowed_tools: Sequence[str] = (),
 ) -> str:
     """Build the model contract for the ordinary Python loop kernel.

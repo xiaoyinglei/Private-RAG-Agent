@@ -17,18 +17,15 @@ if TYPE_CHECKING:
 class AgentRunConfig:
     run_id: str
     thread_id: str
-    budget_total: int
     max_depth: int
     access_policy: AccessPolicy
-    work_budget_total: int = 20_000
+    max_turns: int | None = None
     agent_type: str | None = None
     max_context_tokens: int | None = None
     parent_run_id: str | None = None
     source_scope: tuple[str, ...] = ()
     deadline_iso: str | None = None
     trace_parent_id: str | None = None
-    budget_committed: int = 0
-    budget_reserved: dict[str, int] = field(default_factory=dict)
     tool_policy: ToolPolicy = field(default_factory=ToolPolicy)
     memory_policy: MemoryPolicy = field(default_factory=MemoryPolicy)
 
@@ -44,8 +41,6 @@ def derive_child_config(parent: AgentRunConfig, child_def: AgentRuntimePolicy) -
         access_policy=parent.access_policy,
         source_scope=parent.source_scope,
         max_depth=parent.max_depth - 1,
-        budget_total=child_def.token_budget,
-        work_budget_total=child_def.work_budget,
         agent_type=child_def.agent_type,
         max_context_tokens=parent.max_context_tokens,
         tool_policy=child_def.tool_policy,
@@ -53,49 +48,9 @@ def derive_child_config(parent: AgentRunConfig, child_def: AgentRuntimePolicy) -
     )
 
 
-class BudgetLedger:
-    def __init__(self, total: int) -> None:
-        self._total = total
-        self._lock = asyncio.Lock()
-        self._reserved: dict[str, int] = {}
-        self._committed = 0
-
-    async def remaining(self) -> int:
-        async with self._lock:
-            return max(0, self._total - self._committed - sum(self._reserved.values()))
-
-    async def reserve(self, lease_id: str, amount: int) -> bool:
-        async with self._lock:
-            current = max(0, self._total - self._committed - sum(self._reserved.values()))
-            if amount > current:
-                return False
-            self._reserved[lease_id] = amount
-            return True
-
-    async def commit(self, lease_id: str, actual: int) -> int:
-        async with self._lock:
-            reserved = self._reserved.pop(lease_id, 0)
-            overrun = max(0, actual - reserved)
-            self._committed += actual
-            return overrun
-
-    async def refund(self, lease_id: str) -> int:
-        async with self._lock:
-            return self._reserved.pop(lease_id, 0)
-
-    async def committed(self) -> int:
-        async with self._lock:
-            return self._committed
-
-    async def reserved(self) -> int:
-        async with self._lock:
-            return sum(self._reserved.values())
-
 
 @dataclass
 class AgentRuntimeHandles:
-    budget_ledger: BudgetLedger
-    tool_work_ledger: BudgetLedger
     cancellation: asyncio.Event
     memory_store: WorkspaceMemoryStore | None = None
 
@@ -106,18 +61,7 @@ class RunRegistry:
     @classmethod
     def get_or_create(cls, run_config: AgentRunConfig) -> AgentRuntimeHandles:
         if run_config.run_id not in cls._handles:
-            parent_handles = (
-                cls._handles.get(run_config.parent_run_id)
-                if run_config.parent_run_id
-                else None
-            )
             cls._handles[run_config.run_id] = AgentRuntimeHandles(
-                budget_ledger=(
-                    parent_handles.budget_ledger
-                    if parent_handles is not None
-                    else BudgetLedger(total=run_config.budget_total)
-                ),
-                tool_work_ledger=BudgetLedger(total=run_config.work_budget_total),
                 cancellation=asyncio.Event(),
             )
         return cls._handles[run_config.run_id]

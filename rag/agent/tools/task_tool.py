@@ -183,10 +183,8 @@ class TaskToolRunner:
             delegation_id=f"task-{uuid4().hex[:8]}",
             agent_type="task_child",
             prompt=child_prompt,
-            estimated_tokens=(
-                payload.token_budget
-                or self._policy.token_budget
-                or DEFAULT_DELEGATION_TOKEN_BUDGET
+            max_turns=(
+                payload.max_turns
             ),
         )
         parent_state = ParentAgentContext(run_config=parent_config)

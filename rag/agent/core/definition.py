@@ -44,8 +44,6 @@ class AgentRuntimePolicy:
     system_instructions: str
     core_tool_names: tuple[str, ...]
     deferred_tool_names: tuple[str, ...]
-    token_budget: int
-    work_budget: int
     max_iterations: int
     max_depth: int
     max_active_deferred_tools: int = 10
@@ -91,8 +89,6 @@ class AgentRuntimePolicy:
         system_prompt: str = "",
         allowed_tools: list[str] | None = None,
         access_policy: Any = None,
-        estimated_token_budget: int = 8000,
-        estimated_work_budget: int = 20000,
         model_selection: Any = None,
         output_model: type[BaseModel] | None = None,
         output_validation_max_retries: int = 2,
@@ -113,8 +109,6 @@ class AgentRuntimePolicy:
             system_instructions=system_prompt,
             core_tool_names=core,
             deferred_tool_names=deferred,
-            token_budget=estimated_token_budget,
-            work_budget=estimated_work_budget,
             max_iterations=max_iterations,
             max_depth=max_depth,
             agent_type=agent_type,

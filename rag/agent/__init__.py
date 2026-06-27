@@ -5,7 +5,6 @@ from rag.agent.core.agent_service_factory import AgentServiceFactory
 from rag.agent.core.compiler import GraphCompiler
 from rag.agent.core.context import (
     AgentRunConfig,
-    BudgetLedger,
     RunRegistry,
     derive_child_config,
 )
@@ -57,8 +56,7 @@ __all__ = [
     "AgentDelegationRequest",
     "AgentToolSpec",
     "BuiltinSubAgentRunner",
-    "BudgetLedger",
-    "ContextBudgetSnapshot",
+        "ContextBudgetSnapshot",
     "ExtractedFact",
     "InterruptBehavior",
     "MemoryPolicy",

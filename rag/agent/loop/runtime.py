@@ -79,7 +79,6 @@ class ModelTurnProvider(Protocol):
         state: LoopState,
         *,
         definition: AgentRuntimePolicy,
-        budget_remaining: int,
     ) -> ModelTurnDraft | ModelTurnEnvelope: ...
 
 
@@ -235,16 +234,10 @@ class AgentLoop:
             if not await self._compact(state):
                 return state
 
-            remaining = await handles.budget_ledger.remaining()
-            if remaining <= 0:
-                await self._fail(state, stop_reason="budget_exhausted",
-                    error="Token budget exhausted.", transition_reason="failed",
-                    checkpoint_reason="budget_exhausted")
-                return state
-
+            
             # Model turn — call the LLM, handle errors, return (turn | None)
             state["iteration"] += 1
-            turn, retries = await self._model_turn(state, retries, remaining)
+            turn, retries = await self._model_turn(state, retries)
             if turn is None:
                 if state["status"] != "running":
                     return state  # terminal
@@ -315,13 +308,13 @@ class AgentLoop:
         return True
 
     async def _model_turn(
-        self, state: LoopState, retries: int, budget_remaining: int,
+        self, state: LoopState, retries: int,
     ) -> tuple[ModelTurn | None, int]:
         """Call the model, handle errors.  Returns (turn, retries) or (None, _) on terminal failure."""
         turn: ModelTurn | None = None
         try:
             provided = await self._model_provider.next_turn(
-                state, definition=self._definition, budget_remaining=budget_remaining)
+                state, definition=self._definition)
             envelope = provided if isinstance(provided, ModelTurnEnvelope) else ModelTurnEnvelope(draft=provided)
             for t in envelope.transitions:
                 tr = t.model_copy(update={"iteration": state["iteration"]})

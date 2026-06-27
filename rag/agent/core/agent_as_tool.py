@@ -204,7 +204,7 @@ class AgentAsToolAdapter:
             delegation_id=f"{self._agent_type}-tool-{uuid4().hex[:8]}",
             agent_type=self._agent_type,
             prompt=prompt,
-            estimated_tokens=DEFAULT_DELEGATION_TOKEN_BUDGET,
+            
         )
 
         try:
@@ -340,8 +340,8 @@ class AgentAsToolRunner:
         parent_config = parent_state["run_config"]
         child_definition = self._agent_registry.get(request.agent_type)
         child_config = derive_child_config(parent_config, child_definition)
-        if request.estimated_tokens is not None:
-            child_config = replace(child_config, budget_total=request.estimated_tokens)
+        if request.max_turns is not None:
+            child_config = replace(child_config, max_turns=request.max_turns)
 
         service = AgentService(
             definition=child_definition,

@@ -94,7 +94,7 @@ class AgentRunRequest(BaseModel):
     task: str = Field(min_length=1)
     run_id: str | None = None
     thread_id: str | None = None
-    budget_total: int | None = Field(default=None, gt=0)
+    max_turns: int | None = None
     max_context_tokens: int | None = Field(default=None, gt=0)
     max_depth: int | None = Field(default=None, ge=0)
     pending_tool_calls: list[ToolCallPlan] = Field(default_factory=list)
@@ -111,9 +111,8 @@ class AgentRunRequest(BaseModel):
         return AgentRunConfig(
             run_id=run_id,
             thread_id=self.thread_id or run_id,
-            budget_total=self.budget_total or definition.token_budget,
-            work_budget_total=definition.work_budget,
-            agent_type=definition.agent_type,
+            max_turns=self.max_turns,
+                        agent_type=definition.agent_type,
             max_context_tokens=self.max_context_tokens,
             max_depth=definition.max_depth if self.max_depth is None else self.max_depth,
             access_policy=definition.access_policy_ceiling or AccessPolicy.default(),
@@ -338,18 +337,17 @@ class _TaskChildRunner:
             system_instructions=child_policy.system_instructions,
             core_tool_names=child_policy.core_tool_names,
             deferred_tool_names=child_policy.deferred_tool_names,
-            token_budget=(request.estimated_tokens or child_policy.token_budget),
-            work_budget=child_policy.work_budget,
+            max_turns=parent_config.max_turns,
             max_iterations=child_policy.max_iterations,
             max_depth=child_policy.max_depth,
             model_selection=child_policy.model_selection,
             tool_policy=child_policy.tool_policy,
         )
         child_config = derive_child_config(parent_config, child_definition)
-        if request.estimated_tokens is not None:
+        if request.max_turns is not None:
             child_config = replace(
                 child_config,
-                budget_total=request.estimated_tokens,
+                max_turns=request.max_turns,
             )
         return child_config
 
@@ -1445,23 +1443,12 @@ class AgentService:
         except KeyError:
             handles = RunRegistry.get_or_create(run_config)
 
-        committed = max(0, run_config.budget_committed)
-        if committed > 0:
-            lease_id = f"checkpoint_restore:{run_config.run_id}"
-            reserved = await handles.budget_ledger.reserve(
-                lease_id,
-                min(committed, run_config.budget_total),
-            )
-            if reserved:
-                await handles.budget_ledger.commit(lease_id, committed)
         return run_config
 
     def _checkpoint_lookup_config(self, run_id: str) -> AgentRunConfig:
         return AgentRunConfig(
             run_id=run_id,
             thread_id=run_id,
-            budget_total=self._policy.token_budget,
-            work_budget_total=self._policy.work_budget,
             agent_type=self._policy.agent_type,
             max_depth=self._policy.max_depth,
             access_policy=(self._policy.access_policy_ceiling or AccessPolicy.default()),

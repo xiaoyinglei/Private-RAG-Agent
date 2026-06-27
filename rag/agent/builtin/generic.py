@@ -98,9 +98,7 @@ GENERIC_AGENT = AgentRuntimePolicy(
         "llm_generate",
         "structured_probe",
     ),
-    token_budget=96_000,
-    work_budget=20_000,
-    model_selection=ModelSelectionPolicy(
+model_selection=ModelSelectionPolicy(
         thinking=True,
         retrieval_hint_max_tokens=256,
         tool_decision_max_tokens=2048,

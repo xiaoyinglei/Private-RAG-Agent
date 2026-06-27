@@ -36,7 +36,7 @@ class TestRealModelSmoke:
         svc = _deepseek_service()
         result = await svc.run(AgentRunRequest(
             task='Say exactly: "OK"',
-            budget_total=8000,
+            max_turns=10,
         ))
 
         assert result.status == "done", (
@@ -52,7 +52,7 @@ class TestRealModelSmoke:
         svc = _deepseek_service()
         result = await svc.run(AgentRunRequest(
             task="What is 2 + 2? Answer with just the number.",
-            budget_total=8000,
+            max_turns=10,
         ))
 
         assert result.status == "done", (

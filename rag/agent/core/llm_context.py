@@ -82,7 +82,6 @@ class AgentLLMContextAssembler:
         *,
         definition: AgentRuntimePolicy,
         state: LoopState,
-        budget_remaining: int,
         output_schema: type[BaseModel] | None = None,
     ) -> AssembledAgentLLMContext:
         return self._assemble(
@@ -94,7 +93,6 @@ class AgentLLMContextAssembler:
                     "instructions",
                     build_loop_turn_prompt(
                         state,
-                        budget_remaining=budget_remaining,
                         allowed_tools=definition.allowed_tools,
                     ),
                 ),
