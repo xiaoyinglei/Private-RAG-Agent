@@ -9,9 +9,12 @@ Covers:
 from __future__ import annotations
 
 import json
+import shutil
 import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock
+
+import pytest
 
 from rag.agent.capabilities.catalog import (
     DeferredToolStore,
@@ -21,6 +24,11 @@ from rag.agent.core.definition import AgentRuntimePolicy
 from rag.agent.loop.state import (
     LoopState,
     create_loop_state,
+)
+
+requires_seatbelt = pytest.mark.skipif(
+    shutil.which("sandbox-exec") is None,
+    reason="Seatbelt sandbox-exec is not available on this platform",
 )
 
 
@@ -57,6 +65,7 @@ def _minimal_policy() -> AgentRuntimePolicy:
     )
 
 
+@requires_seatbelt
 class TestRunPythonCodePath:
     """Verify run_python(code=...) end-to-end."""
 
@@ -157,6 +166,7 @@ class TestToolReplRunner:
         assert fmt is not None
         assert fmt.tool_name == "tool_repl"
 
+    @requires_seatbelt
     def test_tool_repl_runner_adapts_command(self) -> None:
         from rag.agent.primitive_ops import PrimitiveOps
         from rag.agent.workspace import create_temp_workspace
@@ -169,6 +179,7 @@ class TestToolReplRunner:
         assert result.exit_code == 0
         assert "repl test" in result.stdout
 
+    @requires_seatbelt
     def test_tool_repl_runner_accepts_pydantic_input(self) -> None:
         from rag.agent.primitive_ops import PrimitiveOps
         from rag.agent.tools.generic_tools import RunCommandInput

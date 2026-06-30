@@ -4,12 +4,20 @@ Uses DeepSeek (cheapest available model) for minimal end-to-end checks.
 Requires DEEPSEEK_API_KEY in .env and network access.
 
 Run:
-    uv run pytest tests/agent/test_smoke_real_model.py -q -v
+    RUN_REAL_MODEL_SMOKE=1 DEEPSEEK_API_KEY=... uv run pytest tests/agent/test_smoke_real_model.py -q -v
 """
 
 from __future__ import annotations
 
+import os
+
 import pytest
+
+requires_real_model = pytest.mark.skipif(
+    os.environ.get("RUN_REAL_MODEL_SMOKE") != "1"
+    or not os.environ.get("DEEPSEEK_API_KEY"),
+    reason="Set RUN_REAL_MODEL_SMOKE=1 and DEEPSEEK_API_KEY to run real model smoke tests",
+)
 
 
 def _deepseek_service():
@@ -28,6 +36,7 @@ def _deepseek_service():
 
 
 @pytest.mark.anyio
+@requires_real_model
 class TestRealModelSmoke:
     async def test_hello(self) -> None:
         """Agent returns a simple text response via DeepSeek."""
