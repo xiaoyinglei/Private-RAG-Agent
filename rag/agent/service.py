@@ -12,10 +12,10 @@ from langgraph.checkpoint.base import BaseCheckpointSaver
 from pydantic import BaseModel, ConfigDict, Field
 
 from rag.agent.capabilities.catalog import (
+    _DEFAULT_ACTIVATION_GROUPS,
     CORE_TOOLS,
     DEFERRED_TOOLS,
     INTERNAL_TOOLS,
-    _DEFAULT_ACTIVATION_GROUPS,
     DeferredToolStore,
     SearchCandidate,
     ToolCatalog,
@@ -31,7 +31,6 @@ from rag.agent.capabilities.tool_search import (
     execute_activate_tools,
     execute_tool_search,
 )
-from rag.agent.core.goal_contract import GoalCompatibilityConfig, GoalSpec
 from rag.agent.core.checkpointing import (
     LangGraphCheckpointStore,
     _digest_text,
@@ -41,6 +40,7 @@ from rag.agent.core.context import AgentRunConfig, RunRegistry, derive_child_con
 from rag.agent.core.definition import AgentRuntimePolicy
 from rag.agent.core.delegation import AgentDelegationRequest, DelegatedAgentRunner, ParentAgentContext
 from rag.agent.core.finalization import FinishCandidateBuilder
+from rag.agent.core.goal_contract import GoalCompatibilityConfig, GoalSpec
 from rag.agent.core.human_input import HumanInputRequest, HumanInputResponse
 from rag.agent.core.llm_providers import create_loop_model_turn_provider
 from rag.agent.core.llm_registry import ModelRegistry
@@ -76,9 +76,9 @@ from rag.agent.memory.models import MemoryPolicy
 from rag.agent.memory.persistent import PersistentMemoryStore
 from rag.agent.memory.store import WorkspaceMemoryStore
 from rag.agent.tools.mcp_adapter import MCPToolRegistry
-from rag.agent.tools.registry import ContextualToolRunner, ToolRegistry, ToolRunner
-from rag.agent.tools.workspace_tools import create_workspace_tools
+from rag.agent.tools.registry import ToolRegistry, ToolRunner
 from rag.agent.tools.spec import ExecutionCategory, ToolPermissions, ToolResult, ToolSpec
+from rag.agent.tools.workspace_tools import create_workspace_tools
 from rag.schema.query import AnswerCitation, EvidenceItem
 from rag.schema.runtime import AccessPolicy
 
@@ -96,6 +96,7 @@ class AgentRunRequest(BaseModel):
     thread_id: str | None = None
     max_turns: int | None = None
     max_context_tokens: int | None = Field(default=None, gt=0)
+    llm_budget_total: int | None = Field(default=None, gt=0)
     max_depth: int | None = Field(default=None, ge=0)
     pending_tool_calls: list[ToolCallPlan] = Field(default_factory=list)
     approved_tool_call_ids: list[str] = Field(default_factory=list)
@@ -112,8 +113,9 @@ class AgentRunRequest(BaseModel):
             run_id=run_id,
             thread_id=self.thread_id or run_id,
             max_turns=self.max_turns,
-                        agent_type=definition.agent_type,
+            agent_type=definition.agent_type,
             max_context_tokens=self.max_context_tokens,
+            llm_budget_total=self.llm_budget_total,
             max_depth=definition.max_depth if self.max_depth is None else self.max_depth,
             access_policy=definition.access_policy_ceiling or AccessPolicy.default(),
             tool_policy=definition.tool_policy,
@@ -343,10 +345,16 @@ class _TaskChildRunner:
             tool_policy=child_policy.tool_policy,
         )
         child_config = derive_child_config(parent_config, child_definition)
+        if request.llm_budget_total is not None:
+            child_config = replace(
+                child_config,
+                llm_budget_total=request.llm_budget_total,
+            )
         if request.max_turns is not None:
             child_config = replace(
                 child_config,
-                )
+                max_turns=request.max_turns,
+            )
         return child_config
 
 
@@ -367,6 +375,7 @@ class AgentService:
         catalog: ToolCatalog | None = None,
         stream_sink: Any = None,  # StreamEventSink | None
         mcp_registry: MCPToolRegistry | None = None,
+        skill_catalog: Any = None,  # SkillCatalog | None
     ) -> None:
         if definition is not None and policy is not None:
             raise ValueError("Provide either 'definition' or 'policy', not both")
@@ -378,6 +387,13 @@ class AgentService:
             raise ValueError("Provide either 'definition' or 'policy'")
         self._base_tool_registry = tool_registry
         self._catalog = catalog or self._build_catalog(tool_registry)
+        self._skill_catalog = skill_catalog  # SkillCatalog | None
+        self._skill_runtime = None
+        if skill_catalog is not None:
+            from rag.agent.skills.runtime import SkillRuntime
+
+            self._skill_runtime = SkillRuntime(skill_catalog)
+            self._register_skill_tool()
         self._model_turn_provider = model_turn_provider
         self._retrieval_hint_provider = retrieval_hint_provider
         self._subagent_runner = subagent_runner
@@ -481,7 +497,10 @@ class AgentService:
             tools=workspace_tools,
         )
         self._validate_allowed_tools(runtime_registry)
-        self._validate_workspace_core_runners(runtime_registry)
+        self._validate_workspace_core_runners(
+            runtime_registry,
+            allowed_tool_names=self._policy.allowed_tools,
+        )
 
         enriched_task = self._inject_manifest_into_task(task, manifest)
 
@@ -738,6 +757,11 @@ class AgentService:
                     deferred_store=store,
                     stream_sink=self._stream_sink,
                     formatter_resolver=formatter_resolver,
+                    skill_context_provider=(
+                        self._skill_runtime.render_prompt_context
+                        if self._skill_runtime is not None
+                        else None
+                    ),
                 )
             except Exception as exc:
                 if state is not None:
@@ -780,7 +804,11 @@ class AgentService:
             raise ValueError(f"unregistered tools: {', '.join(dict.fromkeys(missing))}")
 
     @staticmethod
-    def _validate_workspace_core_runners(registry: ToolRegistry) -> None:
+    def _validate_workspace_core_runners(
+        registry: ToolRegistry,
+        *,
+        allowed_tool_names: Sequence[str] | None = None,
+    ) -> None:
         """Verify workspace-dependent core tools have runners registered.
 
         These tools (search_text, apply_patch, run_command, etc.) depend on
@@ -788,12 +816,15 @@ class AgentService:
         workspace tool creation, this assertion catches the regression before
         a model call fails silently at runtime.
         """
-        _WORKSPACE_CORE_TOOLS = frozenset({
+        workspace_core_tools = frozenset({
             "list_files", "read_file", "write_file", "run_python",
             "search_text", "apply_patch", "run_command",
         })
+        required_tools = workspace_core_tools
+        if allowed_tool_names is not None:
+            required_tools = workspace_core_tools & frozenset(allowed_tool_names)
         missing_runners = sorted(
-            name for name in _WORKSPACE_CORE_TOOLS
+            name for name in required_tools
             if not registry.has_runner(name)
         )
         if missing_runners:
@@ -1049,6 +1080,12 @@ Input files detected — you are in file processing mode:
                         steps.append(old)
             return UpdatePlanOutput(steps=steps, summary=inp.summary, message="plan updated")
 
+        try:
+            runtime.get("update_plan")
+        except KeyError:
+            from rag.agent.tools.generic_tools import update_plan_spec
+
+            runtime.register(update_plan_spec)
         runtime.register_contextual_runner("update_plan", _update_plan_runner)
 
         # Assemble full tool pool (builtin + MCP + deny rules)
@@ -1356,6 +1393,28 @@ Input files detected — you are in file processing mode:
         # Register spec only — runner is request-scoped (needs parent run_config)
         self._base_tool_registry.register(task_tool_spec)
 
+    def _register_skill_tool(self) -> None:
+        """Register the 'invoke_skill' tool spec with a catalog-bound runner."""
+        from rag.agent.skills.invocation import INVOKE_SKILL_SPEC, make_invoke_skill_runner
+
+        # Register spec and a permanent runner (skill catalog is service-scoped)
+        _skill_runner = make_invoke_skill_runner(self._skill_catalog)
+        self._base_tool_registry.register(INVOKE_SKILL_SPEC)
+        self._base_tool_registry.register_contextual_runner("invoke_skill", _skill_runner)
+
+        # Dynamically add skill tools to the policy's core tools so they
+        # appears in the model's tool list ONLY when skills are available.
+        skill_core_tools = ("invoke_skill", "materialize_skill_asset")
+        missing = tuple(
+            name for name in skill_core_tools
+            if name not in self._policy.core_tool_names
+        )
+        if missing:
+            self._policy = replace(
+                self._policy,
+                core_tool_names=self._policy.core_tool_names + missing,
+            )
+
     async def resume(
         self,
         *,
@@ -1398,7 +1457,10 @@ Input files detected — you are in file processing mode:
             tools=workspace_tools,
         )
         self._validate_allowed_tools(runtime_registry)
-        self._validate_workspace_core_runners(runtime_registry)
+        self._validate_workspace_core_runners(
+            runtime_registry,
+            allowed_tool_names=self._policy.allowed_tools,
+        )
         loop = self._build_loop(
             runtime_registry=runtime_registry,
             checkpoint_store=checkpoint_store,
@@ -1451,7 +1513,7 @@ Input files detected — you are in file processing mode:
             RunRegistry.get(run_config.run_id)
             return run_config
         except KeyError:
-            handles = RunRegistry.get_or_create(run_config)
+            RunRegistry.get_or_create(run_config)
 
         return run_config
 

@@ -1,4 +1,4 @@
-"""B2b: Declarative tool batch — integration tests with real SDK and reader."""
+"""Declarative tool batch integration tests with real SDK and reader."""
 
 from __future__ import annotations
 
@@ -6,8 +6,6 @@ import json
 import os
 import tempfile
 from pathlib import Path
-
-import pytest
 
 from rag.agent.core.tool_batch_reader import (
     clean_batch_file,

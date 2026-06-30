@@ -6,7 +6,6 @@ import pytest
 from langgraph.checkpoint.memory import MemorySaver
 from pydantic import BaseModel
 
-from rag.agent.core.goal_contract import GoalCompatibilityConfig, GoalSpec
 from rag.agent.core.checkpointing import (
     CheckpointPersistenceError,
     LangGraphCheckpointStore,
@@ -15,6 +14,7 @@ from rag.agent.core.checkpointing import (
     create_agent_checkpointer,
 )
 from rag.agent.core.context import AgentRunConfig, RunRegistry
+from rag.agent.core.goal_contract import GoalCompatibilityConfig, GoalSpec
 from rag.agent.core.human_input import (
     HumanInputRequest,
     HumanInputRequestIdMismatchError,
@@ -26,12 +26,12 @@ from rag.agent.core.tool_execution import (
     ToolExecutionService,
     tool_arguments_digest,
 )
+from rag.agent.core.turn_contracts import ToolCallPlan
 from rag.agent.loop.state import (
     LoopPause,
     LoopTransition,
     create_loop_state,
 )
-from rag.agent.core.turn_contracts import ToolCallPlan
 from rag.agent.tools.registry import ToolRegistry
 from rag.agent.tools.spec import ToolError, ToolPermissions, ToolSpec
 from rag.schema.runtime import AccessPolicy
@@ -49,7 +49,7 @@ def _config(run_id: str) -> AgentRunConfig:
     config = AgentRunConfig(
         run_id=run_id,
         thread_id=run_id,
-        budget_total=100,
+        llm_budget_total=100,
         max_depth=2,
         access_policy=AccessPolicy.default(),
     )

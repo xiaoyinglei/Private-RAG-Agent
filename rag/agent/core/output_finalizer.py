@@ -80,7 +80,7 @@ class ModelStructuredOutputFinalizer:
         if output_model is None:
             raise ValueError("AgentRuntimePolicy.output_model is not configured")
         try:
-            ledger = None
+            handles = RunRegistry.get(state["run_config"].run_id)
         except KeyError as exc:
             raise RuntimeError(f"Runtime handles missing for run_id={state['run_config'].run_id}") from exc
 
@@ -100,7 +100,7 @@ class ModelStructuredOutputFinalizer:
                     stage=LLMCallStage.FINAL_SYNTHESIS,
                     prompt=assembled.prompt,
                     schema=output_model,
-                    ledger=ledger,
+                    ledger=handles.llm_budget_ledger,
                     lease_id=(f"{state['run_config'].run_id}:final_output:{attempt_index}:{uuid4().hex}"),
                     kwargs=self._kwargs,
                 )

@@ -49,5 +49,5 @@ def test_generic_agent_includes_semantic_rag_tools() -> None:
     assert "search_assets" in allowed
 
 
-def test_generic_agent_budget_defaults() -> None:
-    assert BUILTIN_AGENT_DEFINITIONS["generic"].token_budget == 96_000
+def test_generic_agent_does_not_carry_legacy_policy_budget() -> None:
+    assert not hasattr(BUILTIN_AGENT_DEFINITIONS["generic"], "token_budget")

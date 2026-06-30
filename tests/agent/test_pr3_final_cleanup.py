@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import warnings
-
 import pytest
 from pydantic import BaseModel
 
@@ -32,7 +30,7 @@ def _config() -> AgentRunConfig:
     return AgentRunConfig(
         run_id="test-pr3-cleanup",
         thread_id="test-pr3-cleanup",
-        budget_total=100,
+        llm_budget_total=100,
         max_depth=1,
         access_policy=AccessPolicy.default(),
     )
@@ -236,8 +234,10 @@ def test_legacy_checkpoint_fields_dropped() -> None:
 
 def test_agent_state_module_is_gone() -> None:
     """rag.agent.state has been removed — use rag.agent.loop.state instead."""
+    import importlib
+
     with pytest.raises(ModuleNotFoundError):
-        import rag.agent.state  # noqa: F811
+        importlib.import_module("rag.agent.state")
 
 
 # ── Test 7 (from Task 5 Step 1) ──

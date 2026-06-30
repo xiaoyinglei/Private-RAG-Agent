@@ -11,6 +11,7 @@ from rag.agent.core.checkpointing import agent_checkpoint_serde
 from rag.agent.core.context import AgentRunConfig, RunRegistry
 from rag.agent.core.definition import ToolPolicy
 from rag.agent.core.human_input import HumanInputResponse
+from rag.agent.core.llm_context import AgentLLMContextOverflowError
 from rag.agent.core.tool_execution import (
     ToolBatchRequest,
     ToolExecutionRecord,
@@ -19,8 +20,10 @@ from rag.agent.core.tool_execution import (
     tool_arguments_digest,
 )
 from rag.agent.core.turn_contracts import ToolCallPlan
+from rag.agent.memory.models import ContextBudgetSnapshot
 from rag.agent.tools.registry import ToolExecutionContext, ToolRegistry
 from rag.agent.tools.spec import ToolError, ToolPermissions, ToolSpec
+from rag.schema.llm import LLMCallStage
 from rag.schema.runtime import AccessPolicy
 
 
@@ -40,7 +43,7 @@ def _config(
     config = AgentRunConfig(
         run_id=run_id,
         thread_id=run_id,
-        budget_total=100,
+        llm_budget_total=100,
         max_depth=2,
         access_policy=AccessPolicy.default(),
         tool_policy=ToolPolicy(max_parallel_calls=max_parallel_calls),
@@ -57,6 +60,7 @@ def _spec(
     concurrency_safe: bool = False,
     max_retries: int = 0,
     requires_confirmation: bool = False,
+    work_budget_cost: int = 0,
 ) -> ToolSpec:
     return ToolSpec(
         name=name,
@@ -70,6 +74,7 @@ def _spec(
         idempotent=idempotent,
         concurrency_safe=concurrency_safe,
         requires_confirmation=requires_confirmation,
+        work_budget_cost=work_budget_cost,
     )
 
 
@@ -219,6 +224,149 @@ async def test_idempotent_retry_reuses_operation_id() -> None:
     assert len(set(seen_operation_ids)) == 1
     assert result.execution_records[call.tool_call_id].attempt_count == 2
     RunRegistry.remove("execution-retry")
+
+
+@pytest.mark.anyio
+async def test_budget_exhausted_prevents_tool_invocation() -> None:
+    calls = 0
+
+    def runner(payload: _Input) -> _Output:
+        nonlocal calls
+        calls += 1
+        return _Output(value=payload.value)
+
+    registry = ToolRegistry()
+    registry.register(_spec(work_budget_cost=150), runner=runner)
+    call = ToolCallPlan.create("tool", {"value": "too-expensive"})
+
+    result = await ToolExecutionService(tool_registry=registry).execute_batch(
+        _request(call, run_id="execution-budget-exhausted"),
+        state={},
+    )
+
+    ledger = RunRegistry.get("execution-budget-exhausted").llm_budget_ledger
+    assert result.tool_results[0].status == "error"
+    assert result.tool_results[0].error is not None
+    assert result.tool_results[0].error.code == "budget_exhausted"
+    assert calls == 0
+    assert ledger is not None
+    assert await ledger.remaining() == 100
+    RunRegistry.remove("execution-budget-exhausted")
+
+
+@pytest.mark.anyio
+async def test_successful_call_commits_work_budget() -> None:
+    registry = ToolRegistry()
+    registry.register(
+        _spec(work_budget_cost=40),
+        runner=lambda payload: _Output(value=payload.value),
+    )
+    call = ToolCallPlan.create("tool", {"value": "ok"})
+
+    result = await ToolExecutionService(tool_registry=registry).execute_batch(
+        _request(call, run_id="execution-budget-commit"),
+        state={},
+    )
+
+    ledger = RunRegistry.get("execution-budget-commit").llm_budget_ledger
+    assert result.tool_results[0].status == "ok"
+    assert ledger is not None
+    assert await ledger.committed() == 40
+    assert await ledger.reserved() == 0
+    assert await ledger.remaining() == 60
+    RunRegistry.remove("execution-budget-commit")
+
+
+@pytest.mark.anyio
+async def test_successful_call_commits_work_budget_after_run_registry_removal() -> None:
+    config = _config("execution-budget-commit-after-remove")
+    handles = RunRegistry.get(config.run_id)
+    registry = ToolRegistry()
+
+    def runner(payload: _Input) -> _Output:
+        RunRegistry.remove(config.run_id)
+        return _Output(value=payload.value)
+
+    registry.register(_spec(work_budget_cost=40), runner=runner)
+    call = ToolCallPlan.create("tool", {"value": "ok"})
+    request = ToolBatchRequest(
+        calls=(call,),
+        run_config=config,
+        allowed_tools=frozenset({"tool"}),
+    )
+
+    result = await ToolExecutionService(tool_registry=registry).execute_batch(
+        request,
+        state={},
+    )
+
+    assert result.tool_results[0].status == "ok"
+    assert handles.llm_budget_ledger is not None
+    assert await handles.llm_budget_ledger.committed() == 40
+    assert await handles.llm_budget_ledger.reserved() == 0
+    assert await handles.llm_budget_ledger.remaining() == 60
+
+
+@pytest.mark.anyio
+async def test_pre_execution_failure_refunds_work_budget() -> None:
+    registry = ToolRegistry()
+    registry.register(_spec(work_budget_cost=40))
+    call = ToolCallPlan.create("tool", {"value": "missing-runner"})
+
+    result = await ToolExecutionService(tool_registry=registry).execute_batch(
+        _request(call, run_id="execution-budget-refund"),
+        state={},
+    )
+
+    ledger = RunRegistry.get("execution-budget-refund").llm_budget_ledger
+    assert result.tool_results[0].status == "error"
+    assert result.tool_results[0].error is not None
+    assert result.tool_results[0].error.code == "tool_not_implemented"
+    assert ledger is not None
+    assert await ledger.committed() == 0
+    assert await ledger.reserved() == 0
+    assert await ledger.remaining() == 100
+    RunRegistry.remove("execution-budget-refund")
+
+
+@pytest.mark.anyio
+async def test_context_overflow_refunds_work_budget_after_run_registry_removal() -> None:
+    config = _config("execution-budget-refund-after-remove")
+    handles = RunRegistry.get(config.run_id)
+    registry = ToolRegistry()
+
+    def runner(payload: _Input) -> _Output:
+        del payload
+        RunRegistry.remove(config.run_id)
+        raise AgentLLMContextOverflowError(
+            stage=LLMCallStage.TOOL_DECISION,
+            context_budget=ContextBudgetSnapshot(
+                max_context_tokens=1,
+                overflow=True,
+                required_truncated=["system"],
+            ),
+        )
+
+    registry.register(_spec(work_budget_cost=40), runner=runner)
+    call = ToolCallPlan.create("tool", {"value": "overflow"})
+    request = ToolBatchRequest(
+        calls=(call,),
+        run_config=config,
+        allowed_tools=frozenset({"tool"}),
+    )
+
+    result = await ToolExecutionService(tool_registry=registry).execute_batch(
+        request,
+        state={},
+    )
+
+    assert result.tool_results[0].status == "error"
+    assert result.tool_results[0].error is not None
+    assert result.tool_results[0].error.code == "context_overflow"
+    assert handles.llm_budget_ledger is not None
+    assert await handles.llm_budget_ledger.committed() == 0
+    assert await handles.llm_budget_ledger.reserved() == 0
+    assert await handles.llm_budget_ledger.remaining() == 100
 
 
 @pytest.mark.anyio

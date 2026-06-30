@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import logging
 from typing import cast
 
 import pytest
 
 from rag.agent.builtin import create_builtin_agent_registry
+from rag.agent.capabilities.tool_search import ToolSearchInput, ToolSearchOutput
 from rag.agent.cli import (
     CLI_AGENT_CHOICES,
     _build_agent_service,
@@ -16,9 +18,8 @@ from rag.agent.core.context import AgentRunConfig, RunRegistry
 from rag.agent.core.definition import AgentRuntimePolicy
 from rag.agent.core.llm_registry import ModelRegistry
 from rag.agent.core.runtime_diagnostics import RuntimeDiagnostic
-from rag.agent.service import AgentRunRequest, AgentRunResult
 from rag.agent.loop.state import LoopState as AgentState
-from rag.agent.capabilities.tool_search import ToolSearchInput, ToolSearchOutput
+from rag.agent.service import AgentRunRequest, AgentRunResult
 from rag.agent.tools.llm_tools import LLMCompareInput, LLMGenerateInput
 from rag.agent.tools.registry import ToolExecutionContext
 from rag.schema.runtime import AccessPolicy, RuntimeMode
@@ -123,7 +124,7 @@ async def test_cli_llm_runner_wiring_includes_compare_runner() -> None:
     config = AgentRunConfig(
         run_id="cli-compare",
         thread_id="cli-compare",
-        budget_total=10_000,
+        llm_budget_total=10_000,
         max_depth=1,
         access_policy=AccessPolicy.default(),
     )
@@ -154,7 +155,7 @@ async def test_cli_generate_runner_preserves_supplied_grounding_ids() -> None:
     config = AgentRunConfig(
         run_id="cli-generate",
         thread_id="cli-generate",
-        budget_total=10_000,
+        llm_budget_total=10_000,
         max_depth=1,
         access_policy=AccessPolicy.default(),
     )
@@ -247,6 +248,36 @@ def test_build_agent_service_records_automatic_model_registry_failure(
     assert state["runtime_diagnostics"][0].code == "model_registry_initialization_failed"
 
 
+def test_build_agent_service_records_skill_catalog_load_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from rag.agent.skills import loader
+
+    def fail_scan(*args: object, **kwargs: object) -> object:
+        del args, kwargs
+        raise PermissionError("skills directory unreadable")
+
+    monkeypatch.setattr(loader, "scan_and_load_skills", fail_scan)
+
+    with caplog.at_level(logging.WARNING, logger="rag.agent.cli"):
+        service = _build_agent_service(_Runtime(), agent_type="generic")
+
+    state = service.initial_state(
+        AgentRunRequest(
+            task="Explain policy",
+            run_id="cli-skill-catalog-failure",
+            thread_id="cli-skill-catalog-failure",
+        )
+    )
+
+    assert "Skill catalog loading failed" in caplog.text
+    assert any(
+        diagnostic.code == "skill_catalog_load_failed"
+        for diagnostic in state["runtime_diagnostics"]
+    )
+
+
 @pytest.mark.parametrize("verbose", [False, True])
 def test_display_result_surfaces_runtime_degradation(
     capsys: pytest.CaptureFixture[str],
@@ -286,7 +317,7 @@ async def test_build_agent_service_registers_rag_runner_with_execution_context()
     run_config = AgentRunConfig(
         run_id="cli-rag-context",
         thread_id="cli-rag-context",
-        budget_total=100,
+        llm_budget_total=100,
         max_depth=1,
         access_policy=access_policy,
     )

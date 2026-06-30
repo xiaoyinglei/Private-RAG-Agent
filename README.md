@@ -39,6 +39,13 @@
 
 RAG 是 Agent 可以调用的一类工具，不是所有任务的默认入口。对本地 Excel、CSV、JSON 等文件分析，优先走 workspace 文件工具和 Python 分析；只有需要知识库证据时才走 RAG 检索。
 
+Python 包名仍保留为 `rag`，因为检索、入库、存储和模型装配代码还在这个包内。对用户暴露的项目名和主命令已经收敛为 `agent-runtime` / `agent`：
+
+```text
+agent run / chat / resume    # Agent 主入口
+rag ingest / query / delete  # 知识库和检索维护入口
+```
+
 ## 快速开始
 
 ```bash
@@ -99,7 +106,7 @@ uv run rag query \
 最小 Agent 文件分析 smoke：
 
 ```bash
-uv run rag agent run \
+uv run agent run \
   "读取这个文件，列出结构并给出摘要" \
   --agent generic \
   --input-file "/absolute/path/to/file.xlsx" \
@@ -108,6 +115,7 @@ uv run rag agent run \
 
 ## News
 
+- 2026-06-30：项目入口产品化：项目名改为 `agent-runtime`，新增顶层 `agent` 命令；`rag` CLI 只保留 ingest/query/delete/benchmark/service 等 RAG 子系统命令；删除旧 `analyze-task` 和 `RAGRuntime.analyze_task()` 残口。
 - 2026-06-26：Agent 架构收尾——状态模型收敛、ACI 产品化就绪、工具按需加载、code-as-tool。mypy 清零（22→0），630 个 agent 测试通过。
 - 2026-06-24：PR1-PR3 合并：ToolRegistry + ToolExecutionService 收敛、workspace 工具迁移到 BaseTool、ToolCatalog/DeferredToolStore 完成。`GENERIC_SYSTEM_PROMPT` 作为 Agent 系统指令入口。
 - 2026-06-22：README 重写为当前架构说明：单 `generic` 入口、Claude-like while loop、Tool Search、deferred tools、workspace 文件工具和 `task` 工具。旧的 `ResearchAgent / OrchestratorAgent / agent_*` 默认路径不再作为当前设计描述。
@@ -345,6 +353,7 @@ tool_search("RAG / search documents")
 - Native tool calling path：通过 OpenAI-compatible `messages + tools` 调模型，并把 tool result 回灌到下一轮模型上下文。
 - Prompt assembly：`AgentMessageAssembler` 将稳定 system sections 和动态 runtime context 分离。
 - 工具发现：`ToolCatalog` 用 BM25 搜索 deferred tools，`activate_tools` 激活本次 run 的候选工具。
+- Skills：`SkillCatalog` 从 `.agents/skills/` 和 `SKILL_PATH` 加载 `SKILL.md`，通过 `invoke_skill` 进入同一套工具执行边界。
 - 单内置 Agent：`BUILTIN_AGENT_DEFINITIONS` 当前只包含 `generic`。
 - Workspace + PrimitiveOps：支持 `list_files`、`read_file`、`write_file`、`run_python`、`run_python_inline`、`structured_probe`。
 - 通用 `task` 工具：替代默认 role-specific child agents。
@@ -354,7 +363,7 @@ tool_search("RAG / search documents")
 
 ### 已具备的能力
 
-- 可以用 `rag agent run` 启动一个 generic Agent run，并返回结构化 `AgentRunResult`。
+- 可以用 `agent run` 启动一个 generic Agent run，并返回结构化 `AgentRunResult`。
 - 可以把本地文件导入 workspace，让 Agent 直接读取、探测和用 Python 分析，不必先入 RAG。
 - 可以让模型用 `tool_search` 找到 RAG、asset、LLM、structured probe 等 deferred tools，再显式激活。
 - 可以执行已注册工具，并在工具未注册、runner 缺失、参数非法、输出非法、预算不足、timeout、runner 异常时返回结构化失败结果。
@@ -363,7 +372,6 @@ tool_search("RAG / search documents")
 
 ### 下一步规划实现
 
-- **文档更新**：README 和项目文档从 RAG-first 转为 agent-first 口吻，`GENERIC_SYSTEM_PROMPT` 作为系统指令入口在文档中明确说明。
 - **简单任务 fast path**：当前所有任务走完整 AgentLoop + ToolExecutionService，对简单任务（单文件读取、单次检索）提供轻量 fast path，跳过完整 runtime 装配。
 - **清理 `LoopState`**：先明确 tool call / tool result / model message 的唯一 source of truth，再删除 PR0/PR1 遗留字段。
 - **收敛 legacy structured-output path**：把 native tool calling 作为主线，结构化输出走 fallback 而非默认路径。
@@ -501,7 +509,7 @@ uv run pytest -q \
 ./
 ├── README.md                          # 项目说明、架构、Agent 设计
 ├── CLAUDE.md                          # AI coding agent 参考（启动命令、约束）
-├── pyproject.toml                     # Python 项目元数据、依赖、pytest/ruff/mypy 配置
+├── pyproject.toml                     # agent-runtime 项目元数据、console scripts、pytest/ruff/mypy 配置
 ├── uv.lock                            # uv 锁文件
 ├── configs/models.yaml                # 默认 chat / embedding / rerank 模型配置
 ├── docs/
@@ -516,8 +524,8 @@ uv run pytest -q \
 
 ```text
 rag/
-├── cli.py                             # 主 CLI：ingest / query / benchmark / service / agent
-├── runtime.py                         # AppRuntime 装配 storage、ingest、retrieval、synthesis
+├── cli.py                             # RAG CLI：ingest / query / delete / benchmark / service
+├── runtime.py                         # RAGRuntime 装配 storage、ingest、retrieval、synthesis
 ├── query_pipeline.py                  # 查询端 L3-L6 编排、表格 compute_request 循环
 ├── embedding_service.py               # 本地 embedding HTTP 服务入口
 ├── rerank_service.py                  # 本地 rerank HTTP 服务入口
@@ -539,6 +547,7 @@ rag/
 │   │   ├── state.py                   # LoopState、ModelTurnDraft、transitions
 │   │   └── stop_hooks.py              # stop hook 协议和 bounded runner
 │   ├── memory/                        # working memory compaction / injection / store
+│   ├── skills/                        # Skill manifest、loader、catalog、invocation runtime
 │   ├── primitive_ops.py               # workspace 文件和 Python 原语
 │   ├── service.py                     # AgentRunRequest / AgentRunResult / AgentService
 │   ├── tools/

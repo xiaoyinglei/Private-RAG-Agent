@@ -141,6 +141,10 @@ def test_public_retrieval_result_excludes_old_preservation_contract() -> None:
     assert not hasattr(query_schema, "PreservationSuggestion")
 
 
+def test_runtime_no_longer_exposes_agent_analysis_facade() -> None:
+    assert not hasattr(RAGRuntime, "analyze_task")
+
+
 def test_runtime_from_request_round_trips_and_exposes_diagnostics(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -5,13 +5,13 @@ from dataclasses import dataclass
 import pytest
 from pydantic import BaseModel
 
-from rag.agent.core.goal_contract import GoalDeliverable, GoalSpec
 from rag.agent.core.context import AgentRunConfig
 from rag.agent.core.definition import AgentRuntimePolicy
 from rag.agent.core.finalization import (
     FinishCandidateBuilder,
     FinishCandidateBuildError,
 )
+from rag.agent.core.goal_contract import GoalDeliverable, GoalSpec
 from rag.agent.core.output_finalizer import OutputValidationExhaustedError
 from rag.agent.loop.state import ModelTurnDraft, create_loop_state
 from rag.agent.loop.stop_hooks import (
@@ -33,7 +33,7 @@ def _config(run_id: str = "stop-hooks") -> AgentRunConfig:
     return AgentRunConfig(
         run_id=run_id,
         thread_id=run_id,
-        budget_total=100,
+        llm_budget_total=100,
         max_depth=2,
         access_policy=AccessPolicy.default(),
     )

@@ -76,10 +76,10 @@ class RAGSearchAnswerRunner:
             options_kwargs["access_policy"] = access_policy
         run_id = execution_context.run_config.run_id
         try:
-            ledger = None
+            handles = RunRegistry.get(run_id)
         except KeyError as exc:
             raise RuntimeError(f"Runtime handles missing for run_id={run_id}") from exc
-        with llm_budget_scope(ledger):
+        with llm_budget_scope(handles.llm_budget_ledger):
             result = await asyncio.to_thread(
                 self.runtime.query_public,
                 payload.query,

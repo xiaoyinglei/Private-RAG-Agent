@@ -12,7 +12,6 @@ import typer
 from pydantic import BaseModel
 
 from rag import AssemblyRequest, CapabilityRequirements, RAGRuntime, StorageConfig
-from rag.agent.cli import agent_app
 from rag.models.assembly_adapter import to_assembly_overrides
 from rag.models.runtime import RuntimeOverrides, resolve_runtime_config
 from rag.retrieval import QueryOptions, RetrievalProfile
@@ -21,7 +20,6 @@ from rag.storage.runtime_config import DEFAULT_VECTOR_BACKEND, runtime_storage_c
 from rag.utils.text import load_env_file
 
 app = typer.Typer(add_completion=False, no_args_is_help=True)
-app.add_typer(agent_app, name="agent")
 DEFAULT_STORAGE_ROOT = Path(".rag")
 FIQA_DATASET = "fiqa"
 MEDICAL_RETRIEVAL_DATASET = "medical_retrieval"
@@ -99,23 +97,23 @@ def _runtime(
     if embedding_service_url:
         from rag.providers.embedding_http import EmbeddingHttpClient
 
-        http_client = EmbeddingHttpClient(base_url=embedding_service_url)
+        embedding_client = EmbeddingHttpClient(base_url=embedding_service_url)
         overrides = replace(
             overrides,
             embedding_provider=_CompositeProvider(
                 provider_name="embedding-http",
-                embedder=http_client,
+                embedder=embedding_client,
             ),
         )
     if rerank_service_url:
         from rag.providers.rerank_http import RerankHttpClient
 
-        http_client = RerankHttpClient(base_url=rerank_service_url)
+        rerank_client = RerankHttpClient(base_url=rerank_service_url)
         overrides = replace(
             overrides,
             rerank_provider=_CompositeProvider(
                 provider_name="rerank-http",
-                reranker=http_client,
+                reranker=rerank_client,
             ),
         )
 
@@ -269,30 +267,6 @@ def query(
         return
     typer.echo(result.answer.answer_text)
     typer.echo(result.answer.answer_text)
-
-
-@app.command("analyze-task")
-def analyze_task(
-    storage_root: Annotated[Path, STORAGE_ROOT_OPTION] = DEFAULT_STORAGE_ROOT,
-    query: Annotated[str | None, QUERY_OPTION] = None,
-    json_output: Annotated[bool, JSON_OPTION] = False,
-    allow_web: Annotated[bool, typer.Option("--allow-web/--no-allow-web")] = False,
-    expected_output: Annotated[str, typer.Option("--expected-output")] = "structured_analysis_report",
-    response_style: Annotated[str, typer.Option("--response-style")] = "formal",
-    max_subtasks: Annotated[int, typer.Option("--max-subtasks")] = 5,
-    retry_budget: Annotated[int, typer.Option("--retry-budget")] = 2,
-) -> None:
-    del (
-        storage_root,
-        query,
-        json_output,
-        allow_web,
-        expected_output,
-        response_style,
-        max_subtasks,
-        retry_budget,
-    )
-    raise click.ClickException("analyze-task is disabled on the new runtime CLI; use `rag query`.")
 
 
 @app.command()

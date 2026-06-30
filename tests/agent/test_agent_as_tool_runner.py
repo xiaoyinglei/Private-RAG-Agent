@@ -74,7 +74,7 @@ def _parent_state(run_id: str = "parent-run", *, max_depth: int = 2) -> LoopStat
     config = AgentRunConfig(
         run_id=run_id,
         thread_id=f"{run_id}-thread",
-        budget_total=10000,
+        llm_budget_total=10000,
         max_depth=max_depth,
         parent_run_id=None,
         source_scope=("doc-1",),
@@ -92,7 +92,6 @@ async def test_agent_as_tool_runner_executes_registered_child_with_derived_confi
         description="Child research",
         system_prompt="Research child task",
         allowed_tools=["llm_summarize"],
-        estimated_token_budget=2500,
     )
     agent_registry = AgentRegistry()
     agent_registry.register(child_def)
@@ -116,7 +115,7 @@ async def test_agent_as_tool_runner_executes_registered_child_with_derived_confi
             delegation_id="s1",
             agent_type="child_research_runner",
             prompt="Child task",
-            estimated_tokens=2400,
+            llm_budget_total=2400,
         ),
         parent_state=_parent_state(),
     )
@@ -128,7 +127,7 @@ async def test_agent_as_tool_runner_executes_registered_child_with_derived_confi
     assert first_child_config.parent_run_id == "parent-run"
     assert first_child_config.source_scope == ("doc-1",)
     assert first_child_config.max_depth == 1
-    assert first_child_config.budget_total == 2400
+    assert first_child_config.llm_budget_total == 2400
     with pytest.raises(KeyError):
         RunRegistry.get(result.run_id)
 
@@ -312,7 +311,7 @@ class TestAgentAsToolAdapter:
         rc = run_config or AgentRunConfig(
             run_id="test-run",
             thread_id="test-thread",
-            budget_total=10000,
+            llm_budget_total=10000,
             max_depth=2,
             access_policy=AccessPolicy.default(),
         )
@@ -330,7 +329,7 @@ class TestAgentAsToolAdapter:
         rc = AgentRunConfig(
             run_id="test-run",
             thread_id="test-thread",
-            budget_total=10000,
+            llm_budget_total=10000,
             max_depth=2,
             access_policy=AccessPolicy.default(),
         )
@@ -364,7 +363,7 @@ class TestAgentAsToolAdapter:
             run_config=AgentRunConfig(
                 run_id="test-run",
                 thread_id="test-thread",
-                budget_total=10000,
+                llm_budget_total=10000,
                 max_depth=2,
                 access_policy=AccessPolicy.default(),
             ),
@@ -381,7 +380,7 @@ class TestAgentAsToolAdapter:
         rc = AgentRunConfig(
             run_id="depth-0",
             thread_id="depth-0-thread",
-            budget_total=10000,
+            llm_budget_total=10000,
             max_depth=0,
             access_policy=AccessPolicy.default(),
         )
@@ -436,14 +435,14 @@ class TestRegistryCloneAndIsolation:
         rc1 = AgentRunConfig(
             run_id="run-1",
             thread_id="thread-1",
-            budget_total=5000,
+            llm_budget_total=5000,
             max_depth=3,
             access_policy=AccessPolicy.default(),
         )
         rc2 = AgentRunConfig(
             run_id="run-2",
             thread_id="thread-2",
-            budget_total=8000,
+            llm_budget_total=8000,
             max_depth=1,
             access_policy=AccessPolicy(allowed_runtimes=frozenset({RuntimeMode.FAST})),
         )
@@ -457,8 +456,8 @@ class TestRegistryCloneAndIsolation:
         a1 = AgentAsToolAdapter(runner=runner, agent_type="research", run_config=rc1)
         a2 = AgentAsToolAdapter(runner=runner, agent_type="research", run_config=rc2)
 
-        assert a1._run_config.budget_total == 5000
-        assert a2._run_config.budget_total == 8000
+        assert a1._run_config.llm_budget_total == 5000
+        assert a2._run_config.llm_budget_total == 8000
         assert a1._run_config.max_depth == 3
         assert a2._run_config.max_depth == 1
         assert a1._run_config.max_depth == 3

@@ -62,7 +62,7 @@ def _parent_state(run_id: str = "parent-run", *, max_depth: int = 2) -> LoopStat
     config = AgentRunConfig(
         run_id=run_id,
         thread_id=f"{run_id}-thread",
-        budget_total=10000,
+        llm_budget_total=10000,
         max_depth=max_depth,
         parent_run_id=None,
         source_scope=("doc-1",),
@@ -80,7 +80,6 @@ async def test_builtin_subagent_runner_returns_agent_run_result_with_derived_con
         description="Child research",
         system_prompt="Research child task",
         allowed_tools=["llm_summarize"],
-        estimated_token_budget=2500,
     )
     agent_registry = AgentRegistry()
     agent_registry.register(child_def)
@@ -106,7 +105,7 @@ async def test_builtin_subagent_runner_returns_agent_run_result_with_derived_con
             delegation_id="s1",
             agent_type="child_research_runner",
             prompt="Child task",
-            estimated_tokens=2400,
+            llm_budget_total=2400,
         ),
         parent_state=_parent_state(),
     )
@@ -118,7 +117,7 @@ async def test_builtin_subagent_runner_returns_agent_run_result_with_derived_con
     assert first_child_config.parent_run_id == "parent-run"
     assert first_child_config.source_scope == ("doc-1",)
     assert first_child_config.max_depth == 1
-    assert first_child_config.budget_total == 2400
+    assert first_child_config.llm_budget_total == 2400
     with pytest.raises(KeyError):
         RunRegistry.get(result.run_id)
 

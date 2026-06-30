@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import Any, Literal
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
@@ -11,7 +11,6 @@ from rag.agent.capabilities.catalog import (
     ToolCatalog,
     resolve_visible_tools,
 )
-from rag.agent.core.context import RunRegistry
 from rag.agent.core.definition import AgentRuntimePolicy, ModelSelectionPolicy
 from rag.agent.core.llm_context import (
     AgentLLMContextAssembler,
@@ -97,6 +96,7 @@ class LLMLoopModelTurnProvider:
         deferred_store: DeferredToolStore | None = None,
         stream_sink: Any = None,
         formatter_resolver: Any | None = None,
+        skill_context_provider: Callable[[LoopState], str] | None = None,
     ) -> None:
         self._kwargs = kwargs or {}
         self._gateway = gateway or _fallback_gateway(
@@ -115,7 +115,10 @@ class LLMLoopModelTurnProvider:
         self._tool_specs = tool_specs or []
         self._catalog = catalog
         self._deferred_store = deferred_store
-        self._assembler = AgentMessageAssembler()
+        self._skill_context_provider = skill_context_provider
+        self._assembler = AgentMessageAssembler(
+            skill_context_provider=skill_context_provider,
+        )
         self._formatter_resolver = formatter_resolver
         self._stream_sink = stream_sink
 
@@ -124,6 +127,7 @@ class LLMLoopModelTurnProvider:
         state: LoopState,
         *,
         definition: AgentRuntimePolicy,
+        budget_remaining: int,
     ) -> ModelTurnDraft:
         if self._tool_specs:
             return await self._next_turn_with_tools(
@@ -133,6 +137,7 @@ class LLMLoopModelTurnProvider:
         return await self._next_turn_legacy(
             state,
             definition=definition,
+            budget_remaining=budget_remaining,
         )
 
     async def _next_turn_with_tools(
@@ -269,17 +274,29 @@ class LLMLoopModelTurnProvider:
         state: LoopState,
         *,
         definition: AgentRuntimePolicy,
+        budget_remaining: int,
     ) -> ModelTurnDraft:
         """Legacy structured-output path (no native tool calling)."""
         assembler = self._context_assembler
         if assembler is None:
             raise RuntimeError("loop model context assembler is not configured")
+        if self._skill_context_provider is not None:
+            from dataclasses import replace
+
+            skill_context = self._skill_context_provider(state).strip()
+            if skill_context:
+                definition = replace(
+                    definition,
+                    system_instructions=(
+                        f"{definition.system_instructions}\n\n{skill_context}"
+                    ),
+                )
         assembled = assembler.assemble_loop_turn(
             definition=definition,
             state=state,
+            budget_remaining=budget_remaining,
             output_schema=LoopModelDecision,
         )
-        run_id = state["run_config"].run_id
         result = await self._gateway.agenerate_structured(
             stage=LLMCallStage.TOOL_DECISION,
             prompt=assembled.prompt,
@@ -439,6 +456,7 @@ def create_loop_model_turn_provider(
     deferred_store: DeferredToolStore | None = None,
     stream_sink: Any = None,
     formatter_resolver: Any | None = None,
+    skill_context_provider: Callable[[LoopState], str] | None = None,
 ) -> LLMLoopModelTurnProvider:
     resolved = registry.resolve_for_node(
         node_model=selection.tool_decision_model,
@@ -473,6 +491,7 @@ def create_loop_model_turn_provider(
         deferred_store=deferred_store,
         stream_sink=stream_sink,
         formatter_resolver=formatter_resolver,
+        skill_context_provider=skill_context_provider,
     )
 
 

@@ -283,7 +283,7 @@ uv run python scripts/evaluate_private_retrieval.py \
 ```bash
 unset RAG_RERANK_SERVICE_URL
 
-uv run rag agent run \
+uv run agent run \
   "单笔国内差旅报销金额超过 12000 元需要谁审批？请给出处" \
   --agent generic \
   --storage-root "$STORAGE_ROOT" \
@@ -297,7 +297,7 @@ uv run rag agent run \
 已入库资产问题：
 
 ```bash
-uv run rag agent run \
+uv run agent run \
   "日提货总量是多少？请检查相关表格并给出处" \
   --agent generic \
   --storage-root "$STORAGE_ROOT" \
@@ -311,7 +311,7 @@ uv run rag agent run \
 本地文件直接分析，不需要先入 RAG：
 
 ```bash
-uv run rag agent run \
+uv run agent run \
   "读取这个 Excel，汇总关键指标，并写一个简短摘要" \
   --agent generic \
   --input-file "/absolute/path/to/report.xlsx" \
@@ -331,7 +331,7 @@ uv run rag agent run \
 交互式：
 
 ```bash
-uv run rag agent chat \
+uv run agent chat \
   --agent generic \
   --storage-root "$STORAGE_ROOT" \
   --vector-backend milvus \
@@ -349,7 +349,7 @@ uv run rag agent chat \
 | 看 evidence / diagnostics | `rag query` 加 `--json` |
 | 普通制度问答 | `--retrieval-profile auto` |
 | Excel/PPT 表格/图片 OCR 资产问题 | `--retrieval-profile asset` |
-| Agent 直接读本地文件 | `rag agent run ... --input-file "/path/to/file.xlsx"` |
+| Agent 直接读本地文件 | `agent run ... --input-file "/path/to/file.xlsx"` |
 | 一次性指定模型 | `--model mimo_cloud` 或 `--model qwen3_8b_mlx_4bit` |
 | 恢复常驻 embedding | `export RAG_EMBEDDING_SERVICE_URL=http://127.0.0.1:9090` |
 

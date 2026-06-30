@@ -1145,6 +1145,36 @@ class LoopContextCompactor:
     ) -> None:
         self._store = store
 
+    @staticmethod
+    def _sync_memory_state_from_flat_channels(
+        state: LoopState,
+        state_dict: dict[str, Any],
+    ) -> None:
+        from rag.agent.core.checkpointing import _digest_text
+        from rag.agent.loop.substate import MemoryState, PersistentMemorySnapshot
+
+        memory_state = state["memory_state"]
+        state["memory_state"] = MemoryState(
+            working_summary=state_dict.get(
+                "working_summary",
+                memory_state.working_summary,
+            ),
+            extracted_facts=list(
+                state_dict.get("extracted_facts", memory_state.extracted_facts)
+            ),
+            context_budget=memory_state.context_budget,
+            memory_refs=list(state_dict.get("memory_refs", memory_state.memory_refs)),
+            memory_budget=state_dict.get("memory_budget", memory_state.memory_budget),
+            memory_warnings=list(
+                state_dict.get("memory_warnings", memory_state.memory_warnings)
+            ),
+            reactive_compact_used=bool(memory_state.reactive_compact_used),
+            persistent=PersistentMemorySnapshot(
+                index_digest=_digest_text(state.get("memory_index", "")),
+                selected_count=len(state.get("persistent_memories", [])),
+            ),
+        )
+
     def prepare(self, state: LoopState) -> LoopCompactionResult:
         from rag.agent.loop.state import (
             LoopTransition,
@@ -1187,25 +1217,14 @@ class LoopContextCompactor:
         self._apply_update(state_dict, memory_update)
 
         # Dual-write to structured memory_state for checkpoint/restore.
-        from rag.agent.core.checkpointing import _digest_text
-        from rag.agent.loop.substate import MemoryState, PersistentMemorySnapshot
-
-        state["memory_state"] = MemoryState(
-            working_summary=state["memory_state"].working_summary,
-            extracted_facts=list(state["memory_state"].extracted_facts),
-            context_budget=state["memory_state"].context_budget,
-            memory_refs=list(state["memory_state"].memory_refs),
-            memory_budget=state["memory_state"].memory_budget,
-            memory_warnings=list(state["memory_state"].memory_warnings),
-            reactive_compact_used=bool(state["memory_state"].reactive_compact_used),
-            persistent=PersistentMemorySnapshot(
-                index_digest=_digest_text(state.get("memory_index", "")),
-                selected_count=len(state.get("persistent_memories", [])),
-            ),
-        )
+        self._sync_memory_state_from_flat_channels(state, state_dict)
 
         changed = bool(changed_channels)
-        warnings = tuple(warning for warning in state["memory_state"].memory_warnings if warning not in initial_warnings)
+        warnings = tuple(
+            warning
+            for warning in state["memory_state"].memory_warnings
+            if warning not in initial_warnings
+        )
         channels = tuple(dict.fromkeys(changed_channels))
         if changed:
             replace_latest_transition(
@@ -1269,24 +1288,13 @@ class LoopContextCompactor:
             changed_channels.append("memory_warnings")
 
         # Dual-write to structured memory_state for checkpoint/restore.
-        from rag.agent.core.checkpointing import _digest_text
-        from rag.agent.loop.substate import MemoryState, PersistentMemorySnapshot
+        self._sync_memory_state_from_flat_channels(state, state_dict)
 
-        state["memory_state"] = MemoryState(
-            working_summary=state["memory_state"].working_summary,
-            extracted_facts=list(state["memory_state"].extracted_facts),
-            context_budget=state["memory_state"].context_budget,
-            memory_refs=list(state["memory_state"].memory_refs),
-            memory_budget=state["memory_state"].memory_budget,
-            memory_warnings=list(state["memory_state"].memory_warnings),
-            reactive_compact_used=bool(state["memory_state"].reactive_compact_used),
-            persistent=PersistentMemorySnapshot(
-                index_digest=_digest_text(state.get("memory_index", "")),
-                selected_count=len(state.get("persistent_memories", [])),
-            ),
+        warnings = tuple(
+            warning
+            for warning in state["memory_state"].memory_warnings
+            if warning not in initial_warnings
         )
-
-        warnings = tuple(warning for warning in state["memory_state"].memory_warnings if warning not in initial_warnings)
         return LoopCompactionResult(
             changed=bool(changed_channels),
             channels=tuple(dict.fromkeys(changed_channels)),

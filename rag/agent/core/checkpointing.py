@@ -20,8 +20,8 @@ from langgraph.checkpoint.serde.base import SerializerProtocol
 from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
-from rag.agent.core.goal_contract import GoalCompatibilityConfig
 from rag.agent.core.context import AgentRunConfig
+from rag.agent.core.goal_contract import GoalCompatibilityConfig
 from rag.agent.core.human_input import (
     HumanInputRequest,
     HumanInputRequestIdMismatchError,
@@ -121,6 +121,12 @@ AGENT_CHECKPOINT_MSGPACK_ALLOWLIST: tuple[tuple[str, ...], ...] = (
     ("rag.agent.primitive_ops", "CandidateHeaderRow"),
     ("rag.agent.primitive_ops", "StructuredProbeOutput"),
     ("rag.agent.primitive_ops", "StructuredTableProbe"),
+    ("rag.agent.skills.models", "LoadedSkill"),
+    ("rag.agent.skills.models", "LoadedSkillRef"),
+    ("rag.agent.skills.models", "SkillInvocation"),
+    ("rag.agent.skills.models", "SkillManifest"),
+    ("rag.agent.skills.models", "SkillSource"),
+    ("rag.agent.skills.models", "SkillState"),
     ("rag.agent.tools.spec", "ToolError"),
     ("rag.agent.tools.spec", "ToolResult"),
     ("rag.schema.query", "AnswerCitation"),
@@ -572,6 +578,26 @@ def _migrate_legacy_state(raw: dict[str, Any]) -> LoopState:
             warnings=list(state.get("stop_hook_warnings", [])),
         ),
     )
+
+    # ── SkillState ──
+    from rag.agent.skills.models import SkillState
+
+    raw_skill_state = state.get("skill_state")
+    if raw_skill_state is None:
+        state["skill_state"] = SkillState()
+    elif not isinstance(raw_skill_state, SkillState):
+        try:
+            state["skill_state"] = SkillState.model_validate(raw_skill_state)
+        except Exception:
+            state.setdefault("runtime_diagnostics", []).append(
+                RuntimeDiagnostic(
+                    code="invalid_skill_state_dropped",
+                    component="checkpoint_migration",
+                    message="Invalid skill_state was dropped during checkpoint migration.",
+                    severity="warning",
+                )
+            )
+            state["skill_state"] = SkillState()
 
     # ── PR3: migrate legacy pending_loop_tool_calls into pending_tool_calls ──
     if "pending_loop_tool_calls" in raw:

@@ -388,10 +388,9 @@ class TestLoopStateIntegration:
         return AgentRunConfig(
             run_id="test",
             thread_id="test",
-            budget_total=1000,
+            llm_budget_total=1000,
             max_depth=2,
             access_policy=AccessPolicy.default(),
-            work_budget_total=1000,
             agent_type="generic",
         )
 

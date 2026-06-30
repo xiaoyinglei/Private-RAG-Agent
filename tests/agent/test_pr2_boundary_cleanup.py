@@ -59,7 +59,7 @@ def _minimal_run_config(run_id: str = "pr2-t10") -> AgentRunConfig:
     return AgentRunConfig(
         run_id=run_id,
         thread_id=run_id,
-        budget_total=10_000,
+        llm_budget_total=10_000,
         max_depth=3,
         access_policy=AccessPolicy.default(),
     )

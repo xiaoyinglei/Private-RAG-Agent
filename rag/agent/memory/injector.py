@@ -140,7 +140,7 @@ class ContextBuilder:
         )
         add(
             "plan",
-            self._format_plan(state.get("agent_plan")),
+            self._format_plan(self._plan_from_state(state)),
             required=True,
         )
         ms = state.get("memory_state")
@@ -423,6 +423,15 @@ class ContextBuilder:
                 if isinstance(notes, str) and notes.strip():
                     lines.append(f"  notes: {self._one_line(notes)}")
         return "\n".join(lines)
+
+    @staticmethod
+    def _plan_from_state(state: LoopState) -> Any:
+        plan_state = state.get("plan_state")
+        if plan_state is not None:
+            plan = getattr(plan_state, "agent_plan", None)
+            if plan is not None:
+                return plan
+        return state.get("agent_plan")
 
     def _format_working_memory(self, working_summary: Any, facts: Sequence[Any]) -> str:
         if working_summary is None and not facts:

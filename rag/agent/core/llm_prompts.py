@@ -10,6 +10,7 @@ if TYPE_CHECKING:
 def build_loop_turn_prompt(
     state: LoopState,
     *,
+    budget_remaining: int | None = None,
     allowed_tools: Sequence[str] = (),
 ) -> str:
     """Build the model contract for the ordinary Python loop kernel.
@@ -25,11 +26,15 @@ def build_loop_turn_prompt(
     ok_count = sum(1 for result in tool_results if getattr(result, "status", None) == "ok")
     error_count = sum(1 for result in tool_results if getattr(result, "status", None) == "error")
     visible_names = list(allowed_tools)
+    budget_line = ""
+    if budget_remaining is not None:
+        budget_text = "unbounded" if budget_remaining < 0 else str(budget_remaining)
+        budget_line = f"\nBudget remaining: {budget_text}"
 
     return f"""Task: {task}
 Iteration: {iteration}
 Tools completed: {ok_count} ok, {error_count} failed
-Available tools: {", ".join(visible_names) if visible_names else "none"}
+Available tools: {", ".join(visible_names) if visible_names else "none"}{budget_line}
 
 Analyze the task and current context, then decide your next action.
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from pathlib import Path
 from typing import Annotated, Any, Literal, cast
 
@@ -27,6 +28,7 @@ from rag.storage.runtime_config import DEFAULT_VECTOR_BACKEND, runtime_storage_c
 from rag.utils.text import load_env_file
 
 agent_app = typer.Typer(add_completion=False, no_args_is_help=True)
+logger = logging.getLogger(__name__)
 
 CLI_AGENT_CHOICES = ("generic",)
 
@@ -153,7 +155,11 @@ def _build_agent_service(
 
         # Semantic asset tool — composite: list → inspect → read_slice
         async def _search_assets_runner(payload: Any) -> Any:
-            from rag.agent.tools.rag_semantic_tools import AssetSearchInput, AssetSearchOutput, AssetResult
+            from rag.agent.tools.rag_semantic_tools import (
+                AssetResult,
+                AssetSearchInput,
+                AssetSearchOutput,
+            )
 
             if isinstance(payload, dict):
                 inp = AssetSearchInput(**payload)
@@ -223,11 +229,37 @@ def _build_agent_service(
             ),
         )
 
+    # Build skill catalog from .agents/skills/ and SKILL_PATH
+    skill_catalog = None
+    try:
+        from pathlib import Path
+
+        from rag.agent.skills.catalog import SkillCatalog
+        from rag.agent.skills.loader import scan_and_load_skills
+
+        manifests = scan_and_load_skills(Path.cwd())
+        if manifests:
+            skill_catalog = SkillCatalog(manifests)
+    except Exception as exc:
+        logger.warning(
+            "Skill catalog loading failed; continuing without skills",
+            exc_info=True,
+        )
+        runtime_diagnostics = (
+            *runtime_diagnostics,
+            RuntimeDiagnostic.from_exception(
+                code="skill_catalog_load_failed",
+                component="skill_catalog",
+                error=exc,
+            ),
+        )
+
     service_factory = AgentServiceFactory(
         tool_registry=tool_registry,
         model_registry=model_registry,
         checkpointer=create_agent_checkpointer(checkpoint_db),
         runtime_diagnostics=runtime_diagnostics,
+        skill_catalog=skill_catalog,
     )
     subagent_runner = BuiltinSubAgentRunner(
         agent_registry=agent_registry,
@@ -391,6 +423,10 @@ def agent_chat(
         str | None,
         typer.Option("--model", help="主生成模型别名，对应 configs/models.yaml 中 capability=chat 的条目"),
     ] = None,
+    budget: Annotated[
+        int | None,
+        typer.Option("--budget", min=1, help="本次 Agent 运行的 LLM/工具预算上限"),
+    ] = None,
     embedding_model: Annotated[
         str | None,
         typer.Option(
@@ -486,7 +522,14 @@ def agent_chat(
                 continue
 
             result = asyncio.run(
-                service.run(AgentRunRequest(task=query, run_id=run_id, thread_id=run_id))
+                service.run(
+                    AgentRunRequest(
+                        task=query,
+                        run_id=run_id,
+                        thread_id=run_id,
+                        llm_budget_total=budget,
+                    )
+                )
             )
 
             while result.status == "paused":
@@ -532,6 +575,10 @@ def agent_run(
     checkpoint_db: Annotated[
         Path | None,
         typer.Option("--checkpoint-db", help="SQLite checkpoint 文件；启用后可跨进程 resume"),
+    ] = None,
+    budget: Annotated[
+        int | None,
+        typer.Option("--budget", min=1, help="本次 Agent 运行的 LLM/工具预算上限"),
     ] = None,
     model: Annotated[
         str | None,
@@ -623,6 +670,7 @@ def agent_run(
                     task=task,
                     run_id=effective_run_id,
                     thread_id=effective_run_id,
+                    llm_budget_total=budget,
                     input_files=input_files or [],
                 )
             )
@@ -638,7 +686,7 @@ def agent_run(
             else:
                 print("⏸  已保存 checkpoint，可跨进程恢复:")
                 resume_cmd = (
-                    f"   rag agent resume {effective_run_id} "
+                    f"   agent resume {effective_run_id} "
                     f"--agent {agent} "
                     f"--checkpoint-db {checkpoint_db}"
                 )

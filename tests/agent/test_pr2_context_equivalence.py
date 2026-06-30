@@ -101,7 +101,7 @@ def _build_golden_state() -> LoopState:
         run_config=AgentRunConfig(
             run_id="pr2-eqv",
             thread_id="pr2-eqv",
-            budget_total=10000,
+            llm_budget_total=10000,
             max_depth=3,
             access_policy=AccessPolicy.default(),
         ),

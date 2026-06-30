@@ -1,35 +1,27 @@
-"""B2b: End-to-end integration tests — code-as-tool full pipeline.
+"""End-to-end integration tests for code-as-tool batch execution.
 
 Covers:
-  - run_python(code=...) → executes, SDK writes batch file
-  - _process_tool_batch() → reads jsonl → PendingToolCall → error ToolResult
-  - tool_repl runner → adapts command → code → execute
+  - run_python(code=...) executes Python and writes a batch file through the SDK
+  - _process_tool_batch() reads jsonl and turns declarations into runtime feedback
+  - tool_repl runner adapts command input into executable code
 """
 
 from __future__ import annotations
 
 import json
-import os
 import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock
 
-import pytest
-
 from rag.agent.capabilities.catalog import (
-    CORE_TOOLS,
-    DEFERRED_TOOLS,
     DeferredToolStore,
     ToolCatalog,
 )
-from rag.agent.core.definition import AgentRuntimePolicy, AgentRuntimePolicy
-from rag.agent.core.tool_batch_reader import clean_batch_file, read_tool_batch
+from rag.agent.core.definition import AgentRuntimePolicy
 from rag.agent.loop.state import (
     LoopState,
-    PendingToolCall,
     create_loop_state,
 )
-from rag.agent.tools.spec import ToolResult
 
 
 def _minimal_state() -> LoopState:
@@ -39,7 +31,7 @@ def _minimal_state() -> LoopState:
     run_config = AgentRunConfig(
         run_id="test-run",
         thread_id="test-thread",
-        budget_total=10000,
+        llm_budget_total=10000,
         max_depth=3,
         access_policy=AccessPolicy.default(),
     )
@@ -52,18 +44,14 @@ def _minimal_state() -> LoopState:
 
 def _minimal_policy() -> AgentRuntimePolicy:
     return AgentRuntimePolicy.test_factory(
-        system_instructions="You are a test agent",
-        core_tool_names=(
+        system_prompt="You are a test agent",
+        allowed_tools=[
             "read_file", "write_file", "run_python", "list_files",
             "search_text", "apply_patch", "run_command",
             "update_plan", "tool_repl", "task",
             "tool_search", "activate_tools",
-        ),
-        deferred_tool_names=(
             "search_knowledge", "search_assets",
-        ),
-        token_budget=10000,
-        work_budget=100,
+        ],
         max_iterations=5,
         max_depth=3,
     )

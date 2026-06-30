@@ -120,5 +120,3 @@ class AgentRuntimePolicy:
             output_validation_max_retries=output_validation_max_retries,
             max_stop_hook_blocks=max_stop_hook_blocks,
         )
-
-

@@ -26,7 +26,7 @@ class HumanInputRequest(BaseModel):
     持久化在 canonical loop checkpoint 中。
     """
 
-    request_id: str  # 唯一 ID，如 "hir_a1b2c3d4"
+    request_id: str  # 唯一 ID，如 "hir_1234abcd"
     kind: Literal[
         "tool_approval",
         "tool_reconciliation",

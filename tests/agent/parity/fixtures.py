@@ -8,9 +8,9 @@ from pydantic import BaseModel
 from rag.agent.core.context import AgentRunConfig, RunRegistry
 from rag.agent.core.definition import AgentRuntimePolicy, ModelSelectionPolicy, ToolPolicy
 from rag.agent.core.delegation import ParentAgentContext
+from rag.agent.core.turn_contracts import ToolCallPlan
 from rag.agent.loop.state import LoopState, create_loop_state
 from rag.agent.memory.models import MemoryPolicy
-from rag.agent.core.turn_contracts import ToolCallPlan
 from rag.agent.tools.spec import ToolError, ToolPermissions, ToolResult, ToolSpec
 from rag.schema.query import AnswerCitation, EvidenceItem
 from rag.schema.runtime import AccessPolicy
@@ -73,8 +73,8 @@ class _CapturingDelegatedRunner:
         self.seen.append(
             {
                 "agent_type": request.agent_type,
-                "estimated_tokens": request.estimated_tokens,
-                "parent_budget_total": run_config.budget_total,
+                "llm_budget_total": request.llm_budget_total,
+                "parent_llm_budget_total": run_config.llm_budget_total,
                 "parent_max_depth": run_config.max_depth,
                 "source_scope": list(run_config.source_scope),
             }
@@ -120,8 +120,7 @@ def _config(
     return AgentRunConfig(
         run_id=run_id,
         thread_id=run_id,
-        budget_total=20_000,
-        work_budget_total=20_000,
+        llm_budget_total=20_000,
         max_depth=max_depth,
         source_scope=source_scope,
         access_policy=AccessPolicy.default(),

@@ -30,6 +30,11 @@ class BuiltinSubAgentRunner:
     ) -> AgentRunResult:
         child_definition = self._agent_registry.get(request.agent_type)
         child_config = derive_child_config(parent_state["run_config"], child_definition)
+        if request.llm_budget_total is not None:
+            child_config = replace(
+                child_config,
+                llm_budget_total=request.llm_budget_total,
+            )
         if request.max_turns is not None:
             child_config = replace(child_config, max_turns=request.max_turns)
 

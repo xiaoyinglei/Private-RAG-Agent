@@ -320,8 +320,8 @@
         "delegations": [
           {
             "agent_type": "research",
-            "estimated_tokens": 10000,
-            "parent_budget_total": 20000,
+            "llm_budget_total": 10000,
+            "parent_llm_budget_total": 20000,
             "parent_max_depth": 2,
             "source_scope": [
               "doc-parent"

@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 from pydantic import BaseModel
 
-from rag.agent.core.context import BudgetLedger
+from rag.agent.core.context import LLMBudgetLedger
 from rag.assembly.support import _OpenAICompatibleChatGenerator
 from rag.providers.llm_gateway import LLMContextOverflowError, LLMGateway, StreamChunk
 from rag.schema.llm import (
@@ -28,7 +29,7 @@ class _UsageAwareGenerator:
         *,
         output: str = "final answer",
         usage: LLMUsage | None = None,
-        error: Exception | None = None,
+        error: BaseException | None = None,
     ) -> None:
         self.output = output
         self.usage = usage
@@ -117,7 +118,7 @@ async def test_gateway_reserves_worst_case_and_commits_provider_usage() -> None:
     generator = _UsageAwareGenerator(
         usage=LLMUsage(input_tokens=3, output_tokens=2, source="provider")
     )
-    ledger = BudgetLedger(total=20)
+    ledger = LLMBudgetLedger(total=20)
 
     result = await _gateway(generator).agenerate_text(
         stage=LLMCallStage.TOOL_DECISION,
@@ -137,7 +138,7 @@ async def test_gateway_reserves_worst_case_and_commits_provider_usage() -> None:
 @pytest.mark.anyio
 async def test_gateway_estimates_usage_when_provider_does_not_report_it() -> None:
     generator = _UsageAwareGenerator(usage=None, output="four five")
-    ledger = BudgetLedger(total=20)
+    ledger = LLMBudgetLedger(total=20)
 
     result = await _gateway(generator).agenerate_text(
         stage=LLMCallStage.TOOL_DECISION,
@@ -157,7 +158,7 @@ async def test_gateway_estimates_usage_when_provider_does_not_report_it() -> Non
 @pytest.mark.anyio
 async def test_gateway_refunds_reservation_when_provider_fails() -> None:
     generator = _UsageAwareGenerator(error=RuntimeError("provider unavailable"))
-    ledger = BudgetLedger(total=20)
+    ledger = LLMBudgetLedger(total=20)
 
     with pytest.raises(RuntimeError, match="provider unavailable"):
         await _gateway(generator).agenerate_text(
@@ -173,9 +174,27 @@ async def test_gateway_refunds_reservation_when_provider_fails() -> None:
 
 
 @pytest.mark.anyio
+async def test_gateway_refunds_reservation_when_provider_call_is_cancelled() -> None:
+    generator = _UsageAwareGenerator(error=asyncio.CancelledError())
+    ledger = LLMBudgetLedger(total=20)
+
+    with pytest.raises(asyncio.CancelledError):
+        await _gateway(generator).agenerate_text(
+            stage=LLMCallStage.TOOL_DECISION,
+            prompt="one two three",
+            ledger=ledger,
+            lease_id="decision:cancelled",
+        )
+
+    assert await ledger.committed() == 0
+    assert await ledger.reserved() == 0
+    assert await ledger.remaining() == 20
+
+
+@pytest.mark.anyio
 async def test_gateway_rejects_prompt_above_stage_input_budget() -> None:
     generator = _UsageAwareGenerator()
-    ledger = BudgetLedger(total=100)
+    ledger = LLMBudgetLedger(total=100)
 
     with pytest.raises(LLMContextOverflowError) as exc_info:
         await _gateway(generator, max_input_tokens=3).agenerate_text(
@@ -204,7 +223,7 @@ async def test_gateway_respects_model_window_after_output_and_safety_reserve() -
         ).agenerate_text(
             stage=LLMCallStage.TOOL_DECISION,
             prompt="one two three four five",
-            ledger=BudgetLedger(total=100),
+            ledger=LLMBudgetLedger(total=100),
             lease_id="decision:5",
         )
 
@@ -229,7 +248,7 @@ def test_gateway_exposes_effective_stage_budget_for_context_assembly() -> None:
 @pytest.mark.anyio
 async def test_gateway_accounts_for_structured_generation_as_one_call() -> None:
     generator = _StructuredUsageAwareGenerator()
-    ledger = BudgetLedger(total=30)
+    ledger = LLMBudgetLedger(total=30)
 
     result = await _gateway(
         generator,
@@ -253,7 +272,7 @@ async def test_gateway_accounts_for_structured_generation_as_one_call() -> None:
 
 @pytest.mark.anyio
 async def test_streaming_gateway_commits_tokenizer_estimate_usage() -> None:
-    ledger = BudgetLedger(total=20)
+    ledger = LLMBudgetLedger(total=20)
 
     chunks = [
         chunk
@@ -270,6 +289,27 @@ async def test_streaming_gateway_commits_tokenizer_estimate_usage() -> None:
     assert chunks[0].content == "one two"
     assert await ledger.committed() == 5
     assert await ledger.reserved() == 0
+
+
+@pytest.mark.anyio
+async def test_streaming_gateway_refunds_when_consumer_closes_early() -> None:
+    ledger = LLMBudgetLedger(total=20)
+    stream = _gateway(_StreamingGenerator()).astream_with_tools(
+        stage=LLMCallStage.TOOL_DECISION,
+        messages=[{"role": "user", "content": "hello prompt"}],
+        tools=[],
+        ledger=ledger,
+        lease_id="decision:stream-close",
+    )
+
+    chunk = await stream.__anext__()
+    assert chunk.type == "text_delta"
+
+    await stream.aclose()
+
+    assert await ledger.committed() == 0
+    assert await ledger.reserved() == 0
+    assert await ledger.remaining() == 20
 
 
 def test_openai_compatible_generator_preserves_response_usage() -> None:

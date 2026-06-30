@@ -553,17 +553,6 @@ class RAGRuntime:
         self.process_pending_storage_lifecycle(max_tasks=1)
         return self.query_pipeline.run_public(query_text, options=self._normalize_query_options(options))
 
-    def analyze_task(
-        self,
-        task: str | object,
-        /,
-        **kwargs: Any,
-    ) -> object:
-        del task, kwargs
-        raise NotImplementedError(
-            "RAGRuntime.analyze_task is not wired to the new LangGraph agent runtime in Phase 1-3"
-        )
-
     def delete(
         self,
         *,

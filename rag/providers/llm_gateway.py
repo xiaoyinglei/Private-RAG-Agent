@@ -188,6 +188,10 @@ class LLMGateway:
                 prompt,
                 call_kwargs,
             )
+        except asyncio.CancelledError:
+            if effective_ledger is not None:
+                await effective_ledger.refund(effective_lease_id)
+            raise
         except Exception:
             if effective_ledger is not None:
                 await effective_ledger.refund(effective_lease_id)
@@ -239,6 +243,10 @@ class LLMGateway:
                 schema,
                 call_kwargs,
             )
+        except asyncio.CancelledError:
+            if effective_ledger is not None:
+                await effective_ledger.refund(effective_lease_id)
+            raise
         except Exception:
             if effective_ledger is not None:
                 await effective_ledger.refund(effective_lease_id)
@@ -299,6 +307,10 @@ class LLMGateway:
                 tools,
                 call_kwargs,
             )
+        except asyncio.CancelledError:
+            if effective_ledger is not None:
+                await effective_ledger.refund(effective_lease_id)
+            raise
         except Exception:
             if effective_ledger is not None:
                 await effective_ledger.refund(effective_lease_id)
@@ -390,6 +402,14 @@ class LLMGateway:
                         chunk.content
                     )
                 yield chunk
+        except asyncio.CancelledError:
+            if effective_ledger is not None:
+                await effective_ledger.refund(effective_lease_id)
+            raise
+        except GeneratorExit:
+            if effective_ledger is not None:
+                await effective_ledger.refund(effective_lease_id)
+            raise
         finally:
             # 确保 producer 线程完成
             await producer_task

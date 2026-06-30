@@ -46,14 +46,14 @@ class RuntimeDiagnostic(BaseModel):
         )
 
 
-# ── B2c: Tool call metrics ──
+# Tool call metrics.
 
 
 class ToolCallMetrics(BaseModel):
     """Lightweight counters for the three calling modes.
 
-    Populated by AgentLoop during tool execution and attached to
-    LoopState.runtime_diagnostics.  Not persisted — rebuilt each run.
+    Populated by AgentLoop during tool execution and attached to the loop
+    state. A compact RuntimeDiagnostic summary is emitted for inline display.
     """
 
     model_config = ConfigDict(frozen=True)

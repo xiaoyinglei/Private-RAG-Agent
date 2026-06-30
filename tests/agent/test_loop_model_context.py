@@ -20,6 +20,7 @@ from rag.agent.core.observations import (
     EvidenceRef,
     StructuredObservation,
 )
+from rag.agent.core.turn_contracts import ToolCallPlan
 from rag.agent.loop.state import (
     ModelTurnDraft,
     StopHookFeedback,
@@ -35,7 +36,6 @@ from rag.agent.memory.models import (
     StateChannelReplacement,
 )
 from rag.agent.planning import PlanStep, PlanTracker, PlanUpdate
-from rag.agent.core.turn_contracts import ToolCallPlan
 from rag.agent.tools.spec import ToolResult
 from rag.assembly.tokenizer import TokenAccountingService, TokenizerContract
 from rag.schema.llm import LLMCallStage, LLMStageBudget
@@ -100,7 +100,7 @@ def _run_config() -> AgentRunConfig:
     return AgentRunConfig(
         run_id="loop-context",
         thread_id="loop-context",
-        budget_total=10_000,
+        llm_budget_total=10_000,
         max_depth=2,
         access_policy=AccessPolicy.default(),
     )
@@ -375,7 +375,7 @@ def test_loop_context_compaction_is_observable_before_model_turn() -> None:
         run_config=AgentRunConfig(
             run_id="loop-compaction",
             thread_id="loop-compaction",
-            budget_total=10_000,
+            llm_budget_total=10_000,
             max_depth=2,
             access_policy=AccessPolicy.default(),
             memory_policy=MemoryPolicy(
@@ -405,7 +405,7 @@ def test_loop_context_snips_messages_without_splitting_tool_pairs() -> None:
         run_config=AgentRunConfig(
             run_id="loop-snip-compaction",
             thread_id="loop-snip-compaction",
-            budget_total=10_000,
+            llm_budget_total=10_000,
             max_depth=2,
             access_policy=AccessPolicy.default(),
             memory_policy=MemoryPolicy(
@@ -463,7 +463,7 @@ def test_loop_context_micro_compacts_old_small_tool_results() -> None:
         run_config=AgentRunConfig(
             run_id="loop-micro-compaction",
             thread_id="loop-micro-compaction",
-            budget_total=10_000,
+            llm_budget_total=10_000,
             max_depth=2,
             access_policy=AccessPolicy.default(),
             memory_policy=MemoryPolicy(
