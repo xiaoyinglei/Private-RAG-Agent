@@ -400,6 +400,7 @@ def _build_agent_service(
         checkpointer=create_agent_checkpointer(checkpoint_db),
         runtime_diagnostics=diagnostics,
         skill_catalog=skill_catalog,
+        strict_model_provider=model_alias is not None,
     )
     subagent_runner = BuiltinSubAgentRunner(
         agent_registry=agent_registry,

@@ -376,6 +376,7 @@ class AgentService:
         stream_sink: Any = None,  # StreamEventSink | None
         mcp_registry: MCPToolRegistry | None = None,
         skill_catalog: Any = None,  # SkillCatalog | None
+        strict_model_provider: bool = False,
     ) -> None:
         if definition is not None and policy is not None:
             raise ValueError("Provide either 'definition' or 'policy', not both")
@@ -399,6 +400,7 @@ class AgentService:
         self._subagent_runner = subagent_runner
         self._output_finalizer = output_finalizer
         self._model_registry = model_registry
+        self._strict_model_provider = strict_model_provider
         self._runtime_diagnostics = tuple(merge_runtime_diagnostics([], runtime_diagnostics))
         self._checkpointer = checkpointer or create_agent_checkpointer(None)
         self._stream_sink = stream_sink
@@ -552,16 +554,16 @@ class AgentService:
             run_config=run_config,
             compatibility_config=GoalCompatibilityConfig(goal_spec=goal_spec),
         )
-        loop = self._build_loop(
-            runtime_registry=ctx.runtime_registry,
-            checkpoint_store=checkpoint_store,
-            memory_store=ctx.memory_store,
-            goal_spec=goal_spec,
-            state=state,
-            auto_activate_tools=ctx.file_tools_to_activate,
-            scratch_dir=ctx.workspace.root / "scratch",
-        )
         try:
+            loop = self._build_loop(
+                runtime_registry=ctx.runtime_registry,
+                checkpoint_store=checkpoint_store,
+                memory_store=ctx.memory_store,
+                goal_spec=goal_spec,
+                state=state,
+                auto_activate_tools=ctx.file_tools_to_activate,
+                scratch_dir=ctx.workspace.root / "scratch",
+            )
             result_state = await loop.run(state)
         except Exception:
             RunRegistry.remove(run_config.run_id)
@@ -764,6 +766,8 @@ class AgentService:
                     ),
                 )
             except Exception as exc:
+                if self._strict_model_provider:
+                    raise
                 if state is not None:
                     append_loop_diagnostic(
                         state,

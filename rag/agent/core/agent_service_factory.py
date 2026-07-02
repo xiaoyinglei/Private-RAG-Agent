@@ -29,6 +29,7 @@ class AgentServiceFactory:
         checkpointer: BaseCheckpointSaver[str] | None = None,
         runtime_diagnostics: Sequence[RuntimeDiagnostic] = (),
         skill_catalog: SkillCatalog | None = None,
+        strict_model_provider: bool = False,
     ) -> None:
         self._tool_registry = tool_registry
         self._model_turn_provider = model_turn_provider
@@ -38,6 +39,7 @@ class AgentServiceFactory:
         self._runtime_diagnostics = tuple(runtime_diagnostics)
         self._subagent_runner: DelegatedAgentRunner | None = None
         self._skill_catalog = skill_catalog
+        self._strict_model_provider = strict_model_provider
 
     def bind_subagent_runner(self, runner: DelegatedAgentRunner) -> None:
         self._subagent_runner = runner
@@ -53,4 +55,5 @@ class AgentServiceFactory:
             checkpointer=self._checkpointer,
             runtime_diagnostics=self._runtime_diagnostics,
             skill_catalog=self._skill_catalog,
+            strict_model_provider=self._strict_model_provider,
         )

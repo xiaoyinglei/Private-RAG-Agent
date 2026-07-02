@@ -45,7 +45,7 @@ lsof -nP -iTCP:6379 -sTCP:LISTEN
 
 | 能力 | 默认别名 | 实际模型 / 服务 |
 | --- | --- | --- |
-| 生成 / 摘要 / Agent tool decision | `qwen3_14b_4bit` | `models--mlx-community--Qwen3-14B-4bit`，OpenAI-compatible，`127.0.0.1:8080` |
+| 生成 / 摘要 / Agent tool decision | `qwen3_14b_4bit` | `mlx-community/Qwen3-14B-4bit`，OpenAI-compatible，`127.0.0.1:8080` |
 | Embedding | `qwen3_embedding_4b_4bit_dwq` | `mlx-community/Qwen3-Embedding-4B-4bit-DWQ`，HTTP service，`127.0.0.1:9090` |
 | Rerank | `bge_reranker_v2_m3` | `BAAI/bge-reranker-v2-m3`，HTTP service，`127.0.0.1:9092` |
 
@@ -120,7 +120,7 @@ screen -S rag_qwen_8080 -X quit >/dev/null 2>&1 || true
 screen -dmS rag_qwen_8080 zsh -lc '
 cd "/Users/leixiaoying/LLM/RAG学习"
 uv run python -m mlx_lm.server \
-  --model models--mlx-community--Qwen3-14B-4bit \
+  --model mlx-community/Qwen3-14B-4bit \
   --host 127.0.0.1 \
   --port 8080 \
   --chat-template-args '"'"'{"enable_thinking": false}'"'"'

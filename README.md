@@ -446,7 +446,7 @@ uv run agent model switch mimo_cloud
 当前默认：
 
 - `defaults.primary_model`：`qwen3_14b_4bit`
-- `qwen3_14b_4bit.model`：`models--mlx-community--Qwen3-14B-4bit`，OpenAI-compatible，`127.0.0.1:8080`，按 `runtime.launch_command` 自动启动
+- `qwen3_14b_4bit.model`：`mlx-community/Qwen3-14B-4bit`，OpenAI-compatible，`127.0.0.1:8080`，按 `runtime.launch_command` 自动启动
 - Embedding：`mlx-community/Qwen3-Embedding-4B-4bit-DWQ`
 - Rerank：`BAAI/bge-reranker-v2-m3`
 

@@ -336,6 +336,18 @@ def test_local_runtime_manager_rejects_endpoint_conflict() -> None:
         )
 
 
+def test_bundled_qwen14_runtime_accepts_mlx_canonical_model_id() -> None:
+    spec = ModelCatalog.from_config_file(Path("configs/models.yaml")).get("qwen3_14b_4bit")
+    assert spec.runtime is not None
+
+    manager = LocalRuntimeManager(
+        request_json=lambda *_: {"data": [{"id": "mlx-community/Qwen3-14B-4bit"}]},
+        launch_process=lambda command: pytest.fail(f"unexpected launch: {command}"),
+    )
+
+    manager.ensure_ready(spec)
+
+
 def _counter():
     value = -1.0
 

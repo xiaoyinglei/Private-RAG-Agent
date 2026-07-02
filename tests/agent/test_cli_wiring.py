@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import pytest
 
@@ -26,6 +26,7 @@ from rag.agent.loop.state import LoopState as AgentState
 from rag.agent.service import AgentRunRequest, AgentRunResult
 from rag.agent.tools.llm_tools import LLMCompareInput, LLMGenerateInput
 from rag.agent.tools.registry import ToolExecutionContext
+from rag.models.config import GenerationConfig
 from rag.schema.runtime import AccessPolicy, RuntimeMode
 
 
@@ -67,6 +68,22 @@ class _RuntimeWithAssetStores(_Runtime):
                 "object_store": object(),
             },
         )()
+
+
+class _FailingModelRegistry:
+    default_model = "qwen3_14b_4bit"
+    fallback_model = None
+    generation_config = GenerationConfig()
+
+    def resolve(self, alias: str) -> object:
+        raise RuntimeError(f"endpoint conflict for {alias!r}")
+
+    def resolve_or_fallback(self, alias: str) -> object:
+        return self.resolve(alias)
+
+    def resolve_for_node(self, *, node_model: str | None, node_name: str) -> object:
+        del node_name
+        return self.resolve(node_model or self.default_model)
 
 
 class _RetrievalService:
@@ -337,6 +354,28 @@ def test_build_agent_service_records_automatic_model_registry_failure(
     )
 
     assert state["runtime_diagnostics"][0].code == "model_registry_initialization_failed"
+
+
+@pytest.mark.anyio
+async def test_explicit_model_provider_failure_is_not_degraded() -> None:
+    service = _build_agent_service(
+        None,
+        agent_type="generic",
+        model_alias="qwen3_14b_4bit",
+        model_control_plane=cast(Any, _FailingModelRegistry()),
+    )
+
+    try:
+        with pytest.raises(RuntimeError, match="endpoint conflict for 'qwen3_14b_4bit'"):
+            await service.run(
+                AgentRunRequest(
+                    task="Explain policy",
+                    run_id="cli-explicit-model-provider-failure",
+                    thread_id="cli-explicit-model-provider-failure",
+                )
+            )
+    finally:
+        RunRegistry.remove("cli-explicit-model-provider-failure")
 
 
 def test_build_agent_service_records_skill_catalog_load_failure(
