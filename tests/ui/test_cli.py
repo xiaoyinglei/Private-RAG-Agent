@@ -215,7 +215,7 @@ def test_assembly_profile_cli_surface_is_removed() -> None:
         assert "--embedding-model" not in output
         assert "--reranker-model" not in output
         assert "--vector-backend" not in output
-    assert "--budget" in agent_run_output
+    assert "--budget" not in agent_run_output
     assert "--budget" in agent_chat_output
     assert "--budget" not in agent_resume_output
 

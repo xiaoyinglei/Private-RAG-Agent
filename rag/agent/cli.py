@@ -11,6 +11,7 @@ from typing import Annotated, Any, Literal, cast
 
 import typer
 
+from agent_runtime import Agent, AgentResult
 from rag.agent.builtin import create_builtin_agent_registry
 from rag.agent.builtin_registry import create_builtin_tool_registry
 from rag.agent.core.agent_service_factory import AgentServiceFactory
@@ -188,6 +189,8 @@ def _build_agent_service(
     agent_type: str = "generic",
     model_alias: str | None = None,
     runtime_diagnostics: Sequence[RuntimeDiagnostic] = (),
+    knowledge_runner: ContextualToolRunner | None = None,
+    knowledge_asset_runner: ContextualToolRunner | None = None,
 ) -> AgentService:
     """Build the product Agent service.
 
@@ -236,6 +239,8 @@ def _build_agent_service(
         metadata_repo = getattr(stores, "metadata_repo", None)
         object_store = getattr(stores, "object_store", None)
         if metadata_repo is not None and object_store is not None:
+            from rag.agent.tools.asset_tools import AssetInspectInput, AssetListInput
+
             asset_runner = AssetToolRunner(
                 metadata_repo=metadata_repo,
                 object_store=object_store,
@@ -257,7 +262,11 @@ def _build_agent_service(
                 else:
                     inp = payload
                 list_out = asset_runner.list_assets(
-                    type("_In", (), {"doc_id": inp.doc_id, "asset_type": inp.asset_type})()
+                    AssetListInput(
+                        doc_id=inp.doc_id,
+                        asset_type=inp.asset_type,
+                        limit=inp.max_results,
+                    )
                 )
                 results: list[AssetResult] = []
                 for a in list_out.assets[:inp.max_results]:
@@ -270,7 +279,7 @@ def _build_agent_service(
                     if inp.include_preview and a.asset_id:
                         try:
                             insp = asset_runner.inspect_asset(
-                                type("_In2", (), {"asset_id": a.asset_id, "head_rows": 3})()
+                                AssetInspectInput(asset_id=a.asset_id, head_rows=3)
                             )
                             if insp.head_rows:
                                 ar.preview_rows = insp.head_rows[:3]
@@ -298,6 +307,11 @@ def _build_agent_service(
                 ),
             )
         )
+
+    if knowledge_runner is not None:
+        contextual_runners["search_knowledge"] = knowledge_runner
+    if knowledge_asset_runner is not None:
+        contextual_runners["search_assets"] = knowledge_asset_runner
 
     unavailable_rag_tools = {
         name for name in _SEMANTIC_RAG_TOOLS
@@ -500,6 +514,39 @@ def _display_result(result: AgentRunResult, *, verbose: bool) -> None:
 
     if result.stop_reason and verbose:
         print(f"停止原因: {result.stop_reason}")
+
+
+def _display_agent_result(result: AgentResult, *, verbose: bool) -> None:
+    if isinstance(result.raw, AgentRunResult):
+        _display_result(result.raw, verbose=verbose)
+        return
+
+    if result.diagnostics:
+        degraded = sum(1 for diagnostic in result.diagnostics if getattr(diagnostic, "degraded", False))
+        if degraded:
+            print(f"\n警告: Agent 以降级模式运行（{degraded} 项诊断）")
+        if verbose:
+            for diagnostic in result.diagnostics:
+                component = getattr(diagnostic, "component", "diagnostic")
+                code = getattr(diagnostic, "code", "unknown")
+                message = getattr(diagnostic, "message", "")
+                print(f"  [{component}] {code}: {message}")
+
+    if result.answer:
+        print(f"\n{result.answer}")
+
+    if verbose and result.tool_calls:
+        print(_format_public_tool_summary(result.tool_calls))
+
+    if verbose:
+        print(f"状态: {result.status}")
+
+
+def _format_public_tool_summary(tool_calls: Sequence[str]) -> str:
+    lines = ["", "─" * 40, "工具执行:"]
+    for tool_name in tool_calls:
+        lines.append(f"  ✓ {tool_name}")
+    return "\n".join(lines)
 
 
 def _handle_pause(result: AgentRunResult, run_id: str) -> HumanInputResponse | None:
@@ -729,11 +776,11 @@ def agent_run(
     ] = None,
     budget: Annotated[
         int | None,
-        typer.Option("--budget", min=1, help="本次 Agent 运行的 LLM/工具预算上限"),
+        typer.Option("--max-tokens-total", "--budget", min=1, help="本次 Agent 运行的 LLM/工具预算上限", hidden=True),
     ] = None,
     model: Annotated[
         str | None,
-        typer.Option("--model", help="主生成模型别名，对应 configs/models.yaml 中 capability=chat 的条目"),
+        typer.Option("--model", "-m", help="主生成模型别名，对应 configs/models.yaml 中 capability=chat 的条目"),
     ] = None,
     embedding_model: Annotated[
         str | None,
@@ -767,71 +814,63 @@ def agent_run(
         str | None,
         typer.Option("--vector-collection-prefix", help="Milvus collection prefix used at ingest time.", hidden=True),
     ] = None,
+    knowledge: Annotated[
+        list[str] | None,
+        typer.Option("--knowledge", help="启用显式知识库，可多次指定"),
+    ] = None,
     input_files: Annotated[
         list[str] | None,
-        typer.Option("--input-file", help="导入 workspace 的输入文件，可多次指定"),
+        typer.Option("--file", "-f", "--input-file", help="导入 workspace 的输入文件，可多次指定"),
     ] = None,
 ) -> None:
     """单次 Agent 运行。传入 --checkpoint-db 后支持跨进程恢复。"""
-    load_env_file()
-    runtime, diagnostics = _build_optional_rag_runtime(
-        storage_root=storage_root,
-        model_alias=model,
-        embedding_model_alias=embedding_model,
-        reranker_model_alias=reranker_model,
+    facade = Agent(
+        model=model,
+        agent_type=agent,
+        checkpoint_db=checkpoint_db,
+        knowledge=tuple(knowledge or ()),
+        rag_storage_root=storage_root,
+        embedding_model=embedding_model,
+        reranker_model=reranker_model,
         vector_backend=vector_backend,
         vector_dsn=vector_dsn,
         vector_namespace=vector_namespace,
         vector_collection_prefix=vector_collection_prefix,
     )
+    effective_run_id = run_id or f"run_{id(facade):x}"
+    result = facade.run(
+        task,
+        files=input_files or [],
+        run_id=effective_run_id,
+        max_tokens_total=budget,
+    )
+    _display_agent_result(result, verbose=verbose)
 
-    with runtime if runtime is not None else nullcontext():
-        service = _build_agent_service(
-            runtime,
-            checkpoint_db=checkpoint_db,
-            agent_type=agent,
-            model_alias=model,
-            runtime_diagnostics=diagnostics,
-        )
-        effective_run_id = run_id or f"run_{id(service):x}"
-        result = asyncio.run(
-            service.run(
-                AgentRunRequest(
-                    task=task,
-                    run_id=effective_run_id,
-                    thread_id=effective_run_id,
-                    llm_budget_total=budget,
-                    input_files=input_files or [],
-                )
+    raw_result = result.raw if isinstance(result.raw, AgentRunResult) else None
+    if result.status == "paused":
+        print()
+        if checkpoint_db is None:
+            print("⚠  当前命令使用 MemorySaver，进程结束后暂停状态无法恢复。")
+            print("   请使用 --checkpoint-db 启用 SQLite checkpoint 后重试。")
+        else:
+            print("⏸  已保存 checkpoint，可跨进程恢复:")
+            resume_cmd = (
+                f"   agent resume {effective_run_id} "
+                f"--agent {agent} "
+                f"--checkpoint-db {checkpoint_db}"
             )
-        )
+            if raw_result is not None and raw_result.workspace_path:
+                resume_cmd += f" --workspace-path {raw_result.workspace_path}"
+            print(resume_cmd)
 
-        _display_result(result, verbose=verbose)
+        if raw_result is not None and raw_result.needs_user_input:
+            print(f"\n   待处理: {raw_result.needs_user_input}")
 
-        if result.status == "paused":
-            print()
-            if checkpoint_db is None:
-                print("⚠  当前命令使用 MemorySaver，进程结束后暂停状态无法恢复。")
-                print("   请使用 --checkpoint-db 启用 SQLite checkpoint 后重试。")
-            else:
-                print("⏸  已保存 checkpoint，可跨进程恢复:")
-                resume_cmd = (
-                    f"   agent resume {effective_run_id} "
-                    f"--agent {agent} "
-                    f"--checkpoint-db {checkpoint_db}"
-                )
-                if result.workspace_path:
-                    resume_cmd += f" --workspace-path {result.workspace_path}"
-                print(resume_cmd)
+        if non_interactive:
+            raise typer.Exit(code=2)
 
-            if result.needs_user_input:
-                print(f"\n   待处理: {result.needs_user_input}")
-
-            if non_interactive:
-                raise typer.Exit(code=2)
-
-        if result.status == "failed":
-            raise typer.Exit(code=1)
+    if result.status == "failed":
+        raise typer.Exit(code=1)
 
 
 @agent_app.command(name="resume")

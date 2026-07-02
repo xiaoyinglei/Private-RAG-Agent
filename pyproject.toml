@@ -56,7 +56,7 @@ agent = "rag.agent.cli:agent_app"
 rag = "rag.cli:app"
 
 [tool.hatch.build.targets.wheel]
-packages = ["rag"]
+packages = ["agent_runtime", "rag"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -74,7 +74,7 @@ python_version = "3.12"
 mypy_path = ["."]
 strict = true
 warn_unused_configs = true
-packages = ["rag"]
+packages = ["agent_runtime", "rag"]
 
 [[tool.mypy.overrides]]
 module = [

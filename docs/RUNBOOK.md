@@ -45,7 +45,7 @@ lsof -nP -iTCP:6379 -sTCP:LISTEN
 
 | 能力 | 默认别名 | 实际模型 / 服务 |
 | --- | --- | --- |
-| 生成 / 摘要 / Agent tool decision | `qwen3_8b_mlx_4bit` | `Qwen/Qwen3-8B-MLX-4bit`，OpenAI-compatible，`127.0.0.1:8080` |
+| 生成 / 摘要 / Agent tool decision | `qwen3_14b_4bit` | `models--mlx-community--Qwen3-14B-4bit`，OpenAI-compatible，`127.0.0.1:8080` |
 | Embedding | `qwen3_embedding_4b_4bit_dwq` | `mlx-community/Qwen3-Embedding-4B-4bit-DWQ`，HTTP service，`127.0.0.1:9090` |
 | Rerank | `bge_reranker_v2_m3` | `BAAI/bge-reranker-v2-m3`，HTTP service，`127.0.0.1:9092` |
 
@@ -102,7 +102,7 @@ screen -S rag_qwen_8080 -X quit >/dev/null 2>&1 || true
 screen -dmS rag_qwen_8080 zsh -lc '
 cd "/Users/leixiaoying/LLM/RAG学习"
 uv run python -m mlx_lm.server \
-  --model Qwen/Qwen3-8B-MLX-4bit \
+  --model models--mlx-community--Qwen3-14B-4bit \
   --host 127.0.0.1 \
   --port 8080 \
   --chat-template-args '"'"'{"enable_thinking": false}'"'"'
@@ -128,11 +128,11 @@ screen -S rag_rerank_9092 -X quit >/dev/null 2>&1 || true
 
 ## 私有文档端到端运行手册
 
-先启动本地 Qwen chat 服务和 embedding 服务；rerank 默认不开，需要时再按"常用开关"打开。默认 chat 走 `configs/models.yaml` 中的 `qwen3_8b_mlx_4bit`。
+先启动本地 Qwen chat 服务和 embedding 服务；rerank 默认不开，需要时再按"常用开关"打开。默认 chat 走 `configs/models.yaml` 中的 `qwen3_14b_4bit`。
 
 ### 统一变量
 
-入库和 Agent 自动挂载知识库必须使用同一套 `STORAGE_ROOT / VECTOR_DSN / VECTOR_PREFIX`。切换 embedding 模型或想重建干净索引时，换新的 `STORAGE_ROOT` 和 `VECTOR_PREFIX`。
+入库和 `agent run --knowledge ...` 必须使用同一套 `STORAGE_ROOT / VECTOR_DSN / VECTOR_PREFIX`。切换 embedding 模型或想重建干净索引时，换新的 `STORAGE_ROOT` 和 `VECTOR_PREFIX`。
 
 ```bash
 cd "/Users/leixiaoying/LLM/RAG学习"
@@ -141,7 +141,7 @@ cd "/Users/leixiaoying/LLM/RAG学习"
 export INPUT_PATH="/absolute/path/to/one-file.docx"
 export INPUT_DIR="/absolute/path/to/private-docs"
 
-# 索引位置：同一批入库和 Agent 自动挂载必须保持一致。
+# 索引位置：同一批入库和显式 --knowledge 查询必须保持一致。
 export STORAGE_ROOT="data/indexes/private_docs_v1"
 export VECTOR_DSN="http://127.0.0.1:19530"
 export VECTOR_PREFIX="private_docs_v1"
@@ -269,7 +269,7 @@ uv run python scripts/evaluate_private_retrieval.py \
 
 ### Agent 测试
 
-Agent CLI 不再暴露 RAG storage/vector 参数。若当前环境已有 `STORAGE_ROOT`、`VECTOR_DSN`、`VECTOR_PREFIX` 且对应 storage 存在，Agent 会自动把 RAG 挂成 deferred tools；模型通过 `tool_search` 自己判断是否调用。否则就是纯 Agent + workspace tools。
+`agent run` 默认是纯 Agent + workspace tools，不会因为当前环境已有 `STORAGE_ROOT`、`VECTOR_DSN`、`VECTOR_PREFIX` 就自动启动 RAG。需要知识库证据时显式传入 `--knowledge`；RAG 会作为 lazy knowledge provider 注册，并在模型首次调用 `search_knowledge` 时初始化。
 
 普通制度问答：
 
@@ -288,6 +288,7 @@ uv run agent run \
 uv run agent run \
   "日提货总量是多少？请检查相关表格并给出处" \
   --agent generic \
+  --knowledge private_docs \
   --verbose
 ```
 
@@ -297,7 +298,7 @@ uv run agent run \
 uv run agent run \
   "读取这个 Excel，汇总关键指标，并写一个简短摘要" \
   --agent generic \
-  --input-file "/absolute/path/to/report.xlsx" \
+  --file "/absolute/path/to/report.xlsx" \
   --verbose
 ```
 
@@ -322,12 +323,12 @@ uv run agent chat \
 
 | 需求 | 做法 |
 | --- | --- |
-| 关闭 rerank 省内存 | `unset RAG_RERANK_SERVICE_URL`；Agent 自动挂载 RAG 时默认不启用 rerank |
+| 关闭 rerank 省内存 | `unset RAG_RERANK_SERVICE_URL`；只在显式 `--knowledge` 的知识库路径中相关 |
 | 开启 HTTP rerank | 启动 `rag_rerank_9092`，`export RAG_RERANK_SERVICE_URL=http://127.0.0.1:9092` |
 | 看 evidence / diagnostics | 先用 `agent run --verbose`；需要检索调试时才用 `rag query --json` |
 | 普通制度问答 | 直接问 `agent run` |
-| Excel/PPT 表格/图片 OCR 资产问题 | 直接问 `agent run`，模型会按需找 `search_assets` |
-| Agent 直接读本地文件 | `agent run ... --input-file "/path/to/file.xlsx"` |
+| Excel/PPT 表格/图片 OCR 已入库资产问题 | `agent run ... --knowledge <name>`，模型会按需找 `search_assets` |
+| Agent 直接读本地文件 | `agent run ... --file "/path/to/file.xlsx"` |
 | 一次性指定模型 | 默认不需要；如要临时走云端可用 `--model mimo_cloud` |
 | 恢复常驻 embedding | `export RAG_EMBEDDING_SERVICE_URL=http://127.0.0.1:9090` |
 
@@ -350,6 +351,7 @@ uv run rag ingest \
 
 uv run agent run \
   "P1 工单首次响应目标是多少？请给出处" \
+  --knowledge smoke \
   --verbose
 ```
 
@@ -456,7 +458,7 @@ PY
 - 入库和查询必须使用同一个 embedding space；切换 embedding 模型后必须重建 Milvus collection。
 - 每次真实实验建议使用新的 `STORAGE_ROOT` 和 Milvus collection prefix，避免不同 embedding 维度或旧 schema 污染结果。
 - `9091` 被 Milvus 占用，rerank 服务使用 `9092`。
-- RAG 是 Agent 的一个工具，不是所有文件任务的默认入口。本地文件分析优先用 `--input-file`、workspace、`structured_probe` 和 `run_python`。
+- RAG 是 Agent 的一个显式 knowledge provider，不是所有文件任务的默认入口。本地文件分析优先用 `--file`、workspace、`structured_probe` 和 `run_python`；需要知识库证据时再加 `--knowledge`。
 - 对表格真实值问题，不要信任 `sample_rows`；正确路径是资产 inspect/read/analyze 或本地 Python 计算。
 - OpenAI-compatible chat provider 的结构化输出能力依赖后端；降级必须可见，不能静默吞掉失败。
 - 批量入库脚本支持 `--summary-provider none`，可跳过 LLM 摘要生成，直接用原文进入 summary index；质量会低于严格摘要链路。

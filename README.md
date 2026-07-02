@@ -13,7 +13,7 @@
 </p>
 
 <p>
-  <img src="https://img.shields.io/badge/Chat-Qwen3--8B--MLX--4bit-111827?style=for-the-badge" alt="Qwen3 8B MLX 4bit">
+  <img src="https://img.shields.io/badge/Chat-Qwen3--14B--4bit-111827?style=for-the-badge" alt="Qwen3 14B 4bit">
   <img src="https://img.shields.io/badge/Embedding-Qwen3--4B--4bit-10b981?style=for-the-badge" alt="Qwen3 Embedding">
   <img src="https://img.shields.io/badge/Rerank-bge--reranker--v2--m3-f97316?style=for-the-badge" alt="bge reranker">
 </p>
@@ -39,9 +39,9 @@
 
 RAG 是 Agent 可以调用的一类工具，不是所有任务的默认入口。对本地 Excel、CSV、JSON 等文件分析，优先走 workspace 文件工具和 Python 分析；只有需要知识库证据时才走 RAG 检索。
 
-用户不需要在每次任务前判断是否启用 RAG。`agent run/chat/resume` 默认只暴露 Agent 参数；如果本地 `.rag` 或 `STORAGE_ROOT/VECTOR_DSN/VECTOR_PREFIX` 能装配出 RAG runtime，RAG 会自动成为 deferred tools，由模型通过 `tool_search` 自己选择。
+`agent run` 默认是纯 Agent 入口，不会因为本地存在 `.rag` 或配置了 embedding/reranker 就启动 RAG。需要知识库证据时显式传入 `--knowledge`，RAG 才会作为 lazy knowledge provider 注册，并在模型首次调用 `search_knowledge` 时初始化。
 
-Python 包名仍保留为 `rag`，因为检索、入库、存储和模型装配代码还在这个包内。对用户暴露的项目名和主命令已经收敛为 `agent-runtime` / `agent`：
+Python SDK 的推荐入口是 `agent_runtime.Agent`。`rag` 仍保留为兼容层和底层 RAG 子系统，因为检索、入库、存储和模型装配代码还在这个包内。对用户暴露的项目名和主命令已经收敛为 `agent-runtime` / `agent`：
 
 ```text
 agent run / chat / resume    # Agent 主入口
@@ -59,7 +59,7 @@ uv sync
 
 ```bash
 uv run python -m mlx_lm.server \
-  --model Qwen/Qwen3-8B-MLX-4bit \
+  --model models--mlx-community--Qwen3-14B-4bit \
   --host 127.0.0.1 \
   --port 8080 \
   --chat-template-args '{"enable_thinking": false}'
@@ -78,8 +78,17 @@ uv run agent run \
 ```bash
 uv run agent run \
   "读取这个文件，列出结构并给出摘要" \
-  --input-file "/absolute/path/to/file.xlsx" \
+  --file "/absolute/path/to/file.xlsx" \
   --verbose
+```
+
+Python SDK：
+
+```python
+from agent_runtime import Agent
+
+result = Agent(model="qwen3_14b_4bit").run("总结一下这个项目")
+print(result.answer)
 ```
 
 只有维护知识库或做底层检索诊断时，才需要启动 embedding 服务并使用 `rag ingest/query`。日常问答仍然只调用 `agent`：
@@ -116,12 +125,14 @@ uv run rag ingest \
 
 uv run agent run \
   "P1 工单首次响应目标是多少？请给出处" \
+  --knowledge quickstart \
   --verbose
 ```
 
 ## News
 
-- 2026-06-30：Agent CLI 产品化清理：`agent run/chat/resume` 默认只展示 Agent 参数；RAG runtime 自动按 `.rag` 或 `STORAGE_ROOT/VECTOR_DSN/VECTOR_PREFIX` 附加为 deferred tools，附加失败时降级为纯 Agent。
+- 2026-07-02：新增 `agent_runtime.Agent` Python SDK facade；`agent run` 改为通过 facade 调用内部 `AgentService`；RAG 从默认自动挂载改为显式 `--knowledge`，并以 lazy knowledge provider 形式在首次工具调用时初始化。
+- 2026-06-30：Agent CLI 产品化清理：`agent run/chat/resume` 默认只展示 Agent 参数；当时的 RAG runtime 自动附加行为已在 2026-07-02 改为显式 `--knowledge`。
 - 2026-06-30：项目入口产品化：项目名改为 `agent-runtime`，新增顶层 `agent` 命令；`rag` CLI 只保留 ingest/query/delete/benchmark/service 等 RAG 子系统命令；删除旧 `analyze-task` 和 `RAGRuntime.analyze_task()` 残口。
 - 2026-06-26：Agent 架构收尾——状态模型收敛、ACI 产品化就绪、工具按需加载、code-as-tool。mypy 清零（22→0），630 个 agent 测试通过。
 - 2026-06-24：PR1-PR3 合并：ToolRegistry + ToolExecutionService 收敛、workspace 工具迁移到 BaseTool、ToolCatalog/DeferredToolStore 完成。`GENERIC_SYSTEM_PROMPT` 作为 Agent 系统指令入口。
@@ -335,7 +346,7 @@ AgentRunRequest
 本地文件任务优先走 workspace：
 
 ```text
---input-file / AgentRunRequest.input_files
+--file / AgentRunRequest.input_files
   -> workspace/input_files/
   -> list_files
   -> structured_probe or read_file
@@ -429,8 +440,8 @@ tool_search("RAG / search documents")
 
 当前默认：
 
-- `defaults.primary_model`：`qwen3_8b_mlx_4bit`
-- `qwen3_8b_mlx_4bit.model`：`Qwen/Qwen3-8B-MLX-4bit`，OpenAI-compatible，`127.0.0.1:8080`
+- `defaults.primary_model`：`qwen3_14b_4bit`
+- `qwen3_14b_4bit.model`：`models--mlx-community--Qwen3-14B-4bit`，OpenAI-compatible，`127.0.0.1:8080`
 - Embedding：`mlx-community/Qwen3-Embedding-4B-4bit-DWQ`
 - Rerank：`BAAI/bge-reranker-v2-m3`
 
