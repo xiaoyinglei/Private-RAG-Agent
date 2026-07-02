@@ -120,7 +120,7 @@ def test_live_loop_state_serde_after_pr3_cleanup() -> None:
     config = AgentRunConfig(
         run_id="test-serde-live",
         thread_id="test-serde-live",
-        budget_total=100,
+        llm_budget_total=100,
         max_depth=1,
         access_policy=AccessPolicy.default(),
     )

@@ -1,9 +1,10 @@
-"""B2b: Declarative tool batch — integration tests with real SDK and reader."""
+"""Declarative tool batch integration tests with real SDK and reader."""
 
 from __future__ import annotations
 
 import json
 import os
+import shutil
 import tempfile
 from pathlib import Path
 
@@ -12,6 +13,11 @@ import pytest
 from rag.agent.core.tool_batch_reader import (
     clean_batch_file,
     read_tool_batch,
+)
+
+requires_seatbelt = pytest.mark.skipif(
+    shutil.which("sandbox-exec") is None,
+    reason="Seatbelt sandbox-exec is not available on this platform",
 )
 
 
@@ -91,6 +97,7 @@ class TestRealToolSDK:
                 os.environ.pop("AGENT_SCRATCH_DIR", None)
 
 
+@requires_seatbelt
 class TestRunPythonCodePath:
     """Verify run_python(code=...) actually works."""
 

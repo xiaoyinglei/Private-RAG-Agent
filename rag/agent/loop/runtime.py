@@ -13,8 +13,6 @@ from rag.agent.capabilities.catalog import CORE_TOOLS, DeferredToolStore, ToolCa
 from rag.agent.capabilities.context import iteration_var
 from rag.agent.core.checkpointing import CheckpointStore
 from rag.agent.core.context import RunRegistry
-from rag.agent.core.turn_contracts import ToolCallPlan
-from rag.agent.tools.spec import ToolResult
 from rag.agent.core.definition import AgentRuntimePolicy
 from rag.agent.core.finalization import (
     FinishCandidateBuilder,
@@ -29,6 +27,7 @@ from rag.agent.core.tool_execution import (
     ToolBatchRequest,
     ToolBatchResult,
 )
+from rag.agent.core.turn_contracts import ToolCallPlan
 from rag.agent.loop.state import (
     LoopPause,
     LoopState,
@@ -42,13 +41,17 @@ from rag.agent.loop.state import (
     replace_latest_transition,
 )
 from rag.agent.loop.stop_hooks import StopHookOutcome, StopHookRunner
-from rag.agent.loop.substate import DeferredToolState, MemoryState, PlanState
 from rag.agent.memory.compactor import LoopCompactionResult
 from rag.agent.planning import MAX_PLAN_EVENTS, PlanEvent, PlanTracker
+from rag.agent.streaming.events import StreamEvent
+from rag.agent.streaming.sink import StreamEventSink
+from rag.agent.tools.observation import ToolExecutionObservation
+from rag.agent.tools.spec import ToolResult
+from rag.providers.llm_gateway import LLMContextOverflowError
 
 logger = logging.getLogger(__name__)
 
-# ── B2c: tool classification for metrics ──
+# Tool classification used by runtime metrics.
 _NATIVE_TOOL_SET = frozenset({
     "read_file", "write_file", "search_text", "apply_patch",
     "run_command", "run_python", "list_files", "update_plan",
@@ -58,10 +61,6 @@ _DEFERRED_TOOL_SET = frozenset({
     "search_knowledge", "search_assets", "llm_generate",
     "llm_summarize", "llm_compare", "structured_probe",
 })
-from rag.agent.streaming.events import StreamEvent
-from rag.agent.streaming.sink import StreamEventSink
-from rag.agent.tools.observation import ToolExecutionObservation
-from rag.providers.llm_gateway import LLMContextOverflowError
 
 
 class ModelTurnEnvelope(BaseModel):
@@ -79,6 +78,7 @@ class ModelTurnProvider(Protocol):
         state: LoopState,
         *,
         definition: AgentRuntimePolicy,
+        budget_remaining: int,
     ) -> ModelTurnDraft | ModelTurnEnvelope: ...
 
 
@@ -210,6 +210,16 @@ class AgentLoop:
 
         retries = 0
         while state["status"] == "running":
+            budget_remaining = await _remaining_llm_budget(handles)
+            if budget_remaining is not None and budget_remaining <= 0:
+                await self._fail(
+                    state,
+                    stop_reason="budget_exhausted",
+                    error="LLM/tool budget exhausted.",
+                    transition_reason="failed",
+                    checkpoint_reason="budget_exhausted",
+                )
+                return state
             await self._emit_stream(
                 _stream_turn_start(run_id=state["run_config"].run_id, turn=state["iteration"] + 1)
             )
@@ -237,7 +247,11 @@ class AgentLoop:
             
             # Model turn — call the LLM, handle errors, return (turn | None)
             state["iteration"] += 1
-            turn, retries = await self._model_turn(state, retries)
+            turn, retries = await self._model_turn(
+                state,
+                retries,
+                budget_remaining=(-1 if budget_remaining is None else budget_remaining),
+            )
             if turn is None:
                 if state["status"] != "running":
                     return state  # terminal
@@ -308,13 +322,20 @@ class AgentLoop:
         return True
 
     async def _model_turn(
-        self, state: LoopState, retries: int,
+        self,
+        state: LoopState,
+        retries: int,
+        *,
+        budget_remaining: int,
     ) -> tuple[ModelTurn | None, int]:
         """Call the model, handle errors.  Returns (turn, retries) or (None, _) on terminal failure."""
         turn: ModelTurn | None = None
         try:
             provided = await self._model_provider.next_turn(
-                state, definition=self._definition)
+                state,
+                definition=self._definition,
+                budget_remaining=budget_remaining,
+            )
             envelope = provided if isinstance(provided, ModelTurnEnvelope) else ModelTurnEnvelope(draft=provided)
             for t in envelope.transitions:
                 tr = t.model_copy(update={"iteration": state["iteration"]})
@@ -549,7 +570,7 @@ class AgentLoop:
         # Sync active deferred tools after tool execution
         self._sync_discovery_to_state(state)
 
-        # Process declarative tool batch (B2b: code-as-tool)
+        # Process declarative tool batches produced by code-as-tool execution.
         batch_plans = self._process_tool_batch(state)
         if batch_plans:
             state["pending_tool_calls"].extend(batch_plans)
@@ -574,7 +595,7 @@ class AgentLoop:
             active_ids.add(tr.tool_call_id)
         state["tool_call_ledger"].trim(active_tool_call_ids=active_ids)
 
-        # ── B2c: tool call metrics ──
+        # Record tool call metrics.
         self._record_metrics(state, new_results)
 
         return False
@@ -584,7 +605,7 @@ class AgentLoop:
         state: LoopState,
         new_results: list[ToolResult],
     ) -> None:
-        """B2c: accumulate structured ToolCallMetrics across turns.
+        """Accumulate structured ToolCallMetrics across turns.
 
         ToolCallMetrics is stored in LoopState and exposed via AgentRunResult.
         The diagnostic string is kept as a compact summary for inline display.
@@ -944,6 +965,13 @@ async def _await_value[T](value: T | Awaitable[T]) -> T:
     if isawaitable(value):
         return await value
     return value
+
+
+async def _remaining_llm_budget(handles: Any) -> int | None:
+    ledger = getattr(handles, "llm_budget_ledger", None)
+    if ledger is None:
+        return None
+    return cast(int, await ledger.remaining())
 
 
 def _merge_keyed[T](existing: list[T], additions: list[T]) -> list[T]:

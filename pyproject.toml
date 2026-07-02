@@ -3,9 +3,9 @@ requires = ["hatchling>=1.27.0"]
 build-backend = "hatchling.build"
 
 [project]
-name = "rag"
+name = "agent-runtime"
 version = "0.1.0"
-description = "Core RAG library with graph-aware retrieval and multimodal indexing."
+description = "Agent runtime with workspace tools and RAG-backed retrieval."
 readme = "README.md"
 requires-python = ">=3.12,<3.14"
 dependencies = [
@@ -52,6 +52,7 @@ dev = [
 ]
 
 [project.scripts]
+agent = "rag.agent.cli:agent_app"
 rag = "rag.cli:app"
 
 [tool.hatch.build.targets.wheel]

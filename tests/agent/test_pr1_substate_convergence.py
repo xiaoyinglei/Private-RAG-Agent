@@ -29,7 +29,7 @@ def _run_config(run_id: str = "pr1-test") -> AgentRunConfig:
     return AgentRunConfig(
         run_id=run_id,
         thread_id=run_id,
-        budget_total=100,
+        llm_budget_total=100,
         max_depth=2,
         access_policy=AccessPolicy.default(),
     )

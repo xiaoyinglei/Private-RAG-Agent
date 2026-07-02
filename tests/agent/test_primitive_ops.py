@@ -565,7 +565,10 @@ class TestWorkspaceTools:
         from rag.agent.tools.workspace_tools import create_workspace_tools
 
         tools = create_workspace_tools(ops._workspace)
-        assert len(tools) == 9
+        assert {tool.name for tool in tools} >= {
+            "materialize_skill_asset",
+        }
+        assert len(tools) == 10
         for tool in tools:
             spec = tool.to_spec()
             assert spec.name

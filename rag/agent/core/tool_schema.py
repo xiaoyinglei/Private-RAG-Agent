@@ -9,6 +9,7 @@ Three responsibilities:
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 from uuid import uuid4
@@ -54,6 +55,13 @@ class AgentMessageAssembler:
     The boundary marker separates the two regions.
     """
 
+    def __init__(
+        self,
+        *,
+        skill_context_provider: Callable[[LoopState], str] | None = None,
+    ) -> None:
+        self._skill_context_provider = skill_context_provider
+
     def build_system_message(
         self,
         *,
@@ -75,6 +83,18 @@ class AgentMessageAssembler:
             self._runtime_state_section(
                 state=state),
         ]
+
+        if self._skill_context_provider is not None:
+            skill_context = self._skill_context_provider(state).strip()
+            if skill_context:
+                sections.insert(
+                    3,
+                    SystemPromptSection(
+                        name="skills",
+                        content=skill_context,
+                        cache_scope="dynamic",
+                    ),
+                )
 
         # Inject persistent memories if available
         persistent_memories = state.get("persistent_memories", [])

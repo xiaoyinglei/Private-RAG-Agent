@@ -4,7 +4,7 @@ import asyncio
 import json
 import time
 from collections.abc import Mapping
-from dataclasses import replace
+from dataclasses import dataclass
 from hashlib import sha256
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 from uuid import uuid4
@@ -45,6 +45,20 @@ ToolExecutionStatus = Literal[
     "failed",
     "unknown",
 ]
+
+
+class WorkBudgetLedger(Protocol):
+    async def reserve(self, lease_id: str, amount: int) -> bool: ...
+    async def commit(self, lease_id: str, actual: int) -> int: ...
+    async def refund(self, lease_id: str) -> int: ...
+    async def remaining(self) -> int: ...
+
+
+@dataclass(frozen=True, slots=True)
+class WorkBudgetReservation:
+    ledger: WorkBudgetLedger | None = None
+    lease_id: str = ""
+    reserved: bool = False
 
 
 class ToolExecutionSummary(BaseModel):
@@ -295,7 +309,6 @@ class ToolExecutionService:
             ):
                 context_budget = ContextBudgetSnapshot.model_validate(result.error.detail["context_budget"])
 
-        run_config = await _committed_run_config(request.run_config)
         if unknown_record is not None and self._pause_on_ambiguous:
             return self._result(
                 status="reconciliation_required",
@@ -305,7 +318,7 @@ class ToolExecutionService:
                 records=records,
                 skipped_completed=skipped_completed,
                 human_input_request=_reconciliation_request(unknown_record),
-                run_config=run_config,
+                run_config=request.run_config,
                 decision_reason="tool_reconciliation",
             )
         if context_budget is not None:
@@ -316,7 +329,7 @@ class ToolExecutionService:
                 pending=tuple(excess),
                 records=records,
                 skipped_completed=skipped_completed,
-                run_config=run_config,
+                run_config=request.run_config,
                 context_budget=context_budget,
                 decision_reason="context_overflow",
             )
@@ -327,7 +340,7 @@ class ToolExecutionService:
             pending=tuple(excess),
             records=records,
             skipped_completed=skipped_completed,
-            run_config=run_config,
+            run_config=request.run_config,
         )
 
     def _preflight_error(
@@ -383,15 +396,15 @@ class ToolExecutionService:
     ) -> tuple[ToolResult, ToolExecutionRecord]:
         started_at = time.perf_counter()
         work_cost = max(0, spec.work_budget_cost)
-        reserved = await _reserve_work_budget(
+        reservation = await _reserve_work_budget(
             call,
             run_config=run_config,
             work_cost=work_cost,
         )
-        if isinstance(reserved, ToolResult):
-            failed = _record_from_result(record, reserved, status="failed")
+        if isinstance(reservation, ToolResult):
+            failed = _record_from_result(record, reservation, status="failed")
             await self._write(failed)
-            return reserved, failed
+            return reservation, failed
 
         # 创建进度回调（如果 stream_sink 可用）
         progress_cb = self._make_progress_callback(
@@ -422,7 +435,7 @@ class ToolExecutionService:
                 )
                 break
             except ToolInputValidationError as exc:
-                await _refund_work_budget(call, run_config, reserved)
+                await _refund_work_budget(reservation)
                 result = _error_result(
                     call,
                     code="invalid_arguments",
@@ -436,7 +449,7 @@ class ToolExecutionService:
                 await self._write(failed)
                 return result, failed
             except ToolRunnerMissingError:
-                await _refund_work_budget(call, run_config, reserved)
+                await _refund_work_budget(reservation)
                 result = _error_result(
                     call,
                     code="tool_not_implemented",
@@ -450,9 +463,7 @@ class ToolExecutionService:
                 return result, failed
             except ToolOutputValidationError as exc:
                 await _commit_work_budget(
-                    call,
-                    run_config,
-                    reserved,
+                    reservation,
                     work_cost,
                 )
                 result = _error_result(
@@ -470,7 +481,7 @@ class ToolExecutionService:
                 await self._write(failed)
                 return result, failed
             except AgentLLMContextOverflowError as exc:
-                await _refund_work_budget(call, run_config, reserved)
+                await _refund_work_budget(reservation)
                 result = _error_result(
                     call,
                     code="context_overflow",
@@ -496,9 +507,7 @@ class ToolExecutionService:
                     await self._write(current)
                     continue
                 await _commit_work_budget(
-                    call,
-                    run_config,
-                    reserved,
+                    reservation,
                     work_cost,
                 )
                 result = _error_result(
@@ -516,9 +525,7 @@ class ToolExecutionService:
                 return result, failed
             except AgentAsToolExecutionError as exc:
                 await _commit_work_budget(
-                    call,
-                    run_config,
-                    reserved,
+                    reservation,
                     work_cost,
                 )
                 result = _error_result(
@@ -550,9 +557,7 @@ class ToolExecutionService:
                     await self._write(current)
                     continue
                 await _commit_work_budget(
-                    call,
-                    run_config,
-                    reserved,
+                    reservation,
                     work_cost,
                 )
                 result = _error_result(
@@ -571,7 +576,7 @@ class ToolExecutionService:
 
         if output is None:
             raise RuntimeError(f"{call.tool_name} exited retry loop without a result")
-        await _commit_work_budget(call, run_config, reserved, work_cost)
+        await _commit_work_budget(reservation, work_cost)
         failure = _structured_output_failure(output)
         if failure is not None:
             result = _error_result(
@@ -791,9 +796,9 @@ async def _reserve_work_budget(
     *,
     run_config: AgentRunConfig,
     work_cost: int,
-) -> bool | ToolResult:
+) -> WorkBudgetReservation | ToolResult:
     if work_cost <= 0:
-        return False
+        return WorkBudgetReservation()
     try:
         handles = RunRegistry.get(run_config.run_id)
     except KeyError:
@@ -803,45 +808,49 @@ async def _reserve_work_budget(
             message=f"Runtime handles missing for run_id={run_config.run_id}",
             retryable=False,
         )
-    reserved = True
+    if handles.llm_budget_ledger is None:
+        return WorkBudgetReservation()
+    lease_id = _work_budget_lease_id(call)
+    ledger = handles.llm_budget_ledger
+    reserved = await ledger.reserve(
+        lease_id,
+        work_cost,
+    )
     if reserved:
-        return True
+        return WorkBudgetReservation(
+            ledger=ledger,
+            lease_id=lease_id,
+            reserved=True,
+        )
+    remaining = await ledger.remaining()
     return _error_result(
         call,
         code="budget_exhausted",
         message=f"Insufficient budget to execute {call.tool_name}",
         retryable=False,
-        detail={"required": work_cost},
+        detail={"required": work_cost, "remaining": remaining},
     )
 
 
 async def _refund_work_budget(
-    call: ToolCallPlan,
-    run_config: AgentRunConfig,
-    reserved: bool,
+    reservation: WorkBudgetReservation,
 ) -> None:
-    if reserved:
-        pass  # refund (budget removed)
+    if not reservation.reserved or reservation.ledger is None:
+        return
+    await reservation.ledger.refund(reservation.lease_id)
 
 
 async def _commit_work_budget(
-    call: ToolCallPlan,
-    run_config: AgentRunConfig,
-    reserved: bool,
+    reservation: WorkBudgetReservation,
     work_cost: int,
 ) -> None:
-    if reserved:
-        pass  # commit (budget removed)
+    if not reservation.reserved or reservation.ledger is None:
+        return
+    await reservation.ledger.commit(reservation.lease_id, work_cost)
 
 
-async def _committed_run_config(
-    run_config: AgentRunConfig,
-) -> AgentRunConfig:
-    try:
-        committed = 0
-    except KeyError:
-        return run_config
-    return replace(run_config)
+def _work_budget_lease_id(call: ToolCallPlan) -> str:
+    return f"tool:{call.tool_call_id}"
 
 
 def _ambiguous_failure_status(

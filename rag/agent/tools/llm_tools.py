@@ -46,7 +46,7 @@ llm_generate = ToolSpec(
     max_retries=1,
     idempotent=True,
     concurrency_safe=True,
-    work_budget_cost=200,
+    work_budget_cost=0,
 )
 
 llm_summarize = ToolSpec(
@@ -61,7 +61,7 @@ llm_summarize = ToolSpec(
     max_retries=1,
     idempotent=True,
     concurrency_safe=True,
-    work_budget_cost=200,
+    work_budget_cost=0,
 )
 
 llm_compare = ToolSpec(
@@ -76,7 +76,7 @@ llm_compare = ToolSpec(
     max_retries=1,
     idempotent=True,
     concurrency_safe=True,
-    work_budget_cost=250,
+    work_budget_cost=0,
 )
 
 ALL_LLM_TOOLS = [llm_generate, llm_summarize, llm_compare]

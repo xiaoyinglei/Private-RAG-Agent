@@ -26,6 +26,7 @@ from rag.agent.primitive_ops import (
     WriteFileInput,
     WriteFileOutput,
 )
+from rag.agent.skills.assets import MaterializeSkillAssetTool
 from rag.agent.tools.base import BaseTool
 from rag.agent.tools.card import ToolCard
 from rag.agent.tools.generic_tools import (
@@ -38,7 +39,6 @@ from rag.agent.tools.generic_tools import (
 )
 from rag.agent.tools.spec import ExecutionCategory, ToolPermissions
 from rag.agent.workspace import WorkspaceRuntime
-
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # list_files / read_file / write_file / run_python / structured_probe
@@ -58,7 +58,12 @@ class ListFilesTool(BaseTool):
     idempotent = True
     concurrency_safe = True
     work_budget_cost = 200
-    aci = ToolCard(when_to_use="Use to explore directory structure.", activation_group="resident", selection_tags=("files",), domains=("files",))
+    aci = ToolCard(
+        when_to_use="Use to explore directory structure.",
+        activation_group="resident",
+        selection_tags=("files",),
+        domains=("files",),
+    )
 
     def __init__(self, workspace: WorkspaceRuntime): self._workspace = workspace
     async def execute(self, i: BaseModel, c: Any = None) -> BaseModel:
@@ -77,7 +82,12 @@ class ReadFileTool(BaseTool):
     idempotent = True
     concurrency_safe = True
     work_budget_cost = 500
-    aci = ToolCard(when_to_use="Use to read file contents.", activation_group="resident", selection_tags=("files",), domains=("files",))
+    aci = ToolCard(
+        when_to_use="Use to read file contents.",
+        activation_group="resident",
+        selection_tags=("files",),
+        domains=("files",),
+    )
 
     def __init__(self, workspace: WorkspaceRuntime): self._workspace = workspace
     async def execute(self, i: BaseModel, c: Any = None) -> BaseModel:
@@ -94,7 +104,13 @@ class WriteFileTool(BaseTool):
     execution_category = ExecutionCategory.WRITE
     timeout_seconds = 5.0
     work_budget_cost = 200
-    aci = ToolCard(when_to_use="Create new files or rewrite entire files.", when_not_to_use="For targeted edits prefer apply_patch.", activation_group="workspace", selection_tags=("files",), domains=("files",))
+    aci = ToolCard(
+        when_to_use="Create new files or rewrite entire files.",
+        when_not_to_use="For targeted edits prefer apply_patch.",
+        activation_group="workspace",
+        selection_tags=("files",),
+        domains=("files",),
+    )
 
     def __init__(self, workspace: WorkspaceRuntime): self._workspace = workspace
     async def execute(self, i: BaseModel, c: Any = None) -> BaseModel:
@@ -111,7 +127,12 @@ class RunPythonTool(BaseTool):
     execution_category = ExecutionCategory.EXECUTE
     timeout_seconds = 120.0
     work_budget_cost = 1000
-    aci = ToolCard(when_to_use="Python data processing, analysis, chart generation.", activation_group="workspace", selection_tags=("code",), domains=("code",))
+    aci = ToolCard(
+        when_to_use="Python data processing, analysis, chart generation.",
+        activation_group="workspace",
+        selection_tags=("code",),
+        domains=("code",),
+    )
 
     def __init__(self, workspace: WorkspaceRuntime): self._workspace = workspace
     async def execute(self, i: BaseModel, c: Any = None) -> BaseModel:
@@ -128,7 +149,12 @@ class StructuredProbeTool(BaseTool):
     execution_category = ExecutionCategory.READ
     timeout_seconds = 20.0
     work_budget_cost = 700
-    aci = ToolCard(when_to_use="Inspect CSV/XLSX/JSON before loading with run_python.", activation_group="workspace", selection_tags=("probe",), domains=("files",))
+    aci = ToolCard(
+        when_to_use="Inspect CSV/XLSX/JSON before loading with run_python.",
+        activation_group="workspace",
+        selection_tags=("probe",),
+        domains=("files",),
+    )
 
     def __init__(self, workspace: WorkspaceRuntime): self._workspace = workspace
     async def execute(self, i: BaseModel, c: Any = None) -> BaseModel:
@@ -151,7 +177,12 @@ class SearchTextTool(BaseTool):
     idempotent = True
     concurrency_safe = True
     work_budget_cost = 200
-    aci = ToolCard(when_to_use="Find where functions/classes/patterns are defined.", activation_group="workspace", selection_tags=("search",), domains=("code",))
+    aci = ToolCard(
+        when_to_use="Find where functions/classes/patterns are defined.",
+        activation_group="workspace",
+        selection_tags=("search",),
+        domains=("code",),
+    )
 
     def __init__(self, workspace: WorkspaceRuntime): self._workspace = workspace
     async def execute(self, i: BaseModel, c: Any = None) -> BaseModel:
@@ -168,7 +199,13 @@ class ApplyPatchTool(BaseTool):
     execution_category = ExecutionCategory.WRITE
     timeout_seconds = 5.0
     work_budget_cost = 100
-    aci = ToolCard(when_to_use="Targeted edits under ~30 lines.", when_not_to_use="New files → write_file.", activation_group="workspace", selection_tags=("edit",), domains=("code",))
+    aci = ToolCard(
+        when_to_use="Targeted edits under ~30 lines.",
+        when_not_to_use="New files → write_file.",
+        activation_group="workspace",
+        selection_tags=("edit",),
+        domains=("code",),
+    )
 
     def __init__(self, workspace: WorkspaceRuntime): self._workspace = workspace
     async def execute(self, i: BaseModel, c: Any = None) -> BaseModel:
@@ -185,7 +222,12 @@ class RunCommandTool(BaseTool):
     execution_category = ExecutionCategory.EXECUTE
     timeout_seconds = 600.0
     work_budget_cost = 500
-    aci = ToolCard(when_to_use="Tests, linters, git, package management.", activation_group="workspace", selection_tags=("shell",), domains=("code",))
+    aci = ToolCard(
+        when_to_use="Tests, linters, git, package management.",
+        activation_group="workspace",
+        selection_tags=("shell",),
+        domains=("code",),
+    )
 
     def __init__(self, workspace: WorkspaceRuntime): self._workspace = workspace
     async def execute(self, i: BaseModel, c: Any = None) -> BaseModel:
@@ -202,7 +244,12 @@ class ToolReplTool(BaseTool):
     execution_category = ExecutionCategory.EXECUTE
     timeout_seconds = 120.0
     work_budget_cost = 800
-    aci = ToolCard(when_to_use="Call multiple tools in batch mode.", activation_group="workspace", selection_tags=("batch",), domains=("code",))
+    aci = ToolCard(
+        when_to_use="Call multiple tools in batch mode.",
+        activation_group="workspace",
+        selection_tags=("batch",),
+        domains=("code",),
+    )
 
     def __init__(self, workspace: WorkspaceRuntime): self._workspace = workspace
     async def execute(self, i: BaseModel, c: Any = None) -> BaseModel:
@@ -224,6 +271,7 @@ WORKSPACE_TOOL_CLASSES: list[type[BaseTool]] = [
     ApplyPatchTool,
     RunCommandTool,
     ToolReplTool,
+    MaterializeSkillAssetTool,
 ]
 
 

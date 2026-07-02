@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import asdict, is_dataclass
+from types import SimpleNamespace
 from typing import Any
 
 from langchain_core.messages import BaseMessage
@@ -45,6 +46,7 @@ def normalize_loop_state(
         "decision_reason": (None if state.get("latest_transition") is None else state["latest_transition"].reason),
         "final_answer": state.get("final_answer"),
         "final_output": _normalize_value(state.get("final_output")),
+        "finish_state": _normalize_finish_state(state["finish_state"]),
         "output_validation_errors": _normalize_value(state.get("output_validation_errors", [])),
         "iteration": state.get("iteration", 0),
         "groundedness_flag": _derive_groundedness(list(state.get("tool_results", []))),
@@ -94,6 +96,18 @@ def normalize_loop_state(
     if observed is not None:
         normalized["observed"] = _normalize_value(observed)
     return normalized
+
+
+def _normalize_finish_state(value: Any) -> SimpleNamespace:
+    return SimpleNamespace(
+        final_answer=getattr(value, "final_answer", None),
+        final_output=_normalize_value(getattr(value, "final_output", None)),
+        output_validation_errors=_normalize_value(
+            getattr(value, "output_validation_errors", [])
+        ),
+        feedback=_normalize_value(getattr(value, "feedback", [])),
+        warnings=_normalize_value(getattr(value, "warnings", [])),
+    )
 
 
 def _normalize_message(message: object) -> dict[str, object]:

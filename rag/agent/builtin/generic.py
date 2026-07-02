@@ -9,6 +9,7 @@ Tool categories:
                            list_files, read_file, write_file,
                            run_python, search_text, apply_patch,
                            run_command, update_plan, tool_repl
+                           invoke_skill, materialize_skill_asset when skills exist
   DEFERRED (activate on demand): search_knowledge, search_assets,
                                  llm_generate, llm_summarize, llm_compare,
                                  structured_probe
@@ -27,7 +28,16 @@ concise; when you have enough context, answer immediately.
 Your tools carry their own instructions for when and how to use them.
 If the visible tools cannot fulfill the task, call tool_search to
 discover more, then activate_tools to load them. Preserve all citation
-identifiers, evidence links, and artifact paths in your answer."""
+identifiers, evidence links, and artifact paths in your answer.
+
+## Skills
+
+Skills are reusable workflows loaded from .agents/skills/ on disk.
+When a skill listed in <available_skills> matches the user's request,
+this is a BLOCKING REQUIREMENT: invoke the relevant skill with
+invoke_skill BEFORE answering or following the workflow. Do NOT guess
+skill ids — only use ids from the listing. Do NOT invoke a skill
+that is already loaded in the current conversation."""
 
 
 GENERIC_AGENT = AgentRuntimePolicy(

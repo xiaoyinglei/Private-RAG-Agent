@@ -13,7 +13,7 @@ from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-from rank_bm25 import BM25L
+from rank_bm25 import BM25L  # type: ignore[import-untyped]
 
 from rag.agent.tools.spec import ToolSpec
 
@@ -34,6 +34,8 @@ CORE_TOOLS: frozenset[str] = frozenset({
     "run_command",
     "update_plan",
     "tool_repl",
+    "invoke_skill",
+    "materialize_skill_asset",
 })
 
 DEFERRED_TOOLS: frozenset[str] = frozenset({
@@ -85,6 +87,8 @@ _DEFAULT_ACTIVATION_GROUPS: dict[str, str] = {
     "list_files": "resident",
     "read_file": "resident",
     "update_plan": "resident",
+    "invoke_skill": "resident",
+    "materialize_skill_asset": "resident",
 
     # rag: semantic knowledge and asset retrieval (activated on demand)
     "search_knowledge": "rag",
@@ -305,7 +309,7 @@ class ToolCatalog:
         top = scored[:max_results]
 
         candidates: list[SearchCandidate] = []
-        for score, name in top:
+        for _score, name in top:
             entry = self._entries.get(name)
             if entry is None:
                 continue

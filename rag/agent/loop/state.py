@@ -16,14 +16,6 @@ from rag.agent.core.runtime_diagnostics import (
 )
 from rag.agent.core.tool_execution import ToolExecutionRecord
 from rag.agent.core.turn_contracts import ToolCallPlan
-from rag.agent.memory.models import (
-    ContextBudgetSnapshot,
-    ExtractedFact,
-    MemoryBudgetSnapshot,
-    MemoryRef,
-    WorkingSummary,
-)
-from rag.agent.planning import AgentPlan, PlanEvent
 from rag.agent.tools.spec import ToolResult
 
 if TYPE_CHECKING:
@@ -34,6 +26,7 @@ if TYPE_CHECKING:
         MemoryState,
         PlanState,
     )
+    from rag.agent.skills.models import SkillState
 
 MAX_STOP_HOOK_FEEDBACK = 10
 MAX_LOOP_MEMORY_WARNINGS = 20
@@ -207,6 +200,7 @@ class LoopState(TypedDict):
     memory_state: MemoryState
     deferred_tool_state: DeferredToolState
     finish_state: FinishState
+    skill_state: SkillState
     # ── File manifest (file-first processing) ──
     file_manifest: FileManifest | None
     # ── Persistent cross-session memory ──
@@ -232,6 +226,7 @@ def create_loop_state(
         PersistentMemorySnapshot,
         PlanState,
     )
+    from rag.agent.skills.models import SkillState
 
     return {
         "task": task,
@@ -285,6 +280,7 @@ def create_loop_state(
             final_output=None,
             output_validation_errors=[],
         ),
+        "skill_state": SkillState(),
     }
 
 
@@ -336,7 +332,11 @@ def append_stop_hook_warning(
     warning: StopHookFeedback,
 ) -> StopHookFeedback:
     existing = next(
-        (item for item in state["finish_state"].warnings if item.code == warning.code and item.message == warning.message),
+        (
+            item
+            for item in state["finish_state"].warnings
+            if item.code == warning.code and item.message == warning.message
+        ),
         None,
     )
     updated = warning.model_copy(

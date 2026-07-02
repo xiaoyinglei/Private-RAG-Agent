@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from typing import TYPE_CHECKING
 
 from langgraph.checkpoint.base import BaseCheckpointSaver
 
@@ -13,6 +14,9 @@ from rag.agent.loop.runtime import ModelTurnProvider
 from rag.agent.service import AgentService
 from rag.agent.tools.registry import ToolRegistry
 
+if TYPE_CHECKING:
+    from rag.agent.skills.catalog import SkillCatalog
+
 
 class AgentServiceFactory:
     def __init__(
@@ -24,6 +28,7 @@ class AgentServiceFactory:
         retrieval_hint_provider: RetrievalHintProvider | None = None,
         checkpointer: BaseCheckpointSaver[str] | None = None,
         runtime_diagnostics: Sequence[RuntimeDiagnostic] = (),
+        skill_catalog: SkillCatalog | None = None,
     ) -> None:
         self._tool_registry = tool_registry
         self._model_turn_provider = model_turn_provider
@@ -32,6 +37,7 @@ class AgentServiceFactory:
         self._checkpointer = checkpointer
         self._runtime_diagnostics = tuple(runtime_diagnostics)
         self._subagent_runner: DelegatedAgentRunner | None = None
+        self._skill_catalog = skill_catalog
 
     def bind_subagent_runner(self, runner: DelegatedAgentRunner) -> None:
         self._subagent_runner = runner
@@ -46,4 +52,5 @@ class AgentServiceFactory:
             model_registry=self._model_registry,
             checkpointer=self._checkpointer,
             runtime_diagnostics=self._runtime_diagnostics,
+            skill_catalog=self._skill_catalog,
         )

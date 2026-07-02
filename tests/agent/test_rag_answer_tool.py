@@ -58,7 +58,7 @@ async def test_rag_search_answer_runner_uses_fast_runtime_query_and_preserves_co
     run_config = AgentRunConfig(
         run_id="rag-answer-test",
         thread_id="rag-answer-test",
-        budget_total=10_000,
+        llm_budget_total=10_000,
         max_depth=2,
         access_policy=AccessPolicy.default(),
     )
@@ -90,6 +90,6 @@ async def test_rag_search_answer_runner_uses_fast_runtime_query_and_preserves_co
     assert options.retrieval_signals.quoted_terms == ["runtime"]
     assert options.retrieval_signals_debug["special_targets"] == ["table"]
     assert runtime.active_ledgers == [
-        RunRegistry.get(run_config.run_id).budget_ledger
+        RunRegistry.get(run_config.run_id).llm_budget_ledger
     ]
     RunRegistry.remove(run_config.run_id)

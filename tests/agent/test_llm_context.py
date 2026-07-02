@@ -45,7 +45,7 @@ def _state() -> LoopState:
         run_config=AgentRunConfig(
             run_id="context-assembler",
             thread_id="context-assembler",
-            budget_total=10_000,
+            llm_budget_total=10_000,
             max_depth=1,
             access_policy=AccessPolicy.default(),
         ),

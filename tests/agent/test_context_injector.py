@@ -4,11 +4,11 @@ from langchain_core.messages import HumanMessage
 
 from rag.agent.core.context import AgentRunConfig
 from rag.agent.core.definition import AgentRuntimePolicy
+from rag.agent.core.turn_contracts import ToolCallPlan
 from rag.agent.loop.state import LoopState, create_loop_state
 from rag.agent.memory.injector import ContextBuilder
 from rag.agent.memory.models import ExternalizedToolOutput, ExtractedFact, MemoryRef, WorkingSummary
 from rag.agent.planning import AgentPlan, PlanStep
-from rag.agent.core.turn_contracts import ToolCallPlan
 from rag.agent.tools.llm_tools import LLMTextOutput
 from rag.agent.tools.spec import ToolError, ToolResult
 from rag.schema.query import AnswerCitation, EvidenceItem
@@ -47,7 +47,7 @@ def _state() -> LoopState:
         run_config=AgentRunConfig(
             run_id="ctx",
             thread_id="ctx",
-            budget_total=1000,
+            llm_budget_total=1000,
             max_depth=2,
             access_policy=AccessPolicy.default(),
         ),

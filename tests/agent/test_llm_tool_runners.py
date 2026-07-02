@@ -14,6 +14,9 @@ from rag.agent.tools.llm_tools import (
     LLMCompareInput,
     LLMGenerateInput,
     LLMSummarizeInput,
+    llm_compare,
+    llm_generate,
+    llm_summarize,
 )
 from rag.agent.tools.registry import ToolExecutionContext
 from rag.providers.llm_gateway import LLMGateway
@@ -109,12 +112,18 @@ def _state(config: AgentRunConfig) -> LoopState:
     )
 
 
+def test_llm_tools_do_not_add_fixed_work_budget_on_top_of_gateway_accounting() -> None:
+    assert llm_generate.work_budget_cost == 0
+    assert llm_summarize.work_budget_cost == 0
+    assert llm_compare.work_budget_cost == 0
+
+
 @pytest.mark.anyio
 async def test_llm_tool_runner_uses_gateway_and_run_ledger() -> None:
     config = AgentRunConfig(
         run_id="llm-tool-runner",
         thread_id="llm-tool-runner",
-        budget_total=500,
+        llm_budget_total=500,
         max_depth=1,
         access_policy=AccessPolicy.default(),
     )
@@ -138,7 +147,7 @@ async def test_llm_tool_runner_uses_gateway_and_run_ledger() -> None:
     assert result.text == "bounded summary"
     assert registry.generator.kwargs["max_tokens"] == 100
     assert registry.generator.kwargs["temperature"] == 0.2
-    assert await handles.budget_ledger.committed() == 11
+    assert await handles.llm_budget_ledger.committed() == 11
     RunRegistry.remove(config.run_id)
 
 
@@ -177,7 +186,7 @@ async def test_llm_tool_required_overflow_never_calls_model(
     config = AgentRunConfig(
         run_id=f"{tool_name}-overflow",
         thread_id=f"{tool_name}-overflow",
-        budget_total=500,
+        llm_budget_total=500,
         max_depth=1,
         access_policy=AccessPolicy.default(),
     )

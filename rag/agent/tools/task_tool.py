@@ -14,7 +14,6 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from rag.agent.core.context import AgentRunConfig
 from rag.agent.core.delegation import (
-    DEFAULT_DELEGATION_TOKEN_BUDGET,
     AgentDelegationRequest,
     DelegatedAgentResult,
     DelegatedAgentRunner,
@@ -52,6 +51,7 @@ class TaskInput(BaseModel):
         ),
     )
     max_turns: int | None = None
+    llm_budget_total: int | None = Field(default=None, ge=1)
 
 
 MAX_KEY_FACTS = 10
@@ -179,9 +179,8 @@ class TaskToolRunner:
             delegation_id=f"task-{uuid4().hex[:8]}",
             agent_type="task_child",
             prompt=child_prompt,
-            max_turns=(
-                payload.max_turns
-            ),
+            max_turns=payload.max_turns,
+            llm_budget_total=payload.llm_budget_total,
         )
         parent_state = ParentAgentContext(run_config=parent_config)
 

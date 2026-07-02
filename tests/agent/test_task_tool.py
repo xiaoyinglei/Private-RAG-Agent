@@ -59,8 +59,7 @@ def _make_run_config(**overrides) -> AgentRunConfig:
     defaults = dict(
         run_id="test-run",
         thread_id="test-thread",
-        budget_total=8000,
-        work_budget_total=20000,
+        llm_budget_total=8000,
         agent_type="generic",
         max_depth=2,
         access_policy=AccessPolicy.default(),
@@ -83,17 +82,17 @@ class TestTaskToolSpec:
         assert inp.task == "Analyze Q3 revenue"
         assert inp.context_summary is None
         assert inp.tool_query is None
-        assert inp.token_budget is None
+        assert inp.llm_budget_total is None
 
     def test_task_input_with_all_fields(self) -> None:
         inp = TaskInput(
             task="Analyze Q3 revenue",
             context_summary="Previous quarter was 1.2M",
             tool_query="search financial data",
-            token_budget=5000,
+            llm_budget_total=5000,
         )
         assert inp.context_summary == "Previous quarter was 1.2M"
-        assert inp.token_budget == 5000
+        assert inp.llm_budget_total == 5000
 
 
 class TestTaskOutput:
@@ -174,7 +173,7 @@ class TestTaskToolRunner:
             TaskInput(
                 task="Summarize the data",
                 context_summary="Q1: 1M",
-                token_budget=1234,
+                llm_budget_total=1234,
             ),
             parent_config=parent_config,
         )
@@ -184,7 +183,7 @@ class TestTaskToolRunner:
         assert len(delegated_runner.calls) == 1
         request, parent_state = delegated_runner.calls[0]
         assert request.agent_type == "task_child"
-        assert request.estimated_tokens == 1234
+        assert request.llm_budget_total == 1234
         assert "Summarize the data" in request.prompt
         assert "Q1: 1M" in request.prompt
         assert parent_state["run_config"] == parent_config

@@ -13,7 +13,7 @@
 </p>
 
 <p>
-  <img src="https://img.shields.io/badge/Chat-mimo--v2.5--pro-111827?style=for-the-badge" alt="mimo-v2.5-pro">
+  <img src="https://img.shields.io/badge/Chat-Qwen3--8B--MLX--4bit-111827?style=for-the-badge" alt="Qwen3 8B MLX 4bit">
   <img src="https://img.shields.io/badge/Embedding-Qwen3--4B--4bit-10b981?style=for-the-badge" alt="Qwen3 Embedding">
   <img src="https://img.shields.io/badge/Rerank-bge--reranker--v2--m3-f97316?style=for-the-badge" alt="bge reranker">
 </p>
@@ -39,6 +39,15 @@
 
 RAG 是 Agent 可以调用的一类工具，不是所有任务的默认入口。对本地 Excel、CSV、JSON 等文件分析，优先走 workspace 文件工具和 Python 分析；只有需要知识库证据时才走 RAG 检索。
 
+用户不需要在每次任务前判断是否启用 RAG。`agent run/chat/resume` 默认只暴露 Agent 参数；如果本地 `.rag` 或 `STORAGE_ROOT/VECTOR_DSN/VECTOR_PREFIX` 能装配出 RAG runtime，RAG 会自动成为 deferred tools，由模型通过 `tool_search` 自己选择。
+
+Python 包名仍保留为 `rag`，因为检索、入库、存储和模型装配代码还在这个包内。对用户暴露的项目名和主命令已经收敛为 `agent-runtime` / `agent`：
+
+```text
+agent run / chat / resume    # Agent 主入口
+rag ingest / query / delete  # 知识库维护和底层诊断入口
+```
+
 ## 快速开始
 
 ```bash
@@ -46,16 +55,34 @@ cd "/Users/leixiaoying/LLM/RAG学习"
 uv sync
 ```
 
-准备默认云模型 key：
+云模型可以不用配。默认走本地 LLM，先启动本地 OpenAI-compatible chat 服务：
 
 ```bash
-cat > .env <<'EOF'
-MIMO_API_KEY=your_mimo_key
-DEEPSEEK_API_KEY=your_deepseek_key_optional
-EOF
+uv run python -m mlx_lm.server \
+  --model Qwen/Qwen3-8B-MLX-4bit \
+  --host 127.0.0.1 \
+  --port 8080 \
+  --chat-template-args '{"enable_thinking": false}'
 ```
 
-启动 embedding 服务：
+直接调用 Agent：
+
+```bash
+uv run agent run \
+  "总结一下这个项目现在的能力边界" \
+  --verbose
+```
+
+分析本地文件：
+
+```bash
+uv run agent run \
+  "读取这个文件，列出结构并给出摘要" \
+  --input-file "/absolute/path/to/file.xlsx" \
+  --verbose
+```
+
+只有维护知识库或做底层检索诊断时，才需要启动 embedding 服务并使用 `rag ingest/query`。日常问答仍然只调用 `agent`：
 
 ```bash
 screen -S rag_embedding_9090 -X quit >/dev/null 2>&1 || true
@@ -68,15 +95,16 @@ uv run rag embedding-service \
 '
 
 export RAG_EMBEDDING_SERVICE_URL="http://127.0.0.1:9090"
+export STORAGE_ROOT="data/quickstart"
 export VECTOR_DSN="http://127.0.0.1:19530"
 export VECTOR_PREFIX="quickstart_v1"
 ```
 
-最小 RAG smoke：
+最小知识库 Agent smoke：
 
 ```bash
 uv run rag ingest \
-  --storage-root data/quickstart \
+  --storage-root "$STORAGE_ROOT" \
   --vector-backend milvus \
   --vector-dsn "$VECTOR_DSN" \
   --vector-collection-prefix "$VECTOR_PREFIX" \
@@ -86,28 +114,15 @@ uv run rag ingest \
   --owner quickstart \
   --content "示例客服 SLA：P1 工单首次响应目标为 30 分钟，解决目标为 4 小时。"
 
-uv run rag query \
-  --query "P1 工单首次响应目标是多少？请给出处" \
-  --storage-root data/quickstart \
-  --vector-backend milvus \
-  --vector-dsn "$VECTOR_DSN" \
-  --vector-collection-prefix "$VECTOR_PREFIX" \
-  --reranker-model none \
-  --retrieval-profile auto
-```
-
-最小 Agent 文件分析 smoke：
-
-```bash
-uv run rag agent run \
-  "读取这个文件，列出结构并给出摘要" \
-  --agent generic \
-  --input-file "/absolute/path/to/file.xlsx" \
+uv run agent run \
+  "P1 工单首次响应目标是多少？请给出处" \
   --verbose
 ```
 
 ## News
 
+- 2026-06-30：Agent CLI 产品化清理：`agent run/chat/resume` 默认只展示 Agent 参数；RAG runtime 自动按 `.rag` 或 `STORAGE_ROOT/VECTOR_DSN/VECTOR_PREFIX` 附加为 deferred tools，附加失败时降级为纯 Agent。
+- 2026-06-30：项目入口产品化：项目名改为 `agent-runtime`，新增顶层 `agent` 命令；`rag` CLI 只保留 ingest/query/delete/benchmark/service 等 RAG 子系统命令；删除旧 `analyze-task` 和 `RAGRuntime.analyze_task()` 残口。
 - 2026-06-26：Agent 架构收尾——状态模型收敛、ACI 产品化就绪、工具按需加载、code-as-tool。mypy 清零（22→0），630 个 agent 测试通过。
 - 2026-06-24：PR1-PR3 合并：ToolRegistry + ToolExecutionService 收敛、workspace 工具迁移到 BaseTool、ToolCatalog/DeferredToolStore 完成。`GENERIC_SYSTEM_PROMPT` 作为 Agent 系统指令入口。
 - 2026-06-22：README 重写为当前架构说明：单 `generic` 入口、Claude-like while loop、Tool Search、deferred tools、workspace 文件工具和 `task` 工具。旧的 `ResearchAgent / OrchestratorAgent / agent_*` 默认路径不再作为当前设计描述。
@@ -237,7 +252,7 @@ L6 只基于 `EvidenceItem` 合成回答。回答保留 `doc_id / section_id / a
 Agent 只有一个 `generic` 入口，不区分角色身份。模型在 `GENERIC_SYSTEM_PROMPT` 的约束下，通过 while-loop 自主决定调用哪些工具、读取哪些文件、激活哪些 deferred capability。核心原则：
 
 - **工具即能力边界**：检索、对比、生成、文件读写、表格分析、子任务隔离都表达为工具或 runtime capability。
-- **两层工具可见性**：core tools 常驻（`tool_search`、`activate_tools`、`task`、`list_files`、`read_file`、`write_file`、`run_python_inline`），deferred tools（RAG、asset、LLM 等）搜索激活后才暴露。
+- **两层工具可见性**：core tools 常驻（`tool_search`、`activate_tools`、`task`、`list_files`、`read_file`、`write_file`、`run_python`），deferred tools（RAG、asset、LLM 等）搜索激活后才暴露。
 - **有界循环**：`ModelTurnProvider` 每轮只能返回 `execute(tool_calls)`、`finish(final_answer)` 或 `pause(reason)`。
 - **ToolSpec 即契约**：每个工具的 Pydantic 输入输出、权限、timeout、retry、预算成本和审批策略在 `ToolSpec` 中声明，由 `ToolRegistry` 和 `ToolExecutionService` 统一执行。
 
@@ -313,7 +328,7 @@ AgentRunRequest
 
 | 类型 | 默认可见 | 说明 |
 | --- | --- | --- |
-| Core tools | 是 | `tool_search`、`activate_tools`、`task`、`list_files`、`read_file`、`write_file`、`run_python_inline` |
+| Core tools | 是 | `tool_search`、`activate_tools`、`task`、`list_files`、`read_file`、`write_file`、`run_python` |
 | Deferred tools | 否 | RAG、asset、LLM、`structured_probe` 等，搜索并激活后才进入下一轮模型工具列表 |
 | Internal tools | 否 | 运行时内部能力，不直接暴露给模型 |
 
@@ -324,7 +339,7 @@ AgentRunRequest
   -> workspace/input_files/
   -> list_files
   -> structured_probe or read_file
-  -> run_python_inline
+  -> run_python
   -> write_file when需要产物
 ```
 
@@ -332,8 +347,8 @@ RAG 任务优先走证据工具：
 
 ```text
 tool_search("RAG / search documents")
-  -> activate_tools(["rag_search_answer", ...])
-  -> rag_search_answer or vector_search / grounding / rerank
+  -> activate_tools(["search_knowledge"])
+  -> search_knowledge
   -> answer with evidence and citations
 ```
 
@@ -345,8 +360,9 @@ tool_search("RAG / search documents")
 - Native tool calling path：通过 OpenAI-compatible `messages + tools` 调模型，并把 tool result 回灌到下一轮模型上下文。
 - Prompt assembly：`AgentMessageAssembler` 将稳定 system sections 和动态 runtime context 分离。
 - 工具发现：`ToolCatalog` 用 BM25 搜索 deferred tools，`activate_tools` 激活本次 run 的候选工具。
+- Skills：`SkillCatalog` 从 `.agents/skills/` 和 `SKILL_PATH` 加载 `SKILL.md`，通过 `invoke_skill` 进入同一套工具执行边界。
 - 单内置 Agent：`BUILTIN_AGENT_DEFINITIONS` 当前只包含 `generic`。
-- Workspace + PrimitiveOps：支持 `list_files`、`read_file`、`write_file`、`run_python`、`run_python_inline`、`structured_probe`。
+- Workspace + PrimitiveOps：支持 `list_files`、`read_file`、`write_file`、`run_python`、`structured_probe`。
 - 通用 `task` 工具：替代默认 role-specific child agents。
 - 工具执行：保留 `ToolExecutionRecord`、审批、幂等恢复、reconciliation、timeout、retry 和结构化错误。
 - Memory：支持 working summary、extracted facts、bounded context injection 和 workspace-backed memory store。
@@ -354,7 +370,7 @@ tool_search("RAG / search documents")
 
 ### 已具备的能力
 
-- 可以用 `rag agent run` 启动一个 generic Agent run，并返回结构化 `AgentRunResult`。
+- 可以用 `agent run` 启动一个 generic Agent run，并返回结构化 `AgentRunResult`。
 - 可以把本地文件导入 workspace，让 Agent 直接读取、探测和用 Python 分析，不必先入 RAG。
 - 可以让模型用 `tool_search` 找到 RAG、asset、LLM、structured probe 等 deferred tools，再显式激活。
 - 可以执行已注册工具，并在工具未注册、runner 缺失、参数非法、输出非法、预算不足、timeout、runner 异常时返回结构化失败结果。
@@ -363,7 +379,6 @@ tool_search("RAG / search documents")
 
 ### 下一步规划实现
 
-- **文档更新**：README 和项目文档从 RAG-first 转为 agent-first 口吻，`GENERIC_SYSTEM_PROMPT` 作为系统指令入口在文档中明确说明。
 - **简单任务 fast path**：当前所有任务走完整 AgentLoop + ToolExecutionService，对简单任务（单文件读取、单次检索）提供轻量 fast path，跳过完整 runtime 装配。
 - **清理 `LoopState`**：先明确 tool call / tool result / model message 的唯一 source of truth，再删除 PR0/PR1 遗留字段。
 - **收敛 legacy structured-output path**：把 native tool calling 作为主线，结构化输出走 fallback 而非默认路径。
@@ -414,8 +429,8 @@ tool_search("RAG / search documents")
 
 当前默认：
 
-- `defaults.primary_model`：`mimo_cloud`
-- `mimo_cloud.model`：`mimo-v2.5-pro`
+- `defaults.primary_model`：`qwen3_8b_mlx_4bit`
+- `qwen3_8b_mlx_4bit.model`：`Qwen/Qwen3-8B-MLX-4bit`，OpenAI-compatible，`127.0.0.1:8080`
 - Embedding：`mlx-community/Qwen3-Embedding-4B-4bit-DWQ`
 - Rerank：`BAAI/bge-reranker-v2-m3`
 
@@ -501,7 +516,7 @@ uv run pytest -q \
 ./
 ├── README.md                          # 项目说明、架构、Agent 设计
 ├── CLAUDE.md                          # AI coding agent 参考（启动命令、约束）
-├── pyproject.toml                     # Python 项目元数据、依赖、pytest/ruff/mypy 配置
+├── pyproject.toml                     # agent-runtime 项目元数据、console scripts、pytest/ruff/mypy 配置
 ├── uv.lock                            # uv 锁文件
 ├── configs/models.yaml                # 默认 chat / embedding / rerank 模型配置
 ├── docs/
@@ -516,8 +531,8 @@ uv run pytest -q \
 
 ```text
 rag/
-├── cli.py                             # 主 CLI：ingest / query / benchmark / service / agent
-├── runtime.py                         # AppRuntime 装配 storage、ingest、retrieval、synthesis
+├── cli.py                             # RAG CLI：ingest / query / delete / benchmark / service
+├── runtime.py                         # RAGRuntime 装配 storage、ingest、retrieval、synthesis
 ├── query_pipeline.py                  # 查询端 L3-L6 编排、表格 compute_request 循环
 ├── embedding_service.py               # 本地 embedding HTTP 服务入口
 ├── rerank_service.py                  # 本地 rerank HTTP 服务入口
@@ -539,6 +554,7 @@ rag/
 │   │   ├── state.py                   # LoopState、ModelTurnDraft、transitions
 │   │   └── stop_hooks.py              # stop hook 协议和 bounded runner
 │   ├── memory/                        # working memory compaction / injection / store
+│   ├── skills/                        # Skill manifest、loader、catalog、invocation runtime
 │   ├── primitive_ops.py               # workspace 文件和 Python 原语
 │   ├── service.py                     # AgentRunRequest / AgentRunResult / AgentService
 │   ├── tools/

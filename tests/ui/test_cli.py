@@ -1,5 +1,6 @@
 import json
 import re
+import tomllib
 from pathlib import Path
 
 from pytest import MonkeyPatch
@@ -7,6 +8,7 @@ from typer.testing import CliRunner
 
 import rag.cli as cli
 from rag import StorageConfig
+from rag.agent.cli import agent_app
 from rag.cli import app
 from rag.retrieval.models import BuiltContext, PublicQueryResult
 from rag.schema.query import GroundedAnswer
@@ -173,51 +175,82 @@ def test_cli_main_delegates_to_typer_app(monkeypatch: MonkeyPatch) -> None:
     assert calls == ["called"]
 
 
+def test_project_metadata_exposes_agent_as_primary_console_script() -> None:
+    pyproject = tomllib.loads(Path("pyproject.toml").read_text())
+
+    assert pyproject["project"]["name"] == "agent-runtime"
+    assert pyproject["project"]["scripts"]["agent"] == "rag.agent.cli:agent_app"
+    assert pyproject["project"]["scripts"]["rag"] == "rag.cli:app"
+
+
 def test_assembly_profile_cli_surface_is_removed() -> None:
     help_env = {"COLUMNS": "240"}
     root_help = runner.invoke(app, ["--help"], env=help_env)
     query_help = runner.invoke(app, ["query", "--help"], env=help_env)
-    agent_run_help = runner.invoke(app, ["agent", "run", "--help"], env=help_env)
-    agent_resume_help = runner.invoke(app, ["agent", "resume", "--help"], env=help_env)
+    agent_run_help = runner.invoke(agent_app, ["run", "--help"], env=help_env)
+    agent_chat_help = runner.invoke(agent_app, ["chat", "--help"], env=help_env)
+    agent_resume_help = runner.invoke(agent_app, ["resume", "--help"], env=help_env)
 
     assert root_help.exit_code == 0
     assert query_help.exit_code == 0
     assert agent_run_help.exit_code == 0
+    assert agent_chat_help.exit_code == 0
     assert agent_resume_help.exit_code == 0
 
     root_output = _plain_help(root_help.output)
     query_output = _plain_help(query_help.output)
     agent_run_output = _plain_help(agent_run_help.output)
+    agent_chat_output = _plain_help(agent_chat_help.output)
     agent_resume_output = _plain_help(agent_resume_help.output)
 
     assert "profiles" not in root_output
     assert "--profile" not in query_output
     assert "--profile" not in agent_run_output
+    assert "--profile" not in agent_chat_output
     assert "--profile" not in agent_resume_output
 
-    for output in (agent_run_output, agent_resume_output):
+    for output in (agent_run_output, agent_chat_output, agent_resume_output):
         assert "--model" in output
-        assert "--embedding-model" in output
-        assert "--reranker-model" in output
+        assert "--storage-root" not in output
+        assert "--embedding-model" not in output
+        assert "--reranker-model" not in output
+        assert "--vector-backend" not in output
+    assert "--budget" in agent_run_output
+    assert "--budget" in agent_chat_output
+    assert "--budget" not in agent_resume_output
 
 
-def test_cli_analyze_task_is_disabled_on_new_runtime(tmp_path: Path) -> None:
-    storage_root = tmp_path / ".rag"
+def test_agent_cli_is_the_top_level_agent_entrypoint() -> None:
+    help_env = {"COLUMNS": "240"}
+    root_help = runner.invoke(agent_app, ["--help"], env=help_env)
+    run_help = runner.invoke(agent_app, ["run", "--help"], env=help_env)
+    chat_help = runner.invoke(agent_app, ["chat", "--help"], env=help_env)
+    resume_help = runner.invoke(agent_app, ["resume", "--help"], env=help_env)
 
-    analyze = runner.invoke(
-        app,
-        [
-            "analyze-task",
-            "--storage-root",
-            str(storage_root),
-            "--query",
-            "Summarize Alpha Engine responsibilities.",
-            "--json",
-        ],
-    )
+    assert root_help.exit_code == 0
+    assert run_help.exit_code == 0
+    assert chat_help.exit_code == 0
+    assert resume_help.exit_code == 0
 
-    assert analyze.exit_code == 1
-    assert "disabled on the new runtime CLI" in analyze.output
+    root_output = _plain_help(root_help.output)
+    assert "run" in root_output
+    assert "chat" in root_output
+    assert "resume" in root_output
+    assert "--agent" in _plain_help(run_help.output)
+
+
+def test_rag_cli_no_longer_exposes_agent_or_analyze_task() -> None:
+    root_help = runner.invoke(app, ["--help"], env={"COLUMNS": "240"})
+    agent = runner.invoke(app, ["agent", "--help"])
+    analyze = runner.invoke(app, ["analyze-task", "--help"])
+
+    assert root_help.exit_code == 0
+    root_output = _plain_help(root_help.output)
+    assert "agent" not in root_output
+    assert "analyze-task" not in root_output
+
+    assert agent.exit_code != 0
+    assert analyze.exit_code != 0
 
 
 def test_cli_query_uses_public_query_contract(monkeypatch: MonkeyPatch) -> None:
@@ -288,17 +321,18 @@ def test_cli_query_help_uses_new_retrieval_profile_option() -> None:
 
 
 def test_agent_run_help_exposes_explicit_agent_selector() -> None:
-    result = runner.invoke(app, ["agent", "run", "--help"], env={"COLUMNS": "240"})
+    result = runner.invoke(agent_app, ["run", "--help"], env={"COLUMNS": "240"})
 
     assert result.exit_code == 0
     output = _plain_help(result.output)
     assert "--agent" in output
-    assert "--vector-collection-prefix" in output
+    assert "--input-file" in output
+    assert "--vector-collection-prefix" not in output
     assert "generic" in output
 
 
 def test_agent_resume_help_exposes_agent_selector_for_checkpoint_restore() -> None:
-    result = runner.invoke(app, ["agent", "resume", "--help"], env={"COLUMNS": "240"})
+    result = runner.invoke(agent_app, ["resume", "--help"], env={"COLUMNS": "240"})
 
     assert result.exit_code == 0
     assert "--agent" in _plain_help(result.output)

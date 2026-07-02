@@ -98,7 +98,7 @@ class TestToolRegistry:
         run_config = AgentRunConfig(
             run_id="contextual-runner",
             thread_id="contextual-runner",
-            budget_total=100,
+            llm_budget_total=100,
             max_depth=1,
             access_policy=access_policy,
         )
@@ -131,7 +131,7 @@ class TestToolRegistry:
         run_config = AgentRunConfig(
             run_id="trusted-context",
             thread_id="trusted-context",
-            budget_total=100,
+            llm_budget_total=100,
             max_depth=1,
             access_policy=AccessPolicy.default(),
         )

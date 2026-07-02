@@ -12,7 +12,7 @@ models:
     capability: chat
     provider: qwen
     protocol: openai_compatible
-    model: mlx-community/Qwen3-14B-4bit
+    model: models--mlx-community--Qwen3-14B-4bit
     base_url: http://127.0.0.1:8080/v1
     context_window_tokens: 32768
 
@@ -96,9 +96,9 @@ models:
 
 
 defaults:
-  primary_model: mimo_cloud
-  embedding_model: qwen3_embedding_4b_4bit_dwq
-  reranker_model: bge_reranker_v2_m3
+  primary_model: qwen3_14b_4bit
+  embedding_model: qwen3_embedding_8b_4bit_dwq
+  reranker_model: qwen3_reranker_4b
 
 generation:
   # 默认继承 defaults.primary_model。
@@ -123,17 +123,17 @@ generation:
     max_tokens: 2048
     temperature: 0.1
 
-  # Memory operations — use mimo cloud model
+  # Memory operations — use the default local chat model unless explicitly overridden.
   memory_select:
-    model: mimo_cloud
+    model: qwen3_8b_mlx_4bit
     max_tokens: 256
     temperature: 0.1
   memory_extract:
-    model: mimo_cloud
+    model: qwen3_8b_mlx_4bit
     max_tokens: 2048
     temperature: 0.3
   memory_consolidate:
-    model: mimo_cloud
+    model: qwen3_8b_mlx_4bit
     max_tokens: 4096
     temperature: 0.3
 

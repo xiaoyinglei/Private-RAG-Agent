@@ -92,7 +92,7 @@ def _execution_context(
         run_config=AgentRunConfig(
             run_id=run_id,
             thread_id=run_id,
-            budget_total=1000,
+            llm_budget_total=1000,
             max_depth=1,
             access_policy=access_policy or AccessPolicy.default(),
         )

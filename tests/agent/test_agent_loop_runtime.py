@@ -19,6 +19,7 @@ from rag.agent.core.tool_execution import (
     ToolExecutionService,
     tool_arguments_digest,
 )
+from rag.agent.core.turn_contracts import ToolCallPlan
 from rag.agent.loop.runtime import (
     AgentLoop,
     LoopEventSink,
@@ -38,7 +39,6 @@ from rag.agent.loop.stop_hooks import (
 )
 from rag.agent.memory.compactor import LoopCompactionResult, LoopContextCompactor
 from rag.agent.memory.models import MemoryPolicy
-from rag.agent.core.turn_contracts import ToolCallPlan
 from rag.agent.streaming.events import EventType, StreamEvent, text_delta
 from rag.agent.tools.registry import ToolExecutionContext, ToolRegistry
 from rag.agent.tools.spec import ToolError, ToolPermissions, ToolSpec
@@ -62,6 +62,7 @@ class _SequenceProvider:
     ) -> None:
         self._turns = turns
         self.seen_states: list[LoopState] = []
+        self.seen_budget_remaining: list[int] = []
 
     async def next_turn(
         self,
@@ -70,8 +71,9 @@ class _SequenceProvider:
         definition: AgentRuntimePolicy,
         budget_remaining: int,
     ) -> ModelTurnDraft | ModelTurnEnvelope:
-        del definition, budget_remaining
+        del definition
         self.seen_states.append(deepcopy(state))
+        self.seen_budget_remaining.append(budget_remaining)
         if not self._turns:
             raise AssertionError("provider called after scripted turns")
         turn = self._turns.pop(0)
@@ -156,12 +158,13 @@ def _config(
     run_id: str,
     *,
     memory_policy: MemoryPolicy | None = None,
+    llm_budget_total: int | None = 20_000,
 ) -> AgentRunConfig:
     RunRegistry.remove(run_id)
     return AgentRunConfig(
         run_id=run_id,
         thread_id=run_id,
-        budget_total=20_000,
+        llm_budget_total=llm_budget_total,
         max_depth=2,
         access_policy=AccessPolicy.default(),
         memory_policy=memory_policy or MemoryPolicy(),
@@ -309,6 +312,57 @@ async def test_run_streaming_tool_progress_keeps_run_and_turn_context() -> None:
     assert len(progress) == 1
     assert progress[0].run_id == config.run_id
     assert progress[0].turn == 1
+
+
+@pytest.mark.anyio
+async def test_loop_fails_before_model_turn_when_budget_is_exhausted() -> None:
+    config = _config("loop-budget-exhausted", llm_budget_total=10)
+    handles = RunRegistry.get_or_create(config)
+    assert handles.llm_budget_ledger is not None
+    assert await handles.llm_budget_ledger.reserve("seed", 10)
+    await handles.llm_budget_ledger.commit("seed", 10)
+    provider = _SequenceProvider(
+        [ModelTurnDraft(action="finish", final_answer="Should not be used.")]
+    )
+    checkpoint = _Checkpoint()
+    state = create_loop_state(task="Stop on exhausted budget.", run_config=config)
+
+    result = await _loop(
+        definition=_definition(),
+        provider=provider,
+        tool_runner=ToolExecutionService(tool_registry=ToolRegistry()),
+        checkpoint=checkpoint,
+    ).run(state)
+
+    assert result["status"] == "failed"
+    assert result["terminal"] is not None
+    assert result["terminal"].stop_reason == "budget_exhausted"
+    assert provider.seen_states == []
+    RunRegistry.remove(config.run_id)
+
+
+@pytest.mark.anyio
+async def test_loop_passes_remaining_budget_to_model_provider() -> None:
+    config = _config("loop-budget-remaining", llm_budget_total=100)
+    handles = RunRegistry.get_or_create(config)
+    assert handles.llm_budget_ledger is not None
+    assert await handles.llm_budget_ledger.reserve("seed", 35)
+    await handles.llm_budget_ledger.commit("seed", 35)
+    provider = _SequenceProvider(
+        [ModelTurnDraft(action="finish", final_answer="Final answer.")]
+    )
+    checkpoint = _Checkpoint()
+    state = create_loop_state(task="Expose remaining budget.", run_config=config)
+
+    await _loop(
+        definition=_definition(),
+        provider=provider,
+        tool_runner=ToolExecutionService(tool_registry=ToolRegistry()),
+        checkpoint=checkpoint,
+    ).run(state)
+
+    assert provider.seen_budget_remaining == [65]
+    RunRegistry.remove(config.run_id)
 
 
 @pytest.mark.anyio
