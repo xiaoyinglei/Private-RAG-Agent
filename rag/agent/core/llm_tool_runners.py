@@ -6,7 +6,7 @@ from uuid import uuid4
 from rag.agent.core.context import RunRegistry
 from rag.agent.core.definition import AgentRuntimePolicy
 from rag.agent.core.llm_context import AgentLLMContextAssembler
-from rag.agent.core.llm_registry import ModelRegistry, ResolvedModel
+from rag.agent.core.llm_registry import ModelResolver, ResolvedModel
 from rag.agent.loop.state import LoopState
 from rag.agent.tools.llm_tools import (
     LLMCompareInput,
@@ -21,7 +21,7 @@ from rag.schema.llm import DEFAULT_LLM_STAGE_BUDGETS, LLMCallStage
 
 
 def create_model_llm_tool_runners(
-    registry: ModelRegistry,
+    registry: ModelResolver,
 ) -> dict[str, ContextualToolRunner]:
     """Create model-backed runners for llm_* tools.
 
@@ -174,7 +174,7 @@ async def _generate_text(
 
 
 def _model_boundary(
-    registry: ModelRegistry,
+    registry: ModelResolver,
     *,
     node_name: str,
     stage: LLMCallStage,

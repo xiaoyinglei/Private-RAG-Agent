@@ -43,7 +43,7 @@ from rag.agent.core.finalization import FinishCandidateBuilder
 from rag.agent.core.goal_contract import GoalCompatibilityConfig, GoalSpec
 from rag.agent.core.human_input import HumanInputRequest, HumanInputResponse
 from rag.agent.core.llm_providers import create_loop_model_turn_provider
-from rag.agent.core.llm_registry import ModelRegistry
+from rag.agent.core.llm_registry import ModelResolver
 from rag.agent.core.output_finalizer import (
     StructuredOutputFinalizer,
     create_model_structured_output_finalizer,
@@ -369,7 +369,7 @@ class AgentService:
         retrieval_hint_provider: RetrievalHintProvider | None = None,
         subagent_runner: DelegatedAgentRunner | None = None,
         output_finalizer: StructuredOutputFinalizer | None = None,
-        model_registry: ModelRegistry | None = None,
+        model_registry: ModelResolver | None = None,
         checkpointer: BaseCheckpointSaver[str] | None = None,
         runtime_diagnostics: Sequence[RuntimeDiagnostic] = (),
         catalog: ToolCatalog | None = None,

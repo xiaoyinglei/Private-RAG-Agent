@@ -165,11 +165,13 @@ No `--knowledge`, no knowledge tools.
 ### 6.3 Model Commands
 
 ```bash
-agent models list
-agent models show qwen14b
-agent models test qwen14b
-agent models default qwen14b
+agent model list
+agent model current
+agent model switch qwen14b
 ```
+
+Model switching is runtime session state. It must not rewrite
+`configs/models.yaml` or imply a global default change.
 
 The main `agent run` help should not show embedding/reranker/storage/vector
 options.
@@ -297,44 +299,42 @@ Rules:
 - Knowledge providers own their embedding/reranker configuration.
 - Agent startup does not initialize embedding/reranker models.
 
-## 9. Model Layer Design
+## 9. Model Control Plane
 
-Do not introduce a model router for the first pass. The required abstraction is a
-thin model resolver and client factory.
+This layer is not a `ModelRouter`, task classifier, or capability router. It is
+a small control plane for selecting the current chat model in a run/session.
 
 Public mental model:
 
 ```python
-chat_model = models.resolve_chat("qwen14b")
-response = chat_model.generate(messages, tools=tools)
+from agent_runtime import Agent
+
+agent = Agent(model="qwen14b")
+agent.switch_model("mimo_cloud")
+result = agent.run("继续当前任务")
 ```
 
 Internal responsibilities:
 
-- Load `agent.yaml`.
-- Validate model aliases.
-- Create chat clients from aliases.
-- Provide clear errors for missing service, missing API key, unknown alias, and
-  capability mismatch.
-- Cache clients when appropriate.
+- `ModelSpec`: runtime-facing model declaration with provider, provider model,
+  context window, tool support, structured output support, local/cloud location,
+  and optional cost metadata.
+- `ModelCatalog`: list and validate known chat models from `configs/models.yaml`.
+- `ModelSessionState`: hold the current model id for the runtime session.
+- `ModelPolicy`: review switch requests, including requests initiated by the
+  agent, before mutating session state.
+- `ModelControlPlane`: shared facade used by Agent, CLI, SDK, and provider
+  resolution.
+- LLM provider construction still happens through the existing thin resolver;
+  when no node-specific model is set, it resolves `session.current_model_id`.
 
 Not responsible for:
 
-- Choosing embedding models for generation.
-- Auto-selecting a different chat model based on task complexity.
+- Auto-selecting a model based on task complexity.
+- Introducing `ModelRouter`, `TaskClassifier`, or `CapabilityRouter`.
+- Choosing embedding/reranker models for generation.
 - Starting local model servers.
 - Initializing RAG or vector infrastructure.
-
-Dynamic model selection can be added later as middleware:
-
-```python
-agent = Agent(
-    model="qwen8b",
-    middleware=[use_model("qwen14b", when=large_context)],
-)
-```
-
-That is not part of the first API cleanup.
 
 ## 10. Knowledge and RAG Boundary
 
@@ -428,7 +428,7 @@ CLI:
 agent run
 agent chat
 agent resume
-agent models
+agent model
 agent knowledge
 ```
 
@@ -463,6 +463,9 @@ the recommended API.
 - Change `agent` CLI to call the facade.
 - Keep existing `rag.agent.service.AgentService` internally.
 - Do not move files yet unless necessary.
+- Add the first Model Control Plane slice: `ModelSpec`, `ModelCatalog`,
+  `ModelSessionState`, `ModelPolicy`, `ModelControlPlane`, and
+  `agent model list/current/switch`.
 
 Success:
 
@@ -609,4 +612,3 @@ Proceed with Phase 1 first: add the facade and make the CLI call it. This gives
 users the new API without breaking the existing runtime internals. Once the
 facade is stable, move package boundaries and split RAG into a lazy knowledge
 provider.
-

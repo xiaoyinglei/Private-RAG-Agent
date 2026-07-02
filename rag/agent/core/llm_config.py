@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from enum import StrEnum
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -26,12 +26,19 @@ class ModelSpec(BaseModel):
 
     provider: ModelProvider
     model: str
+    provider_name: str | None = None
+    protocol: str | None = None
     max_tokens: int = 2048
     timeout_seconds: float = 120.0
     base_url: str | None = None
     api_key_env: str | None = None
     defaults: dict[str, Any] = Field(default_factory=dict)
     context_window_tokens: int = Field(default=32_768, gt=0)
+    supports_tools: bool = True
+    supports_structured_output: bool = True
+    location: Literal["local", "cloud"] | None = None
+    input_cost_per_1m: float | None = None
+    output_cost_per_1m: float | None = None
 
 
 class AgentModelsConfig(BaseModel):

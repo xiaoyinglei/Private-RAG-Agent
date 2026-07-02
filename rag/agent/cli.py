@@ -12,13 +12,18 @@ from typing import Annotated, Any, Literal, cast
 import typer
 
 from agent_runtime import Agent, AgentResult
+from agent_runtime.models import (
+    ModelControlPlane,
+    ModelPolicyError,
+    format_model_rows,
+)
 from rag.agent.builtin import create_builtin_agent_registry
 from rag.agent.builtin_registry import create_builtin_tool_registry
 from rag.agent.core.agent_service_factory import AgentServiceFactory
 from rag.agent.core.checkpointing import create_agent_checkpointer
 from rag.agent.core.definition import AgentRuntimePolicy
 from rag.agent.core.human_input import HumanInputRequest, HumanInputResponse
-from rag.agent.core.llm_registry import ModelRegistry, ResolvedModel
+from rag.agent.core.llm_registry import ResolvedModel, UnknownModelAliasError
 from rag.agent.core.llm_tool_runners import create_model_llm_tool_runners
 from rag.agent.core.registry import AgentRegistry
 from rag.agent.core.runtime_diagnostics import RuntimeDiagnostic
@@ -33,10 +38,13 @@ from rag.storage.runtime_config import DEFAULT_VECTOR_BACKEND, runtime_storage_c
 from rag.utils.text import load_env_file
 
 agent_app = typer.Typer(add_completion=False, no_args_is_help=True)
+model_app = typer.Typer(add_completion=False, no_args_is_help=True)
+agent_app.add_typer(model_app, name="model", help="查看和切换当前模型会话。")
 logger = logging.getLogger(__name__)
 
 CLI_AGENT_CHOICES = ("generic",)
 _SEMANTIC_RAG_TOOLS = frozenset({"search_knowledge", "search_assets"})
+DEFAULT_MODEL_SESSION_PATH = Path(".rag/agent_model_session.json")
 
 
 @dataclass(frozen=True)
@@ -182,12 +190,29 @@ def _service_model_alias(service: AgentService, requested_model: str | None) -> 
     return requested_model or "unavailable"
 
 
+def _build_model_control_plane(
+    *,
+    model_alias: str | None = None,
+    session_path: Path | None = None,
+) -> ModelControlPlane:
+    return ModelControlPlane.from_env(
+        initial_model_id=model_alias,
+        session_path=session_path,
+    )
+
+
+def _service_model_control_plane(service: AgentService) -> ModelControlPlane | None:
+    registry = getattr(service, "_model_registry", None)
+    return registry if isinstance(registry, ModelControlPlane) else None
+
+
 def _build_agent_service(
     runtime: Any | None,
     *,
     checkpoint_db: Path | None = None,
     agent_type: str = "generic",
     model_alias: str | None = None,
+    model_control_plane: ModelControlPlane | None = None,
     runtime_diagnostics: Sequence[RuntimeDiagnostic] = (),
     knowledge_runner: ContextualToolRunner | None = None,
     knowledge_asset_runner: ContextualToolRunner | None = None,
@@ -328,7 +353,9 @@ def _build_agent_service(
     )
     diagnostics: tuple[RuntimeDiagnostic, ...] = tuple(runtime_diagnostics)
     try:
-        model_registry = ModelRegistry.from_env(default_model=model_alias)
+        model_registry = model_control_plane or _build_model_control_plane(
+            model_alias=model_alias,
+        )
     except Exception as exc:
         if model_alias is not None:
             raise
@@ -618,11 +645,102 @@ def _build_resume_response(request: object, decision: str) -> HumanInputResponse
 
 def _print_startup_banner(model_alias: str, *, agent_type: str) -> None:
     print(f"Agent 就绪 (agent: {agent_type}, 模型: {model_alias})")
-    print("输入查询，或 /exit 退出，/verbose 切换详细输出")
+    print("输入查询，或 /exit 退出，/verbose 切换详细输出，/model 查看/切换模型")
     print()
 
 
+def _print_current_model(control_plane: ModelControlPlane) -> None:
+    spec = control_plane.current_model()
+    print(f"{spec.id}")
+    print(f"provider: {spec.provider}")
+    print(f"provider_model: {spec.provider_model}")
+    print(f"context_window: {spec.context_window}")
+    print(f"location: {spec.location}")
+
+
+def _handle_model_slash_command(
+    query: str,
+    *,
+    control_plane: ModelControlPlane | None,
+) -> None:
+    if control_plane is None:
+        print("模型控制平面不可用。")
+        return
+    parts = query.split()
+    action = parts[1] if len(parts) > 1 else "current"
+    try:
+        if action == "list":
+            for line in format_model_rows(
+                control_plane.list_models(),
+                current_model_id=control_plane.current_model().id,
+            ):
+                print(line)
+            return
+        if action == "current":
+            _print_current_model(control_plane)
+            return
+        if action in {"switch", "use"}:
+            if len(parts) < 3:
+                print("用法: /model switch <model_id>")
+                return
+            spec = control_plane.switch_model(parts[2], requested_by="user")
+            print(f"已切换模型: {spec.id}")
+            return
+        if len(parts) == 2:
+            spec = control_plane.switch_model(action, requested_by="user")
+            print(f"已切换模型: {spec.id}")
+            return
+    except (ModelPolicyError, UnknownModelAliasError) as exc:
+        print(f"模型切换失败: {exc}")
+        return
+    print("用法: /model [current|list|switch <model_id>]")
+
+
 # ── CLI Commands ──
+
+
+@model_app.command(name="list")
+def model_list(
+    session_path: Annotated[
+        Path,
+        typer.Option("--session-path", help="模型 session state 文件"),
+    ] = DEFAULT_MODEL_SESSION_PATH,
+) -> None:
+    """列出可用模型，并标记当前会话模型。"""
+    control_plane = _build_model_control_plane(session_path=session_path)
+    for line in format_model_rows(
+        control_plane.list_models(),
+        current_model_id=control_plane.current_model().id,
+    ):
+        print(line)
+
+
+@model_app.command(name="current")
+def model_current(
+    session_path: Annotated[
+        Path,
+        typer.Option("--session-path", help="模型 session state 文件"),
+    ] = DEFAULT_MODEL_SESSION_PATH,
+) -> None:
+    """显示当前会话模型。"""
+    _print_current_model(_build_model_control_plane(session_path=session_path))
+
+
+@model_app.command(name="switch")
+def model_switch(
+    model_id: Annotated[str, typer.Argument(help="要切换到的模型 id")],
+    session_path: Annotated[
+        Path,
+        typer.Option("--session-path", help="模型 session state 文件"),
+    ] = DEFAULT_MODEL_SESSION_PATH,
+) -> None:
+    """切换当前模型 session state，不修改 models.yaml。"""
+    control_plane = _build_model_control_plane(session_path=session_path)
+    try:
+        spec = control_plane.switch_model(model_id, requested_by="user")
+    except (ModelPolicyError, UnknownModelAliasError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    print(f"已切换模型: {spec.id}")
 
 
 @agent_app.command(name="chat")
@@ -692,10 +810,20 @@ def agent_chat(
     )
 
     with runtime if runtime is not None else nullcontext():
+        try:
+            model_control_plane = _build_model_control_plane(
+                model_alias=model,
+                session_path=DEFAULT_MODEL_SESSION_PATH,
+            )
+        except Exception:
+            if model is not None:
+                raise
+            model_control_plane = None
         service = _build_agent_service(
             runtime,
             agent_type=agent,
             model_alias=model,
+            model_control_plane=model_control_plane,
             runtime_diagnostics=diagnostics,
         )
         run_id = f"chat_{id(service):x}"
@@ -717,6 +845,12 @@ def agent_chat(
             if query == "/verbose":
                 verbose = not verbose
                 print(f"详细输出: {'开' if verbose else '关'}")
+                continue
+            if query == "/model" or query.startswith("/model "):
+                _handle_model_slash_command(
+                    query,
+                    control_plane=_service_model_control_plane(service),
+                )
                 continue
 
             result = asyncio.run(
@@ -828,6 +962,7 @@ def agent_run(
         model=model,
         agent_type=agent,
         checkpoint_db=checkpoint_db,
+        model_session_path=DEFAULT_MODEL_SESSION_PATH,
         knowledge=tuple(knowledge or ()),
         rag_storage_root=storage_root,
         embedding_model=embedding_model,
@@ -952,11 +1087,21 @@ def agent_resume(
     )
 
     with runtime if runtime is not None else nullcontext():
+        try:
+            model_control_plane = _build_model_control_plane(
+                model_alias=model,
+                session_path=DEFAULT_MODEL_SESSION_PATH,
+            )
+        except Exception:
+            if model is not None:
+                raise
+            model_control_plane = None
         service = _build_agent_service(
             runtime,
             checkpoint_db=checkpoint_db,
             agent_type=agent,
             model_alias=model,
+            model_control_plane=model_control_plane,
             runtime_diagnostics=diagnostics,
         )
         request = asyncio.run(service.apending_human_input_request(run_id=run_id))

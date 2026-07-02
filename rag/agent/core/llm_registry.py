@@ -4,7 +4,7 @@ import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 from rag.agent.core.llm_config import AgentModelsConfig, ModelProvider, ModelSpec
 from rag.assembly.models import ProviderConfig
@@ -32,6 +32,26 @@ class ResolvedModel:
     token_accounting: TokenAccountingService | None = None
 
 
+class ModelResolver(Protocol):
+    @property
+    def default_model(self) -> str: ...
+
+    @property
+    def fallback_model(self) -> str | None: ...
+
+    @property
+    def generation_config(self) -> GenerationConfig: ...
+
+    def resolve_or_fallback(self, alias: str) -> ResolvedModel: ...
+
+    def resolve_for_node(
+        self,
+        *,
+        node_model: str | None,
+        node_name: str,
+    ) -> ResolvedModel: ...
+
+
 class ModelRegistry:
     """按 alias 解析并缓存 Generator 实例。
 
@@ -55,6 +75,16 @@ class ModelRegistry:
     @property
     def generation_config(self) -> GenerationConfig:
         return self._config.generation
+
+    @property
+    def model_ids(self) -> tuple[str, ...]:
+        return tuple(self._config.models)
+
+    def get_model_spec(self, alias: str) -> ModelSpec:
+        spec = self._config.models.get(alias)
+        if spec is None:
+            raise UnknownModelAliasError(f"Model alias {alias!r} not found in config")
+        return spec
 
     @classmethod
     def from_env(cls, env_path: str = ".env", *, default_model: str | None = None) -> ModelRegistry:
@@ -109,13 +139,26 @@ class ModelRegistry:
                 continue
             if entry.get("capability") != "chat":
                 continue
+            cost = entry.get("cost")
+            if not isinstance(cost, dict):
+                cost = {}
             agent_models[alias] = {
                 "provider": _agent_provider_kind(entry),
+                "provider_name": entry.get("provider"),
+                "protocol": entry.get("protocol"),
                 "model": entry["model"],
                 "max_tokens": entry.get("max_tokens", 2048),
                 "base_url": entry.get("base_url"),
                 "api_key_env": entry.get("api_key_env"),
                 "context_window_tokens": entry.get("context_window_tokens", 32_768),
+                "supports_tools": entry.get("tools", entry.get("supports_tools", True)),
+                "supports_structured_output": entry.get(
+                    "structured_output",
+                    entry.get("supports_structured_output", True),
+                ),
+                "location": entry.get("location"),
+                "input_cost_per_1m": cost.get("input_per_1m"),
+                "output_cost_per_1m": cost.get("output_per_1m"),
             }
 
         default_model = defaults.get("primary_model", "")

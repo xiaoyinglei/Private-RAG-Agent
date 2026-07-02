@@ -55,6 +55,19 @@ lsof -nP -iTCP:6379 -sTCP:LISTEN
 - 入库和查询需要 embedding；建议启动 embedding HTTP 服务，避免每条命令重复加载模型。
 - rerank 是可选服务，默认省内存时关闭。
 - 切换 embedding 模型后必须换新的 Milvus collection prefix，旧向量不能混用。
+- chat 模型的当前选择是 Agent session state，不是 `configs/models.yaml`
+  的全局改写。
+
+查看和切换当前 Agent 模型 session：
+
+```bash
+uv run agent model list
+uv run agent model current
+uv run agent model switch mimo_cloud
+```
+
+`agent model switch` 写 `.rag/agent_model_session.json`。临时只跑一次其他模型时，用
+`agent run --model mimo_cloud ...`，不要改 `configs/models.yaml`。
 
 先检查是否已经有同模型服务，避免重复常驻占内存：
 
@@ -329,6 +342,7 @@ uv run agent chat \
 | 普通制度问答 | 直接问 `agent run` |
 | Excel/PPT 表格/图片 OCR 已入库资产问题 | `agent run ... --knowledge <name>`，模型会按需找 `search_assets` |
 | Agent 直接读本地文件 | `agent run ... --file "/path/to/file.xlsx"` |
+| 查看/切换当前 chat 模型 | `agent model list/current/switch <model_id>`；这是 session state，不改 YAML |
 | 一次性指定模型 | 默认不需要；如要临时走云端可用 `--model mimo_cloud` |
 | 恢复常驻 embedding | `export RAG_EMBEDDING_SERVICE_URL=http://127.0.0.1:9090` |
 

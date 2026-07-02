@@ -15,7 +15,7 @@ from rag.agent.core.definition import AgentRuntimePolicy, ModelSelectionPolicy
 from rag.agent.core.llm_context import (
     AgentLLMContextAssembler,
 )
-from rag.agent.core.llm_registry import ModelRegistry
+from rag.agent.core.llm_registry import ModelResolver
 from rag.agent.core.messages import ModelMessage, StopReason, ToolCall, ToolUseResult
 from rag.agent.core.tool_schema import AgentMessageAssembler, OpenAIAdapter
 from rag.agent.core.turn_contracts import ToolCallPlan
@@ -447,7 +447,7 @@ def _tool_result_content(result: ToolResult, formatter_resolver: Any = None) -> 
 
 
 def create_loop_model_turn_provider(
-    registry: ModelRegistry,
+    registry: ModelResolver,
     selection: ModelSelectionPolicy,
     *,
     tool_registry: Any | None = None,

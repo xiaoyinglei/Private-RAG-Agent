@@ -7,7 +7,7 @@ from langgraph.checkpoint.base import BaseCheckpointSaver
 from rag.agent.core.checkpointing import create_agent_checkpointer
 from rag.agent.core.definition import AgentRuntimePolicy
 from rag.agent.core.delegation import DelegatedAgentRunner
-from rag.agent.core.llm_registry import ModelRegistry
+from rag.agent.core.llm_registry import ModelResolver
 from rag.agent.core.output_finalizer import StructuredOutputFinalizer
 from rag.agent.core.runtime_diagnostics import RuntimeDiagnostic
 from rag.agent.core.runtime_ports import RetrievalHintProvider
@@ -28,7 +28,7 @@ class GraphCompiler:
         retrieval_hint_provider: RetrievalHintProvider | None = None,
         subagent_runner: DelegatedAgentRunner | None = None,
         output_finalizer: StructuredOutputFinalizer | None = None,
-        model_registry: ModelRegistry | None = None,
+        model_registry: ModelResolver | None = None,
         checkpointer: BaseCheckpointSaver[str] | None = None,
         runtime_diagnostics: Sequence[RuntimeDiagnostic] = (),
     ) -> None:

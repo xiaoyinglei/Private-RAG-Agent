@@ -8,6 +8,7 @@ from typer.testing import CliRunner
 
 from agent_runtime import Agent, AgentResult, AgentUsage
 from agent_runtime.knowledge_providers.rag import LazyRAGKnowledgeProvider
+from agent_runtime.models import ModelControlPlane
 from rag.agent import cli as agent_cli
 from rag.agent.cli import agent_app
 from rag.agent.service import AgentRunResult
@@ -57,12 +58,14 @@ def test_agent_facade_run_maps_public_request_to_internal_service(
     assert result.answer == "facade answer"
     assert result.status == "done"
     assert result.files == ("README.md",)
+    assert isinstance(built[0]["model_control_plane"], ModelControlPlane)
     assert built == [
         {
             "runtime": None,
             "checkpoint_db": None,
             "agent_type": "generic",
             "model_alias": "qwen3_14b_4bit",
+            "model_control_plane": built[0]["model_control_plane"],
             "runtime_diagnostics": (),
             "knowledge_runner": None,
             "knowledge_asset_runner": None,
@@ -222,6 +225,7 @@ def test_agent_run_cli_delegates_to_agent_facade(monkeypatch) -> None:
                 "model": "qwen3_14b_4bit",
                 "agent_type": "generic",
                 "checkpoint_db": None,
+                "model_session_path": Path(".rag/agent_model_session.json"),
                 "knowledge": (),
                 "rag_storage_root": Path(".rag"),
                 "embedding_model": None,

@@ -9,7 +9,7 @@ from pydantic import BaseModel, ValidationError
 
 from rag.agent.core.context import RunRegistry
 from rag.agent.core.llm_context import AgentLLMContextAssembler
-from rag.agent.core.llm_registry import ModelRegistry
+from rag.agent.core.llm_registry import ModelResolver
 from rag.agent.core.output_models import (
     ValidatedFinalOutput,
     output_model_path,
@@ -157,7 +157,7 @@ def final_answer_from_output(output: BaseModel) -> str:
 
 
 def create_model_structured_output_finalizer(
-    registry: ModelRegistry,
+    registry: ModelResolver,
 ) -> ModelStructuredOutputFinalizer:
     resolved = registry.resolve_for_node(
         node_model=None,

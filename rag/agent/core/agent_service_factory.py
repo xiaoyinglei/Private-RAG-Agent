@@ -7,7 +7,7 @@ from langgraph.checkpoint.base import BaseCheckpointSaver
 
 from rag.agent.core.definition import AgentRuntimePolicy
 from rag.agent.core.delegation import DelegatedAgentRunner
-from rag.agent.core.llm_registry import ModelRegistry
+from rag.agent.core.llm_registry import ModelResolver
 from rag.agent.core.runtime_diagnostics import RuntimeDiagnostic
 from rag.agent.core.runtime_ports import RetrievalHintProvider
 from rag.agent.loop.runtime import ModelTurnProvider
@@ -24,7 +24,7 @@ class AgentServiceFactory:
         *,
         tool_registry: ToolRegistry,
         model_turn_provider: ModelTurnProvider | None = None,
-        model_registry: ModelRegistry | None = None,
+        model_registry: ModelResolver | None = None,
         retrieval_hint_provider: RetrievalHintProvider | None = None,
         checkpointer: BaseCheckpointSaver[str] | None = None,
         runtime_diagnostics: Sequence[RuntimeDiagnostic] = (),

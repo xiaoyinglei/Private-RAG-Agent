@@ -236,6 +236,7 @@ def test_agent_cli_is_the_top_level_agent_entrypoint() -> None:
     assert "run" in root_output
     assert "chat" in root_output
     assert "resume" in root_output
+    assert "model" in root_output
     assert "--agent" in _plain_help(run_help.output)
 
 
