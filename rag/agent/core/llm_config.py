@@ -21,6 +21,14 @@ class ModelProvider(StrEnum):
     OPENAI_COMPATIBLE = "openai_compatible"
 
 
+class ModelRuntimeConfig(BaseModel):
+    health_url: str | None = None
+    launch_command: tuple[str, ...] = ()
+    expected_model_contains: str | None = None
+    startup_timeout_seconds: float = Field(default=60.0, gt=0)
+    poll_interval_seconds: float = Field(default=1.0, gt=0)
+
+
 class ModelSpec(BaseModel):
     """单个模型声明：只允许填写当前已实现 provider 支持的模型。"""
 
@@ -39,6 +47,7 @@ class ModelSpec(BaseModel):
     location: Literal["local", "cloud"] | None = None
     input_cost_per_1m: float | None = None
     output_cost_per_1m: float | None = None
+    runtime: ModelRuntimeConfig | None = None
 
 
 class AgentModelsConfig(BaseModel):

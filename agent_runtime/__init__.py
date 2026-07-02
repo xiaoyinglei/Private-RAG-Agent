@@ -6,6 +6,7 @@ from agent_runtime.models import (
     ModelControlPlane,
     ModelPolicy,
     ModelPolicyError,
+    ModelRuntimeSpec,
     ModelSessionState,
     ModelSpec,
 )
@@ -19,6 +20,7 @@ __all__ = [
     "ModelControlPlane",
     "ModelPolicy",
     "ModelPolicyError",
+    "ModelRuntimeSpec",
     "ModelSessionState",
     "ModelSpec",
 ]

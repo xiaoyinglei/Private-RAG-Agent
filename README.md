@@ -56,15 +56,9 @@ cd "/Users/leixiaoying/LLM/RAG学习"
 uv sync
 ```
 
-云模型可以不用配。默认走本地 LLM，先启动本地 OpenAI-compatible chat 服务：
-
-```bash
-uv run python -m mlx_lm.server \
-  --model models--mlx-community--Qwen3-14B-4bit \
-  --host 127.0.0.1 \
-  --port 8080 \
-  --chat-template-args '{"enable_thinking": false}'
-```
+云模型可以不用配。默认走本地 LLM；`agent run --model qwen3_14b_4bit`
+会按 `configs/models.yaml` 的 `runtime` 配置检查 `127.0.0.1:8080/v1/models`，
+未启动时自动拉起本地 OpenAI-compatible server，然后再调用模型。
 
 直接调用 Agent：
 
@@ -447,12 +441,12 @@ uv run agent model current
 uv run agent model switch mimo_cloud
 ```
 
-`agent model switch` 写入 workspace-local session state；`agent run --model ...` 只是本次运行覆盖，不改变全局模型目录。
+`agent model switch` 写入 workspace-local session state；`agent run --model ...` 只是本次运行覆盖，不改变全局模型目录。指定什么模型就用什么模型：云端模型缺 API key 会报 `Missing API key: ...`；本地端口已被其他模型占用会报 endpoint conflict，不会 silent fallback。
 
 当前默认：
 
 - `defaults.primary_model`：`qwen3_14b_4bit`
-- `qwen3_14b_4bit.model`：`models--mlx-community--Qwen3-14B-4bit`，OpenAI-compatible，`127.0.0.1:8080`
+- `qwen3_14b_4bit.model`：`models--mlx-community--Qwen3-14B-4bit`，OpenAI-compatible，`127.0.0.1:8080`，按 `runtime.launch_command` 自动启动
 - Embedding：`mlx-community/Qwen3-Embedding-4B-4bit-DWQ`
 - Rerank：`BAAI/bge-reranker-v2-m3`
 

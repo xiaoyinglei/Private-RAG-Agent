@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Protocol, cast
 from urllib.parse import urlparse
 
 from rag.agent.core.llm_config import ModelProvider
@@ -21,8 +22,21 @@ ModelLocation = Literal["local", "cloud"]
 ModelSwitchRequester = Literal["user", "agent", "system"]
 
 
+class LocalRuntimeReadyManager(Protocol):
+    def ensure_ready(self, spec: ModelSpec) -> None: ...
+
+
 class ModelPolicyError(ValueError):
     """A model switch request was rejected by policy."""
+
+
+@dataclass(frozen=True, slots=True)
+class ModelRuntimeSpec:
+    health_url: str | None = None
+    launch_command: tuple[str, ...] = ()
+    expected_model_contains: str | None = None
+    startup_timeout_seconds: float = 60.0
+    poll_interval_seconds: float = 1.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,6 +54,7 @@ class ModelSpec:
     max_output_tokens: int = 2048
     input_cost_per_1m: float | None = None
     output_cost_per_1m: float | None = None
+    runtime: ModelRuntimeSpec | None = None
 
 
 class ModelCatalog:
@@ -168,6 +183,7 @@ class ModelControlPlane:
         policy: ModelPolicy | None = None,
         registry: ModelResolver | None = None,
         session_path: Path | None = None,
+        local_runtime_manager: LocalRuntimeReadyManager | None = None,
     ) -> None:
         if not catalog.has(state.current_model_id):
             raise UnknownModelAliasError(
@@ -178,6 +194,7 @@ class ModelControlPlane:
         self.policy = policy or ModelPolicy()
         self._registry = registry
         self._session_path = session_path
+        self._local_runtime_manager = local_runtime_manager
 
     @classmethod
     def from_config_file(
@@ -187,6 +204,7 @@ class ModelControlPlane:
         initial_model_id: str | None = None,
         session_path: Path | None = None,
         policy: ModelPolicy | None = None,
+        local_runtime_manager: LocalRuntimeReadyManager | None = None,
     ) -> ModelControlPlane:
         registry = ModelRegistry(ModelRegistry._load_yaml_file(path))
         return cls.from_registry(
@@ -194,6 +212,7 @@ class ModelControlPlane:
             initial_model_id=initial_model_id,
             session_path=session_path,
             policy=policy,
+            local_runtime_manager=local_runtime_manager,
         )
 
     @classmethod
@@ -204,6 +223,7 @@ class ModelControlPlane:
         initial_model_id: str | None = None,
         session_path: Path | None = None,
         policy: ModelPolicy | None = None,
+        local_runtime_manager: LocalRuntimeReadyManager | None = None,
     ) -> ModelControlPlane:
         registry = ModelRegistry.from_env(env_path=env_path)
         return cls.from_registry(
@@ -211,6 +231,7 @@ class ModelControlPlane:
             initial_model_id=initial_model_id,
             session_path=session_path,
             policy=policy,
+            local_runtime_manager=local_runtime_manager,
         )
 
     @classmethod
@@ -221,6 +242,7 @@ class ModelControlPlane:
         initial_model_id: str | None = None,
         session_path: Path | None = None,
         policy: ModelPolicy | None = None,
+        local_runtime_manager: LocalRuntimeReadyManager | None = None,
     ) -> ModelControlPlane:
         catalog = ModelCatalog.from_registry(registry)
         state = _load_session_state(
@@ -234,6 +256,7 @@ class ModelControlPlane:
             policy=policy,
             registry=registry,
             session_path=session_path,
+            local_runtime_manager=local_runtime_manager,
         )
 
     @property
@@ -278,10 +301,15 @@ class ModelControlPlane:
     def request_model_switch(self, model_id: str) -> ModelSpec:
         return self.switch_model(model_id, requested_by="agent")
 
-    def resolve_or_fallback(self, alias: str) -> ResolvedModel:
+    def resolve(self, alias: str) -> ResolvedModel:
         if self._registry is None:
             raise RuntimeError("Model resolver is not configured")
-        return self._registry.resolve_or_fallback(alias)
+        spec = self.catalog.get(alias)
+        self._ensure_model_ready(spec)
+        return self._registry.resolve(alias)
+
+    def resolve_or_fallback(self, alias: str) -> ResolvedModel:
+        return self.resolve(alias)
 
     def resolve_for_node(
         self,
@@ -291,7 +319,21 @@ class ModelControlPlane:
     ) -> ResolvedModel:
         del node_name
         model_id = node_model or self.state.current_model_id
-        return self.resolve_or_fallback(model_id)
+        return self.resolve(model_id)
+
+    def _ensure_model_ready(self, spec: ModelSpec) -> None:
+        if spec.location == "local":
+            manager = self._local_runtime_manager
+            if manager is None:
+                from agent_runtime.local_runtime import LocalRuntimeManager
+
+                manager = cast(LocalRuntimeReadyManager, LocalRuntimeManager())
+            manager.ensure_ready(spec)
+            return
+        if spec.api_key_env:
+            value = os.environ.get(spec.api_key_env)
+            if not isinstance(value, str) or not value.strip():
+                raise RuntimeError(f"Missing API key: {spec.api_key_env}")
 
 
 def _load_session_state(
@@ -341,6 +383,20 @@ def _to_public_spec(
         max_output_tokens=int(spec.max_tokens),
         input_cost_per_1m=spec.input_cost_per_1m,
         output_cost_per_1m=spec.output_cost_per_1m,
+        runtime=_to_public_runtime_spec(spec.runtime),
+    )
+
+
+def _to_public_runtime_spec(runtime: object | None) -> ModelRuntimeSpec | None:
+    if runtime is None:
+        return None
+    launch_command = getattr(runtime, "launch_command", ()) or ()
+    return ModelRuntimeSpec(
+        health_url=getattr(runtime, "health_url", None),
+        launch_command=tuple(str(part) for part in launch_command),
+        expected_model_contains=getattr(runtime, "expected_model_contains", None),
+        startup_timeout_seconds=float(getattr(runtime, "startup_timeout_seconds", 60.0)),
+        poll_interval_seconds=float(getattr(runtime, "poll_interval_seconds", 1.0)),
     )
 
 
@@ -389,6 +445,7 @@ __all__ = [
     "ModelLocation",
     "ModelPolicy",
     "ModelPolicyError",
+    "ModelRuntimeSpec",
     "ModelSessionState",
     "ModelSpec",
     "ModelSwitchRequester",

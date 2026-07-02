@@ -325,6 +325,9 @@ Internal responsibilities:
   agent, before mutating session state.
 - `ModelControlPlane`: shared facade used by Agent, CLI, SDK, and provider
   resolution.
+- `LocalRuntimeManager`: for `location: local` models, check `runtime.health_url`,
+  launch exactly `runtime.launch_command` when needed, poll until ready, and
+  fail on endpoint conflict if the endpoint is serving a different model.
 - LLM provider construction still happens through the existing thin resolver;
   when no node-specific model is set, it resolves `session.current_model_id`.
 
@@ -333,7 +336,8 @@ Not responsible for:
 - Auto-selecting a model based on task complexity.
 - Introducing `ModelRouter`, `TaskClassifier`, or `CapabilityRouter`.
 - Choosing embedding/reranker models for generation.
-- Starting local model servers.
+- Killing local model processes, changing ports, or silently selecting a
+  different model.
 - Initializing RAG or vector infrastructure.
 
 ## 10. Knowledge and RAG Boundary

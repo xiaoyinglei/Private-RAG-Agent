@@ -42,6 +42,8 @@ class ModelResolver(Protocol):
     @property
     def generation_config(self) -> GenerationConfig: ...
 
+    def resolve(self, alias: str) -> ResolvedModel: ...
+
     def resolve_or_fallback(self, alias: str) -> ResolvedModel: ...
 
     def resolve_for_node(
@@ -159,6 +161,7 @@ class ModelRegistry:
                 "location": entry.get("location"),
                 "input_cost_per_1m": cost.get("input_per_1m"),
                 "output_cost_per_1m": cost.get("output_per_1m"),
+                "runtime": entry.get("runtime"),
             }
 
         default_model = defaults.get("primary_model", "")

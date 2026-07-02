@@ -15,6 +15,26 @@ models:
     model: models--mlx-community--Qwen3-14B-4bit
     base_url: http://127.0.0.1:8080/v1
     context_window_tokens: 32768
+    location: local
+    runtime:
+      health_url: http://127.0.0.1:8080/v1/models
+      launch_command:
+        - uv
+        - run
+        - python
+        - -m
+        - mlx_lm.server
+        - --model
+        - models--mlx-community--Qwen3-14B-4bit
+        - --host
+        - 127.0.0.1
+        - --port
+        - "8080"
+        - --chat-template-args
+        - '{"enable_thinking": false}'
+      expected_model_contains: models--mlx-community--Qwen3-14B-4bit
+      startup_timeout_seconds: 120
+      poll_interval_seconds: 1
 
   qwen3_0_6b_4bit:
     capability: chat
@@ -23,6 +43,26 @@ models:
     model: mlx-community/Qwen3-0.6B-4bit
     base_url: http://127.0.0.1:8080/v1
     context_window_tokens: 32768
+    location: local
+    runtime:
+      health_url: http://127.0.0.1:8080/v1/models
+      launch_command:
+        - uv
+        - run
+        - python
+        - -m
+        - mlx_lm.server
+        - --model
+        - mlx-community/Qwen3-0.6B-4bit
+        - --host
+        - 127.0.0.1
+        - --port
+        - "8080"
+        - --chat-template-args
+        - '{"enable_thinking": false}'
+      expected_model_contains: mlx-community/Qwen3-0.6B-4bit
+      startup_timeout_seconds: 120
+      poll_interval_seconds: 1
 
   qwen3_8b_mlx_4bit:
     capability: chat
@@ -31,6 +71,36 @@ models:
     model: Qwen/Qwen3-8B-MLX-4bit
     base_url: http://127.0.0.1:8080/v1
     context_window_tokens: 32768
+    location: local
+    runtime:
+      health_url: http://127.0.0.1:8080/v1/models
+      launch_command:
+        - uv
+        - run
+        - python
+        - -m
+        - mlx_lm.server
+        - --model
+        - Qwen/Qwen3-8B-MLX-4bit
+        - --host
+        - 127.0.0.1
+        - --port
+        - "8080"
+        - --chat-template-args
+        - '{"enable_thinking": false}'
+      expected_model_contains: Qwen/Qwen3-8B-MLX-4bit
+      startup_timeout_seconds: 120
+      poll_interval_seconds: 1
+
+  deepseek:
+    capability: chat
+    provider: deepseek
+    protocol: openai_compatible
+    model: deepseek-chat
+    base_url: https://api.deepseek.com/v1
+    api_key_env: DEEPSEEK_API_KEY
+    context_window_tokens: 128000
+    location: cloud
 
   deepseek_chat:
     capability: chat
@@ -40,6 +110,7 @@ models:
     base_url: https://api.deepseek.com/v1
     api_key_env: DEEPSEEK_API_KEY
     context_window_tokens: 128000
+    location: cloud
 
   deepseek_reasoner:
     capability: chat
@@ -49,6 +120,7 @@ models:
     base_url: https://api.deepseek.com/v1
     api_key_env: DEEPSEEK_API_KEY
     context_window_tokens: 128000
+    location: cloud
 
   deepseek_v4_flash:
     capability: chat
@@ -58,6 +130,7 @@ models:
     base_url: https://api.deepseek.com/v1
     api_key_env: DEEPSEEK_API_KEY
     context_window_tokens: 128000
+    location: cloud
 
   qwen3_embedding_8b_4bit_dwq:
     capability: embedding
@@ -93,6 +166,7 @@ models:
     base_url: https://token-plan-cn.xiaomimimo.com/v1
     api_key_env: MIMO_API_KEY
     context_window_tokens: 256000
+    location: cloud
 
 
 defaults:

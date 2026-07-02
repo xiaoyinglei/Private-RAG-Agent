@@ -51,12 +51,15 @@ lsof -nP -iTCP:6379 -sTCP:LISTEN
 
 内存策略：
 
-- 默认 chat 走本地 Qwen 服务，需要先启动 `127.0.0.1:8080` 的 OpenAI-compatible server。
+- 默认 chat 走本地 Qwen 服务。`agent run --model qwen3_14b_4bit`
+  会先检查 `runtime.health_url`，未启动时按 `runtime.launch_command`
+  自动拉起 `127.0.0.1:8080` 的 OpenAI-compatible server。
 - 入库和查询需要 embedding；建议启动 embedding HTTP 服务，避免每条命令重复加载模型。
 - rerank 是可选服务，默认省内存时关闭。
 - 切换 embedding 模型后必须换新的 Milvus collection prefix，旧向量不能混用。
 - chat 模型的当前选择是 Agent session state，不是 `configs/models.yaml`
   的全局改写。
+- 指定什么 chat 模型就必须用什么模型；不会 silent fallback，不会自动换端口，也不会自动杀已有进程。如果 `8080` 已经跑着别的模型，会报 endpoint conflict。
 
 查看和切换当前 Agent 模型 session：
 
@@ -108,7 +111,9 @@ uv run rag rerank-service \
 '
 ```
 
-启动默认本地 Qwen chat 服务：
+可选：手动预热默认本地 Qwen chat 服务。通常不需要；Agent 会按
+`configs/models.yaml` 的 runtime 配置自动启动。手动预热适合提前加载模型、
+减少第一次请求等待：
 
 ```bash
 screen -S rag_qwen_8080 -X quit >/dev/null 2>&1 || true
@@ -141,7 +146,7 @@ screen -S rag_rerank_9092 -X quit >/dev/null 2>&1 || true
 
 ## 私有文档端到端运行手册
 
-先启动本地 Qwen chat 服务和 embedding 服务；rerank 默认不开，需要时再按"常用开关"打开。默认 chat 走 `configs/models.yaml` 中的 `qwen3_14b_4bit`。
+先准备 embedding 服务；rerank 默认不开，需要时再按"常用开关"打开。默认 chat 走 `configs/models.yaml` 中的 `qwen3_14b_4bit`，Agent 会按 runtime 配置自动检查和启动本地 chat 服务。
 
 ### 统一变量
 
