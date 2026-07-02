@@ -2,6 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+from collections.abc import Sequence
+from contextlib import nullcontext
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Annotated, Any, Literal, cast
 
@@ -31,6 +35,66 @@ agent_app = typer.Typer(add_completion=False, no_args_is_help=True)
 logger = logging.getLogger(__name__)
 
 CLI_AGENT_CHOICES = ("generic",)
+_SEMANTIC_RAG_TOOLS = frozenset({"search_knowledge", "search_assets"})
+
+
+@dataclass(frozen=True)
+class AutoRAGConfig:
+    storage_root: Path
+    vector_backend: str
+    vector_dsn: str | None
+    vector_namespace: str | None
+    vector_collection_prefix: str | None
+    explicit: bool
+
+
+def _resolve_auto_rag_config(
+    *,
+    storage_root: Path,
+    vector_backend: str,
+    vector_dsn: str | None,
+    vector_namespace: str | None,
+    vector_collection_prefix: str | None,
+) -> AutoRAGConfig:
+    effective_storage_root = storage_root
+    env_storage_root = (
+        os.environ.get("AGENT_RAG_STORAGE_ROOT")
+        or os.environ.get("RAG_STORAGE_ROOT")
+        or os.environ.get("STORAGE_ROOT")
+    )
+    if storage_root == Path(".rag"):
+        if env_storage_root:
+            effective_storage_root = Path(env_storage_root)
+    env_vector_backend = os.environ.get("AGENT_VECTOR_BACKEND") or os.environ.get("VECTOR_BACKEND")
+    env_vector_dsn = os.environ.get("AGENT_VECTOR_DSN") or os.environ.get("VECTOR_DSN")
+    env_vector_namespace = os.environ.get("AGENT_VECTOR_NAMESPACE") or os.environ.get("VECTOR_NAMESPACE")
+    env_vector_prefix = os.environ.get("AGENT_VECTOR_PREFIX") or os.environ.get("VECTOR_PREFIX")
+    return AutoRAGConfig(
+        storage_root=effective_storage_root,
+        vector_backend=env_vector_backend or vector_backend,
+        vector_dsn=vector_dsn or env_vector_dsn,
+        vector_namespace=vector_namespace or env_vector_namespace,
+        vector_collection_prefix=vector_collection_prefix or env_vector_prefix,
+        explicit=(
+            storage_root != Path(".rag")
+            or bool(env_storage_root)
+            or vector_backend != DEFAULT_VECTOR_BACKEND
+            or bool(env_vector_backend)
+            or bool(vector_dsn)
+            or bool(env_vector_dsn)
+            or bool(vector_namespace)
+            or bool(env_vector_namespace)
+            or bool(vector_collection_prefix)
+            or bool(env_vector_prefix)
+        ),
+    )
+
+
+def _looks_like_rag_storage(storage_root: Path) -> bool:
+    return any(
+        (storage_root / marker).exists()
+        for marker in ("metadata.sqlite3", "vectors.sqlite3", "index.sqlite")
+    )
 
 
 def _build_llm_tool_runners(
@@ -93,135 +157,170 @@ def _resolve_cli_agent_definition(
     return agent_registry.get(agent_type)
 
 
+def _without_unavailable_deferred_tools(
+    definition: AgentRuntimePolicy,
+    unavailable_tools: set[str],
+) -> AgentRuntimePolicy:
+    if not unavailable_tools:
+        return definition
+    filt = definition.tool_catalog_filter
+    return replace(
+        definition,
+        deferred_tool_names=tuple(
+            name for name in definition.deferred_tool_names
+            if name not in unavailable_tools
+        ),
+        tool_catalog_filter=replace(filt, deny=filt.deny | frozenset(unavailable_tools)),
+    )
+
+
+def _service_model_alias(service: AgentService, requested_model: str | None) -> str:
+    registry = getattr(service, "_model_registry", None)
+    if registry is not None:
+        return str(registry.default_model)
+    return requested_model or "unavailable"
+
+
 def _build_agent_service(
-    runtime: Any,
+    runtime: Any | None,
     *,
     checkpoint_db: Path | None = None,
     agent_type: str = "generic",
     model_alias: str | None = None,
+    runtime_diagnostics: Sequence[RuntimeDiagnostic] = (),
 ) -> AgentService:
-    """从 RAGRuntime 构造 AgentService，注册真实 RAG tool runners。
+    """Build the product Agent service.
 
-    只在可以构造 RAGRuntime / retrieval_service 时成功。
-    无法构造时报错，不静默使用 stub。
+    RAG is an optional attached tool provider.  Pure Agent runs should not
+    require RAG storage/vector configuration, and unavailable RAG tools should
+    not be visible to the model.
     """
     agent_registry = create_builtin_agent_registry()
     definition = _resolve_cli_agent_definition(agent_registry, agent_type)
 
-    chat_bindings = list(runtime.capability_bundle.chat_bindings)
-    primary_chat = chat_bindings[0] if chat_bindings else None
-
     runners: dict[str, ToolRunner] = {}
     contextual_runners: dict[str, ContextualToolRunner] = {}
 
-    # RAG tools — AsyncRAGToolRunner（aretrieve_payload → to_thread fallback）
-    from rag.agent.tools.rag_tool_runner import AsyncRAGToolRunner
+    if runtime is not None:
+        bundle = getattr(runtime, "capability_bundle", None)
+        chat_bindings = list(getattr(bundle, "chat_bindings", ()) or ())
+        primary_chat = chat_bindings[0] if chat_bindings else None
 
-    rag_runner = AsyncRAGToolRunner(
-        runtime=runtime,
-        retrieval_service=runtime.retrieval_service,
-        max_context_tokens=4096,
-    )
-    for name in ("vector_search", "keyword_search", "grounding", "rerank", "graph_expand"):
-        contextual_runners[name] = cast(
-            ContextualToolRunner,
-            rag_runner.retrieve_evidence,
-        )
-    rag_answer_runner = RAGSearchAnswerRunner(runtime=runtime)
-    contextual_runners["rag_search_answer"] = cast(
-        ContextualToolRunner,
-        rag_answer_runner.answer,
-    )
-    # Semantic RAG tools (search_knowledge → same runner as rag_search_answer)
-    contextual_runners["search_knowledge"] = cast(
-        ContextualToolRunner,
-        rag_answer_runner.answer,
-    )
+        retrieval_service = getattr(runtime, "retrieval_service", None)
+        if retrieval_service is not None:
+            from rag.agent.tools.rag_tool_runner import AsyncRAGToolRunner
 
-    from rag.agent.tools.asset_tools import AssetToolRunner
-
-    stores = getattr(runtime, "stores", None)
-    metadata_repo = getattr(stores, "metadata_repo", None)
-    object_store = getattr(stores, "object_store", None)
-    if metadata_repo is not None and object_store is not None:
-        asset_runner = AssetToolRunner(
-            metadata_repo=metadata_repo,
-            object_store=object_store,
-        )
-        runners["asset_list"] = cast(ToolRunner, asset_runner.list_assets)
-        runners["asset_inspect"] = cast(ToolRunner, asset_runner.inspect_asset)
-        runners["asset_read_slice"] = cast(ToolRunner, asset_runner.read_slice)
-        runners["asset_analyze"] = cast(ToolRunner, asset_runner.analyze_asset)
-
-        # Semantic asset tool — composite: list → inspect → read_slice
-        async def _search_assets_runner(payload: Any) -> Any:
-            from rag.agent.tools.rag_semantic_tools import (
-                AssetResult,
-                AssetSearchInput,
-                AssetSearchOutput,
+            rag_runner = AsyncRAGToolRunner(
+                runtime=runtime,
+                retrieval_service=retrieval_service,
+                max_context_tokens=4096,
             )
-
-            if isinstance(payload, dict):
-                inp = AssetSearchInput(**payload)
-            else:
-                inp = payload
-            # List
-            list_out = asset_runner.list_assets(
-                type("_In", (), {"doc_id": inp.doc_id, "asset_type": inp.asset_type})()
-            )
-            results: list[AssetResult] = []
-            for a in list_out.assets[:inp.max_results]:
-                ar = AssetResult(
-                    asset_id=a.asset_id, doc_id=a.doc_id,
-                    asset_type=a.asset_type, sheet_name=a.sheet_name,
-                    caption=a.caption, columns=list(a.columns or []),
-                    row_count=a.row_count, column_count=a.column_count,
+            for name in ("vector_search", "keyword_search", "grounding", "rerank", "graph_expand"):
+                contextual_runners[name] = cast(
+                    ContextualToolRunner,
+                    rag_runner.retrieve_evidence,
                 )
-                # Inspect if preview requested
-                if inp.include_preview and a.asset_id:
-                    try:
-                        insp = asset_runner.inspect_asset(
-                            type("_In2", (), {"asset_id": a.asset_id, "head_rows": 3})()
-                        )
-                        if insp.head_rows:
-                            ar.preview_rows = insp.head_rows[:3]
-                        ar.analysis_capabilities = list(insp.analysis_capabilities or [])
-                    except Exception:
-                        pass
-                results.append(ar)
-            return AssetSearchOutput(assets=results, total_found=len(list_out.assets))
+            rag_answer_runner = RAGSearchAnswerRunner(runtime=runtime)
+            contextual_runners["rag_search_answer"] = cast(
+                ContextualToolRunner,
+                rag_answer_runner.answer,
+            )
+            contextual_runners["search_knowledge"] = cast(
+                ContextualToolRunner,
+                rag_answer_runner.answer,
+            )
 
-        contextual_runners["search_assets"] = cast(ContextualToolRunner, _search_assets_runner)
+        from rag.agent.tools.asset_tools import AssetToolRunner
 
-    contextual_runners.update(
-        _build_llm_tool_runners(
-            primary_chat,
-            token_accounting=runtime.token_accounting,
-            model_context_tokens=getattr(
-                runtime,
-                "chat_context_window_tokens",
-                32_768,
-            ),
-            stage_budgets=getattr(
-                runtime,
-                "llm_stage_budgets",
-                DEFAULT_LLM_STAGE_BUDGETS,
-            ),
+        stores = getattr(runtime, "stores", None)
+        metadata_repo = getattr(stores, "metadata_repo", None)
+        object_store = getattr(stores, "object_store", None)
+        if metadata_repo is not None and object_store is not None:
+            asset_runner = AssetToolRunner(
+                metadata_repo=metadata_repo,
+                object_store=object_store,
+            )
+            runners["asset_list"] = cast(ToolRunner, asset_runner.list_assets)
+            runners["asset_inspect"] = cast(ToolRunner, asset_runner.inspect_asset)
+            runners["asset_read_slice"] = cast(ToolRunner, asset_runner.read_slice)
+            runners["asset_analyze"] = cast(ToolRunner, asset_runner.analyze_asset)
+
+            async def _search_assets_runner(payload: Any) -> Any:
+                from rag.agent.tools.rag_semantic_tools import (
+                    AssetResult,
+                    AssetSearchInput,
+                    AssetSearchOutput,
+                )
+
+                if isinstance(payload, dict):
+                    inp = AssetSearchInput(**payload)
+                else:
+                    inp = payload
+                list_out = asset_runner.list_assets(
+                    type("_In", (), {"doc_id": inp.doc_id, "asset_type": inp.asset_type})()
+                )
+                results: list[AssetResult] = []
+                for a in list_out.assets[:inp.max_results]:
+                    ar = AssetResult(
+                        asset_id=a.asset_id, doc_id=a.doc_id,
+                        asset_type=a.asset_type, sheet_name=a.sheet_name,
+                        caption=a.caption, columns=list(a.columns or []),
+                        row_count=a.row_count, column_count=a.column_count,
+                    )
+                    if inp.include_preview and a.asset_id:
+                        try:
+                            insp = asset_runner.inspect_asset(
+                                type("_In2", (), {"asset_id": a.asset_id, "head_rows": 3})()
+                            )
+                            if insp.head_rows:
+                                ar.preview_rows = insp.head_rows[:3]
+                            ar.analysis_capabilities = list(insp.analysis_capabilities or [])
+                        except Exception:
+                            pass
+                    results.append(ar)
+                return AssetSearchOutput(assets=results, total_found=len(list_out.assets))
+
+            contextual_runners["search_assets"] = cast(ContextualToolRunner, _search_assets_runner)
+
+        contextual_runners.update(
+            _build_llm_tool_runners(
+                primary_chat,
+                token_accounting=getattr(runtime, "token_accounting", None),
+                model_context_tokens=getattr(
+                    runtime,
+                    "chat_context_window_tokens",
+                    32_768,
+                ),
+                stage_budgets=getattr(
+                    runtime,
+                    "llm_stage_budgets",
+                    DEFAULT_LLM_STAGE_BUDGETS,
+                ),
+            )
         )
+
+    unavailable_rag_tools = {
+        name for name in _SEMANTIC_RAG_TOOLS
+        if name not in contextual_runners
+    }
+    definition = _without_unavailable_deferred_tools(
+        definition,
+        unavailable_rag_tools,
     )
 
     tool_registry = create_builtin_tool_registry(
         runners=runners,
         contextual_runners=contextual_runners,
     )
-    runtime_diagnostics: tuple[RuntimeDiagnostic, ...] = ()
+    diagnostics: tuple[RuntimeDiagnostic, ...] = tuple(runtime_diagnostics)
     try:
         model_registry = ModelRegistry.from_env(default_model=model_alias)
     except Exception as exc:
         if model_alias is not None:
             raise
         model_registry = None
-        runtime_diagnostics = (
+        diagnostics = (
+            *diagnostics,
             RuntimeDiagnostic.from_exception(
                 code="model_registry_initialization_failed",
                 component="model_registry",
@@ -245,8 +344,8 @@ def _build_agent_service(
             "Skill catalog loading failed; continuing without skills",
             exc_info=True,
         )
-        runtime_diagnostics = (
-            *runtime_diagnostics,
+        diagnostics = (
+            *diagnostics,
             RuntimeDiagnostic.from_exception(
                 code="skill_catalog_load_failed",
                 component="skill_catalog",
@@ -258,7 +357,7 @@ def _build_agent_service(
         tool_registry=tool_registry,
         model_registry=model_registry,
         checkpointer=create_agent_checkpointer(checkpoint_db),
-        runtime_diagnostics=runtime_diagnostics,
+        runtime_diagnostics=diagnostics,
         skill_catalog=skill_catalog,
     )
     subagent_runner = BuiltinSubAgentRunner(
@@ -267,6 +366,78 @@ def _build_agent_service(
     )
     service_factory.bind_subagent_runner(subagent_runner)
     return service_factory.create(definition)
+
+
+def _build_optional_rag_runtime(
+    *,
+    storage_root: Path,
+    model_alias: str | None,
+    embedding_model_alias: str | None,
+    reranker_model_alias: str | None,
+    vector_backend: str,
+    vector_dsn: str | None,
+    vector_namespace: str | None,
+    vector_collection_prefix: str | None,
+) -> tuple[Any | None, tuple[RuntimeDiagnostic, ...]]:
+    """Auto-attach RAG when the local storage exists and can be assembled."""
+    rag_config = _resolve_auto_rag_config(
+        storage_root=storage_root,
+        vector_backend=vector_backend,
+        vector_dsn=vector_dsn,
+        vector_namespace=vector_namespace,
+        vector_collection_prefix=vector_collection_prefix,
+    )
+    if not rag_config.storage_root.exists():
+        return None, ()
+    if not rag_config.explicit and not _looks_like_rag_storage(rag_config.storage_root):
+        return None, ()
+    try:
+        from rag import AssemblyRequest, CapabilityRequirements, RAGRuntime
+        from rag.models.assembly_adapter import to_assembly_overrides
+        from rag.models.runtime import RuntimeOverrides, resolve_runtime_config
+        from rag.retrieval import QueryOptions
+
+        runtime_config = resolve_runtime_config(
+            RuntimeOverrides(
+                model_alias=model_alias,
+                embedding_model_alias=embedding_model_alias,
+                reranker_model_alias=reranker_model_alias or "none",
+            )
+        )
+        assembly_overrides = to_assembly_overrides(runtime_config)
+        storage = runtime_storage_config(
+            rag_config.storage_root,
+            vector_backend=rag_config.vector_backend,
+            vector_dsn=rag_config.vector_dsn,
+            vector_namespace=rag_config.vector_namespace,
+            vector_collection_prefix=rag_config.vector_collection_prefix,
+        )
+        requirements = CapabilityRequirements(
+            require_chat=True,
+            default_context_tokens=QueryOptions().max_context_tokens,
+        )
+        runtime = RAGRuntime.from_request(
+            storage=storage,
+            request=AssemblyRequest(
+                requirements=requirements,
+                overrides=assembly_overrides,
+            ),
+            generation_config=runtime_config.generation,
+            chat_context_window_tokens=(
+                runtime_config.primary_model.context_window_tokens or 32_768
+            ),
+            llm_stage_budgets=runtime_config.llm_stage_budgets,
+        )
+        return runtime, ()
+    except Exception as exc:
+        logger.warning("RAG auto-attach failed; continuing without RAG", exc_info=True)
+        return None, (
+            RuntimeDiagnostic.from_exception(
+                code="rag_auto_attach_failed",
+                component="rag_runtime",
+                error=exc,
+            ),
+        )
 
 
 def _format_tool_summary(result: AgentRunResult) -> str:
@@ -410,7 +581,7 @@ def _print_startup_banner(model_alias: str, *, agent_type: str) -> None:
 @agent_app.command(name="chat")
 def agent_chat(
     storage_root: Annotated[
-        Path, typer.Option("--storage-root", help="RAG 存储根目录")
+        Path, typer.Option("--storage-root", help="RAG 存储根目录", hidden=True)
     ] = Path(".rag"),
     agent: Annotated[
         str,
@@ -432,6 +603,7 @@ def agent_chat(
         typer.Option(
             "--embedding-model",
             help="Embedding 模型别名，对应 configs/models.yaml 中 capability=embedding 的条目",
+            hidden=True,
         ),
     ] = None,
     reranker_model: Annotated[
@@ -439,71 +611,50 @@ def agent_chat(
         typer.Option(
             "--reranker-model",
             help="Reranker 模型别名，对应 configs/models.yaml 中 capability=reranker 的条目",
+            hidden=True,
         ),
     ] = None,
     vector_backend: Annotated[
         str,
-        typer.Option("--vector-backend", help="Vector backend: milvus or sqlite."),
+        typer.Option("--vector-backend", help="Vector backend: milvus or sqlite.", hidden=True),
     ] = DEFAULT_VECTOR_BACKEND,
     vector_dsn: Annotated[
         str | None,
-        typer.Option("--vector-dsn", help="Vector backend DSN."),
+        typer.Option("--vector-dsn", help="Vector backend DSN.", hidden=True),
     ] = None,
     vector_namespace: Annotated[
         str | None,
-        typer.Option("--vector-namespace", help="Vector namespace/database."),
+        typer.Option("--vector-namespace", help="Vector namespace/database.", hidden=True),
     ] = None,
     vector_collection_prefix: Annotated[
         str | None,
-        typer.Option("--vector-collection-prefix", help="Milvus collection prefix used at ingest time."),
+        typer.Option("--vector-collection-prefix", help="Milvus collection prefix used at ingest time.", hidden=True),
     ] = None,
 ) -> None:
     """交互式 Agent 对话。暂停时支持工具审批。"""
-    from rag import AssemblyRequest, CapabilityRequirements, RAGRuntime
-    from rag.models.assembly_adapter import to_assembly_overrides
-    from rag.models.runtime import RuntimeOverrides, resolve_runtime_config
-    from rag.retrieval import QueryOptions
-
     load_env_file()
-    runtime_config = resolve_runtime_config(
-        RuntimeOverrides(
-            model_alias=model,
-            embedding_model_alias=embedding_model,
-            reranker_model_alias=reranker_model,
-        )
-    )
-    assembly_overrides = to_assembly_overrides(runtime_config)
-
-    storage = runtime_storage_config(
-        storage_root,
+    runtime, diagnostics = _build_optional_rag_runtime(
+        storage_root=storage_root,
+        model_alias=model,
+        embedding_model_alias=embedding_model,
+        reranker_model_alias=reranker_model,
         vector_backend=vector_backend,
         vector_dsn=vector_dsn,
         vector_namespace=vector_namespace,
         vector_collection_prefix=vector_collection_prefix,
     )
-    requirements = CapabilityRequirements(
-        require_chat=True,
-        default_context_tokens=QueryOptions().max_context_tokens,
-    )
-    runtime = RAGRuntime.from_request(
-        storage=storage,
-        request=AssemblyRequest(
-            requirements=requirements,
-            overrides=assembly_overrides,
-        ),
-        generation_config=runtime_config.generation,
-        chat_context_window_tokens=(
-            runtime_config.primary_model.context_window_tokens or 32_768
-        ),
-        llm_stage_budgets=runtime_config.llm_stage_budgets,
-    )
 
-    with runtime:
-        service = _build_agent_service(runtime, agent_type=agent, model_alias=model)
+    with runtime if runtime is not None else nullcontext():
+        service = _build_agent_service(
+            runtime,
+            agent_type=agent,
+            model_alias=model,
+            runtime_diagnostics=diagnostics,
+        )
         run_id = f"chat_{id(service):x}"
         verbose = False
 
-        _print_startup_banner(runtime_config.primary_model.alias, agent_type=agent)
+        _print_startup_banner(_service_model_alias(service, model), agent_type=agent)
 
         while True:
             try:
@@ -554,7 +705,7 @@ def agent_chat(
 def agent_run(
     task: Annotated[str, typer.Argument(help="查询任务")],
     storage_root: Annotated[
-        Path, typer.Option("--storage-root", help="RAG 存储根目录")
+        Path, typer.Option("--storage-root", help="RAG 存储根目录", hidden=True)
     ] = Path(".rag"),
     agent: Annotated[
         str,
@@ -589,6 +740,7 @@ def agent_run(
         typer.Option(
             "--embedding-model",
             help="Embedding 模型别名，对应 configs/models.yaml 中 capability=embedding 的条目",
+            hidden=True,
         ),
     ] = None,
     reranker_model: Annotated[
@@ -596,23 +748,24 @@ def agent_run(
         typer.Option(
             "--reranker-model",
             help="Reranker 模型别名，对应 configs/models.yaml 中 capability=reranker 的条目",
+            hidden=True,
         ),
     ] = None,
     vector_backend: Annotated[
         str,
-        typer.Option("--vector-backend", help="Vector backend: milvus or sqlite."),
+        typer.Option("--vector-backend", help="Vector backend: milvus or sqlite.", hidden=True),
     ] = DEFAULT_VECTOR_BACKEND,
     vector_dsn: Annotated[
         str | None,
-        typer.Option("--vector-dsn", help="Vector backend DSN."),
+        typer.Option("--vector-dsn", help="Vector backend DSN.", hidden=True),
     ] = None,
     vector_namespace: Annotated[
         str | None,
-        typer.Option("--vector-namespace", help="Vector namespace/database."),
+        typer.Option("--vector-namespace", help="Vector namespace/database.", hidden=True),
     ] = None,
     vector_collection_prefix: Annotated[
         str | None,
-        typer.Option("--vector-collection-prefix", help="Milvus collection prefix used at ingest time."),
+        typer.Option("--vector-collection-prefix", help="Milvus collection prefix used at ingest time.", hidden=True),
     ] = None,
     input_files: Annotated[
         list[str] | None,
@@ -620,48 +773,25 @@ def agent_run(
     ] = None,
 ) -> None:
     """单次 Agent 运行。传入 --checkpoint-db 后支持跨进程恢复。"""
-    from rag import AssemblyRequest, CapabilityRequirements, RAGRuntime
-    from rag.models.assembly_adapter import to_assembly_overrides
-    from rag.models.runtime import RuntimeOverrides, resolve_runtime_config
-    from rag.retrieval import QueryOptions
-
     load_env_file()
-    runtime_config = resolve_runtime_config(
-        RuntimeOverrides(
-            model_alias=model,
-            embedding_model_alias=embedding_model,
-            reranker_model_alias=reranker_model,
-        )
-    )
-    assembly_overrides = to_assembly_overrides(runtime_config)
-
-    storage = runtime_storage_config(
-        storage_root,
+    runtime, diagnostics = _build_optional_rag_runtime(
+        storage_root=storage_root,
+        model_alias=model,
+        embedding_model_alias=embedding_model,
+        reranker_model_alias=reranker_model,
         vector_backend=vector_backend,
         vector_dsn=vector_dsn,
         vector_namespace=vector_namespace,
         vector_collection_prefix=vector_collection_prefix,
     )
-    requirements = CapabilityRequirements(
-        require_chat=True,
-        default_context_tokens=QueryOptions().max_context_tokens,
-    )
-    runtime = RAGRuntime.from_request(
-        storage=storage,
-        request=AssemblyRequest(requirements=requirements, overrides=assembly_overrides),
-        generation_config=runtime_config.generation,
-        chat_context_window_tokens=(
-            runtime_config.primary_model.context_window_tokens or 32_768
-        ),
-        llm_stage_budgets=runtime_config.llm_stage_budgets,
-    )
 
-    with runtime:
+    with runtime if runtime is not None else nullcontext():
         service = _build_agent_service(
             runtime,
             checkpoint_db=checkpoint_db,
             agent_type=agent,
             model_alias=model,
+            runtime_diagnostics=diagnostics,
         )
         effective_run_id = run_id or f"run_{id(service):x}"
         result = asyncio.run(
@@ -708,7 +838,7 @@ def agent_run(
 def agent_resume(
     run_id: Annotated[str, typer.Argument(help="要恢复的 run_id/thread_id")],
     storage_root: Annotated[
-        Path, typer.Option("--storage-root", help="RAG 存储根目录")
+        Path, typer.Option("--storage-root", help="RAG 存储根目录", hidden=True)
     ] = Path(".rag"),
     agent: Annotated[
         str,
@@ -737,6 +867,7 @@ def agent_resume(
         typer.Option(
             "--embedding-model",
             help="Embedding 模型别名，对应 configs/models.yaml 中 capability=embedding 的条目",
+            hidden=True,
         ),
     ] = None,
     reranker_model: Annotated[
@@ -744,23 +875,24 @@ def agent_resume(
         typer.Option(
             "--reranker-model",
             help="Reranker 模型别名，对应 configs/models.yaml 中 capability=reranker 的条目",
+            hidden=True,
         ),
     ] = None,
     vector_backend: Annotated[
         str,
-        typer.Option("--vector-backend", help="Vector backend: milvus or sqlite."),
+        typer.Option("--vector-backend", help="Vector backend: milvus or sqlite.", hidden=True),
     ] = DEFAULT_VECTOR_BACKEND,
     vector_dsn: Annotated[
         str | None,
-        typer.Option("--vector-dsn", help="Vector backend DSN."),
+        typer.Option("--vector-dsn", help="Vector backend DSN.", hidden=True),
     ] = None,
     vector_namespace: Annotated[
         str | None,
-        typer.Option("--vector-namespace", help="Vector namespace/database."),
+        typer.Option("--vector-namespace", help="Vector namespace/database.", hidden=True),
     ] = None,
     vector_collection_prefix: Annotated[
         str | None,
-        typer.Option("--vector-collection-prefix", help="Milvus collection prefix used at ingest time."),
+        typer.Option("--vector-collection-prefix", help="Milvus collection prefix used at ingest time.", hidden=True),
     ] = None,
     workspace_path: Annotated[
         str | None,
@@ -768,48 +900,25 @@ def agent_resume(
     ] = None,
 ) -> None:
     """从 SQLite checkpoint 恢复暂停的 Agent 运行。"""
-    from rag import AssemblyRequest, CapabilityRequirements, RAGRuntime
-    from rag.models.assembly_adapter import to_assembly_overrides
-    from rag.models.runtime import RuntimeOverrides, resolve_runtime_config
-    from rag.retrieval import QueryOptions
-
     load_env_file()
-    runtime_config = resolve_runtime_config(
-        RuntimeOverrides(
-            model_alias=model,
-            embedding_model_alias=embedding_model,
-            reranker_model_alias=reranker_model,
-        )
-    )
-    assembly_overrides = to_assembly_overrides(runtime_config)
-
-    storage = runtime_storage_config(
-        storage_root,
+    runtime, diagnostics = _build_optional_rag_runtime(
+        storage_root=storage_root,
+        model_alias=model,
+        embedding_model_alias=embedding_model,
+        reranker_model_alias=reranker_model,
         vector_backend=vector_backend,
         vector_dsn=vector_dsn,
         vector_namespace=vector_namespace,
         vector_collection_prefix=vector_collection_prefix,
     )
-    requirements = CapabilityRequirements(
-        require_chat=True,
-        default_context_tokens=QueryOptions().max_context_tokens,
-    )
-    runtime = RAGRuntime.from_request(
-        storage=storage,
-        request=AssemblyRequest(requirements=requirements, overrides=assembly_overrides),
-        generation_config=runtime_config.generation,
-        chat_context_window_tokens=(
-            runtime_config.primary_model.context_window_tokens or 32_768
-        ),
-        llm_stage_budgets=runtime_config.llm_stage_budgets,
-    )
 
-    with runtime:
+    with runtime if runtime is not None else nullcontext():
         service = _build_agent_service(
             runtime,
             checkpoint_db=checkpoint_db,
             agent_type=agent,
             model_alias=model,
+            runtime_diagnostics=diagnostics,
         )
         request = asyncio.run(service.apending_human_input_request(run_id=run_id))
         response = _build_resume_response(request, decision)

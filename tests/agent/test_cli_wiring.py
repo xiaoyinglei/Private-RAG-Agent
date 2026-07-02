@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import cast
 
 import pytest
@@ -11,7 +12,10 @@ from rag.agent.cli import (
     CLI_AGENT_CHOICES,
     _build_agent_service,
     _build_llm_tool_runners,
+    _build_optional_rag_runtime,
     _display_result,
+    _looks_like_rag_storage,
+    _resolve_auto_rag_config,
     _resolve_cli_agent_definition,
 )
 from rag.agent.core.context import AgentRunConfig, RunRegistry
@@ -197,6 +201,93 @@ def test_build_agent_service_registers_all_asset_tool_runners() -> None:
     assert service._base_tool_registry.has_runner("asset_inspect")
     assert service._base_tool_registry.has_runner("asset_read_slice")
     assert service._base_tool_registry.has_runner("asset_analyze")
+
+
+def test_build_agent_service_without_rag_runtime_hides_rag_tools() -> None:
+    service = _build_agent_service(None, agent_type="generic")
+    run_config = AgentRunConfig(
+        run_id="pure-agent-cli",
+        thread_id="pure-agent-cli",
+        max_depth=1,
+        access_policy=AccessPolicy.default(),
+    )
+    runtime_registry = service._runtime_tool_registry(run_config)
+
+    assert "search_knowledge" not in service._policy.allowed_tools
+    assert "search_assets" not in service._policy.allowed_tools
+    assert service._catalog.get("search_knowledge") is None
+    assert service._catalog.get("search_assets") is None
+    assert "structured_probe" in service._policy.allowed_tools
+    assert "llm_generate" in service._policy.allowed_tools
+    assert runtime_registry.has_runner("llm_generate")
+
+
+def test_build_agent_service_with_retrieval_runtime_exposes_rag_tool() -> None:
+    service = _build_agent_service(_RuntimeWithRetrieval(), agent_type="generic")
+
+    assert "search_knowledge" in service._policy.allowed_tools
+    assert service._catalog.get("search_knowledge") is not None
+    assert service._base_tool_registry.has_runner("search_knowledge")
+
+
+def test_resolve_auto_rag_config_uses_existing_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("STORAGE_ROOT", "/tmp/agent-rag-store")
+    monkeypatch.setenv("VECTOR_DSN", "http://127.0.0.1:19530")
+    monkeypatch.setenv("VECTOR_PREFIX", "private_docs_v1")
+
+    config = _resolve_auto_rag_config(
+        storage_root=Path(".rag"),
+        vector_backend="milvus",
+        vector_dsn=None,
+        vector_namespace=None,
+        vector_collection_prefix=None,
+    )
+
+    assert config.storage_root == Path("/tmp/agent-rag-store")
+    assert config.vector_dsn == "http://127.0.0.1:19530"
+    assert config.vector_collection_prefix == "private_docs_v1"
+    assert config.explicit is True
+
+
+def test_default_checkpoint_dir_does_not_auto_attach_rag(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for name in (
+        "AGENT_RAG_STORAGE_ROOT",
+        "RAG_STORAGE_ROOT",
+        "STORAGE_ROOT",
+        "AGENT_VECTOR_BACKEND",
+        "VECTOR_BACKEND",
+        "AGENT_VECTOR_DSN",
+        "VECTOR_DSN",
+        "AGENT_VECTOR_NAMESPACE",
+        "VECTOR_NAMESPACE",
+        "AGENT_VECTOR_PREFIX",
+        "VECTOR_PREFIX",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.chdir(tmp_path)
+    storage_root = tmp_path / ".rag"
+    storage_root.mkdir()
+    (storage_root / "agent_checkpoints.sqlite").touch()
+
+    runtime, diagnostics = _build_optional_rag_runtime(
+        storage_root=Path(".rag"),
+        model_alias=None,
+        embedding_model_alias=None,
+        reranker_model_alias=None,
+        vector_backend="milvus",
+        vector_dsn=None,
+        vector_namespace=None,
+        vector_collection_prefix=None,
+    )
+
+    assert not _looks_like_rag_storage(storage_root)
+    assert runtime is None
+    assert diagnostics == ()
 
 
 def test_build_agent_service_honors_cli_model_alias_for_agent_decisions() -> None:

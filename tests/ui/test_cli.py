@@ -211,8 +211,10 @@ def test_assembly_profile_cli_surface_is_removed() -> None:
 
     for output in (agent_run_output, agent_chat_output, agent_resume_output):
         assert "--model" in output
-        assert "--embedding-model" in output
-        assert "--reranker-model" in output
+        assert "--storage-root" not in output
+        assert "--embedding-model" not in output
+        assert "--reranker-model" not in output
+        assert "--vector-backend" not in output
     assert "--budget" in agent_run_output
     assert "--budget" in agent_chat_output
     assert "--budget" not in agent_resume_output
@@ -324,7 +326,8 @@ def test_agent_run_help_exposes_explicit_agent_selector() -> None:
     assert result.exit_code == 0
     output = _plain_help(result.output)
     assert "--agent" in output
-    assert "--vector-collection-prefix" in output
+    assert "--input-file" in output
+    assert "--vector-collection-prefix" not in output
     assert "generic" in output
 
 
