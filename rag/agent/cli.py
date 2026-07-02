@@ -494,24 +494,81 @@ def _format_tool_summary(result: AgentRunResult) -> str:
     return "\n".join(lines)
 
 
+def _failure_title(stop_reason: str | None) -> str:
+    if stop_reason == "model_provider_failed":
+        return "错误: 模型调用失败 (model_provider_failed)"
+    if stop_reason:
+        return f"错误: Agent 运行失败 ({stop_reason})"
+    return "错误: Agent 运行失败"
+
+
+def _failure_diagnostics(
+    diagnostics: Sequence[object],
+    *,
+    stop_reason: str | None,
+) -> list[object]:
+    all_diagnostics = list(diagnostics)
+    if not all_diagnostics:
+        return []
+    if stop_reason:
+        exact = [
+            diagnostic for diagnostic in all_diagnostics
+            if getattr(diagnostic, "code", None) == stop_reason
+        ]
+        if exact:
+            return exact
+    errors = [
+        diagnostic for diagnostic in all_diagnostics
+        if getattr(diagnostic, "severity", None) == "error"
+    ]
+    return errors or all_diagnostics[:1]
+
+
+def _print_diagnostic(diagnostic: object) -> None:
+    component = getattr(diagnostic, "component", "diagnostic")
+    code = getattr(diagnostic, "code", "unknown")
+    message = getattr(diagnostic, "message", "")
+    error_type = getattr(diagnostic, "error_type", None)
+    suffix = f", {error_type}" if error_type is not None else ""
+    print(f"  [{component}] {code}: {message}{suffix}")
+
+
+def _display_failure(
+    *,
+    stop_reason: str | None,
+    diagnostics: Sequence[object],
+    verbose: bool,
+) -> None:
+    print(f"\n{_failure_title(stop_reason)}")
+    selected = _failure_diagnostics(diagnostics, stop_reason=stop_reason)
+    if selected:
+        for diagnostic in selected:
+            _print_diagnostic(diagnostic)
+    elif verbose and stop_reason:
+        print(f"  stop_reason: {stop_reason}")
+    if verbose:
+        selected_ids = {id(diagnostic) for diagnostic in selected}
+        for diagnostic in diagnostics:
+            if id(diagnostic) not in selected_ids:
+                _print_diagnostic(diagnostic)
+
+
 def _display_result(result: AgentRunResult, *, verbose: bool) -> None:
     """干净输出 AgentRunResult。"""
-    if result.runtime_diagnostics:
+    if result.status == "failed":
+        _display_failure(
+            stop_reason=result.stop_reason,
+            diagnostics=result.runtime_diagnostics,
+            verbose=verbose,
+        )
+    elif result.runtime_diagnostics:
         degraded = sum(
             1 for diagnostic in result.runtime_diagnostics if diagnostic.degraded
         )
         print(f"\n警告: Agent 以降级模式运行（{degraded} 项诊断）")
         if verbose:
             for diagnostic in result.runtime_diagnostics:
-                error_type = (
-                    f", {diagnostic.error_type}"
-                    if diagnostic.error_type is not None
-                    else ""
-                )
-                print(
-                    f"  [{diagnostic.component}] {diagnostic.code}: "
-                    f"{diagnostic.message}{error_type}"
-                )
+                _print_diagnostic(diagnostic)
 
     if result.final_answer:
         print(f"\n{result.final_answer}")
@@ -548,16 +605,19 @@ def _display_agent_result(result: AgentResult, *, verbose: bool) -> None:
         _display_result(result.raw, verbose=verbose)
         return
 
-    if result.diagnostics:
+    if result.status == "failed":
+        _display_failure(
+            stop_reason=None,
+            diagnostics=result.diagnostics,
+            verbose=verbose,
+        )
+    elif result.diagnostics:
         degraded = sum(1 for diagnostic in result.diagnostics if getattr(diagnostic, "degraded", False))
         if degraded:
             print(f"\n警告: Agent 以降级模式运行（{degraded} 项诊断）")
         if verbose:
             for diagnostic in result.diagnostics:
-                component = getattr(diagnostic, "component", "diagnostic")
-                code = getattr(diagnostic, "code", "unknown")
-                message = getattr(diagnostic, "message", "")
-                print(f"  [{component}] {code}: {message}")
+                _print_diagnostic(diagnostic)
 
     if result.answer:
         print(f"\n{result.answer}")

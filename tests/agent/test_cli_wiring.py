@@ -398,6 +398,33 @@ def test_display_result_surfaces_runtime_degradation(
         assert "decision model unavailable" in output
 
 
+def test_display_result_surfaces_model_failure_without_verbose(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    result = AgentRunResult(
+        run_id="display-model-failure",
+        thread_id="display-model-failure",
+        status="failed",
+        stop_reason="model_provider_failed",
+        runtime_diagnostics=[
+            RuntimeDiagnostic(
+                code="model_provider_failed",
+                component="agent_loop",
+                message="Error code: 502, InternalServerError",
+                severity="error",
+            )
+        ],
+    )
+
+    _display_result(result, verbose=False)
+
+    output = capsys.readouterr().out
+    assert "模型调用失败" in output
+    assert "model_provider_failed" in output
+    assert "Error code: 502" in output
+    assert "降级模式" not in output
+
+
 @pytest.mark.anyio
 async def test_build_agent_service_registers_rag_runner_with_execution_context() -> None:
     runtime = _RuntimeWithRetrieval()
