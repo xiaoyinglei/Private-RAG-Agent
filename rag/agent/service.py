@@ -326,6 +326,7 @@ class _TaskChildRunner:
             self._policy,
             max_depth=max(self._policy.max_depth - 1, 0),
             core_tool_names=tuple(tool for tool in self._policy.core_tool_names if tool != "task"),
+            deferred_tool_names=tuple(tool for tool in self._policy.deferred_tool_names if tool != "task"),
         )
 
     def _derive_child_config(

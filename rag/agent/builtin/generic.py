@@ -5,13 +5,14 @@ The model decides what tools to use based on the task, guided by tool_search
 and the deferred tool mechanism.
 
 Tool categories:
-  CORE (always visible):  tool_search, activate_tools, task,
+  CORE (always visible):  tool_search, activate_tools,
                            list_files, read_file, write_file,
-                           run_python, search_text, apply_patch,
-                           run_command, update_plan, tool_repl
                            invoke_skill, materialize_skill_asset when skills exist
   DEFERRED (activate on demand): search_knowledge, search_assets,
+                                 task,
                                  llm_generate, llm_summarize, llm_compare,
+                                 run_python, search_text, apply_patch,
+                                 run_command, update_plan, tool_repl,
                                  structured_probe
 """
 
@@ -47,29 +48,29 @@ GENERIC_AGENT = AgentRuntimePolicy(
     core_tool_names=(
         "tool_search",
         "activate_tools",
-        "task",
         "list_files",
         "read_file",
         "write_file",
+    ),
+    deferred_tool_names=(
+        "task",
+        "search_knowledge",
+        "search_assets",
+        "llm_summarize",
+        "llm_compare",
+        "llm_generate",
         "run_python",
         "search_text",
         "apply_patch",
         "run_command",
         "update_plan",
         "tool_repl",
-    ),
-    deferred_tool_names=(
-        "search_knowledge",
-        "search_assets",
-        "llm_summarize",
-        "llm_compare",
-        "llm_generate",
         "structured_probe",
     ),
-model_selection=ModelSelectionPolicy(
+    model_selection=ModelSelectionPolicy(
         thinking=True,
         retrieval_hint_max_tokens=256,
-        tool_decision_max_tokens=2048,
+        tool_decision_max_tokens=768,
     ),
     max_iterations=10,
     max_depth=2,

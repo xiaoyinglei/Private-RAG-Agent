@@ -1,6 +1,7 @@
 """Public Agent SDK facade."""
 
-from agent_runtime.agent import Agent
+from typing import TYPE_CHECKING
+
 from agent_runtime.models import (
     ModelCatalog,
     ModelControlPlane,
@@ -11,6 +12,18 @@ from agent_runtime.models import (
     ModelSpec,
 )
 from agent_runtime.result import AgentResult, AgentUsage
+
+if TYPE_CHECKING:
+    from agent_runtime.agent import Agent
+
+
+def __getattr__(name: str) -> object:
+    if name == "Agent":
+        from agent_runtime.agent import Agent
+
+        return Agent
+    raise AttributeError(f"module 'agent_runtime' has no attribute {name!r}")
+
 
 __all__ = [
     "Agent",

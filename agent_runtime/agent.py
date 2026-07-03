@@ -3,13 +3,15 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 from pathlib import Path
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
-from agent_runtime.knowledge_providers.rag import LazyRAGKnowledgeProvider
 from agent_runtime.models import ModelControlPlane, ModelSpec
 from agent_runtime.result import AgentResult
-from rag.agent.tools.registry import ContextualToolRunner
-from rag.storage.runtime_config import DEFAULT_VECTOR_BACKEND
+
+if TYPE_CHECKING:
+    from agent_runtime.knowledge_providers.rag import LazyRAGKnowledgeProvider
+
+DEFAULT_VECTOR_BACKEND = "milvus"
 
 
 class Agent:
@@ -150,6 +152,9 @@ class Agent:
         knowledge_runner = None
         knowledge_asset_runner = None
         if self.knowledge:
+            from agent_runtime.knowledge_providers.rag import LazyRAGKnowledgeProvider
+            from rag.agent.tools.registry import ContextualToolRunner
+
             provider = LazyRAGKnowledgeProvider(
                 storage_root=self.rag_storage_root,
                 model_alias=self.model,

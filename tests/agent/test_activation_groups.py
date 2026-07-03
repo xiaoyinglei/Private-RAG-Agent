@@ -16,7 +16,6 @@ from rag.agent.capabilities.catalog import (
 )
 from rag.agent.capabilities.tool_search import (
     execute_activate_tools,
-    execute_tool_search,
 )
 from rag.agent.tools.card import ToolCard
 from rag.agent.tools.spec import ToolPermissions, ToolSpec
@@ -124,27 +123,40 @@ class TestActivationGroups:
 
     def test_activation_group_does_not_change_visibility(self) -> None:
         """resolve_visible_tools result is unchanged: category still controls visibility."""
-        from rag.agent.capabilities.catalog import _DEFAULT_ACTIVATION_GROUPS
-
         catalog = _build_catalog([])
         store = DeferredToolStore(max_active=10)
 
         # Visibility should still be based on core/deferred, not activation_group
-        allowed = ["tool_search", "vector_search", "write_file"]
+        allowed = ["tool_search", "vector_search", "run_python"]
         visible = resolve_visible_tools(allowed, catalog=catalog, store=store)
 
         # tool_search is in CORE_TOOLS → visible
         assert "tool_search" in visible
         # vector_search is in DEFERRED_TOOLS, not activated → NOT visible
         assert "vector_search" not in visible
-        # write_file is in DEFERRED_TOOLS (but CORE_TOOLS... wait)
-        # Actually write_file is in CORE_TOOLS, so should be visible
-        assert "write_file" in visible
+        # run_python is a deferred workspace tool, so it is hidden until activated.
+        assert "run_python" not in visible
+
+        store.set_pending_candidates(
+            "workspace",
+            [
+                SearchCandidate(
+                    name="run_python",
+                    description="Run Python",
+                    reason="workspace python",
+                )
+            ],
+        )
+        store.activate("run_python", iteration=1, source_query="workspace")
+
+        assert "run_python" in resolve_visible_tools(
+            allowed,
+            catalog=catalog,
+            store=store,
+        )
 
     def test_backward_compat_without_toolcard(self) -> None:
         """Tools without ToolCard get activation_group from _DEFAULT_ACTIVATION_GROUPS."""
-        from rag.agent.capabilities.catalog import _DEFAULT_ACTIVATION_GROUPS
-
         spec = _make_spec("search_tool", "Search")  # no ToolCard
         catalog = _build_catalog([spec])
         store = DeferredToolStore(max_active=10)

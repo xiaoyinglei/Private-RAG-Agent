@@ -140,8 +140,8 @@ class TestTaskToolRunner:
         )
         child = runner._child_policy()
 
-        assert "task" not in child.core_tool_names
-        assert "task" in policy.core_tool_names
+        assert "task" not in child.allowed_tools
+        assert "task" in policy.deferred_tool_names
         assert child.max_depth == policy.max_depth - 1
 
     def test_child_policy_at_zero_depth(self) -> None:

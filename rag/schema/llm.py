@@ -67,7 +67,7 @@ DEFAULT_LLM_STAGE_BUDGETS: dict[LLMCallStage, LLMStageBudget] = {
     ),
     LLMCallStage.TOOL_DECISION: LLMStageBudget(
         max_input_tokens=12_000,
-        max_output_tokens=2_048,
+        max_output_tokens=768,
     ),
     LLMCallStage.RETRIEVAL_SUMMARY: LLMStageBudget(
         max_input_tokens=6_000,

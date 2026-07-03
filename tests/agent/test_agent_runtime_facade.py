@@ -221,7 +221,7 @@ def test_agent_run_cli_delegates_to_agent_facade(monkeypatch) -> None:
     def fail_rag_runtime(**_: object) -> object:
         raise AssertionError("CLI run without --knowledge must not initialize RAG")
 
-    monkeypatch.setattr(agent_cli, "Agent", _Facade)
+    monkeypatch.setattr(agent_cli, "_create_agent_facade", lambda **kwargs: _Facade(**kwargs))
     monkeypatch.setattr(agent_cli, "_build_optional_rag_runtime", fail_rag_runtime)
 
     result = CliRunner().invoke(

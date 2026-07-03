@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from rag.agent.builtin import BUILTIN_AGENT_DEFINITIONS, create_builtin_agent_registry
 from rag.agent.builtin_registry import create_builtin_tool_registry
+from rag.agent.capabilities.catalog import DeferredToolStore, resolve_visible_tools
+from rag.agent.service import AgentService
 
 
 def test_create_builtin_agent_registry_registers_expected_agents() -> None:
@@ -47,6 +49,37 @@ def test_generic_agent_includes_semantic_rag_tools() -> None:
     allowed = BUILTIN_AGENT_DEFINITIONS["generic"].allowed_tools
     assert "search_knowledge" in allowed
     assert "search_assets" in allowed
+
+
+def test_generic_agent_default_visible_tools_are_minimal() -> None:
+    """Only resident tools are sent to the model before tool_search activation."""
+    definition = BUILTIN_AGENT_DEFINITIONS["generic"]
+    service = AgentService.__new__(AgentService)
+    service._policy = definition
+    catalog = AgentService._build_catalog(service, create_builtin_tool_registry())
+    store = DeferredToolStore(max_active=10)
+
+    visible = resolve_visible_tools(
+        definition.allowed_tools,
+        catalog=catalog,
+        store=store,
+    )
+
+    assert visible == [
+        "tool_search",
+        "activate_tools",
+        "list_files",
+        "read_file",
+        "write_file",
+    ]
+    assert "task" not in visible
+    assert "update_plan" not in visible
+    assert "run_python" not in visible
+    assert "search_knowledge" not in visible
+
+
+def test_generic_agent_tool_decision_output_budget_is_small_for_local_models() -> None:
+    assert BUILTIN_AGENT_DEFINITIONS["generic"].model_selection.tool_decision_max_tokens == 768
 
 
 def test_generic_agent_does_not_carry_legacy_policy_budget() -> None:

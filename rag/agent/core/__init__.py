@@ -1,34 +1,38 @@
-"""Agent core contracts: config, registry, definition, compiler."""
+"""Lazy public exports for agent core contracts."""
 
-from rag.agent.core.agent_as_tool import AgentAsToolRunner, AgentToolSpec
-from rag.agent.core.agent_service_factory import AgentServiceFactory
-from rag.agent.core.checkpointing import aclose_agent_checkpointer, create_agent_checkpointer
-from rag.agent.core.compiler import GraphCompiler
-from rag.agent.core.context import (
-    AgentRunConfig,
-    RunRegistry,
-    derive_child_config,
-)
-from rag.agent.core.definition import AgentRuntimePolicy, ModelSelectionPolicy, ToolPolicy
-from rag.agent.core.delegation import AgentDelegationRequest, DelegatedAgentRunner
-from rag.agent.core.registry import AgentRegistry
-from rag.agent.core.subagent_runner import BuiltinSubAgentRunner
+from __future__ import annotations
 
-__all__ = [
-    "AgentRuntimePolicy",
-    "GraphCompiler",
-    "AgentRegistry",
-    "AgentRunConfig",
-    "AgentServiceFactory",
-    "AgentAsToolRunner",
-    "AgentDelegationRequest",
-    "AgentToolSpec",
-    "BuiltinSubAgentRunner",
-        "aclose_agent_checkpointer",
-    "create_agent_checkpointer",
-    "ModelSelectionPolicy",
-    "RunRegistry",
-    "DelegatedAgentRunner",
-    "ToolPolicy",
-    "derive_child_config",
-]
+from typing import Any
+
+_EXPORTS: dict[str, tuple[str, str]] = {
+    "AgentRuntimePolicy": ("rag.agent.core.definition", "AgentRuntimePolicy"),
+    "GraphCompiler": ("rag.agent.core.compiler", "GraphCompiler"),
+    "AgentRegistry": ("rag.agent.core.registry", "AgentRegistry"),
+    "AgentRunConfig": ("rag.agent.core.context", "AgentRunConfig"),
+    "AgentServiceFactory": ("rag.agent.core.agent_service_factory", "AgentServiceFactory"),
+    "AgentAsToolRunner": ("rag.agent.core.agent_as_tool", "AgentAsToolRunner"),
+    "AgentDelegationRequest": ("rag.agent.core.delegation", "AgentDelegationRequest"),
+    "AgentToolSpec": ("rag.agent.core.agent_as_tool", "AgentToolSpec"),
+    "BuiltinSubAgentRunner": ("rag.agent.core.subagent_runner", "BuiltinSubAgentRunner"),
+    "aclose_agent_checkpointer": ("rag.agent.core.checkpointing", "aclose_agent_checkpointer"),
+    "create_agent_checkpointer": ("rag.agent.core.checkpointing", "create_agent_checkpointer"),
+    "ModelSelectionPolicy": ("rag.agent.core.definition", "ModelSelectionPolicy"),
+    "RunRegistry": ("rag.agent.core.context", "RunRegistry"),
+    "DelegatedAgentRunner": ("rag.agent.core.delegation", "DelegatedAgentRunner"),
+    "ToolPolicy": ("rag.agent.core.definition", "ToolPolicy"),
+    "derive_child_config": ("rag.agent.core.context", "derive_child_config"),
+}
+
+__all__ = list(_EXPORTS)
+
+
+def __getattr__(name: str) -> Any:
+    try:
+        module_name, attr_name = _EXPORTS[name]
+    except KeyError as exc:
+        raise AttributeError(f"module 'rag.agent.core' has no attribute {name!r}") from exc
+    from importlib import import_module
+
+    value = getattr(import_module(module_name), attr_name)
+    globals()[name] = value
+    return value

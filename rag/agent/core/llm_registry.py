@@ -7,11 +7,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from rag.agent.core.llm_config import AgentModelsConfig, ModelProvider, ModelSpec
-from rag.assembly.models import ProviderConfig
-from rag.assembly.support import build_provider
-from rag.assembly.tokenizer import TokenAccountingService, TokenizerContract
 from rag.models.config import GenerationConfig, GenerationTaskConfig
-from rag.providers.llm_gateway import LLMGateway
 from rag.schema.llm import parse_llm_stage_budgets
 
 
@@ -28,8 +24,8 @@ class ResolvedModel:
     generator: object
     kwargs: dict[str, Any]
     context_window_tokens: int = 32_768
-    gateway: LLMGateway | None = None
-    token_accounting: TokenAccountingService | None = None
+    gateway: Any | None = None
+    token_accounting: Any | None = None
 
 
 class ModelResolver(Protocol):
@@ -179,6 +175,10 @@ class ModelRegistry:
 
     def resolve(self, alias: str) -> ResolvedModel:
         """别名 → (Generator, kwargs)。按 alias 缓存，同 alias 多次调用返回同一 Generator。"""
+        from rag.assembly.support import build_provider
+        from rag.assembly.tokenizer import TokenAccountingService, TokenizerContract
+        from rag.providers.llm_gateway import LLMGateway
+
         if alias in self._cache:
             return self._cache[alias]
 
@@ -247,7 +247,9 @@ class ModelRegistry:
         return self.resolve_or_fallback(alias)
 
     @staticmethod
-    def _spec_to_provider_config(spec: ModelSpec) -> ProviderConfig:
+    def _spec_to_provider_config(spec: ModelSpec) -> Any:
+        from rag.assembly.models import ProviderConfig
+
         if spec.provider == ModelProvider.MLX:
             return ProviderConfig(
                 provider_kind="openai-compatible",

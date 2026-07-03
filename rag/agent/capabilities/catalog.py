@@ -24,21 +24,16 @@ ToolCategory = Literal["core", "deferred", "internal"]
 CORE_TOOLS: frozenset[str] = frozenset({
     "tool_search",
     "activate_tools",
-    "task",
     "list_files",
     "read_file",
     "write_file",
-    "run_python",
-    "search_text",
-    "apply_patch",
-    "run_command",
-    "update_plan",
-    "tool_repl",
     "invoke_skill",
     "materialize_skill_asset",
 })
 
 DEFERRED_TOOLS: frozenset[str] = frozenset({
+    # Subagent delegation
+    "task",
     # Semantic RAG tools (agent-visible, on-demand activation)
     "search_knowledge",
     "search_assets",
@@ -47,6 +42,12 @@ DEFERRED_TOOLS: frozenset[str] = frozenset({
     "llm_summarize",
     "llm_compare",
     # Primitive / workspace
+    "run_python",
+    "search_text",
+    "apply_patch",
+    "run_command",
+    "update_plan",
+    "tool_repl",
     "structured_probe",
 })
 
@@ -83,16 +84,17 @@ _DEFAULT_ACTIVATION_GROUPS: dict[str, str] = {
     # resident: always visible, no search/activation needed
     "tool_search": "resident",
     "activate_tools": "resident",
-    "task": "resident",
     "list_files": "resident",
     "read_file": "resident",
-    "update_plan": "resident",
     "invoke_skill": "resident",
     "materialize_skill_asset": "resident",
 
     # rag: semantic knowledge and asset retrieval (activated on demand)
     "search_knowledge": "rag",
     "search_assets": "rag",
+
+    # subagent: isolated child-loop delegation
+    "task": "subagent",
 
     # code: LLM sub-agent tools
     "llm_generate": "code",
@@ -105,6 +107,7 @@ _DEFAULT_ACTIVATION_GROUPS: dict[str, str] = {
     "search_text": "workspace",
     "apply_patch": "workspace",
     "run_command": "workspace",
+    "update_plan": "workspace",
     "structured_probe": "workspace",
     "tool_repl": "workspace",
 

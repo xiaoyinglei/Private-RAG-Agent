@@ -7,35 +7,25 @@ from collections.abc import Sequence
 from contextlib import nullcontext
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Annotated, Any, Literal, cast
+from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
 
 import typer
 
-from agent_runtime import Agent, AgentResult
 from agent_runtime.models import (
     ModelControlPlane,
     ModelPolicyError,
     format_model_rows,
 )
-from rag.agent.builtin import create_builtin_agent_registry
-from rag.agent.builtin_registry import create_builtin_tool_registry
-from rag.agent.core.agent_service_factory import AgentServiceFactory
-from rag.agent.core.checkpointing import create_agent_checkpointer
-from rag.agent.core.definition import AgentRuntimePolicy
-from rag.agent.core.human_input import HumanInputRequest, HumanInputResponse
-from rag.agent.core.llm_registry import ResolvedModel, UnknownModelAliasError
-from rag.agent.core.llm_tool_runners import create_model_llm_tool_runners
-from rag.agent.core.registry import AgentRegistry
-from rag.agent.core.runtime_diagnostics import RuntimeDiagnostic
-from rag.agent.core.subagent_runner import BuiltinSubAgentRunner
-from rag.agent.service import AgentRunRequest, AgentRunResult, AgentService
-from rag.agent.tools.rag_answer_tools import RAGSearchAnswerRunner
-from rag.agent.tools.registry import ContextualToolRunner, ToolRunner
-from rag.assembly.tokenizer import TokenAccountingService, TokenizerContract
-from rag.providers.llm_gateway import LLMGateway
-from rag.schema.llm import DEFAULT_LLM_STAGE_BUDGETS
-from rag.storage.runtime_config import DEFAULT_VECTOR_BACKEND, runtime_storage_config
-from rag.utils.text import load_env_file
+from rag.agent.core.llm_registry import UnknownModelAliasError
+
+if TYPE_CHECKING:
+    from agent_runtime import AgentResult
+    from rag.agent.core.definition import AgentRuntimePolicy
+    from rag.agent.core.human_input import HumanInputResponse
+    from rag.agent.core.registry import AgentRegistry
+    from rag.agent.core.runtime_diagnostics import RuntimeDiagnostic
+    from rag.agent.service import AgentRunResult, AgentService
+    from rag.agent.tools.registry import ContextualToolRunner
 
 agent_app = typer.Typer(add_completion=False, no_args_is_help=True)
 model_app = typer.Typer(add_completion=False, no_args_is_help=True)
@@ -45,6 +35,7 @@ logger = logging.getLogger(__name__)
 CLI_AGENT_CHOICES = ("generic",)
 _SEMANTIC_RAG_TOOLS = frozenset({"search_knowledge", "search_assets"})
 DEFAULT_MODEL_SESSION_PATH = Path(".rag/agent_model_session.json")
+DEFAULT_VECTOR_BACKEND = "milvus"
 
 
 @dataclass(frozen=True)
@@ -113,6 +104,12 @@ def _build_llm_tool_runners(
     model_context_tokens: int = 32_768,
     stage_budgets: object | None = None,
 ) -> dict[str, ContextualToolRunner]:
+    from rag.agent.core.llm_registry import ResolvedModel
+    from rag.agent.core.llm_tool_runners import create_model_llm_tool_runners
+    from rag.assembly.tokenizer import TokenAccountingService, TokenizerContract
+    from rag.providers.llm_gateway import LLMGateway
+    from rag.schema.llm import DEFAULT_LLM_STAGE_BUDGETS
+
     if primary_chat is None:
         return {}
 
@@ -217,6 +214,14 @@ def _build_agent_service(
     knowledge_runner: ContextualToolRunner | None = None,
     knowledge_asset_runner: ContextualToolRunner | None = None,
 ) -> AgentService:
+    from rag.agent.builtin import create_builtin_agent_registry
+    from rag.agent.builtin_registry import create_builtin_tool_registry
+    from rag.agent.core.agent_service_factory import AgentServiceFactory
+    from rag.agent.core.checkpointing import create_agent_checkpointer
+    from rag.agent.core.runtime_diagnostics import RuntimeDiagnostic
+    from rag.agent.core.subagent_runner import BuiltinSubAgentRunner
+    from rag.agent.tools.registry import ToolRunner
+
     """Build the product Agent service.
 
     RAG is an optional attached tool provider.  Pure Agent runs should not
@@ -236,6 +241,7 @@ def _build_agent_service(
 
         retrieval_service = getattr(runtime, "retrieval_service", None)
         if retrieval_service is not None:
+            from rag.agent.tools.rag_answer_tools import RAGSearchAnswerRunner
             from rag.agent.tools.rag_tool_runner import AsyncRAGToolRunner
 
             rag_runner = AsyncRAGToolRunner(
@@ -245,16 +251,16 @@ def _build_agent_service(
             )
             for name in ("vector_search", "keyword_search", "grounding", "rerank", "graph_expand"):
                 contextual_runners[name] = cast(
-                    ContextualToolRunner,
+                    Any,
                     rag_runner.retrieve_evidence,
                 )
             rag_answer_runner = RAGSearchAnswerRunner(runtime=runtime)
             contextual_runners["rag_search_answer"] = cast(
-                ContextualToolRunner,
+                Any,
                 rag_answer_runner.answer,
             )
             contextual_runners["search_knowledge"] = cast(
-                ContextualToolRunner,
+                Any,
                 rag_answer_runner.answer,
             )
 
@@ -314,7 +320,7 @@ def _build_agent_service(
                     results.append(ar)
                 return AssetSearchOutput(assets=results, total_found=len(list_out.assets))
 
-            contextual_runners["search_assets"] = cast(ContextualToolRunner, _search_assets_runner)
+            contextual_runners["search_assets"] = cast(Any, _search_assets_runner)
 
         contextual_runners.update(
             _build_llm_tool_runners(
@@ -328,7 +334,7 @@ def _build_agent_service(
                 stage_budgets=getattr(
                     runtime,
                     "llm_stage_budgets",
-                    DEFAULT_LLM_STAGE_BUDGETS,
+                    None,
                 ),
             )
         )
@@ -422,6 +428,8 @@ def _build_optional_rag_runtime(
     vector_collection_prefix: str | None,
     explicit: bool = False,
 ) -> tuple[Any | None, tuple[RuntimeDiagnostic, ...]]:
+    from rag.agent.core.runtime_diagnostics import RuntimeDiagnostic
+
     """Build a RAG runtime only for an explicit knowledge provider."""
     if not explicit:
         return None, ()
@@ -441,6 +449,7 @@ def _build_optional_rag_runtime(
         from rag.models.assembly_adapter import to_assembly_overrides
         from rag.models.runtime import RuntimeOverrides, resolve_runtime_config
         from rag.retrieval import QueryOptions
+        from rag.storage.runtime_config import runtime_storage_config
 
         runtime_config = resolve_runtime_config(
             RuntimeOverrides(
@@ -605,6 +614,8 @@ def _display_result(result: AgentRunResult, *, verbose: bool) -> None:
 
 
 def _display_agent_result(result: AgentResult, *, verbose: bool) -> None:
+    from rag.agent.service import AgentRunResult
+
     if isinstance(result.raw, AgentRunResult):
         _display_result(result.raw, verbose=verbose)
         return
@@ -641,6 +652,8 @@ def _format_public_tool_summary(tool_calls: Sequence[str]) -> str:
 
 
 def _handle_pause(result: AgentRunResult, run_id: str) -> HumanInputResponse | None:
+    from rag.agent.core.human_input import HumanInputRequest, HumanInputResponse
+
     """展示暂停信息，获取用户决策。返回 None 表示退出。"""
     req = result.human_input_request
     if req is None:
@@ -694,6 +707,8 @@ def _handle_pause(result: AgentRunResult, run_id: str) -> HumanInputResponse | N
 
 
 def _build_resume_response(request: object, decision: str) -> HumanInputResponse:
+    from rag.agent.core.human_input import HumanInputRequest, HumanInputResponse
+
     r = cast(HumanInputRequest, request)
     tool_call_ids = [
         tool_call.tool_call_id
@@ -711,6 +726,39 @@ def _close_agent_service(service: object) -> None:
     close_method = getattr(service, "aclose", None)
     if callable(close_method):
         asyncio.run(close_method())
+
+
+def _create_agent_facade(
+    *,
+    model: str | None = None,
+    agent_type: str = "generic",
+    checkpoint_db: Path | None = None,
+    model_session_path: Path | None = None,
+    knowledge: tuple[str, ...] | list[str] | None = None,
+    rag_storage_root: Path = Path(".rag"),
+    embedding_model: str | None = None,
+    reranker_model: str | None = None,
+    vector_backend: str = DEFAULT_VECTOR_BACKEND,
+    vector_dsn: str | None = None,
+    vector_namespace: str | None = None,
+    vector_collection_prefix: str | None = None,
+) -> Any:
+    from agent_runtime import Agent
+
+    return Agent(
+        model=model,
+        agent_type=agent_type,
+        checkpoint_db=checkpoint_db,
+        model_session_path=model_session_path,
+        knowledge=knowledge,
+        rag_storage_root=rag_storage_root,
+        embedding_model=embedding_model,
+        reranker_model=reranker_model,
+        vector_backend=vector_backend,
+        vector_dsn=vector_dsn,
+        vector_namespace=vector_namespace,
+        vector_collection_prefix=vector_collection_prefix,
+    )
 
 
 def _print_startup_banner(model_alias: str, *, agent_type: str) -> None:
@@ -867,6 +915,9 @@ def agent_chat(
     ] = None,
 ) -> None:
     """交互式 Agent 对话。暂停时支持工具审批。"""
+    from rag.agent.service import AgentRunRequest
+    from rag.utils.text import load_env_file
+
     load_env_file()
     runtime, diagnostics = _build_optional_rag_runtime(
         storage_root=storage_root,
@@ -1032,7 +1083,9 @@ def agent_run(
     ] = None,
 ) -> None:
     """单次 Agent 运行。传入 --checkpoint-db 后支持跨进程恢复。"""
-    facade = Agent(
+    from rag.agent.service import AgentRunResult
+
+    facade = _create_agent_facade(
         model=model,
         agent_type=agent,
         checkpoint_db=checkpoint_db,
@@ -1148,6 +1201,8 @@ def agent_resume(
     ] = None,
 ) -> None:
     """从 SQLite checkpoint 恢复暂停的 Agent 运行。"""
+    from rag.utils.text import load_env_file
+
     load_env_file()
     runtime, diagnostics = _build_optional_rag_runtime(
         storage_root=storage_root,

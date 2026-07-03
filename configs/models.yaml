@@ -222,7 +222,7 @@ llm_budgets:
     safety_margin_tokens: 512
   tool_decision:
     max_input_tokens: 12000
-    max_output_tokens: 2048
+    max_output_tokens: 768
     safety_margin_tokens: 512
   retrieval_summary:
     max_input_tokens: 6000

@@ -19,6 +19,7 @@ from agent_runtime.models import (
 )
 from rag.agent.cli import agent_app
 from rag.agent.core.llm_registry import ModelNotAvailableError, ModelRegistry
+from rag.schema.llm import DEFAULT_LLM_STAGE_BUDGETS, LLMCallStage
 
 
 def _write_models_config(path: Path) -> None:
@@ -105,6 +106,13 @@ def test_bundled_default_chat_model_is_local_qwen8() -> None:
     assert spec.provider_model == "mlx-community/Qwen3-8B-4bit"
     assert spec.runtime is not None
     assert spec.runtime.expected_model_contains == "Qwen3-8B-4bit"
+
+
+def test_bundled_tool_decision_output_budget_is_small_for_local_agent() -> None:
+    payload = yaml.safe_load(Path("configs/models.yaml").read_text(encoding="utf-8"))
+
+    assert payload["llm_budgets"]["tool_decision"]["max_output_tokens"] == 768
+    assert DEFAULT_LLM_STAGE_BUDGETS[LLMCallStage.TOOL_DECISION].max_output_tokens == 768
 
 
 def test_model_policy_reviews_agent_model_switch_requests(tmp_path: Path) -> None:
