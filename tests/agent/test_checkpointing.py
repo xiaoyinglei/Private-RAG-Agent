@@ -1,9 +1,16 @@
 from __future__ import annotations
 
+import asyncio
 import logging
+from pathlib import Path
 
-from rag.agent.core.checkpointing import agent_checkpoint_serde
+from rag.agent.core.checkpointing import (
+    aclose_agent_checkpointer,
+    agent_checkpoint_serde,
+    create_agent_checkpointer,
+)
 from rag.agent.core.context import AgentRunConfig
+from rag.agent.core.runtime_diagnostics import ToolCallMetrics
 from rag.agent.core.turn_contracts import ToolCallPlan
 from rag.agent.loop.state import PendingToolCall, create_loop_state
 from rag.agent.memory.models import ExternalizedToolOutput, MemoryRef
@@ -109,6 +116,35 @@ def test_agent_checkpoint_serde_restores_externalized_tool_output_without_unregi
     assert isinstance(restored.output, ExternalizedToolOutput)
     assert restored.output.ref.ref_id == "mem_abc"
     assert "Deserializing unregistered type" not in caplog.text
+
+
+def test_agent_checkpoint_serde_restores_tool_call_metrics_without_unregistered_warning(
+    caplog,
+) -> None:
+    metrics = ToolCallMetrics(native_calls=2, native_latency_ms_total=15.5)
+    serde = agent_checkpoint_serde()
+
+    with caplog.at_level(
+        logging.WARNING,
+        logger="langgraph.checkpoint.serde.jsonplus",
+    ):
+        restored = serde.loads_typed(serde.dumps_typed(metrics))
+
+    assert isinstance(restored, ToolCallMetrics)
+    assert restored.native_calls == 2
+    assert restored.native_latency_ms_total == 15.5
+    assert "Deserializing unregistered type" not in caplog.text
+
+
+def test_sqlite_checkpointer_can_be_constructed_without_running_event_loop(
+    tmp_path: Path,
+) -> None:
+    checkpoint_db = tmp_path / "agent-checkpoints.sqlite"
+
+    checkpointer = create_agent_checkpointer(checkpoint_db)
+
+    assert checkpointer is not None
+    asyncio.run(aclose_agent_checkpointer(checkpointer))
 
 
 def test_live_loop_state_serde_after_pr3_cleanup() -> None:

@@ -34,6 +34,7 @@ from rag.agent.capabilities.tool_search import (
 from rag.agent.core.checkpointing import (
     LangGraphCheckpointStore,
     _digest_text,
+    aclose_agent_checkpointer,
     create_agent_checkpointer,
 )
 from rag.agent.core.context import AgentRunConfig, RunRegistry, derive_child_config
@@ -408,6 +409,9 @@ class AgentService:
         # Register core tools: tool_search, activate_tools, task
         self._register_discovery_tools()
         self._register_task_tool()
+
+    async def aclose(self) -> None:
+        await aclose_agent_checkpointer(self._checkpointer)
 
     def initial_state(self, request: AgentRunRequest) -> LoopState:
         run_config = request.to_run_config(self._policy)

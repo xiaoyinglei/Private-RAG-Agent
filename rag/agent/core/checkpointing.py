@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import sqlite3
+from collections.abc import AsyncIterator, Iterator, Sequence
 from copy import deepcopy
 from dataclasses import replace
 from pathlib import Path
@@ -11,6 +13,7 @@ from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.base import (
     BaseCheckpointSaver,
     ChannelVersions,
+    Checkpoint,
     CheckpointMetadata,
     CheckpointTuple,
     empty_checkpoint,
@@ -18,6 +21,7 @@ from langgraph.checkpoint.base import (
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.checkpoint.serde.base import SerializerProtocol
 from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
+from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
 from rag.agent.core.context import AgentRunConfig
@@ -64,6 +68,7 @@ AGENT_CHECKPOINT_MSGPACK_ALLOWLIST: tuple[tuple[str, ...], ...] = (
     ("rag.agent.core.human_input", "ToolCallSummary"),
     ("rag.agent.core.output_models", "ValidatedFinalOutput"),
     ("rag.agent.core.runtime_diagnostics", "RuntimeDiagnostic"),
+    ("rag.agent.core.runtime_diagnostics", "ToolCallMetrics"),
     ("rag.agent.core.tool_execution", "ToolBatchRequest"),
     ("rag.agent.core.tool_execution", "ToolBatchResult"),
     ("rag.agent.core.tool_execution", "ToolExecutionRecord"),
@@ -158,6 +163,128 @@ def agent_checkpoint_serde() -> SerializerProtocol:
     return JsonPlusSerializer(
         allowed_msgpack_modules=AGENT_CHECKPOINT_MSGPACK_ALLOWLIST,
     )
+
+
+class LazyAsyncSqliteSaver(BaseCheckpointSaver[str]):
+    """SQLite checkpointer that creates async resources inside the active loop."""
+
+    def __init__(
+        self,
+        path: Path,
+        *,
+        serde: SerializerProtocol,
+    ) -> None:
+        super().__init__(serde=serde)
+        self._path = path
+        self._async_conn: aiosqlite.Connection | None = None
+        self._async_saver: AsyncSqliteSaver | None = None
+
+    async def _aget_saver(self) -> AsyncSqliteSaver:
+        if self._async_saver is None:
+            self._async_conn = await aiosqlite.connect(str(self._path))
+            self._async_saver = AsyncSqliteSaver(
+                self._async_conn,
+                serde=self.serde,
+            )
+        return self._async_saver
+
+    def _sync_saver(self) -> SqliteSaver:
+        conn = sqlite3.connect(str(self._path), check_same_thread=False)
+        return SqliteSaver(conn, serde=self.serde)
+
+    def get_tuple(self, config: RunnableConfig) -> CheckpointTuple | None:
+        saver = self._sync_saver()
+        try:
+            return saver.get_tuple(config)
+        finally:
+            saver.conn.close()
+
+    async def aget_tuple(self, config: RunnableConfig) -> CheckpointTuple | None:
+        saver = await self._aget_saver()
+        return await saver.aget_tuple(config)
+
+    def put(
+        self,
+        config: RunnableConfig,
+        checkpoint: Checkpoint,
+        metadata: CheckpointMetadata,
+        new_versions: ChannelVersions,
+    ) -> RunnableConfig:
+        saver = self._sync_saver()
+        try:
+            return saver.put(config, checkpoint, metadata, new_versions)
+        finally:
+            saver.conn.close()
+
+    async def aput(
+        self,
+        config: RunnableConfig,
+        checkpoint: Checkpoint,
+        metadata: CheckpointMetadata,
+        new_versions: ChannelVersions,
+    ) -> RunnableConfig:
+        saver = await self._aget_saver()
+        return await saver.aput(config, checkpoint, metadata, new_versions)
+
+    def put_writes(
+        self,
+        config: RunnableConfig,
+        writes: Sequence[tuple[str, Any]],
+        task_id: str,
+        task_path: str = "",
+    ) -> None:
+        saver = self._sync_saver()
+        try:
+            saver.put_writes(config, writes, task_id, task_path)
+        finally:
+            saver.conn.close()
+
+    async def aput_writes(
+        self,
+        config: RunnableConfig,
+        writes: Sequence[tuple[str, Any]],
+        task_id: str,
+        task_path: str = "",
+    ) -> None:
+        saver = await self._aget_saver()
+        await saver.aput_writes(config, writes, task_id, task_path)
+
+    def list(
+        self,
+        config: RunnableConfig | None,
+        *,
+        filter: dict[str, Any] | None = None,
+        before: RunnableConfig | None = None,
+        limit: int | None = None,
+    ) -> Iterator[CheckpointTuple]:
+        saver = self._sync_saver()
+        try:
+            yield from saver.list(config, filter=filter, before=before, limit=limit)
+        finally:
+            saver.conn.close()
+
+    async def alist(
+        self,
+        config: RunnableConfig | None,
+        *,
+        filter: dict[str, Any] | None = None,
+        before: RunnableConfig | None = None,
+        limit: int | None = None,
+    ) -> AsyncIterator[CheckpointTuple]:
+        saver = await self._aget_saver()
+        async for item in saver.alist(
+            config,
+            filter=filter,
+            before=before,
+            limit=limit,
+        ):
+            yield item
+
+    async def aclose(self) -> None:
+        if self._async_conn is not None:
+            await self._async_conn.close()
+            self._async_conn = None
+            self._async_saver = None
 
 
 class CheckpointPersistenceError(RuntimeError):
@@ -754,13 +881,14 @@ def create_agent_checkpointer(checkpoint_db: Path | str | None) -> BaseCheckpoin
 
     path = Path(checkpoint_db)
     path.parent.mkdir(parents=True, exist_ok=True)
-    return AsyncSqliteSaver(
-        aiosqlite.connect(str(path)),
-        serde=agent_checkpoint_serde(),
-    )
+    return LazyAsyncSqliteSaver(path, serde=agent_checkpoint_serde())
 
 
 async def aclose_agent_checkpointer(checkpointer: BaseCheckpointSaver[str]) -> None:
+    close_method = getattr(checkpointer, "aclose", None)
+    if callable(close_method):
+        await close_method()
+        return
     connection = getattr(checkpointer, "conn", None)
     if connection is not None and hasattr(connection, "close"):
         await connection.close()

@@ -113,6 +113,29 @@ def test_agent_facade_registers_knowledge_runner_lazily(monkeypatch) -> None:
     assert built[0]["knowledge_asset_runner"] is not None
 
 
+def test_agent_facade_closes_service_after_run(monkeypatch) -> None:
+    closed: list[bool] = []
+
+    class _Service:
+        async def run(self, request: Any) -> AgentRunResult:
+            return AgentRunResult(
+                run_id=request.run_id,
+                thread_id=request.thread_id,
+                status="done",
+                final_answer="closed",
+            )
+
+        async def aclose(self) -> None:
+            closed.append(True)
+
+    monkeypatch.setattr(agent_cli, "_build_agent_service", lambda *_args, **_kwargs: _Service())
+
+    result = Agent(model="qwen3_14b_4bit").run("close service", run_id="close-service")
+
+    assert result.answer == "closed"
+    assert closed == [True]
+
+
 @pytest.mark.anyio
 async def test_lazy_knowledge_provider_search_assets_uses_typed_asset_inputs(monkeypatch) -> None:
     class _MetadataRepo:

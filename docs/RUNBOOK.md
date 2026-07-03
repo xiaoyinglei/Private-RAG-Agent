@@ -45,13 +45,13 @@ lsof -nP -iTCP:6379 -sTCP:LISTEN
 
 | 能力 | 默认别名 | 实际模型 / 服务 |
 | --- | --- | --- |
-| 生成 / 摘要 / Agent tool decision | `qwen3_14b_4bit` | `mlx-community/Qwen3-14B-4bit`，OpenAI-compatible，`127.0.0.1:8080` |
+| 生成 / 摘要 / Agent tool decision | `qwen3_8b_mlx_4bit` | `mlx-community/Qwen3-8B-4bit`，OpenAI-compatible，`127.0.0.1:8080` |
 | Embedding | `qwen3_embedding_4b_4bit_dwq` | `mlx-community/Qwen3-Embedding-4B-4bit-DWQ`，HTTP service，`127.0.0.1:9090` |
 | Rerank | `bge_reranker_v2_m3` | `BAAI/bge-reranker-v2-m3`，HTTP service，`127.0.0.1:9092` |
 
 内存策略：
 
-- 默认 chat 走本地 Qwen 服务。`agent run --model qwen3_14b_4bit`
+- 默认 chat 走本地 Qwen 服务。`agent run --model qwen3_8b_mlx_4bit`
   会先检查 `runtime.health_url`，未启动时按 `runtime.launch_command`
   自动拉起 `127.0.0.1:8080` 的 OpenAI-compatible server。
 - 入库和查询需要 embedding；建议启动 embedding HTTP 服务，避免每条命令重复加载模型。
@@ -120,7 +120,7 @@ screen -S rag_qwen_8080 -X quit >/dev/null 2>&1 || true
 screen -dmS rag_qwen_8080 zsh -lc '
 cd "/Users/leixiaoying/LLM/RAG学习"
 uv run python -m mlx_lm.server \
-  --model mlx-community/Qwen3-14B-4bit \
+  --model mlx-community/Qwen3-8B-4bit \
   --host 127.0.0.1 \
   --port 8080 \
   --chat-template-args '"'"'{"enable_thinking": false}'"'"'
@@ -146,7 +146,7 @@ screen -S rag_rerank_9092 -X quit >/dev/null 2>&1 || true
 
 ## 私有文档端到端运行手册
 
-先准备 embedding 服务；rerank 默认不开，需要时再按"常用开关"打开。默认 chat 走 `configs/models.yaml` 中的 `qwen3_14b_4bit`，Agent 会按 runtime 配置自动检查和启动本地 chat 服务。
+先准备 embedding 服务；rerank 默认不开，需要时再按"常用开关"打开。默认 chat 走 `configs/models.yaml` 中的 `qwen3_8b_mlx_4bit`，Agent 会按 runtime 配置自动检查和启动本地 chat 服务。
 
 ### 统一变量
 

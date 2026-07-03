@@ -68,7 +68,7 @@ models:
     capability: chat
     provider: qwen
     protocol: openai_compatible
-    model: Qwen/Qwen3-8B-MLX-4bit
+    model: mlx-community/Qwen3-8B-4bit
     base_url: http://127.0.0.1:8080/v1
     context_window_tokens: 32768
     location: local
@@ -81,14 +81,14 @@ models:
         - -m
         - mlx_lm.server
         - --model
-        - Qwen/Qwen3-8B-MLX-4bit
+        - mlx-community/Qwen3-8B-4bit
         - --host
         - 127.0.0.1
         - --port
         - "8080"
         - --chat-template-args
         - '{"enable_thinking": false}'
-      expected_model_contains: Qwen/Qwen3-8B-MLX-4bit
+      expected_model_contains: Qwen3-8B-4bit
       startup_timeout_seconds: 120
       poll_interval_seconds: 1
 
@@ -170,7 +170,7 @@ models:
 
 
 defaults:
-  primary_model: qwen3_14b_4bit
+  primary_model: qwen3_8b_mlx_4bit
   embedding_model: qwen3_embedding_8b_4bit_dwq
   reranker_model: qwen3_reranker_4b
 

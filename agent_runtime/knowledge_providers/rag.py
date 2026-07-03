@@ -164,6 +164,7 @@ class LazyRAGKnowledgeProvider:
             vector_dsn=self.vector_dsn,
             vector_namespace=self.vector_namespace,
             vector_collection_prefix=self.vector_collection_prefix,
+            explicit=True,
         )
         self._diagnostics = tuple(diagnostics)
         if runtime is None:

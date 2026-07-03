@@ -100,6 +100,9 @@ class Agent:
                 files=tuple(files or ()),
             )
         finally:
+            close_method = getattr(service, "aclose", None)
+            if callable(close_method):
+                await close_method()
             if provider is not None:
                 provider.close()
 
@@ -126,6 +129,9 @@ class Agent:
             async for event in service.run_streaming(request):
                 yield event
         finally:
+            close_method = getattr(service, "aclose", None)
+            if callable(close_method):
+                await close_method()
             if provider is not None:
                 provider.close()
 

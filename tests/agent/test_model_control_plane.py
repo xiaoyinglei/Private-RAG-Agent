@@ -96,6 +96,17 @@ def test_model_catalog_loads_runtime_specs_without_embedding_models(tmp_path: Pa
     assert local.runtime.expected_model_contains == "Qwen3-14B"
 
 
+def test_bundled_default_chat_model_is_local_qwen8() -> None:
+    catalog = ModelCatalog.from_config_file(Path("configs/models.yaml"))
+
+    spec = catalog.get(catalog.default_model_id)
+
+    assert catalog.default_model_id == "qwen3_8b_mlx_4bit"
+    assert spec.provider_model == "mlx-community/Qwen3-8B-4bit"
+    assert spec.runtime is not None
+    assert spec.runtime.expected_model_contains == "Qwen3-8B-4bit"
+
+
 def test_model_policy_reviews_agent_model_switch_requests(tmp_path: Path) -> None:
     config_path = tmp_path / "models.yaml"
     _write_models_config(config_path)

@@ -307,6 +307,43 @@ def test_default_checkpoint_dir_does_not_auto_attach_rag(
     assert diagnostics == ()
 
 
+def test_existing_rag_storage_does_not_auto_attach_without_explicit_knowledge(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for name in (
+        "AGENT_RAG_STORAGE_ROOT",
+        "RAG_STORAGE_ROOT",
+        "STORAGE_ROOT",
+        "AGENT_VECTOR_BACKEND",
+        "VECTOR_BACKEND",
+        "AGENT_VECTOR_DSN",
+        "VECTOR_DSN",
+        "AGENT_VECTOR_NAMESPACE",
+        "VECTOR_NAMESPACE",
+        "AGENT_VECTOR_PREFIX",
+        "VECTOR_PREFIX",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    storage_root = tmp_path / ".rag"
+    storage_root.mkdir()
+    (storage_root / "metadata.sqlite3").touch()
+
+    runtime, diagnostics = _build_optional_rag_runtime(
+        storage_root=storage_root,
+        model_alias=None,
+        embedding_model_alias=None,
+        reranker_model_alias=None,
+        vector_backend="milvus",
+        vector_dsn=None,
+        vector_namespace=None,
+        vector_collection_prefix=None,
+    )
+
+    assert runtime is None
+    assert diagnostics == ()
+
+
 def test_build_agent_service_honors_cli_model_alias_for_agent_decisions() -> None:
     service = _build_agent_service(
         _Runtime(),

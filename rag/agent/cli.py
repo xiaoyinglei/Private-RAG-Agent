@@ -420,8 +420,11 @@ def _build_optional_rag_runtime(
     vector_dsn: str | None,
     vector_namespace: str | None,
     vector_collection_prefix: str | None,
+    explicit: bool = False,
 ) -> tuple[Any | None, tuple[RuntimeDiagnostic, ...]]:
-    """Auto-attach RAG when the local storage exists and can be assembled."""
+    """Build a RAG runtime only for an explicit knowledge provider."""
+    if not explicit:
+        return None, ()
     rag_config = _resolve_auto_rag_config(
         storage_root=storage_root,
         vector_backend=vector_backend,
@@ -704,6 +707,12 @@ def _build_resume_response(request: object, decision: str) -> HumanInputResponse
     )
 
 
+def _close_agent_service(service: object) -> None:
+    close_method = getattr(service, "aclose", None)
+    if callable(close_method):
+        asyncio.run(close_method())
+
+
 def _print_startup_banner(model_alias: str, *, agent_type: str) -> None:
     print(f"Agent 就绪 (agent: {agent_type}, 模型: {model_alias})")
     print("输入查询，或 /exit 退出，/verbose 切换详细输出，/model 查看/切换模型")
@@ -868,6 +877,7 @@ def agent_chat(
         vector_dsn=vector_dsn,
         vector_namespace=vector_namespace,
         vector_collection_prefix=vector_collection_prefix,
+        explicit=False,
     )
 
     with runtime if runtime is not None else nullcontext():
@@ -887,60 +897,63 @@ def agent_chat(
             model_control_plane=model_control_plane,
             runtime_diagnostics=diagnostics,
         )
-        run_id = f"chat_{id(service):x}"
-        verbose = False
+        try:
+            run_id = f"chat_{id(service):x}"
+            verbose = False
 
-        _print_startup_banner(_service_model_alias(service, model), agent_type=agent)
+            _print_startup_banner(_service_model_alias(service, model), agent_type=agent)
 
-        while True:
-            try:
-                query = input("> ").strip()
-            except (EOFError, KeyboardInterrupt):
-                print("\n再见。")
-                break
+            while True:
+                try:
+                    query = input("> ").strip()
+                except (EOFError, KeyboardInterrupt):
+                    print("\n再见。")
+                    break
 
-            if not query:
-                continue
-            if query == "/exit":
-                break
-            if query == "/verbose":
-                verbose = not verbose
-                print(f"详细输出: {'开' if verbose else '关'}")
-                continue
-            if query == "/model" or query.startswith("/model "):
-                _handle_model_slash_command(
-                    query,
-                    control_plane=_service_model_control_plane(service),
-                )
-                continue
+                if not query:
+                    continue
+                if query == "/exit":
+                    break
+                if query == "/verbose":
+                    verbose = not verbose
+                    print(f"详细输出: {'开' if verbose else '关'}")
+                    continue
+                if query == "/model" or query.startswith("/model "):
+                    _handle_model_slash_command(
+                        query,
+                        control_plane=_service_model_control_plane(service),
+                    )
+                    continue
 
-            result = asyncio.run(
-                service.run(
-                    AgentRunRequest(
-                        task=query,
-                        run_id=run_id,
-                        thread_id=run_id,
-                        llm_budget_total=budget,
+                result = asyncio.run(
+                    service.run(
+                        AgentRunRequest(
+                            task=query,
+                            run_id=run_id,
+                            thread_id=run_id,
+                            llm_budget_total=budget,
+                        )
                     )
                 )
-            )
 
-            while result.status == "paused":
-                _display_result(result, verbose=verbose)
-                response = _handle_pause(result, run_id)
-                if response is None:
-                    print("已取消。")
-                    break
-                result = asyncio.run(
-                    service.resume(run_id=run_id, response=response)
-                )
+                while result.status == "paused":
+                    _display_result(result, verbose=verbose)
+                    response = _handle_pause(result, run_id)
+                    if response is None:
+                        print("已取消。")
+                        break
+                    result = asyncio.run(
+                        service.resume(run_id=run_id, response=response)
+                    )
 
-            if result.status in ("done", "failed"):
-                _display_result(result, verbose=verbose)
+                if result.status in ("done", "failed"):
+                    _display_result(result, verbose=verbose)
 
-            if result.status == "failed" and result.stop_reason:
-                if verbose:
-                    print(f"失败: {result.stop_reason}")
+                if result.status == "failed" and result.stop_reason:
+                    if verbose:
+                        print(f"失败: {result.stop_reason}")
+        finally:
+            _close_agent_service(service)
 
 
 @agent_app.command(name="run")
@@ -1165,9 +1178,12 @@ def agent_resume(
             model_control_plane=model_control_plane,
             runtime_diagnostics=diagnostics,
         )
-        request = asyncio.run(service.apending_human_input_request(run_id=run_id))
-        response = _build_resume_response(request, decision)
-        result = asyncio.run(service.resume(run_id=run_id, response=response, workspace_path=workspace_path))
-        _display_result(result, verbose=verbose)
-        if result.status == "failed":
-            raise typer.Exit(code=1)
+        try:
+            request = asyncio.run(service.apending_human_input_request(run_id=run_id))
+            response = _build_resume_response(request, decision)
+            result = asyncio.run(service.resume(run_id=run_id, response=response, workspace_path=workspace_path))
+            _display_result(result, verbose=verbose)
+            if result.status == "failed":
+                raise typer.Exit(code=1)
+        finally:
+            _close_agent_service(service)

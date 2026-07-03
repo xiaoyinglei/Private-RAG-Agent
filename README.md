@@ -56,7 +56,7 @@ cd "/Users/leixiaoying/LLM/RAG学习"
 uv sync
 ```
 
-云模型可以不用配。默认走本地 LLM；`agent run --model qwen3_14b_4bit`
+云模型可以不用配。默认走本地 LLM；`agent run --model qwen3_8b_mlx_4bit`
 会按 `configs/models.yaml` 的 `runtime` 配置检查 `127.0.0.1:8080/v1/models`，
 未启动时自动拉起本地 OpenAI-compatible server，然后再调用模型。
 
@@ -82,7 +82,7 @@ Python SDK：
 ```python
 from agent_runtime import Agent
 
-agent = Agent(model="qwen3_14b_4bit")
+agent = Agent(model="qwen3_8b_mlx_4bit")
 agent.switch_model("mimo_cloud")  # 切换当前 SDK session，不修改 configs/models.yaml
 result = agent.run("总结一下这个项目")
 print(result.answer)
@@ -445,8 +445,8 @@ uv run agent model switch mimo_cloud
 
 当前默认：
 
-- `defaults.primary_model`：`qwen3_14b_4bit`
-- `qwen3_14b_4bit.model`：`mlx-community/Qwen3-14B-4bit`，OpenAI-compatible，`127.0.0.1:8080`，按 `runtime.launch_command` 自动启动
+- `defaults.primary_model`：`qwen3_8b_mlx_4bit`
+- `qwen3_8b_mlx_4bit.model`：`mlx-community/Qwen3-8B-4bit`，OpenAI-compatible，`127.0.0.1:8080`，按 `runtime.launch_command` 自动启动
 - Embedding：`mlx-community/Qwen3-Embedding-4B-4bit-DWQ`
 - Rerank：`BAAI/bge-reranker-v2-m3`
 
