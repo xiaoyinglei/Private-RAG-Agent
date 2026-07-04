@@ -213,207 +213,21 @@ def _build_agent_service(
     runtime_diagnostics: Sequence[RuntimeDiagnostic] = (),
     knowledge_runner: ContextualToolRunner | None = None,
     knowledge_asset_runner: ContextualToolRunner | None = None,
+    strict_model_provider: bool = True,
 ) -> AgentService:
-    from rag.agent.builtin import create_builtin_agent_registry
-    from rag.agent.builtin_registry import create_builtin_tool_registry
-    from rag.agent.core.agent_service_factory import AgentServiceFactory
-    from rag.agent.core.checkpointing import create_agent_checkpointer
-    from rag.agent.core.runtime_diagnostics import RuntimeDiagnostic
-    from rag.agent.core.subagent_runner import BuiltinSubAgentRunner
-    from rag.agent.tools.registry import ToolRunner
+    from agent_runtime.runtime.builder import build_agent_service
 
-    """Build the product Agent service.
-
-    RAG is an optional attached tool provider.  Pure Agent runs should not
-    require RAG storage/vector configuration, and unavailable RAG tools should
-    not be visible to the model.
-    """
-    agent_registry = create_builtin_agent_registry()
-    definition = _resolve_cli_agent_definition(agent_registry, agent_type)
-
-    runners: dict[str, ToolRunner] = {}
-    contextual_runners: dict[str, ContextualToolRunner] = {}
-
-    if runtime is not None:
-        bundle = getattr(runtime, "capability_bundle", None)
-        chat_bindings = list(getattr(bundle, "chat_bindings", ()) or ())
-        primary_chat = chat_bindings[0] if chat_bindings else None
-
-        retrieval_service = getattr(runtime, "retrieval_service", None)
-        if retrieval_service is not None:
-            from rag.agent.tools.rag_answer_tools import RAGSearchAnswerRunner
-            from rag.agent.tools.rag_tool_runner import AsyncRAGToolRunner
-
-            rag_runner = AsyncRAGToolRunner(
-                runtime=runtime,
-                retrieval_service=retrieval_service,
-                max_context_tokens=4096,
-            )
-            for name in ("vector_search", "keyword_search", "grounding", "rerank", "graph_expand"):
-                contextual_runners[name] = cast(
-                    Any,
-                    rag_runner.retrieve_evidence,
-                )
-            rag_answer_runner = RAGSearchAnswerRunner(runtime=runtime)
-            contextual_runners["rag_search_answer"] = cast(
-                Any,
-                rag_answer_runner.answer,
-            )
-            contextual_runners["search_knowledge"] = cast(
-                Any,
-                rag_answer_runner.answer,
-            )
-
-        from rag.agent.tools.asset_tools import AssetToolRunner
-
-        stores = getattr(runtime, "stores", None)
-        metadata_repo = getattr(stores, "metadata_repo", None)
-        object_store = getattr(stores, "object_store", None)
-        if metadata_repo is not None and object_store is not None:
-            from rag.agent.tools.asset_tools import AssetInspectInput, AssetListInput
-
-            asset_runner = AssetToolRunner(
-                metadata_repo=metadata_repo,
-                object_store=object_store,
-            )
-            runners["asset_list"] = cast(ToolRunner, asset_runner.list_assets)
-            runners["asset_inspect"] = cast(ToolRunner, asset_runner.inspect_asset)
-            runners["asset_read_slice"] = cast(ToolRunner, asset_runner.read_slice)
-            runners["asset_analyze"] = cast(ToolRunner, asset_runner.analyze_asset)
-
-            async def _search_assets_runner(payload: Any) -> Any:
-                from rag.agent.tools.rag_semantic_tools import (
-                    AssetResult,
-                    AssetSearchInput,
-                    AssetSearchOutput,
-                )
-
-                if isinstance(payload, dict):
-                    inp = AssetSearchInput(**payload)
-                else:
-                    inp = payload
-                list_out = asset_runner.list_assets(
-                    AssetListInput(
-                        doc_id=inp.doc_id,
-                        asset_type=inp.asset_type,
-                        limit=inp.max_results,
-                    )
-                )
-                results: list[AssetResult] = []
-                for a in list_out.assets[:inp.max_results]:
-                    ar = AssetResult(
-                        asset_id=a.asset_id, doc_id=a.doc_id,
-                        asset_type=a.asset_type, sheet_name=a.sheet_name,
-                        caption=a.caption, columns=list(a.columns or []),
-                        row_count=a.row_count, column_count=a.column_count,
-                    )
-                    if inp.include_preview and a.asset_id:
-                        try:
-                            insp = asset_runner.inspect_asset(
-                                AssetInspectInput(asset_id=a.asset_id, head_rows=3)
-                            )
-                            if insp.head_rows:
-                                ar.preview_rows = insp.head_rows[:3]
-                            ar.analysis_capabilities = list(insp.analysis_capabilities or [])
-                        except Exception:
-                            pass
-                    results.append(ar)
-                return AssetSearchOutput(assets=results, total_found=len(list_out.assets))
-
-            contextual_runners["search_assets"] = cast(Any, _search_assets_runner)
-
-        contextual_runners.update(
-            _build_llm_tool_runners(
-                primary_chat,
-                token_accounting=getattr(runtime, "token_accounting", None),
-                model_context_tokens=getattr(
-                    runtime,
-                    "chat_context_window_tokens",
-                    32_768,
-                ),
-                stage_budgets=getattr(
-                    runtime,
-                    "llm_stage_budgets",
-                    None,
-                ),
-            )
-        )
-
-    if knowledge_runner is not None:
-        contextual_runners["search_knowledge"] = knowledge_runner
-    if knowledge_asset_runner is not None:
-        contextual_runners["search_assets"] = knowledge_asset_runner
-
-    unavailable_rag_tools = {
-        name for name in _SEMANTIC_RAG_TOOLS
-        if name not in contextual_runners
-    }
-    definition = _without_unavailable_deferred_tools(
-        definition,
-        unavailable_rag_tools,
+    return build_agent_service(
+        runtime,
+        checkpoint_db=checkpoint_db,
+        agent_type=agent_type,
+        model_alias=model_alias,
+        model_control_plane=model_control_plane,
+        runtime_diagnostics=runtime_diagnostics,
+        knowledge_runner=knowledge_runner,
+        knowledge_asset_runner=knowledge_asset_runner,
+        strict_model_provider=strict_model_provider,
     )
-
-    tool_registry = create_builtin_tool_registry(
-        runners=runners,
-        contextual_runners=contextual_runners,
-    )
-    diagnostics: tuple[RuntimeDiagnostic, ...] = tuple(runtime_diagnostics)
-    try:
-        model_registry = model_control_plane or _build_model_control_plane(
-            model_alias=model_alias,
-        )
-    except Exception as exc:
-        if model_alias is not None:
-            raise
-        model_registry = None
-        diagnostics = (
-            *diagnostics,
-            RuntimeDiagnostic.from_exception(
-                code="model_registry_initialization_failed",
-                component="model_registry",
-                error=exc,
-            ),
-        )
-
-    # Build skill catalog from .agents/skills/ and SKILL_PATH
-    skill_catalog = None
-    try:
-        from pathlib import Path
-
-        from rag.agent.skills.catalog import SkillCatalog
-        from rag.agent.skills.loader import scan_and_load_skills
-
-        manifests = scan_and_load_skills(Path.cwd())
-        if manifests:
-            skill_catalog = SkillCatalog(manifests)
-    except Exception as exc:
-        logger.warning(
-            "Skill catalog loading failed; continuing without skills",
-            exc_info=True,
-        )
-        diagnostics = (
-            *diagnostics,
-            RuntimeDiagnostic.from_exception(
-                code="skill_catalog_load_failed",
-                component="skill_catalog",
-                error=exc,
-            ),
-        )
-
-    service_factory = AgentServiceFactory(
-        tool_registry=tool_registry,
-        model_registry=model_registry,
-        checkpointer=create_agent_checkpointer(checkpoint_db),
-        runtime_diagnostics=diagnostics,
-        skill_catalog=skill_catalog,
-        strict_model_provider=model_alias is not None,
-    )
-    subagent_runner = BuiltinSubAgentRunner(
-        agent_registry=agent_registry,
-        service_factory=service_factory,
-    )
-    service_factory.bind_subagent_runner(subagent_runner)
-    return service_factory.create(definition)
 
 
 def _build_optional_rag_runtime(
@@ -428,70 +242,19 @@ def _build_optional_rag_runtime(
     vector_collection_prefix: str | None,
     explicit: bool = False,
 ) -> tuple[Any | None, tuple[RuntimeDiagnostic, ...]]:
-    from rag.agent.core.runtime_diagnostics import RuntimeDiagnostic
+    from agent_runtime.runtime.builder import build_optional_rag_runtime
 
-    """Build a RAG runtime only for an explicit knowledge provider."""
-    if not explicit:
-        return None, ()
-    rag_config = _resolve_auto_rag_config(
+    return build_optional_rag_runtime(
         storage_root=storage_root,
+        model_alias=model_alias,
+        embedding_model_alias=embedding_model_alias,
+        reranker_model_alias=reranker_model_alias,
         vector_backend=vector_backend,
         vector_dsn=vector_dsn,
         vector_namespace=vector_namespace,
         vector_collection_prefix=vector_collection_prefix,
+        explicit=explicit,
     )
-    if not rag_config.storage_root.exists():
-        return None, ()
-    if not rag_config.explicit and not _looks_like_rag_storage(rag_config.storage_root):
-        return None, ()
-    try:
-        from rag import AssemblyRequest, CapabilityRequirements, RAGRuntime
-        from rag.models.assembly_adapter import to_assembly_overrides
-        from rag.models.runtime import RuntimeOverrides, resolve_runtime_config
-        from rag.retrieval import QueryOptions
-        from rag.storage.runtime_config import runtime_storage_config
-
-        runtime_config = resolve_runtime_config(
-            RuntimeOverrides(
-                model_alias=model_alias,
-                embedding_model_alias=embedding_model_alias,
-                reranker_model_alias=reranker_model_alias or "none",
-            )
-        )
-        assembly_overrides = to_assembly_overrides(runtime_config)
-        storage = runtime_storage_config(
-            rag_config.storage_root,
-            vector_backend=rag_config.vector_backend,
-            vector_dsn=rag_config.vector_dsn,
-            vector_namespace=rag_config.vector_namespace,
-            vector_collection_prefix=rag_config.vector_collection_prefix,
-        )
-        requirements = CapabilityRequirements(
-            require_chat=True,
-            default_context_tokens=QueryOptions().max_context_tokens,
-        )
-        runtime = RAGRuntime.from_request(
-            storage=storage,
-            request=AssemblyRequest(
-                requirements=requirements,
-                overrides=assembly_overrides,
-            ),
-            generation_config=runtime_config.generation,
-            chat_context_window_tokens=(
-                runtime_config.primary_model.context_window_tokens or 32_768
-            ),
-            llm_stage_budgets=runtime_config.llm_stage_budgets,
-        )
-        return runtime, ()
-    except Exception as exc:
-        logger.warning("RAG auto-attach failed; continuing without RAG", exc_info=True)
-        return None, (
-            RuntimeDiagnostic.from_exception(
-                code="rag_auto_attach_failed",
-                component="rag_runtime",
-                error=exc,
-            ),
-        )
 
 
 def _format_tool_summary(result: AgentRunResult) -> str:
@@ -605,6 +368,20 @@ def _display_result(result: AgentRunResult, *, verbose: bool) -> None:
         if isinstance(m, ToolCallMetrics):
             print(f"\n调用统计: native={m.native_calls}({m.native_errors}err/{m.native_latency_ms_total:.0f}ms) "
                   f"deferred={m.deferred_calls} mcp={m.mcp_calls}({m.mcp_errors}err/{m.mcp_latency_ms_total:.0f}ms)")
+
+    if verbose and result.latency_profile is not None:
+        p = result.latency_profile
+        print(
+            "\n耗时: "
+            f"total={p.total_ms:.0f}ms "
+            f"build={p.build_service_ms:.0f}ms "
+            f"model_ready={p.model_ready_ms:.0f}ms "
+            f"model={p.model_latency_ms:.0f}ms "
+            f"tool={p.tool_latency_ms:.0f}ms "
+            f"finalize={p.finalize_latency_ms:.0f}ms "
+            f"prompt_bytes={p.prompt_bytes} "
+            f"tool_schema_bytes={p.tool_schema_bytes}"
+        )
 
     if verbose and result.evidence:
         print(f"证据: {len(result.evidence)} 条")

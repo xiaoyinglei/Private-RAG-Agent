@@ -11,6 +11,7 @@ from rag.agent.core.context import AgentRunConfig
 from rag.agent.core.human_input import HumanInputRequest, HumanInputResponse
 from rag.agent.core.output_models import ValidatedFinalOutput
 from rag.agent.core.runtime_diagnostics import (
+    AgentLatencyProfile,
     RuntimeDiagnostic,
     merge_runtime_diagnostics,
 )
@@ -191,6 +192,7 @@ class LoopState(TypedDict):
     denied_tool_call_ids: list[str]
     tool_results: list[ToolResult]
     runtime_diagnostics: list[RuntimeDiagnostic]
+    latency_profile: AgentLatencyProfile
     last_model_turn: ModelTurn | None
     pause: LoopPause | None
     terminal: LoopTerminal | None
@@ -247,6 +249,7 @@ def create_loop_state(
         "denied_tool_call_ids": [],
         "tool_results": [],
         "runtime_diagnostics": merge_runtime_diagnostics([], runtime_diagnostics),
+        "latency_profile": AgentLatencyProfile(),
         "last_model_turn": None,
         "pause": None,
         "terminal": None,

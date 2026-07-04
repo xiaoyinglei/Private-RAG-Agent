@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from collections.abc import AsyncGenerator, Awaitable, Sequence
 from inspect import isawaitable
 from pathlib import Path
@@ -22,7 +23,7 @@ from rag.agent.core.human_input import HumanInputRequest
 from rag.agent.core.llm_context import AgentLLMContextOverflowError
 from rag.agent.core.observations import ObservationBatch, ObservationExtractor
 from rag.agent.core.output_models import ValidatedFinalOutput
-from rag.agent.core.runtime_diagnostics import RuntimeDiagnostic
+from rag.agent.core.runtime_diagnostics import AgentLatencyProfile, RuntimeDiagnostic
 from rag.agent.core.tool_execution import (
     ToolBatchRequest,
     ToolBatchResult,
@@ -61,6 +62,15 @@ _DEFERRED_TOOL_SET = frozenset({
     "search_knowledge", "search_assets", "llm_generate",
     "llm_summarize", "llm_compare", "structured_probe",
 })
+
+
+def _add_model_latency(state: LoopState, latency_ms: float) -> None:
+    profile = state.get("latency_profile")
+    if not isinstance(profile, AgentLatencyProfile):
+        profile = AgentLatencyProfile()
+    state["latency_profile"] = profile.model_copy(
+        update={"model_latency_ms": profile.model_latency_ms + latency_ms}
+    )
 
 
 class ModelTurnEnvelope(BaseModel):
@@ -331,11 +341,15 @@ class AgentLoop:
         """Call the model, handle errors.  Returns (turn, retries) or (None, _) on terminal failure."""
         turn: ModelTurn | None = None
         try:
-            provided = await self._model_provider.next_turn(
-                state,
-                definition=self._definition,
-                budget_remaining=budget_remaining,
-            )
+            model_started_at = time.perf_counter()
+            try:
+                provided = await self._model_provider.next_turn(
+                    state,
+                    definition=self._definition,
+                    budget_remaining=budget_remaining,
+                )
+            finally:
+                _add_model_latency(state, (time.perf_counter() - model_started_at) * 1000)
             envelope = provided if isinstance(provided, ModelTurnEnvelope) else ModelTurnEnvelope(draft=provided)
             for t in envelope.transitions:
                 tr = t.model_copy(update={"iteration": state["iteration"]})

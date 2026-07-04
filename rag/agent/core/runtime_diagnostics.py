@@ -115,6 +115,23 @@ class ToolCallMetrics(BaseModel):
         return self.approval_ask / total * 100
 
 
+class AgentLatencyProfile(BaseModel):
+    """Per-run latency profile for product Agent execution."""
+
+    model_config = ConfigDict(frozen=True)
+
+    startup_ms: float = 0.0
+    build_service_ms: float = 0.0
+    model_ready_ms: float = 0.0
+    prepare_latency_ms: float = 0.0
+    model_latency_ms: float = 0.0
+    tool_latency_ms: float = 0.0
+    finalize_latency_ms: float = 0.0
+    total_ms: float = 0.0
+    prompt_bytes: int = 0
+    tool_schema_bytes: int = 0
+
+
 def merge_runtime_diagnostics(
     left: Iterable[RuntimeDiagnostic],
     right: Iterable[RuntimeDiagnostic],
@@ -129,6 +146,7 @@ def merge_runtime_diagnostics(
 
 __all__ = [
     "MAX_RUNTIME_DIAGNOSTICS",
+    "AgentLatencyProfile",
     "RuntimeDiagnostic",
     "ToolCallMetrics",
     "merge_runtime_diagnostics",

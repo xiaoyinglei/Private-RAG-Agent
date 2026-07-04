@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from typer.testing import CliRunner
@@ -9,8 +9,10 @@ from typer.testing import CliRunner
 from agent_runtime import Agent, AgentResult, AgentUsage
 from agent_runtime.knowledge_providers.rag import LazyRAGKnowledgeProvider
 from agent_runtime.models import ModelControlPlane
+from agent_runtime.runtime import builder as runtime_builder
 from rag.agent import cli as agent_cli
 from rag.agent.cli import agent_app
+from rag.agent.core.runtime_diagnostics import AgentLatencyProfile
 from rag.agent.service import AgentRunResult
 from rag.agent.tools.rag_semantic_tools import AssetSearchInput
 from rag.schema.core import AssetRecord
@@ -23,7 +25,7 @@ def test_agent_runtime_exports_sdk_facade() -> None:
 
 
 def test_agent_facade_run_maps_public_request_to_internal_service(
-    monkeypatch,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     built: list[dict[str, Any]] = []
     requests: list[Any] = []
@@ -45,8 +47,15 @@ def test_agent_facade_run_maps_public_request_to_internal_service(
         built.append({"runtime": runtime, **kwargs})
         return _Service()
 
-    monkeypatch.setattr(agent_cli, "_build_optional_rag_runtime", fail_rag_runtime)
-    monkeypatch.setattr(agent_cli, "_build_agent_service", build_service)
+    monkeypatch.setattr(runtime_builder, "build_optional_rag_runtime", fail_rag_runtime)
+    monkeypatch.setattr(runtime_builder, "build_agent_service", build_service)
+    monkeypatch.setattr(
+        agent_cli,
+        "_build_agent_service",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("Agent SDK must not build services through rag.agent.cli")
+        ),
+    )
 
     result = Agent(model="qwen3_14b_4bit").run(
         "summarize",
@@ -80,7 +89,7 @@ def test_agent_facade_run_maps_public_request_to_internal_service(
     assert request.input_files == ["README.md"]
 
 
-def test_agent_facade_registers_knowledge_runner_lazily(monkeypatch) -> None:
+def test_agent_facade_registers_knowledge_runner_lazily(monkeypatch: pytest.MonkeyPatch) -> None:
     built: list[dict[str, Any]] = []
 
     def fail_rag_runtime(**_: object) -> object:
@@ -99,8 +108,8 @@ def test_agent_facade_registers_knowledge_runner_lazily(monkeypatch) -> None:
         built.append({"runtime": runtime, **kwargs})
         return _Service()
 
-    monkeypatch.setattr(agent_cli, "_build_optional_rag_runtime", fail_rag_runtime)
-    monkeypatch.setattr(agent_cli, "_build_agent_service", build_service)
+    monkeypatch.setattr(runtime_builder, "build_optional_rag_runtime", fail_rag_runtime)
+    monkeypatch.setattr(runtime_builder, "build_agent_service", build_service)
 
     result = Agent(model="qwen3_14b_4bit", knowledge=["company_docs"]).run(
         "lookup policy",
@@ -113,7 +122,7 @@ def test_agent_facade_registers_knowledge_runner_lazily(monkeypatch) -> None:
     assert built[0]["knowledge_asset_runner"] is not None
 
 
-def test_agent_facade_closes_service_after_run(monkeypatch) -> None:
+def test_agent_facade_closes_service_after_run(monkeypatch: pytest.MonkeyPatch) -> None:
     closed: list[bool] = []
 
     class _Service:
@@ -128,7 +137,7 @@ def test_agent_facade_closes_service_after_run(monkeypatch) -> None:
         async def aclose(self) -> None:
             closed.append(True)
 
-    monkeypatch.setattr(agent_cli, "_build_agent_service", lambda *_args, **_kwargs: _Service())
+    monkeypatch.setattr(runtime_builder, "build_agent_service", lambda *_args, **_kwargs: _Service())
 
     result = Agent(model="qwen3_14b_4bit").run("close service", run_id="close-service")
 
@@ -136,8 +145,27 @@ def test_agent_facade_closes_service_after_run(monkeypatch) -> None:
     assert closed == [True]
 
 
+def test_agent_result_usage_uses_latency_profile_total() -> None:
+    raw = AgentRunResult(
+        run_id="sdk-profile",
+        thread_id="sdk-profile",
+        status="done",
+        final_answer="profiled",
+        latency_profile=AgentLatencyProfile(
+            total_ms=42.0,
+            tool_latency_ms=5.0,
+        ),
+    )
+
+    result = AgentResult.from_internal(raw)
+
+    assert result.usage.latency_ms == 42.0
+
+
 @pytest.mark.anyio
-async def test_lazy_knowledge_provider_search_assets_uses_typed_asset_inputs(monkeypatch) -> None:
+async def test_lazy_knowledge_provider_search_assets_uses_typed_asset_inputs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     class _MetadataRepo:
         def list_assets(
             self,
@@ -183,12 +211,12 @@ async def test_lazy_knowledge_provider_search_assets_uses_typed_asset_inputs(mon
     def build_runtime(**_: object) -> tuple[object, tuple[object, ...]]:
         return runtime, ()
 
-    monkeypatch.setattr(agent_cli, "_build_optional_rag_runtime", build_runtime)
+    monkeypatch.setattr(runtime_builder, "build_optional_rag_runtime", build_runtime)
 
     provider = LazyRAGKnowledgeProvider()
     result = await provider.search_assets(
         AssetSearchInput(query="revenue chart", asset_type="chart", max_results=1),
-        execution_context=object(),
+        execution_context=cast(Any, object()),
     )
 
     assert result.total_found == 1
@@ -196,7 +224,7 @@ async def test_lazy_knowledge_provider_search_assets_uses_typed_asset_inputs(mon
     assert result.assets[0].caption == "Revenue chart"
 
 
-def test_agent_run_cli_delegates_to_agent_facade(monkeypatch) -> None:
+def test_agent_run_cli_delegates_to_agent_facade(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[tuple[str, dict[str, object]]] = []
 
     class _Facade:
@@ -208,7 +236,7 @@ def test_agent_run_cli_delegates_to_agent_facade(monkeypatch) -> None:
             return AgentResult(
                 answer="cli facade answer",
                 status="done",
-                files=tuple(kwargs.get("files") or ()),
+                files=tuple(cast(list[str], kwargs.get("files") or [])),
                 tool_calls=(),
                 citations=(),
                 usage=AgentUsage(),
@@ -222,7 +250,7 @@ def test_agent_run_cli_delegates_to_agent_facade(monkeypatch) -> None:
         raise AssertionError("CLI run without --knowledge must not initialize RAG")
 
     monkeypatch.setattr(agent_cli, "_create_agent_facade", lambda **kwargs: _Facade(**kwargs))
-    monkeypatch.setattr(agent_cli, "_build_optional_rag_runtime", fail_rag_runtime)
+    monkeypatch.setattr(runtime_builder, "build_optional_rag_runtime", fail_rag_runtime)
 
     result = CliRunner().invoke(
         agent_app,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 from pydantic import BaseModel
@@ -10,9 +11,10 @@ from rag.agent.builtin_registry import create_builtin_tool_registry
 from rag.agent.core.context import AgentRunConfig, RunRegistry
 from rag.agent.core.definition import AgentRuntimePolicy
 from rag.agent.core.goal_contract import GoalDeliverable, GoalSpec
+from rag.agent.core.runtime_diagnostics import AgentLatencyProfile
 from rag.agent.core.turn_contracts import ToolCallPlan
 from rag.agent.loop.state import LoopState, ModelTurnDraft
-from rag.agent.primitive_ops import PrimitiveOps
+from rag.agent.primitive_ops import PrimitiveOps, WriteFileOutput
 from rag.agent.runner.python_runner import LocalSubprocessPythonRunner
 from rag.agent.service import AgentRunRequest, AgentRunResult, AgentService
 from rag.agent.tools.llm_tools import LLMTextOutput
@@ -94,7 +96,7 @@ class _FinishFromResultsProvider:
         )
 
 
-def _service_with_registry(runners: dict | None = None) -> AgentService:
+def _service_with_registry(runners: dict[str, Any] | None = None) -> AgentService:
     extra = runners or {}
     extra.setdefault(
         "llm_summarize",
@@ -161,9 +163,10 @@ def test_agent_initial_state_does_not_persist_explicit_goal_spec() -> None:
 def test_agent_run_result_clears_stale_human_input_when_done() -> None:
     service = _service_with_registry()
     state = service.initial_state(AgentRunRequest(task="Explain policy", run_id="svc-clear", thread_id="svc-clear"))
-    state["status"] = "done"
-    state["needs_user_input"] = "stale approval"
-    state["human_input_request"] = object()
+    state["status"] = "completed"
+    raw_state = cast(dict[str, Any], state)
+    raw_state["needs_user_input"] = "stale approval"
+    raw_state["human_input_request"] = object()
 
     result = AgentRunResult.from_state(state)
 
@@ -171,6 +174,49 @@ def test_agent_run_result_clears_stale_human_input_when_done() -> None:
     assert result.needs_user_input is None
     assert result.human_input_request is None
     RunRegistry.remove("svc-clear")
+
+
+def test_agent_run_result_exposes_latency_profile_from_state() -> None:
+    service = _service_with_registry()
+    state = service.initial_state(AgentRunRequest(task="Explain policy", run_id="svc-profile", thread_id="svc-profile"))
+    state["latency_profile"] = AgentLatencyProfile(
+        startup_ms=1.0,
+        build_service_ms=2.0,
+        model_ready_ms=3.0,
+        model_latency_ms=4.0,
+        tool_latency_ms=5.0,
+        finalize_latency_ms=6.0,
+        total_ms=21.0,
+        prompt_bytes=7,
+        tool_schema_bytes=8,
+    )
+
+    result = AgentRunResult.from_state(state)
+
+    assert result.latency_profile is not None
+    assert result.latency_profile.total_ms == 21.0
+    assert result.latency_profile.model_latency_ms == 4.0
+    assert result.latency_profile.tool_schema_bytes == 8
+    RunRegistry.remove("svc-profile")
+
+
+@pytest.mark.anyio
+async def test_agent_service_run_populates_latency_profile() -> None:
+    service = _service_with_registry()
+
+    result = await service.run(
+        AgentRunRequest(
+            task="Explain policy",
+            run_id="svc-runtime-profile",
+            thread_id="svc-runtime-profile",
+        )
+    )
+
+    assert result.latency_profile is not None
+    assert result.latency_profile.total_ms > 0
+    assert result.latency_profile.model_latency_ms > 0
+    assert result.latency_profile.tool_latency_ms == 0
+    RunRegistry.remove("svc-runtime-profile")
 
 
 def test_agent_run_result_restores_configured_concrete_final_output() -> None:
@@ -192,11 +238,11 @@ def test_agent_run_result_restores_configured_concrete_final_output() -> None:
             thread_id="svc-final-output",
         )
     )
-    state["status"] = "done"
-    state["finish_state"].final_output = {
+    state["status"] = "completed"
+    state["finish_state"].final_output = cast(Any, {
         "model_path": f"{_StructuredAnswer.__module__}.{_StructuredAnswer.__qualname__}",
         "data": {"answer": "validated", "confidence": 0.9},
-    }
+    })
 
     result = AgentRunResult.from_state(state, definition=definition)
 
@@ -268,7 +314,9 @@ async def test_agent_service_run_without_runner_fails_closed() -> None:
     # No RAG generation output from this tool error, so insufficient_evidence_flag stays False
     assert result.insufficient_evidence_flag is False
     assert result.tool_results[0].status == "error"
-    assert result.tool_results[0].error.code == "tool_not_implemented"
+    error = result.tool_results[0].error
+    assert error is not None
+    assert error.code == "tool_not_implemented"
 
 
 @pytest.mark.anyio
@@ -399,6 +447,7 @@ async def test_agent_service_run_with_primitive_ops_through_agent_loop() -> None
     assert result.workspace_path is not None
     write_result = result.tool_results[0]
     assert write_result.status == "ok"
+    assert isinstance(write_result.output, WriteFileOutput)
     assert write_result.output.path == "scratch/hello.py"
 
 

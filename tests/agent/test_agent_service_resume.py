@@ -7,14 +7,14 @@ from pydantic import BaseModel
 
 from rag.agent.builtin.generic import GENERIC_AGENT
 from rag.agent.builtin_registry import create_builtin_tool_registry
-from rag.agent.core.goal_contract import GoalDeliverable, GoalSpec
 from rag.agent.core.checkpointing import agent_checkpoint_serde
 from rag.agent.core.context import RunRegistry
 from rag.agent.core.definition import AgentRuntimePolicy
+from rag.agent.core.goal_contract import GoalDeliverable, GoalSpec
 from rag.agent.core.human_input import HumanInputResponse
+from rag.agent.core.turn_contracts import ToolCallPlan
 from rag.agent.loop.state import LoopState, ModelTurnDraft
 from rag.agent.service import AgentRunRequest, AgentService
-from rag.agent.core.turn_contracts import ToolCallPlan
 from rag.agent.tools.registry import ToolRegistry
 from rag.agent.tools.spec import ToolError, ToolPermissions, ToolSpec
 
@@ -173,6 +173,11 @@ async def test_default_checkpointer_supports_resume_on_same_service() -> None:
 
     assert resumed.status == "done"
     assert calls == ["default"]
+    assert resumed.latency_profile is not None
+    assert resumed.latency_profile.total_ms > 0
+    assert resumed.latency_profile.tool_latency_ms == pytest.approx(
+        sum(result.latency_ms for result in resumed.tool_results)
+    )
 
 
 @pytest.mark.anyio

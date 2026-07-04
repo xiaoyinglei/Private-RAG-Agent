@@ -4,13 +4,15 @@ import asyncio
 import logging
 from pathlib import Path
 
+import pytest
+
 from rag.agent.core.checkpointing import (
     aclose_agent_checkpointer,
     agent_checkpoint_serde,
     create_agent_checkpointer,
 )
 from rag.agent.core.context import AgentRunConfig
-from rag.agent.core.runtime_diagnostics import ToolCallMetrics
+from rag.agent.core.runtime_diagnostics import AgentLatencyProfile, ToolCallMetrics
 from rag.agent.core.turn_contracts import ToolCallPlan
 from rag.agent.loop.state import PendingToolCall, create_loop_state
 from rag.agent.memory.models import ExternalizedToolOutput, MemoryRef
@@ -23,7 +25,7 @@ from rag.schema.runtime import AccessPolicy
 
 
 def test_agent_checkpoint_serde_restores_tool_result_without_unregistered_warning(
-    caplog,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     result = ToolResult(
         tool_call_id="tc-list",
@@ -56,7 +58,7 @@ def test_agent_checkpoint_serde_restores_tool_result_without_unregistered_warnin
 
 
 def test_agent_checkpoint_serde_restores_agent_plan_without_unregistered_warning(
-    caplog,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     plan = AgentPlan(
         objective="Answer with a bounded plan.",
@@ -83,7 +85,7 @@ def test_agent_checkpoint_serde_restores_agent_plan_without_unregistered_warning
 
 
 def test_agent_checkpoint_serde_restores_externalized_tool_output_without_unregistered_warning(
-    caplog,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     result = ToolResult(
         tool_call_id="tc-big",
@@ -119,7 +121,7 @@ def test_agent_checkpoint_serde_restores_externalized_tool_output_without_unregi
 
 
 def test_agent_checkpoint_serde_restores_tool_call_metrics_without_unregistered_warning(
-    caplog,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     metrics = ToolCallMetrics(native_calls=2, native_latency_ms_total=15.5)
     serde = agent_checkpoint_serde()
@@ -133,6 +135,24 @@ def test_agent_checkpoint_serde_restores_tool_call_metrics_without_unregistered_
     assert isinstance(restored, ToolCallMetrics)
     assert restored.native_calls == 2
     assert restored.native_latency_ms_total == 15.5
+    assert "Deserializing unregistered type" not in caplog.text
+
+
+def test_agent_checkpoint_serde_restores_latency_profile_without_unregistered_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    profile = AgentLatencyProfile(total_ms=12.5, model_latency_ms=4.0)
+    serde = agent_checkpoint_serde()
+
+    with caplog.at_level(
+        logging.WARNING,
+        logger="langgraph.checkpoint.serde.jsonplus",
+    ):
+        restored = serde.loads_typed(serde.dumps_typed(profile))
+
+    assert isinstance(restored, AgentLatencyProfile)
+    assert restored.total_ms == 12.5
+    assert restored.model_latency_ms == 4.0
     assert "Deserializing unregistered type" not in caplog.text
 
 

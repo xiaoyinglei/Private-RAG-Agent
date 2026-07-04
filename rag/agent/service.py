@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import AsyncGenerator, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -54,6 +55,7 @@ from rag.agent.core.output_models import (
     output_model_path,
 )
 from rag.agent.core.runtime_diagnostics import (
+    AgentLatencyProfile,
     RuntimeDiagnostic,
     merge_runtime_diagnostics,
 )
@@ -146,6 +148,7 @@ class AgentRunResult(BaseModel):
     workspace_path: str | None = None
     runtime_diagnostics: list[RuntimeDiagnostic] = Field(default_factory=list)
     tool_call_metrics: object | None = None  # ToolCallMetrics | None
+    latency_profile: AgentLatencyProfile | None = None
 
     @classmethod
     def from_state(
@@ -224,6 +227,7 @@ class AgentRunResult(BaseModel):
             workspace_path=workspace_path,
             runtime_diagnostics=list(state["runtime_diagnostics"]),
             tool_call_metrics=state.get("tool_call_metrics"),
+            latency_profile=state.get("latency_profile"),
         )
 
 
@@ -243,6 +247,28 @@ class _RunContext:
     runtime_registry: ToolRegistry
     memory_store: WorkspaceMemoryStore
     persistent_store: PersistentMemoryStore
+
+
+def _elapsed_ms(started_at: float) -> float:
+    return (time.perf_counter() - started_at) * 1000
+
+
+def _profile_with_run_timings(
+    profile: AgentLatencyProfile,
+    *,
+    prepare_latency_ms: float,
+    tool_latency_ms: float,
+    finalize_latency_ms: float,
+    total_ms: float,
+) -> AgentLatencyProfile:
+    return profile.model_copy(
+        update={
+            "prepare_latency_ms": profile.prepare_latency_ms + prepare_latency_ms,
+            "tool_latency_ms": tool_latency_ms,
+            "finalize_latency_ms": profile.finalize_latency_ms + finalize_latency_ms,
+            "total_ms": total_ms,
+        }
+    )
 
 
 class _ResultDrivenModelTurnProvider:
@@ -379,6 +405,7 @@ class AgentService:
         mcp_registry: MCPToolRegistry | None = None,
         skill_catalog: Any = None,  # SkillCatalog | None
         strict_model_provider: bool = False,
+        latency_profile: AgentLatencyProfile | None = None,
     ) -> None:
         if definition is not None and policy is not None:
             raise ValueError("Provide either 'definition' or 'policy', not both")
@@ -407,6 +434,7 @@ class AgentService:
         self._checkpointer = checkpointer or create_agent_checkpointer(None)
         self._stream_sink = stream_sink
         self._mcp_registry = mcp_registry
+        self._latency_profile = latency_profile or AgentLatencyProfile()
         # Register core tools: tool_search, activate_tools, task
         self._register_discovery_tools()
         self._register_task_tool()
@@ -535,12 +563,15 @@ class AgentService:
         input_files: list[str] | None = None,
         workspace_path: str | None = None,
     ) -> AgentRunResult:
+        run_started_at = time.perf_counter()
+        prepare_started_at = run_started_at
         ctx = self._prepare_run(
             task=task,
             run_config=run_config,
             input_files=input_files,
             workspace_path=workspace_path,
         )
+        prepare_latency_ms = _elapsed_ms(prepare_started_at)
 
         state = self._initial_loop_state_from_config(
             task=ctx.task,
@@ -576,16 +607,42 @@ class AgentService:
         if result_state["status"] in {"completed", "failed"}:
             RunRegistry.remove(run_config.run_id)
 
+        finalize_started_at = time.perf_counter()
         if result_state["status"] == "completed":
             try:
                 await self._extract_persistent_memories(result_state, ctx.persistent_store)
             except Exception:
                 logger.warning("Persistent memory extraction failed", exc_info=True)
+        finalize_latency_ms = _elapsed_ms(finalize_started_at)
+        self._record_result_latency_profile(
+            result_state,
+            run_started_at=run_started_at,
+            prepare_latency_ms=prepare_latency_ms,
+            finalize_latency_ms=finalize_latency_ms,
+        )
 
         return AgentRunResult.from_loop_result(
             result_state,
             definition=self._policy,
             workspace_path=str(ctx.workspace.root),
+        )
+
+    def _record_result_latency_profile(
+        self,
+        result_state: LoopState,
+        *,
+        run_started_at: float,
+        prepare_latency_ms: float,
+        finalize_latency_ms: float,
+    ) -> None:
+        result_state["latency_profile"] = _profile_with_run_timings(
+            result_state["latency_profile"],
+            prepare_latency_ms=prepare_latency_ms,
+            tool_latency_ms=sum(result.latency_ms for result in result_state["tool_results"]),
+            finalize_latency_ms=finalize_latency_ms,
+            total_ms=self._latency_profile.startup_ms
+            + self._latency_profile.build_service_ms
+            + _elapsed_ms(run_started_at),
         )
 
     async def run_streaming(self, request: AgentRunRequest) -> AsyncGenerator[Any, None]:
@@ -667,6 +724,7 @@ class AgentService:
             runtime_diagnostics=self._runtime_diagnostics,
             file_manifest=file_manifest,
         )
+        state["latency_profile"] = self._latency_profile
         state["approved_tool_call_ids"] = list(approved_tool_call_ids or ())
         state["denied_tool_call_ids"] = list(denied_tool_call_ids or ())
         return state
@@ -1438,6 +1496,8 @@ Input files detected — you are in file processing mode:
         """
         from rag.agent.workspace import open_workspace
 
+        resume_started_at = time.perf_counter()
+        prepare_started_at = resume_started_at
         lookup_config = self._checkpoint_lookup_config(run_id)
         checkpoint_store = LangGraphCheckpointStore(
             self._checkpointer,
@@ -1477,9 +1537,16 @@ Input files detected — you are in file processing mode:
             goal_spec=checkpoint_store.compatibility_config.goal_spec,
             state=state,
         )
+        prepare_latency_ms = _elapsed_ms(prepare_started_at)
         result_state = await loop.run(state)
         if result_state["status"] in {"completed", "failed"}:
             RunRegistry.remove(run_config.run_id)
+        self._record_result_latency_profile(
+            result_state,
+            run_started_at=resume_started_at,
+            prepare_latency_ms=prepare_latency_ms,
+            finalize_latency_ms=0.0,
+        )
         return AgentRunResult.from_loop_result(
             result_state,
             definition=self._policy,

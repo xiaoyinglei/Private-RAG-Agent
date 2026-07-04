@@ -153,9 +153,9 @@ class LazyRAGKnowledgeProvider:
         if self._runtime is not None:
             return self._runtime
 
-        from rag.agent.cli import _build_optional_rag_runtime
+        from agent_runtime.runtime.builder import build_optional_rag_runtime
 
-        runtime, diagnostics = _build_optional_rag_runtime(
+        runtime, diagnostics = build_optional_rag_runtime(
             storage_root=self.storage_root,
             model_alias=self.model_alias,
             embedding_model_alias=self.embedding_model_alias,

@@ -69,6 +69,7 @@ AGENT_CHECKPOINT_MSGPACK_ALLOWLIST: tuple[tuple[str, ...], ...] = (
     ("rag.agent.core.output_models", "ValidatedFinalOutput"),
     ("rag.agent.core.runtime_diagnostics", "RuntimeDiagnostic"),
     ("rag.agent.core.runtime_diagnostics", "ToolCallMetrics"),
+    ("rag.agent.core.runtime_diagnostics", "AgentLatencyProfile"),
     ("rag.agent.core.tool_execution", "ToolBatchRequest"),
     ("rag.agent.core.tool_execution", "ToolBatchResult"),
     ("rag.agent.core.tool_execution", "ToolExecutionRecord"),

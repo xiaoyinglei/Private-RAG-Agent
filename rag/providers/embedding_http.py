@@ -168,6 +168,8 @@ class EmbeddingHttpClient:
     def _normalize_batch_size(cls, value: object | None) -> int | None:
         if value is None:
             return None
+        if not isinstance(value, int | str | bytes | bytearray) or isinstance(value, bool):
+            raise ValueError(f"embedding batch_size must be an integer, got {value!r}")
         try:
             batch_size = int(value)
         except (TypeError, ValueError) as exc:

@@ -8,7 +8,7 @@ from langgraph.checkpoint.base import BaseCheckpointSaver
 from rag.agent.core.definition import AgentRuntimePolicy
 from rag.agent.core.delegation import DelegatedAgentRunner
 from rag.agent.core.llm_registry import ModelResolver
-from rag.agent.core.runtime_diagnostics import RuntimeDiagnostic
+from rag.agent.core.runtime_diagnostics import AgentLatencyProfile, RuntimeDiagnostic
 from rag.agent.core.runtime_ports import RetrievalHintProvider
 from rag.agent.loop.runtime import ModelTurnProvider
 from rag.agent.service import AgentService
@@ -30,6 +30,7 @@ class AgentServiceFactory:
         runtime_diagnostics: Sequence[RuntimeDiagnostic] = (),
         skill_catalog: SkillCatalog | None = None,
         strict_model_provider: bool = False,
+        latency_profile: AgentLatencyProfile | None = None,
     ) -> None:
         self._tool_registry = tool_registry
         self._model_turn_provider = model_turn_provider
@@ -40,6 +41,7 @@ class AgentServiceFactory:
         self._subagent_runner: DelegatedAgentRunner | None = None
         self._skill_catalog = skill_catalog
         self._strict_model_provider = strict_model_provider
+        self._latency_profile = latency_profile
 
     def bind_subagent_runner(self, runner: DelegatedAgentRunner) -> None:
         self._subagent_runner = runner
@@ -56,4 +58,5 @@ class AgentServiceFactory:
             runtime_diagnostics=self._runtime_diagnostics,
             skill_catalog=self._skill_catalog,
             strict_model_provider=self._strict_model_provider,
+            latency_profile=self._latency_profile,
         )

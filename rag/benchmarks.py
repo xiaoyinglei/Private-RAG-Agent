@@ -1750,15 +1750,21 @@ def build_runtime_for_benchmark(
     if summary_provider_kind == "none":
         runtime.configure_default_summary_generator(raw_text_mode=True, strict_generation=False)
     elif summary_model is not None or summary_model_path is not None or summary_provider_kind is not None:
-        summary_generator_kwargs: dict[str, object] = {
-            "provider_kind": summary_provider_kind or "ollama",
-            "model": summary_model,
-            "model_path": summary_model_path,
-            "backend": summary_backend,
-        }
         if strict_summary_generation:
-            summary_generator_kwargs["strict_generation"] = True
-        runtime.configure_summary_generator(**summary_generator_kwargs)
+            runtime.configure_summary_generator(
+                provider_kind=summary_provider_kind or "ollama",
+                model=summary_model,
+                model_path=summary_model_path,
+                backend=summary_backend,
+                strict_generation=True,
+            )
+        else:
+            runtime.configure_summary_generator(
+                provider_kind=summary_provider_kind or "ollama",
+                model=summary_model,
+                model_path=summary_model_path,
+                backend=summary_backend,
+            )
     elif strict_summary_generation:
         runtime.configure_default_summary_generator(strict_generation=True)
     if skip_graph_extraction:

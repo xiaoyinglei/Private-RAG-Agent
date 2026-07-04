@@ -34,7 +34,12 @@ class AgentResult:
         files: tuple[str, ...] = (),
     ) -> AgentResult:
         tool_results = tuple(getattr(result, "tool_results", ()) or ())
-        latency_ms = sum(float(getattr(tool, "latency_ms", 0.0)) for tool in tool_results)
+        latency_profile = getattr(result, "latency_profile", None)
+        latency_ms = (
+            float(getattr(latency_profile, "total_ms", 0.0))
+            if latency_profile is not None
+            else sum(float(getattr(tool, "latency_ms", 0.0)) for tool in tool_results)
+        )
         return cls(
             answer=getattr(result, "final_answer", None),
             status=str(getattr(result, "status", "unknown")),

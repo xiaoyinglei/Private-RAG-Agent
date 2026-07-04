@@ -21,7 +21,7 @@ from rag.agent.cli import (
 from rag.agent.core.context import AgentRunConfig, RunRegistry
 from rag.agent.core.definition import AgentRuntimePolicy
 from rag.agent.core.llm_registry import ModelRegistry
-from rag.agent.core.runtime_diagnostics import RuntimeDiagnostic
+from rag.agent.core.runtime_diagnostics import AgentLatencyProfile, RuntimeDiagnostic
 from rag.agent.loop.state import LoopState as AgentState
 from rag.agent.service import AgentRunRequest, AgentRunResult
 from rag.agent.tools.llm_tools import LLMCompareInput, LLMGenerateInput
@@ -40,7 +40,7 @@ class _ChatBinding:
 
 
 class _Runtime:
-    retrieval_service = None
+    retrieval_service: object | None = None
     chat_context_window_tokens = 32_768
     llm_stage_budgets = None
     token_accounting = type(
@@ -153,7 +153,7 @@ async def test_cli_llm_runner_wiring_includes_compare_runner() -> None:
     RunRegistry.get_or_create(config)
 
     assert {"llm_generate", "llm_summarize", "llm_compare"} <= set(runners)
-    result = await runners["llm_compare"](
+    result = await cast(Any, runners["llm_compare"])(
         LLMCompareInput(
             question="Compare A and B",
             left_context_sections=["A evidence"],
@@ -183,7 +183,7 @@ async def test_cli_generate_runner_preserves_supplied_grounding_ids() -> None:
     RunRegistry.remove(config.run_id)
     RunRegistry.get_or_create(config)
 
-    result = await runners["llm_generate"](
+    result = await cast(Any, runners["llm_generate"])(
         LLMGenerateInput(
             prompt="Write grounded answer",
             evidence_ids=["ev1"],
@@ -381,7 +381,11 @@ def test_build_agent_service_records_automatic_model_registry_failure(
 
     monkeypatch.setattr(ModelRegistry, "from_env", fail_from_env)
 
-    service = _build_agent_service(_Runtime(), agent_type="generic")
+    service = _build_agent_service(
+        _Runtime(),
+        agent_type="generic",
+        strict_model_provider=False,
+    )
     state = service.initial_state(
         AgentRunRequest(
             task="Explain policy",
@@ -391,6 +395,19 @@ def test_build_agent_service_records_automatic_model_registry_failure(
     )
 
     assert state["runtime_diagnostics"][0].code == "model_registry_initialization_failed"
+
+
+def test_build_agent_service_rejects_default_model_registry_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_from_env(*args: object, **kwargs: object) -> ModelRegistry:
+        del args, kwargs
+        raise FileNotFoundError("models config missing")
+
+    monkeypatch.setattr(ModelRegistry, "from_env", fail_from_env)
+
+    with pytest.raises(FileNotFoundError, match="models config missing"):
+        _build_agent_service(_Runtime(), agent_type="generic")
 
 
 @pytest.mark.anyio
@@ -413,6 +430,27 @@ async def test_explicit_model_provider_failure_is_not_degraded() -> None:
             )
     finally:
         RunRegistry.remove("cli-explicit-model-provider-failure")
+
+
+@pytest.mark.anyio
+async def test_default_model_provider_failure_is_not_degraded() -> None:
+    service = _build_agent_service(
+        None,
+        agent_type="generic",
+        model_control_plane=cast(Any, _FailingModelRegistry()),
+    )
+
+    try:
+        with pytest.raises(RuntimeError, match="endpoint conflict for 'qwen3_14b_4bit'"):
+            await service.run(
+                AgentRunRequest(
+                    task="Explain policy",
+                    run_id="cli-default-model-provider-failure",
+                    thread_id="cli-default-model-provider-failure",
+                )
+            )
+    finally:
+        RunRegistry.remove("cli-default-model-provider-failure")
 
 
 def test_build_agent_service_records_skill_catalog_load_failure(
@@ -501,6 +539,37 @@ def test_display_result_surfaces_model_failure_without_verbose(
     assert "降级模式" not in output
 
 
+def test_display_result_surfaces_latency_profile_when_verbose(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    result = AgentRunResult(
+        run_id="display-latency",
+        thread_id="display-latency",
+        status="done",
+        final_answer="ok",
+        latency_profile=AgentLatencyProfile(
+            build_service_ms=2.0,
+            model_ready_ms=3.0,
+            model_latency_ms=11.0,
+            tool_latency_ms=5.0,
+            finalize_latency_ms=7.0,
+            total_ms=30.0,
+            prompt_bytes=13,
+            tool_schema_bytes=17,
+        ),
+    )
+
+    _display_result(result, verbose=True)
+
+    output = capsys.readouterr().out
+    assert "耗时:" in output
+    assert "total=30ms" in output
+    assert "model=11ms" in output
+    assert "tool=5ms" in output
+    assert "prompt_bytes=13" in output
+    assert "tool_schema_bytes=17" in output
+
+
 @pytest.mark.anyio
 async def test_build_agent_service_registers_rag_runner_with_execution_context() -> None:
     runtime = _RuntimeWithRetrieval()
@@ -522,7 +591,8 @@ async def test_build_agent_service_registers_rag_runner_with_execution_context()
         execution_context=ToolExecutionContext(run_config=run_config),
     )
 
-    assert runtime.retrieval_service.access_policies == [access_policy]
+    retrieval_service = cast(_RetrievalService, runtime.retrieval_service)
+    assert retrieval_service.access_policies == [access_policy]
 
 
 def test_build_agent_service_rejects_unknown_agent() -> None:
@@ -573,7 +643,7 @@ def test_validate_workspace_core_runners_passes_when_runners_present() -> None:
             execution_category=ExecutionCategory.READ,
             timeout_seconds=5,
         ))
-        registry.register_runner(name, lambda **kw: None)
+        registry.register_runner(name, cast(Any, lambda **kw: None))
 
     # Should not raise
     AgentService._validate_workspace_core_runners(registry)

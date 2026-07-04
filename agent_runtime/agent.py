@@ -138,7 +138,7 @@ class Agent:
                 provider.close()
 
     def _build_service(self) -> tuple[Any, LazyRAGKnowledgeProvider | None]:
-        from rag.agent.cli import _build_agent_service
+        from agent_runtime.runtime.builder import build_agent_service
         from rag.utils.text import load_env_file
 
         load_env_file()
@@ -168,7 +168,7 @@ class Agent:
             knowledge_runner = cast(ContextualToolRunner, provider.search_knowledge)
             knowledge_asset_runner = cast(ContextualToolRunner, provider.search_assets)
 
-        service = _build_agent_service(
+        service = build_agent_service(
             None,
             checkpoint_db=self.checkpoint_db,
             agent_type=self.agent_type,
