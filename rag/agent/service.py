@@ -1407,7 +1407,9 @@ Input files detected — you are in file processing mode:
             name="tool_search",
             description=(
                 "Discover available tools by natural language query. "
-                "Returns candidate tools. Call activate_tools to load them."
+                "Returns candidate tools. Call activate_tools to load them. "
+                "Do not use for simple questions, greetings, or literal reply "
+                "requests; answer those directly."
             ),
             input_model=ToolSearchInput,
             output_model=ToolSearchOutput,

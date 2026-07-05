@@ -308,6 +308,23 @@ async def test_update_plan_runner_normalizes_existing_planning_steps() -> None:
     RunRegistry.remove("cli-update-plan-existing")
 
 
+def test_tool_search_description_discourages_simple_direct_answer_tasks() -> None:
+    service = _build_agent_service(None, agent_type="generic")
+    state = service.initial_state(
+        AgentRunRequest(
+            task="Reply exactly: direct smoke ok",
+            run_id="cli-tool-search-description",
+            thread_id="cli-tool-search-description",
+        )
+    )
+    runtime_registry = service._runtime_tool_registry(state["run_config"])
+
+    description = runtime_registry.get("tool_search").description
+
+    assert "Do not use for simple questions, greetings, or literal reply requests" in description
+    RunRegistry.remove("cli-tool-search-description")
+
+
 def test_build_agent_service_with_retrieval_runtime_exposes_rag_tool() -> None:
     service = _build_agent_service(_RuntimeWithRetrieval(), agent_type="generic")
 
@@ -606,6 +623,36 @@ def test_display_result_surfaces_model_failure_without_verbose(
     assert "model_provider_failed" in output
     assert "Error code: 502" in output
     assert "降级模式" not in output
+
+
+@pytest.mark.parametrize("verbose", [False, True])
+def test_display_result_does_not_warn_for_non_degraded_diagnostics(
+    capsys: pytest.CaptureFixture[str],
+    *,
+    verbose: bool,
+) -> None:
+    result = AgentRunResult(
+        run_id="display-nondegraded-diagnostics",
+        thread_id="display-nondegraded-diagnostics",
+        status="done",
+        runtime_diagnostics=[
+            RuntimeDiagnostic(
+                code="tool_call_metrics",
+                component="AgentLoop",
+                message="native=1/0err deferred=0 mcp=0/0err lat=0/0ms",
+                degraded=False,
+            )
+        ],
+    )
+
+    _display_result(result, verbose=verbose)
+
+    output = capsys.readouterr().out
+    assert "降级模式" not in output
+    if verbose:
+        assert "tool_call_metrics" in output
+    else:
+        assert "tool_call_metrics" not in output
 
 
 def test_display_result_surfaces_latency_profile_when_verbose(

@@ -39,7 +39,10 @@ Available tools: {", ".join(visible_names) if visible_names else "none"}{budget_
 Analyze the task and current context, then decide your next action.
 
 If a tool can advance the task → return action="execute" with concrete tool_calls.
-If you have enough context to answer → return action="finish" with a complete, well-cited final_answer.
+For simple questions, greetings, literal reply requests, or tasks answerable
+from the current conversation → return action="finish" without calling tools.
+If you have enough context to answer → return action="finish" with a complete
+final_answer. Preserve citations when you used evidence.
 If you need external input → return action="pause" with a clear pause_reason.
 
 Do not repeat completed tool calls. Preserve citations, scores, and artifact paths.

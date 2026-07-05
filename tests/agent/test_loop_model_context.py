@@ -22,6 +22,7 @@ from rag.agent.core.observations import (
     EvidenceRef,
     StructuredObservation,
 )
+from rag.agent.core.tool_schema import AgentMessageAssembler
 from rag.agent.core.turn_contracts import ToolCallPlan
 from rag.agent.loop.state import (
     LoopState,
@@ -198,6 +199,20 @@ def test_loop_prompt_has_no_goal_gap_completion_authority() -> None:
     assert "open_gaps" not in prompt
     assert "goal checker" not in prompt
     assert "must call llm_summarize" not in prompt
+
+
+def test_native_tool_contract_prioritizes_direct_finish_for_simple_tasks() -> None:
+    state = _state()
+    state["task"] = "Reply exactly: direct smoke ok"
+
+    message = AgentMessageAssembler().build_system_message(
+        definition=_definition(),
+        state=state,
+        visible_tool_names=["activate_tools", "tool_search"],
+    )
+
+    assert "For simple questions, greetings, literal reply requests" in message.content
+    assert "do not call tool_search just to look for a tool" in message.content
 
 
 def test_turn_parser_prefers_actual_calls_over_finish_label() -> None:

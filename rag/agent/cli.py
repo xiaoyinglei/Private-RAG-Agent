@@ -344,7 +344,8 @@ def _display_result(result: AgentRunResult, *, verbose: bool) -> None:
         degraded = sum(
             1 for diagnostic in result.runtime_diagnostics if diagnostic.degraded
         )
-        print(f"\n警告: Agent 以降级模式运行（{degraded} 项诊断）")
+        if degraded:
+            print(f"\n警告: Agent 以降级模式运行（{degraded} 项诊断）")
         if verbose:
             for diagnostic in result.runtime_diagnostics:
                 _print_diagnostic(diagnostic)
