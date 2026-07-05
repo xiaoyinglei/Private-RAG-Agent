@@ -5,7 +5,7 @@ import time
 from collections.abc import AsyncGenerator, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import TYPE_CHECKING, Any, cast
 from uuid import uuid4
 
 from langchain_core.messages import BaseMessage
@@ -16,7 +16,6 @@ from rag.agent.capabilities.catalog import (
     DeferredToolStore,
     SearchCandidate,
     ToolCatalog,
-    ToolCatalogEntry,
 )
 from rag.agent.capabilities.context import deferred_store_var, iteration_var
 from rag.agent.capabilities.tool_search import (
@@ -74,6 +73,7 @@ from rag.agent.memory.store import WorkspaceMemoryStore
 from rag.agent.tools.catalog_assembly import build_tool_catalog
 from rag.agent.tools.mcp_adapter import MCPToolRegistry
 from rag.agent.tools.registry import ToolRegistry, ToolRunner
+from rag.agent.tools.runtime_registry_builder import RuntimeToolRegistryBuilder
 from rag.agent.tools.spec import ExecutionCategory, ToolPermissions, ToolResult, ToolSpec
 from rag.agent.tools.workspace_tools import create_workspace_tools
 from rag.schema.query import AnswerCitation, EvidenceItem
@@ -892,240 +892,28 @@ Input files detected — you are in file processing mode:
         Agent-as-tool adapters are request-scoped — each run_config gets fresh adapters
         to prevent concurrent request pollution of depth/budget/access_policy.
         """
-        runtime = self._base_tool_registry.clone()
-
-        self._inject_model_llm_tool_runners(runtime)
-
-        from rag.agent.core.agent_as_tool import AgentAsToolAdapter
-
-        # Register workspace tool instances (BaseTool: spec + runner in one call)
-        if tools:
-            for tool in tools:
-                try:
-                    runtime.register_tool(tool)
-                except Exception:
-                    logger.warning(
-                        f"Failed to register tool '{getattr(tool, 'name', '?')}'", exc_info=True
-                    )
-
-        # Legacy: plain runners dict (backward compat for CLI)
-        if runners:
-            for extra_name, extra_runner in runners.items():
-                try:
-                    runtime.register_runner(extra_name, extra_runner)
-                except KeyError:
-                    pass
-
-        # Register update_plan as contextual runner (needs LoopState)
-        def _update_plan_runner(payload: Any, context: Any) -> Any:
-            from rag.agent.tools.generic_tools import PlanStep, UpdatePlanInput, UpdatePlanOutput
-
-            def _to_tool_step(step: Any, *, fallback_index: int) -> PlanStep:
-                sid = getattr(step, "id", None) or getattr(step, "step_id", None)
-                description = (
-                    getattr(step, "description", None)
-                    or getattr(step, "title", None)
-                    or ""
-                )
-                status_value = getattr(step, "status", "pending")
-                if status_value in {"pending", "in_progress", "completed", "blocked"}:
-                    status = cast(
-                        Literal["pending", "in_progress", "completed", "blocked"],
-                        status_value,
-                    )
-                else:
-                    status = "pending"
-                return PlanStep(
-                    id=str(sid or f"step-{fallback_index}"),
-                    description=str(description),
-                    status=status,
-                )
-
-            if isinstance(payload, dict):
-                inp = UpdatePlanInput(**payload)
-            else:
-                inp = payload
-            state = getattr(context, "state", {}) or {}
-            plan_state = state.get("plan_state")
-            existing: list[PlanStep] = []
-            if plan_state and hasattr(plan_state, "agent_plan") and plan_state.agent_plan:
-                existing = [
-                    _to_tool_step(step, fallback_index=index + 1)
-                    for index, step in enumerate(plan_state.agent_plan.steps)
-                ]
-            steps = list(existing)
-            if inp.action == "add":
-                for s in inp.steps:
-                    sid = s.id or f"step-{len(steps) + 1}"
-                    steps.append(PlanStep(id=sid, description=s.description, status=s.status))
-            elif inp.action == "complete":
-                ids = set(inp.step_ids)
-                steps = [PlanStep(id=s.id, description=s.description,
-                         status="completed" if s.id in ids else s.status) for s in steps]
-            elif inp.action == "update":
-                by_id = {s.id: s for s in inp.steps if s.id}
-                steps = []
-                for old in existing:
-                    new = by_id.get(old.id)
-                    if new:
-                        steps.append(new)
-                    else:
-                        steps.append(old)
-            return UpdatePlanOutput(steps=steps, summary=inp.summary, message="plan updated")
-
-        try:
-            runtime.get("update_plan")
-        except KeyError:
-            from rag.agent.tools.generic_tools import update_plan_spec
-
-            runtime.register(update_plan_spec)
-        runtime.register_contextual_runner("update_plan", _update_plan_runner)
-
-        # Assemble full tool pool (builtin + MCP + deny rules)
-        self._assemble_tool_pool(runtime)
-
-        # Wire generic 'task' tool with request-scoped parent_config
-        if runtime.has_runner("task") or "task" in {s.name for s in self._base_tool_registry.list_all()}:
-            from rag.agent.tools.task_tool import TaskOutput, TaskToolRunner
-
-            task_runner = TaskToolRunner(
-                policy=self._policy,
-                tool_registry=runtime,
-                model_turn_provider=self._model_turn_provider,
-                retrieval_hint_provider=self._retrieval_hint_provider,
-                delegated_runner=_TaskChildRunner(
+        return RuntimeToolRegistryBuilder(
+            base_tool_registry=self._base_tool_registry,
+            policy=self._policy,
+            catalog=self._catalog,
+            model_registry=self._model_registry,
+            model_turn_provider=self._model_turn_provider,
+            retrieval_hint_provider=self._retrieval_hint_provider,
+            task_delegated_runner_factory=(
+                lambda runtime: _TaskChildRunner(
                     policy=self._policy,
                     tool_registry=runtime,
                     model_turn_provider=self._model_turn_provider,
                     retrieval_hint_provider=self._retrieval_hint_provider,
-                ),
-            )
-
-            async def _task_runner(payload: BaseModel) -> TaskOutput:
-                from rag.agent.tools.task_tool import TaskInput
-
-                input_data = TaskInput.model_validate(payload)
-                return await task_runner.run(input_data, parent_config=run_config)
-
-            runtime.register_runner("task", _task_runner)
-
-        if self._subagent_runner is None:
-            return runtime
-
-        runner = self._subagent_runner
-
-        # Wire adapters for all agent-tool specs registered in the base registry
-        for spec in self._base_tool_registry.list_all():
-            if not spec.name.startswith("agent_"):
-                continue
-            agent_type = spec.name[len("agent_") :]
-            adapter = AgentAsToolAdapter(
-                runner=runner,
-                agent_type=agent_type,
-                run_config=run_config,
-            )
-            runtime.register_runner(spec.name, adapter)
-
-        return runtime
-
-    def _inject_model_llm_tool_runners(self, registry: ToolRegistry) -> None:
-        if self._model_registry is None:
-            return
-        from rag.agent.core.llm_tool_runners import create_model_llm_tool_runners
-
-        for tool_name, runner in create_model_llm_tool_runners(self._model_registry).items():
-            if registry.has_runner(tool_name):
-                continue
-            try:
-                registry.register_contextual_runner(tool_name, runner)
-            except KeyError:
-                pass
-
-    def _assemble_tool_pool(self, runtime: ToolRegistry) -> None:
-        """Single entry point for tool pool assembly.
-
-        Combines builtin catalog building + MCP injection + deny rules
-        in one place.  Called from _runtime_tool_registry() for each run.
-
-        This is the moral equivalent of Claude Code's assembleToolPool:
-        built-in + MCP, unified filtering, single catalog registration.
-        """
-        # 1. MCP tools → registry + catalog + allowed_tools
-        self._inject_mcp_tools(runtime)
-
-        # 2. Deny rules — apply ToolCatalogFilter to MCP tools as well
-        deny = self._policy.tool_catalog_filter.deny
-        if deny:
-            for tool_name in sorted(deny):
-                if tool_name in self._policy.allowed_tools:
-                    self._policy.allowed_tools.remove(tool_name)
-                # Remove from catalog if present
-                if self._catalog.get(tool_name) is not None:
-                    logger.info(f"Tool '{tool_name}' removed by deny rule")
-
-    def _inject_mcp_tools(self, runtime: ToolRegistry) -> None:
-        """Register MCP tool specs, runners, formatters, and catalog entries.
-
-        MCP tools are pre-loaded (connected before AgentService creation).
-        This method synchronously registers them in:
-        - the per-request cloned registry (spec + runner + formatter)
-        - the ToolCatalog (so tool_search can find them)
-        """
-        if self._mcp_registry is None:
-            return
-
-        # Extend allowed_tools so activate_tools accepts MCP tools.
-        mcp_names = [s.name for s in self._mcp_registry.list_all_tools()]
-        for name in mcp_names:
-            if name not in self._policy.allowed_tools:
-                self._policy.allowed_tools.append(name)
-
-        for spec in self._mcp_registry.list_all_tools():
-            # Register spec (if not already present)
-            try:
-                runtime.get(spec.name)
-            except KeyError:
-                runtime.register(spec)
-
-            # Register contextual runner
-            try:
-                runner = self._mcp_registry.get_runner(spec.name)
-                runtime.register_contextual_runner(spec.name, runner)
-            except KeyError:
-                logger.warning(
-                    f"MCP tool '{spec.name}' has no runner — call skipped"
                 )
-
-            # Register formatter if not already present
-            if runtime.get_formatter(spec.name) is None:
-                from rag.agent.tools.formatters.mcp_tools import MCPToolFormatter
-                runtime.register_formatter(MCPToolFormatter(spec.name))
-
-            # Register in catalog (so tool_search can find it)
-            if self._catalog.get(spec.name) is None:
-                card = spec.aci
-                search_text = ToolCatalog.build_search_text(
-                    spec.name, spec.description, "",
-                    when_to_use=card.when_to_use if card else "",
-                    when_not_to_use=card.when_not_to_use if card else "",
-                    domains=card.domains if card else (),
-                    file_types=card.file_types if card else (),
-                    selection_tags=card.selection_tags if card else (),
-                )
-                self._catalog.register(
-                    ToolCatalogEntry(
-                        name=spec.name,
-                        description=spec.description,
-                        category="deferred",  # MCP tools are always deferred
-                        search_text=search_text,
-                        activation_group=card.activation_group if card else "mcp",
-                        when_to_use=card.when_to_use if card else "",
-                        when_not_to_use=card.when_not_to_use if card else "",
-                        domains=card.domains if card else (),
-                        selection_tags=card.selection_tags if card else (),
-                        source="mcp",
-                    ),
-                )
+            ),
+            subagent_runner=self._subagent_runner,
+            mcp_registry=self._mcp_registry,
+        ).build(
+            run_config,
+            runners=runners,
+            tools=tools,
+        )
 
     def _register_discovery_tools(self) -> None:
         """Register tool_search and activate_tools as core tools.
