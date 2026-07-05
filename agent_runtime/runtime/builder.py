@@ -188,6 +188,7 @@ def build_agent_service(
     knowledge_runner: ContextualToolRunner | None = None,
     knowledge_asset_runner: ContextualToolRunner | None = None,
     strict_model_provider: bool = True,
+    startup_ms: float = 0.0,
 ) -> AgentService:
     """Build the product Agent service.
 
@@ -388,6 +389,7 @@ def build_agent_service(
         skill_catalog=skill_catalog,
         strict_model_provider=strict_model_provider,
         latency_profile=AgentLatencyProfile(
+            startup_ms=startup_ms,
             build_service_ms=(time.perf_counter() - build_started_at) * 1000,
             model_ready_ms=model_ready_ms,
         ),

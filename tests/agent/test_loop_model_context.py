@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -22,6 +24,7 @@ from rag.agent.core.observations import (
 )
 from rag.agent.core.turn_contracts import ToolCallPlan
 from rag.agent.loop.state import (
+    LoopState,
     ModelTurnDraft,
     StopHookFeedback,
     create_loop_state,
@@ -36,9 +39,9 @@ from rag.agent.memory.models import (
     StateChannelReplacement,
 )
 from rag.agent.planning import PlanStep, PlanTracker, PlanUpdate
-from rag.agent.tools.spec import ToolResult
+from rag.agent.tools.spec import ToolError, ToolPermissions, ToolResult, ToolSpec
 from rag.assembly.tokenizer import TokenAccountingService, TokenizerContract
-from rag.schema.llm import LLMCallStage, LLMStageBudget
+from rag.schema.llm import LLMCallStage, LLMProviderResult, LLMStageBudget
 from rag.schema.runtime import AccessPolicy
 
 
@@ -60,6 +63,37 @@ class _StubGenerator:
 
 class _ToolOutput(BaseModel):
     value: str
+
+
+class _NativeToolInput(BaseModel):
+    query: str
+
+
+class _RecordingToolGenerator:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    def generate_with_tools(
+        self,
+        *,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        **kwargs: Any,
+    ) -> LLMProviderResult[Any]:
+        self.calls.append({"messages": messages, "tools": tools, "kwargs": kwargs})
+        return LLMProviderResult(
+            value=SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        finish_reason="stop",
+                        message=SimpleNamespace(
+                            content="Native answer.",
+                            tool_calls=[],
+                        ),
+                    )
+                ]
+            )
+        )
 
 
 class _RecordingMemoryStore:
@@ -106,7 +140,7 @@ def _run_config() -> AgentRunConfig:
     )
 
 
-def _state() -> dict[str, Any]:
+def _state() -> LoopState:
     return create_loop_state(
         task="Explain the policy with sources.",
         run_config=_run_config(),
@@ -134,6 +168,17 @@ def _assembler() -> AgentLLMContextAssembler:
                 safety_margin_tokens=128,
             )
         },
+    )
+
+
+def _json_bytes(value: object) -> int:
+    return len(
+        json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
     )
 
 
@@ -206,6 +251,62 @@ async def test_loop_provider_returns_finish_without_satisfaction_authorization()
     prompt = generator.calls[0][0]
     assert "open_gaps" not in prompt
     assert "goal checker" not in prompt
+
+
+@pytest.mark.anyio
+async def test_loop_provider_records_legacy_prompt_bytes() -> None:
+    generator = _StubGenerator(
+        [
+            {
+                "action": "finish",
+                "final_answer": "The policy changed in 2026.",
+            }
+        ]
+    )
+    state = _state()
+    provider = LLMLoopModelTurnProvider(generator)
+
+    await provider.next_turn(
+        state,
+        definition=_definition(),
+        budget_remaining=5_000,
+    )
+
+    assert len(generator.calls) == 1
+    prompt = generator.calls[0][0]
+    assert state["latency_profile"].prompt_bytes == len(prompt.encode("utf-8"))
+    assert state["latency_profile"].tool_schema_bytes == 0
+
+
+@pytest.mark.anyio
+async def test_loop_provider_records_native_prompt_and_tool_schema_bytes() -> None:
+    generator = _RecordingToolGenerator()
+    state = _state()
+    provider = LLMLoopModelTurnProvider(
+        generator,
+        tool_specs=[
+            ToolSpec(
+                name="vector_search",
+                description="Search trusted vector evidence.",
+                input_model=_NativeToolInput,
+                output_model=_ToolOutput,
+                error_model=ToolError,
+                permissions=ToolPermissions(),
+                timeout_seconds=5,
+            )
+        ],
+    )
+
+    await provider.next_turn(
+        state,
+        definition=_definition(),
+        budget_remaining=5_000,
+    )
+
+    assert len(generator.calls) == 1
+    call = generator.calls[0]
+    assert state["latency_profile"].prompt_bytes == _json_bytes(call["messages"])
+    assert state["latency_profile"].tool_schema_bytes == _json_bytes(call["tools"])
 
 
 def test_loop_context_keeps_approval_and_feedback_without_goal_fields() -> None:

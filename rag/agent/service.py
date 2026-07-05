@@ -477,13 +477,15 @@ class AgentService:
         )
         state["approved_tool_call_ids"] = list(approved_tool_call_ids or ())
         state["denied_tool_call_ids"] = list(denied_tool_call_ids or ())
-        return cast(
+        compacted = cast(
             LoopState,
             MessageCompactor(
                 policy=run_config.memory_policy,
                 store=memory_store,
             ).compact_initial_state(dict(state)),
         )
+        compacted["latency_profile"] = self._latency_profile
+        return compacted
 
     async def run(self, request: AgentRunRequest) -> AgentRunResult:
         run_config = request.to_run_config(self._policy)

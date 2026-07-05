@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from collections.abc import Callable, Mapping
 from typing import Any, Literal
 
@@ -17,6 +18,7 @@ from rag.agent.core.llm_context import (
 )
 from rag.agent.core.llm_registry import ModelResolver
 from rag.agent.core.messages import ModelMessage, StopReason, ToolCall, ToolUseResult
+from rag.agent.core.runtime_diagnostics import AgentLatencyProfile
 from rag.agent.core.tool_schema import AgentMessageAssembler, OpenAIAdapter
 from rag.agent.core.turn_contracts import ToolCallPlan
 from rag.agent.loop.state import (
@@ -171,6 +173,11 @@ class LLMLoopModelTurnProvider:
         all_messages = [system_msg, *conversation_msgs]
         openai_messages = OpenAIAdapter.messages(all_messages)
         openai_tools = OpenAIAdapter.tools(visible_specs)
+        _record_llm_payload_size(
+            state,
+            prompt_bytes=_json_payload_bytes(openai_messages),
+            tool_schema_bytes=_json_payload_bytes(openai_tools),
+        )
 
         # 5. Call gateway (no budget — Claude Code uses max_turns as the only cap)
         if self._stream_sink is not None:
@@ -297,13 +304,46 @@ class LLMLoopModelTurnProvider:
             budget_remaining=budget_remaining,
             output_schema=LoopModelDecision,
         )
+        _record_llm_payload_size(
+            state,
+            prompt_bytes=len(assembled.prompt.encode("utf-8")),
+            tool_schema_bytes=0,
+        )
         result = await self._gateway.agenerate_structured(
             stage=LLMCallStage.TOOL_DECISION,
             prompt=assembled.prompt,
             schema=LoopModelDecision,
-kwargs=self._kwargs,
+            kwargs=self._kwargs,
         )
         return parse_loop_model_turn(result.value)
+
+
+def _json_payload_bytes(value: object) -> int:
+    return len(
+        json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    )
+
+
+def _record_llm_payload_size(
+    state: LoopState,
+    *,
+    prompt_bytes: int,
+    tool_schema_bytes: int,
+) -> None:
+    profile = state.get("latency_profile")
+    if not isinstance(profile, AgentLatencyProfile):
+        profile = AgentLatencyProfile()
+    state["latency_profile"] = profile.model_copy(
+        update={
+            "prompt_bytes": profile.prompt_bytes + prompt_bytes,
+            "tool_schema_bytes": profile.tool_schema_bytes + tool_schema_bytes,
+        }
+    )
 
 
 def _base_messages_to_model_messages(

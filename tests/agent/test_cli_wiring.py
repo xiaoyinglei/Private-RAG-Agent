@@ -239,6 +239,25 @@ def test_build_agent_service_without_rag_runtime_hides_rag_tools() -> None:
     assert runtime_registry.has_runner("llm_generate")
 
 
+def test_build_agent_service_preserves_startup_latency() -> None:
+    service = _build_agent_service(
+        None,
+        agent_type="generic",
+        startup_ms=12.5,
+    )
+    state = service.initial_state(
+        AgentRunRequest(
+            task="Explain policy",
+            run_id="cli-startup-latency",
+            thread_id="cli-startup-latency",
+        )
+    )
+
+    assert state["latency_profile"].startup_ms == 12.5
+    assert state["latency_profile"].build_service_ms > 0
+    RunRegistry.remove("cli-startup-latency")
+
+
 def test_build_agent_service_with_retrieval_runtime_exposes_rag_tool() -> None:
     service = _build_agent_service(_RuntimeWithRetrieval(), agent_type="generic")
 
@@ -548,6 +567,7 @@ def test_display_result_surfaces_latency_profile_when_verbose(
         status="done",
         final_answer="ok",
         latency_profile=AgentLatencyProfile(
+            startup_ms=1.0,
             build_service_ms=2.0,
             model_ready_ms=3.0,
             model_latency_ms=11.0,
@@ -564,6 +584,7 @@ def test_display_result_surfaces_latency_profile_when_verbose(
     output = capsys.readouterr().out
     assert "耗时:" in output
     assert "total=30ms" in output
+    assert "startup=1ms" in output
     assert "model=11ms" in output
     assert "tool=5ms" in output
     assert "prompt_bytes=13" in output

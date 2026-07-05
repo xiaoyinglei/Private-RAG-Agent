@@ -68,6 +68,8 @@ def test_agent_facade_run_maps_public_request_to_internal_service(
     assert result.status == "done"
     assert result.files == ("README.md",)
     assert isinstance(built[0]["model_control_plane"], ModelControlPlane)
+    assert isinstance(built[0]["startup_ms"], float)
+    assert built[0]["startup_ms"] >= 0
     assert built == [
         {
             "runtime": None,
@@ -78,6 +80,7 @@ def test_agent_facade_run_maps_public_request_to_internal_service(
             "runtime_diagnostics": (),
             "knowledge_runner": None,
             "knowledge_asset_runner": None,
+            "startup_ms": built[0]["startup_ms"],
         }
     ]
     assert len(requests) == 1

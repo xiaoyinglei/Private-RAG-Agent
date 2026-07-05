@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
@@ -141,6 +142,7 @@ class Agent:
         from agent_runtime.runtime.builder import build_agent_service
         from rag.utils.text import load_env_file
 
+        startup_started_at = time.perf_counter()
         load_env_file()
         try:
             model_control_plane = self._get_model_control_plane()
@@ -177,6 +179,7 @@ class Agent:
             runtime_diagnostics=(),
             knowledge_runner=knowledge_runner,
             knowledge_asset_runner=knowledge_asset_runner,
+            startup_ms=(time.perf_counter() - startup_started_at) * 1000,
         )
         return service, provider
 

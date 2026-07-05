@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import time
 from collections.abc import Sequence
 from contextlib import nullcontext
 from dataclasses import dataclass, replace
@@ -214,6 +215,7 @@ def _build_agent_service(
     knowledge_runner: ContextualToolRunner | None = None,
     knowledge_asset_runner: ContextualToolRunner | None = None,
     strict_model_provider: bool = True,
+    startup_ms: float = 0.0,
 ) -> AgentService:
     from agent_runtime.runtime.builder import build_agent_service
 
@@ -227,6 +229,7 @@ def _build_agent_service(
         knowledge_runner=knowledge_runner,
         knowledge_asset_runner=knowledge_asset_runner,
         strict_model_provider=strict_model_provider,
+        startup_ms=startup_ms,
     )
 
 
@@ -374,6 +377,7 @@ def _display_result(result: AgentRunResult, *, verbose: bool) -> None:
         print(
             "\n耗时: "
             f"total={p.total_ms:.0f}ms "
+            f"startup={p.startup_ms:.0f}ms "
             f"build={p.build_service_ms:.0f}ms "
             f"model_ready={p.model_ready_ms:.0f}ms "
             f"model={p.model_latency_ms:.0f}ms "
@@ -695,6 +699,7 @@ def agent_chat(
     from rag.agent.service import AgentRunRequest
     from rag.utils.text import load_env_file
 
+    startup_started_at = time.perf_counter()
     load_env_file()
     runtime, diagnostics = _build_optional_rag_runtime(
         storage_root=storage_root,
@@ -724,6 +729,7 @@ def agent_chat(
             model_alias=model,
             model_control_plane=model_control_plane,
             runtime_diagnostics=diagnostics,
+            startup_ms=(time.perf_counter() - startup_started_at) * 1000,
         )
         try:
             run_id = f"chat_{id(service):x}"
@@ -980,6 +986,7 @@ def agent_resume(
     """从 SQLite checkpoint 恢复暂停的 Agent 运行。"""
     from rag.utils.text import load_env_file
 
+    startup_started_at = time.perf_counter()
     load_env_file()
     runtime, diagnostics = _build_optional_rag_runtime(
         storage_root=storage_root,
@@ -1009,6 +1016,7 @@ def agent_resume(
             model_alias=model,
             model_control_plane=model_control_plane,
             runtime_diagnostics=diagnostics,
+            startup_ms=(time.perf_counter() - startup_started_at) * 1000,
         )
         try:
             request = asyncio.run(service.apending_human_input_request(run_id=run_id))
