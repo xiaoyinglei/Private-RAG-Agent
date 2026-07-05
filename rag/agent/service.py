@@ -1120,15 +1120,39 @@ Input files detected — you are in file processing mode:
         def _update_plan_runner(payload: Any, context: Any) -> Any:
             from rag.agent.tools.generic_tools import PlanStep, UpdatePlanInput, UpdatePlanOutput
 
+            def _to_tool_step(step: Any, *, fallback_index: int) -> PlanStep:
+                sid = getattr(step, "id", None) or getattr(step, "step_id", None)
+                description = (
+                    getattr(step, "description", None)
+                    or getattr(step, "title", None)
+                    or ""
+                )
+                status_value = getattr(step, "status", "pending")
+                if status_value in {"pending", "in_progress", "completed", "blocked"}:
+                    status = cast(
+                        Literal["pending", "in_progress", "completed", "blocked"],
+                        status_value,
+                    )
+                else:
+                    status = "pending"
+                return PlanStep(
+                    id=str(sid or f"step-{fallback_index}"),
+                    description=str(description),
+                    status=status,
+                )
+
             if isinstance(payload, dict):
                 inp = UpdatePlanInput(**payload)
             else:
                 inp = payload
             state = getattr(context, "state", {}) or {}
             plan_state = state.get("plan_state")
-            existing = []
+            existing: list[PlanStep] = []
             if plan_state and hasattr(plan_state, "agent_plan") and plan_state.agent_plan:
-                existing = list(plan_state.agent_plan.steps)
+                existing = [
+                    _to_tool_step(step, fallback_index=index + 1)
+                    for index, step in enumerate(plan_state.agent_plan.steps)
+                ]
             steps = list(existing)
             if inp.action == "add":
                 for s in inp.steps:

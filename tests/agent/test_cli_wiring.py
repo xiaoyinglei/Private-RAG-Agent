@@ -23,6 +23,8 @@ from rag.agent.core.definition import AgentRuntimePolicy
 from rag.agent.core.llm_registry import ModelRegistry
 from rag.agent.core.runtime_diagnostics import AgentLatencyProfile, RuntimeDiagnostic
 from rag.agent.loop.state import LoopState as AgentState
+from rag.agent.planning import AgentPlan
+from rag.agent.planning import PlanStep as PlanningStep
 from rag.agent.service import AgentRunRequest, AgentRunResult
 from rag.agent.tools.llm_tools import LLMCompareInput, LLMGenerateInput
 from rag.agent.tools.registry import ToolExecutionContext
@@ -256,6 +258,54 @@ def test_build_agent_service_preserves_startup_latency() -> None:
     assert state["latency_profile"].startup_ms == 12.5
     assert state["latency_profile"].build_service_ms > 0
     RunRegistry.remove("cli-startup-latency")
+
+
+@pytest.mark.anyio
+async def test_update_plan_runner_normalizes_existing_planning_steps() -> None:
+    service = _build_agent_service(None, agent_type="generic")
+    state = service.initial_state(
+        AgentRunRequest(
+            task="Explain policy",
+            run_id="cli-update-plan-existing",
+            thread_id="cli-update-plan-existing",
+        )
+    )
+    state["plan_state"].agent_plan = AgentPlan(
+        objective="Explain policy",
+        steps=[
+            PlanningStep(
+                step_id="step_existing",
+                title="Inspect existing context",
+                status="in_progress",
+            )
+        ],
+    )
+    runtime_registry = service._runtime_tool_registry(state["run_config"])
+
+    output = await runtime_registry.run(
+        "update_plan",
+        {
+            "action": "add",
+            "steps": [
+                {
+                    "id": "step_new",
+                    "description": "Summarize result",
+                    "status": "pending",
+                }
+            ],
+            "summary": "Plan updated",
+        },
+        execution_context=ToolExecutionContext(
+            run_config=state["run_config"],
+            state=state,
+        ),
+    )
+
+    assert [step.id for step in output.steps] == ["step_existing", "step_new"]
+    assert output.steps[0].description == "Inspect existing context"
+    assert output.steps[0].status == "in_progress"
+    assert output.summary == "Plan updated"
+    RunRegistry.remove("cli-update-plan-existing")
 
 
 def test_build_agent_service_with_retrieval_runtime_exposes_rag_tool() -> None:
