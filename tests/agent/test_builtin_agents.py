@@ -3,7 +3,7 @@ from __future__ import annotations
 from rag.agent.builtin import BUILTIN_AGENT_DEFINITIONS, create_builtin_agent_registry
 from rag.agent.builtin_registry import create_builtin_tool_registry
 from rag.agent.capabilities.catalog import DeferredToolStore, resolve_visible_tools
-from rag.agent.service import AgentService
+from rag.agent.tools.catalog_assembly import build_tool_catalog
 
 
 def test_create_builtin_agent_registry_registers_expected_agents() -> None:
@@ -54,9 +54,7 @@ def test_generic_agent_includes_semantic_rag_tools() -> None:
 def test_generic_agent_default_visible_tools_are_minimal() -> None:
     """Only resident tools are sent to the model before tool_search activation."""
     definition = BUILTIN_AGENT_DEFINITIONS["generic"]
-    service = AgentService.__new__(AgentService)
-    service._policy = definition
-    catalog = AgentService._build_catalog(service, create_builtin_tool_registry())
+    catalog = build_tool_catalog(create_builtin_tool_registry(), definition)
     store = DeferredToolStore(max_active=10)
 
     visible = resolve_visible_tools(

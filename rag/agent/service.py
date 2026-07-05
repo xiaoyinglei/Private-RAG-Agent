@@ -13,15 +13,10 @@ from langgraph.checkpoint.base import BaseCheckpointSaver
 from pydantic import BaseModel, ConfigDict, Field
 
 from rag.agent.capabilities.catalog import (
-    _DEFAULT_ACTIVATION_GROUPS,
-    CORE_TOOLS,
-    DEFERRED_TOOLS,
-    INTERNAL_TOOLS,
     DeferredToolStore,
     SearchCandidate,
     ToolCatalog,
     ToolCatalogEntry,
-    flatten_schema,
 )
 from rag.agent.capabilities.context import deferred_store_var, iteration_var
 from rag.agent.capabilities.tool_search import (
@@ -34,7 +29,6 @@ from rag.agent.capabilities.tool_search import (
 )
 from rag.agent.core.checkpointing import (
     LangGraphCheckpointStore,
-    _digest_text,
     aclose_agent_checkpointer,
     create_agent_checkpointer,
 )
@@ -44,8 +38,8 @@ from rag.agent.core.delegation import AgentDelegationRequest, DelegatedAgentRunn
 from rag.agent.core.finalization import FinishCandidateBuilder
 from rag.agent.core.goal_contract import GoalCompatibilityConfig, GoalSpec
 from rag.agent.core.human_input import HumanInputRequest, HumanInputResponse
-from rag.agent.core.llm_providers import create_loop_model_turn_provider
 from rag.agent.core.llm_registry import ModelResolver
+from rag.agent.core.model_provider_runtime import ModelProviderResolver
 from rag.agent.core.output_finalizer import (
     StructuredOutputFinalizer,
     create_model_structured_output_finalizer,
@@ -65,19 +59,19 @@ from rag.agent.core.turn_contracts import ToolCallPlan
 from rag.agent.loop.runtime import AgentLoop, ModelTurnProvider
 from rag.agent.loop.state import (
     LoopState,
-    ModelTurnDraft,
     append_loop_diagnostic,
     create_loop_state,
 )
 from rag.agent.loop.stop_hooks import StopHookRunner, build_stop_hooks
-from rag.agent.loop.substate import MemoryState, PersistentMemorySnapshot
 from rag.agent.memory.compactor import (
     LoopContextCompactor,
     MessageCompactor,
 )
 from rag.agent.memory.models import MemoryPolicy
 from rag.agent.memory.persistent import PersistentMemoryStore
+from rag.agent.memory.persistent.runtime import PersistentMemoryRuntime
 from rag.agent.memory.store import WorkspaceMemoryStore
+from rag.agent.tools.catalog_assembly import build_tool_catalog
 from rag.agent.tools.mcp_adapter import MCPToolRegistry
 from rag.agent.tools.registry import ToolRegistry, ToolRunner
 from rag.agent.tools.spec import ExecutionCategory, ToolPermissions, ToolResult, ToolSpec
@@ -271,40 +265,6 @@ def _profile_with_run_timings(
     )
 
 
-class _ResultDrivenModelTurnProvider:
-    async def next_turn(
-        self,
-        state: LoopState,
-        *,
-        definition: AgentRuntimePolicy,
-        budget_remaining: int,
-    ) -> ModelTurnDraft:
-        del definition, budget_remaining
-        if state["finish_state"].feedback:
-            return ModelTurnDraft(
-                action="pause",
-                pause_reason=("No model turn provider is available to address stop-hook feedback."),
-            )
-        # PR2: answer_candidates no longer written to LoopState; use tool output directly
-        if state["tool_results"]:
-            latest = state["tool_results"][-1]
-            if latest.error is not None:
-                return ModelTurnDraft(action="finish")
-            if latest.output is not None:
-                text = getattr(latest.output, "text", None) or getattr(latest.output, "result", None)
-                if text:
-                    return ModelTurnDraft(action="finish", final_answer=str(text))
-            # Tool produced output but no extracted answer text; pause for direction
-            return ModelTurnDraft(
-                action="pause",
-                pause_reason="Tool execution produced no extractable answer.",
-            )
-        return ModelTurnDraft(
-            action="pause",
-            pause_reason="No model turn provider is configured.",
-        )
-
-
 class _TaskChildRunner:
     """Service-layer runner for the generic task tool.
 
@@ -416,7 +376,7 @@ class AgentService:
         else:
             raise ValueError("Provide either 'definition' or 'policy'")
         self._base_tool_registry = tool_registry
-        self._catalog = catalog or self._build_catalog(tool_registry)
+        self._catalog = catalog or build_tool_catalog(tool_registry, self._policy)
         self._skill_catalog = skill_catalog  # SkillCatalog | None
         self._skill_runtime = None
         if skill_catalog is not None:
@@ -435,6 +395,9 @@ class AgentService:
         self._stream_sink = stream_sink
         self._mcp_registry = mcp_registry
         self._latency_profile = latency_profile or AgentLatencyProfile()
+        self._persistent_memory_runtime = PersistentMemoryRuntime(
+            model_registry=model_registry,
+        )
         # Register core tools: tool_search, activate_tools, task
         self._register_discovery_tools()
         self._register_task_tool()
@@ -585,7 +548,11 @@ class AgentService:
             memory_store=ctx.memory_store,
             file_manifest=ctx.manifest,
         )
-        await self._load_persistent_memories(state, ctx.persistent_store, task=ctx.task)
+        await self._persistent_memory_runtime.load(
+            state,
+            ctx.persistent_store,
+            task=ctx.task,
+        )
 
         checkpoint_store = LangGraphCheckpointStore(
             self._checkpointer,
@@ -612,7 +579,10 @@ class AgentService:
         finalize_started_at = time.perf_counter()
         if result_state["status"] == "completed":
             try:
-                await self._extract_persistent_memories(result_state, ctx.persistent_store)
+                await self._persistent_memory_runtime.extract(
+                    result_state,
+                    ctx.persistent_store,
+                )
             except Exception:
                 logger.warning("Persistent memory extraction failed", exc_info=True)
         finalize_latency_ms = _elapsed_ms(finalize_started_at)
@@ -673,7 +643,11 @@ class AgentService:
             memory_store=ctx.memory_store,
             file_manifest=ctx.manifest,
         )
-        await self._load_persistent_memories(state, ctx.persistent_store, task=ctx.task)
+        await self._persistent_memory_runtime.load(
+            state,
+            ctx.persistent_store,
+            task=ctx.task,
+        )
 
         checkpoint_store = LangGraphCheckpointStore(
             self._checkpointer,
@@ -698,7 +672,10 @@ class AgentService:
                 RunRegistry.remove(run_config.run_id)
             if state["status"] == "completed":
                 try:
-                    await self._extract_persistent_memories(state, ctx.persistent_store)
+                    await self._persistent_memory_runtime.extract(
+                        state,
+                        ctx.persistent_store,
+                    )
                 except Exception:
                     logger.warning("Persistent memory extraction failed", exc_info=True)
 
@@ -801,48 +778,20 @@ class AgentService:
         *,
         tool_registry: ToolRegistry | None = None,
     ) -> ModelTurnProvider:
-        if self._model_turn_provider is not None:
-            return self._model_turn_provider
-        if self._model_registry is not None:
-            try:
-                store = deferred_store_var.get(None)
-                if store is None:
-                    raise RuntimeError(
-                        "DeferredToolStore is not bound — "
-                        "AgentLoop must set deferred_store_var before creating provider"
-                    )
-                effective_registry = tool_registry or self._base_tool_registry
-                formatter_resolver = (
-                    (lambda name: tool_registry.get_formatter(name)) if tool_registry is not None else None
-                )
-                return create_loop_model_turn_provider(
-                    self._model_registry,
-                    self._policy.model_selection,
-                    tool_registry=effective_registry,
-                    definition=self._policy,
-                    catalog=self._catalog,
-                    deferred_store=store,
-                    stream_sink=self._stream_sink,
-                    formatter_resolver=formatter_resolver,
-                    skill_context_provider=(
-                        self._skill_runtime.render_prompt_context
-                        if self._skill_runtime is not None
-                        else None
-                    ),
-                )
-            except Exception as exc:
-                if self._strict_model_provider:
-                    raise
-                if state is not None:
-                    append_loop_diagnostic(
-                        state,
-                        RuntimeDiagnostic.from_exception(
-                            code="default_providers_initialization_failed",
-                            component="model_providers",
-                            error=exc,
-                        ),
-                    )
-        return _ResultDrivenModelTurnProvider()
+        return ModelProviderResolver(
+            model_turn_provider=self._model_turn_provider,
+            model_registry=self._model_registry,
+            policy=self._policy,
+            base_tool_registry=self._base_tool_registry,
+            catalog=self._catalog,
+            strict_model_provider=self._strict_model_provider,
+            stream_sink=self._stream_sink,
+            skill_context_provider=(
+                self._skill_runtime.render_prompt_context
+                if self._skill_runtime is not None
+                else None
+            ),
+        ).resolve(state, tool_registry=tool_registry)
 
     def _resolve_output_finalizer(
         self,
@@ -930,155 +879,6 @@ Input files detected — you are in file processing mode:
 - For charts, use matplotlib; plt.savefig() to scratch/."""
 
         return f"{block}\n\n{instructions}\n\n── User Task ──\n{task}"
-
-    # ── Persistent memory helpers ──
-
-    async def _load_persistent_memories(
-        self,
-        state: LoopState,
-        store: PersistentMemoryStore,
-        *,
-        task: str,
-    ) -> None:
-        """Load persistent memories into the loop state for context injection."""
-        if not store.is_available:
-            return
-
-        try:
-            from rag.agent.memory.persistent import MemorySelector
-
-            index_content = store.read_index()
-            state["memory_index"] = index_content
-
-            if not index_content.strip():
-                return
-
-            # Create a memory gateway if available
-            memory_gateway = self._create_memory_gateway("memory_select")
-            if memory_gateway is None:
-                # No gateway — fall back to rule-only selection
-                selector = MemorySelector(max_selected=5, max_tokens=4000)
-            else:
-                selector = MemorySelector(
-                    llm_gateway=memory_gateway,
-                    max_selected=5,
-                    max_tokens=4000,
-                )
-
-            selected = await selector.select(
-                task=task,
-                index_content=index_content,
-                store=store,
-            )
-            state["persistent_memories"] = [m.to_markdown() for m in selected]
-
-            # ── PR1 dual-write: update PersistentMemorySnapshot ──
-            ms = state.get("memory_state")
-            if isinstance(ms, MemoryState):
-                state["memory_state"] = ms.model_copy(
-                    update={
-                        "persistent": PersistentMemorySnapshot(
-                            index_digest=_digest_text(index_content),
-                            selected_count=len(selected) if selected else 0,
-                            selected_summaries=([m.to_markdown()[:200] for m in selected] if selected else []),
-                        )
-                    }
-                )
-            else:
-                # memory_state not present (shouldn't happen after Task 2, but guard)
-                state["memory_state"] = MemoryState(
-                    persistent=PersistentMemorySnapshot(
-                        index_digest=_digest_text(index_content),
-                        selected_count=len(selected) if selected else 0,
-                        selected_summaries=([m.to_markdown()[:200] for m in selected] if selected else []),
-                    ),
-                )
-        except Exception:
-            logger.warning("Failed to load persistent memories", exc_info=True)
-
-    async def _extract_persistent_memories(
-        self,
-        state: LoopState,
-        store: PersistentMemoryStore,
-    ) -> None:
-        """Extract new memories from the completed conversation (background task)."""
-        if not store.is_available:
-            return
-
-        try:
-            from rag.agent.memory.persistent import MemoryExtractor
-
-            extract_gateway = self._create_memory_gateway("memory_extract")
-            if extract_gateway is None:
-                return
-
-            extractor = MemoryExtractor(llm_gateway=extract_gateway)
-            written = await extractor.extract(state=state, store=store)
-            if written:
-                logger.info("Extracted persistent memories: %s", written)
-
-            # Optionally consolidate
-            from rag.agent.memory.persistent import MemoryConsolidator
-
-            consolidate_gateway = self._create_memory_gateway("memory_consolidate")
-            consolidator = MemoryConsolidator(llm_gateway=consolidate_gateway or extract_gateway)
-            result = await consolidator.consolidate(store)
-            if result.action == "consolidated":
-                logger.info(
-                    "Consolidated memories: %d -> %d",
-                    result.before_count,
-                    result.after_count,
-                )
-        except Exception:
-            logger.warning("Failed to extract persistent memories", exc_info=True)
-
-    def _create_memory_gateway(
-        self,
-        stage: str = "memory_select",
-    ) -> Any | None:
-        """Create an LLM gateway for memory operations.
-
-        Resolves the model for the given memory stage from the generation
-        config in models.yaml. Falls back to the default model if no
-        stage-specific config is found.
-
-        Returns None if no model registry is available.
-        """
-        if self._model_registry is None:
-            return None
-        try:
-            model_alias = self._resolve_memory_model_alias(stage)
-            resolved = self._model_registry.resolve_or_fallback(model_alias)
-            if resolved.gateway is not None:
-                return resolved.gateway
-            if resolved.token_accounting is None:
-                return None
-            from rag.providers.llm_gateway import LLMGateway
-
-            return LLMGateway(
-                generator=resolved.generator,
-                token_accounting=resolved.token_accounting,
-                model_context_tokens=resolved.context_window_tokens,
-            )
-        except Exception:
-            logger.debug("Failed to create memory gateway for stage %s", stage, exc_info=True)
-            return None
-
-    def _resolve_memory_model_alias(self, stage: str) -> str:
-        """Resolve model alias for a memory stage from the runtime config.
-
-        Uses the GenerationConfig parsed from models.yaml by the catalog.
-        Falls back to the default model if no stage-specific config is found.
-        """
-        if self._model_registry is None:
-            return ""
-        try:
-            task_config = getattr(self._model_registry.generation_config, stage, None)
-            if task_config is not None and task_config.model:
-                return str(task_config.model)
-        except Exception:
-            logger.debug("Failed to resolve memory model from runtime config", exc_info=True)
-        return str(self._model_registry.default_model)
 
     def _runtime_tool_registry(
         self,
@@ -1326,69 +1126,6 @@ Input files detected — you are in file processing mode:
                         source="mcp",
                     ),
                 )
-
-    def _build_catalog(self, registry: ToolRegistry) -> ToolCatalog:
-        """Build a ToolCatalog from all tools in the registry.
-
-        Categorizes each tool and builds search_text by flattening the
-        input schema.  Only deferred tools are indexed for search.
-
-        PR5: ToolCard fields (if present) are appended to search_text
-        and stored in ToolCatalogEntry for enriched search results.
-        """
-        filt = self._policy.tool_catalog_filter
-        catalog = ToolCatalog()
-        for spec in registry.list_all():
-            if spec.name in filt.deny:
-                continue
-            category: Literal["core", "deferred", "internal"]
-            if spec.name in filt.promote_to_core or spec.name in CORE_TOOLS:
-                category = "core"
-            elif spec.name in DEFERRED_TOOLS:
-                category = "deferred"
-            elif spec.name in INTERNAL_TOOLS:
-                category = "internal"
-            else:
-                category = "internal"
-            # Build search_text for BM25 indexing
-            schema_text = ""
-            if category == "deferred" and hasattr(spec.input_model, "model_json_schema"):
-                schema_text = flatten_schema(spec.input_model.model_json_schema())
-
-            # PR5: collect ToolCard fields for enriched search and display
-            card = spec.aci
-            search_text = ToolCatalog.build_search_text(
-                spec.name,
-                spec.description,
-                schema_text,
-                when_to_use=card.when_to_use if card else "",
-                when_not_to_use=card.when_not_to_use if card else "",
-                domains=card.domains if card else (),
-                file_types=card.file_types if card else (),
-                selection_tags=card.selection_tags if card else (),
-            )
-            catalog.register(
-                ToolCatalogEntry(
-                    name=spec.name,
-                    description=spec.description,
-                    category=category,
-                    search_text=search_text,
-                    schema_text=schema_text,
-                    # ToolCard-derived fields
-                    activation_group=(
-                        card.activation_group
-                        if card and card.activation_group
-                        else _DEFAULT_ACTIVATION_GROUPS.get(spec.name, "")
-                    ),
-                    when_to_use=card.when_to_use if card else "",
-                    when_not_to_use=card.when_not_to_use if card else "",
-                    domains=card.domains if card else (),
-                    file_types=card.file_types if card else (),
-                    failure_codes=card.failure_codes if card else (),
-                    selection_tags=card.selection_tags if card else (),
-                ),
-            )
-        return catalog
 
     def _register_discovery_tools(self) -> None:
         """Register tool_search and activate_tools as core tools.
