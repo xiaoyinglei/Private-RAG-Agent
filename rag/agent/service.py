@@ -404,7 +404,7 @@ class AgentService:
         stream_sink: Any = None,  # StreamEventSink | None
         mcp_registry: MCPToolRegistry | None = None,
         skill_catalog: Any = None,  # SkillCatalog | None
-        strict_model_provider: bool = False,
+        strict_model_provider: bool = True,
         latency_profile: AgentLatencyProfile | None = None,
     ) -> None:
         if definition is not None and policy is not None:

@@ -8,6 +8,7 @@ from pydantic import BaseModel
 
 from rag.agent.builtin.generic import GENERIC_AGENT
 from rag.agent.builtin_registry import create_builtin_tool_registry
+from rag.agent.core.agent_service_factory import AgentServiceFactory
 from rag.agent.core.context import AgentRunConfig, RunRegistry
 from rag.agent.core.definition import AgentRuntimePolicy
 from rag.agent.core.goal_contract import GoalDeliverable, GoalSpec
@@ -54,6 +55,15 @@ class _FakeModelRegistry:
     def resolve_for_node(self, *, node_model: str | None, node_name: str) -> _ResolvedFakeModel:
         del node_model, node_name
         return _ResolvedFakeModel(self.generator)
+
+
+class _FailingModelRegistry:
+    default_model = "broken"
+    fallback_model = None
+
+    def resolve_for_node(self, *, node_model: str | None, node_name: str) -> object:
+        del node_model, node_name
+        raise RuntimeError("model provider broken")
 
 
 class _ResearchUnderstandingService:
@@ -158,6 +168,48 @@ def test_agent_initial_state_does_not_persist_explicit_goal_spec() -> None:
 
     assert "goal_spec" not in state
     RunRegistry.remove("explicit-goal")
+
+
+@pytest.mark.anyio
+async def test_agent_service_defaults_to_strict_model_provider() -> None:
+    service = AgentService(
+        definition=GENERIC_AGENT,
+        tool_registry=create_builtin_tool_registry(),
+        model_registry=cast(Any, _FailingModelRegistry()),
+    )
+
+    try:
+        with pytest.raises(RuntimeError, match="model provider broken"):
+            await service.run(
+                AgentRunRequest(
+                    task="Explain policy",
+                    run_id="svc-strict-model-default",
+                    thread_id="svc-strict-model-default",
+                )
+            )
+    finally:
+        RunRegistry.remove("svc-strict-model-default")
+
+
+@pytest.mark.anyio
+async def test_agent_service_factory_defaults_to_strict_model_provider() -> None:
+    factory = AgentServiceFactory(
+        tool_registry=create_builtin_tool_registry(),
+        model_registry=cast(Any, _FailingModelRegistry()),
+    )
+    service = factory.create(GENERIC_AGENT)
+
+    try:
+        with pytest.raises(RuntimeError, match="model provider broken"):
+            await service.run(
+                AgentRunRequest(
+                    task="Explain policy",
+                    run_id="svc-factory-strict-model-default",
+                    thread_id="svc-factory-strict-model-default",
+                )
+            )
+    finally:
+        RunRegistry.remove("svc-factory-strict-model-default")
 
 
 def test_agent_run_result_clears_stale_human_input_when_done() -> None:

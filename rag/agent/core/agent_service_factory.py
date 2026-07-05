@@ -29,7 +29,7 @@ class AgentServiceFactory:
         checkpointer: BaseCheckpointSaver[str] | None = None,
         runtime_diagnostics: Sequence[RuntimeDiagnostic] = (),
         skill_catalog: SkillCatalog | None = None,
-        strict_model_provider: bool = False,
+        strict_model_provider: bool = True,
         latency_profile: AgentLatencyProfile | None = None,
     ) -> None:
         self._tool_registry = tool_registry
