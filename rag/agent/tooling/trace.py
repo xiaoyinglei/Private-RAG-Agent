@@ -24,9 +24,12 @@ class ToolExecutionTrace(BaseModel):
 
     tool_call_id: str
     tool_name: str
+    ok: bool
     status: str
     recoverable: bool
     error_code: str | None = None
+    truncated: bool = False
+    output_size_bytes: int = 0
     can_use_tool_decision: str | None = None
     can_use_tool_reason: str | None = None
     latency_ms: float = 0.0

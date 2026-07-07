@@ -406,9 +406,81 @@ def test_executor_runs_visible_tool_and_records_trace() -> None:
     assert result.ok is True
     assert result.content == "read README.md"
     assert result.data["path"] == "README.md"
+    assert result.data["_meta"]["truncated"] is False
+    assert result.data["_meta"]["size_bytes"] > 0
     assert executor.traces[-1].tool_name == "read_file"
     assert executor.traces[-1].status == "ok"
     assert executor.traces[-1].can_use_tool_decision == "allow"
+    assert executor.traces[-1].truncated is False
+    assert executor.traces[-1].output_size_bytes > 0
+
+
+def test_executor_truncates_large_runner_output_and_records_size() -> None:
+    registry = ToolRegistry()
+    spec = _read_spec()
+    spec = spec.model_copy(update={"output_limit_chars": 20})
+    registry.register(spec, lambda args: {"content": "x" * 100, "payload": "y" * 100})
+    executor = ToolExecutor(registry)
+
+    result = asyncio.run(
+        executor.execute(
+            ToolCall(id="call_1", name="read_file", arguments={"path": "README.md"}),
+            sent_schema_names=["read_file"],
+        )
+    )
+
+    assert result.ok is True
+    assert result.content.endswith("[truncated]")
+    assert result.data["_meta"]["truncated"] is True
+    assert result.data["_meta"]["size_bytes"] > 20
+    assert len(result.data["payload"]) <= len("y" * 20 + "\n[truncated]")
+    assert executor.traces[-1].truncated is True
+    assert executor.traces[-1].output_size_bytes == result.data["_meta"]["size_bytes"]
+
+
+def test_executor_runner_exception_is_runner_error_without_traceback() -> None:
+    registry = ToolRegistry()
+
+    def broken_runner(args: dict[str, Any]) -> dict[str, Any]:
+        del args
+        raise RuntimeError("boom")
+
+    registry.register(_read_spec(), broken_runner)
+    executor = ToolExecutor(registry)
+
+    result = asyncio.run(
+        executor.execute(
+            ToolCall(id="call_1", name="read_file", arguments={"path": "README.md"}),
+            sent_schema_names=["read_file"],
+        )
+    )
+
+    assert result.ok is False
+    assert result.error_code == "runner_error"
+    assert result.content == "boom"
+    assert "Traceback" not in result.content
+    assert result.data["_meta"]["truncated"] is False
+    assert executor.traces[-1].status == "error"
+    assert executor.traces[-1].error_code == "runner_error"
+
+
+def test_executor_invalid_arguments_do_not_expose_traceback() -> None:
+    registry = ToolRegistry()
+    registry.register(_read_spec(), _runner)
+    executor = ToolExecutor(registry)
+
+    result = asyncio.run(
+        executor.execute(
+            ToolCall(id="call_1", name="read_file", arguments={}),
+            sent_schema_names=["read_file"],
+        )
+    )
+
+    assert result.ok is False
+    assert result.error_code == "invalid_arguments"
+    assert "Traceback" not in result.content
+    assert result.data["_meta"]["size_bytes"] == len(result.content.encode("utf-8"))
+    assert executor.traces[-1].error_code == "invalid_arguments"
 
 
 def test_executor_asks_for_write_without_entry_allow_flag() -> None:

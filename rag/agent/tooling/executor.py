@@ -83,12 +83,9 @@ class ToolExecutor:
         if spec is None:
             return self._record_result(
                 start,
-                ToolResult(
-                    tool_call_id=call.id,
-                    tool_name=call.name,
-                    ok=False,
+                _error_result(
+                    call,
                     content=f"Unknown tool: {call.name}",
-                    recoverable=True,
                     error_code="unknown_tool",
                 ),
             )
@@ -96,12 +93,9 @@ class ToolExecutor:
         if call.name not in set(sent_schema_names):
             return self._record_result(
                 start,
-                ToolResult(
-                    tool_call_id=call.id,
-                    tool_name=call.name,
-                    ok=False,
+                _error_result(
+                    call,
                     content=f"Tool schema was not sent for this request: {call.name}",
-                    recoverable=True,
                     error_code="schema_not_sent",
                 ),
             )
@@ -110,12 +104,9 @@ class ToolExecutor:
         if validation_errors:
             return self._record_result(
                 start,
-                ToolResult(
-                    tool_call_id=call.id,
-                    tool_name=call.name,
-                    ok=False,
+                _error_result(
+                    call,
                     content="; ".join(validation_errors),
-                    recoverable=True,
                     error_code="invalid_arguments",
                 ),
             )
@@ -139,12 +130,9 @@ class ToolExecutor:
         if runner is None:
             return self._record_result(
                 start,
-                ToolResult(
-                    tool_call_id=call.id,
-                    tool_name=call.name,
-                    ok=False,
+                _error_result(
+                    call,
                     content=f"No runner installed for tool: {call.name}",
-                    recoverable=True,
                     error_code="runner_missing",
                 ),
                 can_use_tool_result=can_use_tool_result,
@@ -158,12 +146,9 @@ class ToolExecutor:
         except asyncio.TimeoutError:
             return self._record_result(
                 start,
-                ToolResult(
-                    tool_call_id=call.id,
-                    tool_name=call.name,
-                    ok=False,
+                _error_result(
+                    call,
                     content=f"Tool timed out after {spec.timeout_seconds:.1f}s",
-                    recoverable=True,
                     error_code="timeout",
                 ),
                 can_use_tool_result=can_use_tool_result,
@@ -192,9 +177,12 @@ class ToolExecutor:
             ToolExecutionTrace(
                 tool_call_id=result.tool_call_id,
                 tool_name=result.tool_name,
+                ok=result.ok,
                 status="ok" if result.ok else "error",
                 recoverable=result.recoverable,
                 error_code=result.error_code,
+                truncated=_result_truncated(result),
+                output_size_bytes=_result_size_bytes(result),
                 can_use_tool_decision=(
                     can_use_tool_result.decision if can_use_tool_result else None
                 ),
@@ -304,13 +292,19 @@ def _to_legacy_result(result: ToolResult, latency_ms: float) -> Any:
 
 def _success_result(call: ToolCall, spec: ToolSpec, raw: Any) -> ToolResult:
     if isinstance(raw, ToolResult):
-        return raw
-    data = _to_data(raw, spec.output_limit_chars)
-    if isinstance(raw, dict) and isinstance(raw.get("content"), str):
-        content = _limit_text(raw["content"], spec.output_limit_chars)
+        return _normalize_tool_result(raw, spec.output_limit_chars)
+
+    raw_data = _raw_data(raw)
+    data, data_truncated = _limit_value(raw_data, spec.output_limit_chars)
+    if isinstance(raw_data, dict) and isinstance(raw_data.get("content"), str):
+        content, content_truncated = _limit_text(
+            raw_data["content"],
+            spec.output_limit_chars,
+        )
     else:
-        content = _limit_text(
-            json.dumps(data, ensure_ascii=False, sort_keys=True, default=str),
+        raw_content = json.dumps(raw_data, ensure_ascii=False, sort_keys=True, default=str)
+        content, content_truncated = _limit_text(
+            raw_content,
             spec.output_limit_chars,
         )
     return ToolResult(
@@ -318,7 +312,11 @@ def _success_result(call: ToolCall, spec: ToolSpec, raw: Any) -> ToolResult:
         tool_name=call.name,
         ok=True,
         content=content,
-        data=data,
+        data=_with_meta(
+            data,
+            truncated=data_truncated or content_truncated or _data_reports_truncated(raw_data),
+            size_bytes=max(_json_size(raw_data), _text_size(content)),
+        ),
         recoverable=True,
     )
 
@@ -337,7 +335,25 @@ def _can_use_tool_denied_result(
         tool_name=call.name,
         ok=False,
         content=decision.reason,
-        data={"can_use_tool": decision.model_dump()},
+        data=_with_meta({"can_use_tool": decision.model_dump()}),
+        recoverable=True,
+        error_code=error_code,
+    )
+
+
+def _error_result(
+    call: ToolCall,
+    *,
+    content: str,
+    error_code: str,
+    data: dict[str, Any] | None = None,
+) -> ToolResult:
+    return ToolResult(
+        tool_call_id=call.id,
+        tool_name=call.name,
+        ok=False,
+        content=content,
+        data=_with_meta(data or {}, size_bytes=_text_size(content)),
         recoverable=True,
         error_code=error_code,
     )
@@ -347,12 +363,9 @@ def _exception_result(call: ToolCall, exc: Exception) -> ToolResult:
     error_code = getattr(exc, "error_code", None)
     if not error_code:
         error_code = _error_code_for_exception(exc)
-    return ToolResult(
-        tool_call_id=call.id,
-        tool_name=call.name,
-        ok=False,
+    return _error_result(
+        call,
         content=str(exc),
-        recoverable=True,
         error_code=error_code,
     )
 
@@ -364,37 +377,122 @@ def _error_code_for_exception(exc: Exception) -> str:
         return "permission_denied"
     if isinstance(exc, NotADirectoryError):
         return "invalid_arguments"
-    if isinstance(exc, (ValidationError, ValueError, TypeError)):
+    if isinstance(exc, ValidationError):
         return "invalid_arguments"
     if isinstance(exc, PermissionError):
         return "permission_denied"
     return "runner_error"
 
 
-def _to_data(raw: Any, limit: int) -> dict[str, Any]:
+def _normalize_tool_result(result: ToolResult, limit: int) -> ToolResult:
+    content, content_truncated = _limit_text(result.content, limit)
+    data, data_truncated = _limit_value(result.data, limit)
+    return result.model_copy(
+        update={
+            "content": content,
+            "data": _with_meta(
+                data,
+                truncated=content_truncated
+                or data_truncated
+                or _data_reports_truncated(result.data),
+                size_bytes=max(_json_size(result.data), _text_size(result.content)),
+            ),
+        }
+    )
+
+
+def _raw_data(raw: Any) -> dict[str, Any]:
     if isinstance(raw, BaseModel):
-        return _limit_value(raw.model_dump(), limit)
+        return raw.model_dump()
     if isinstance(raw, dict):
-        return _limit_value(raw, limit)
-    return {"value": _limit_value(raw, limit)}
+        return raw
+    return {"value": raw}
 
 
-def _limit_value(value: Any, limit: int) -> Any:
+def _limit_value(value: Any, limit: int) -> tuple[Any, bool]:
     if isinstance(value, str):
         return _limit_text(value, limit)
     if isinstance(value, list):
-        return [_limit_value(item, limit) for item in value]
+        limited_items = []
+        truncated = False
+        for item in value:
+            limited, item_truncated = _limit_value(item, limit)
+            limited_items.append(limited)
+            truncated = truncated or item_truncated
+        return limited_items, truncated
     if isinstance(value, tuple):
-        return [_limit_value(item, limit) for item in value]
+        limited_items = []
+        truncated = False
+        for item in value:
+            limited, item_truncated = _limit_value(item, limit)
+            limited_items.append(limited)
+            truncated = truncated or item_truncated
+        return limited_items, truncated
     if isinstance(value, dict):
-        return {str(key): _limit_value(item, limit) for key, item in value.items()}
-    return value
+        limited_dict: dict[str, Any] = {}
+        truncated = False
+        for key, item in value.items():
+            limited, item_truncated = _limit_value(item, limit)
+            limited_dict[str(key)] = limited
+            truncated = truncated or item_truncated
+        return limited_dict, truncated
+    return value, False
 
 
-def _limit_text(value: str, limit: int) -> str:
+def _limit_text(value: str, limit: int) -> tuple[str, bool]:
     if len(value) <= limit:
-        return value
-    return value[:limit] + "\n[truncated]"
+        return value, False
+    return value[:limit] + "\n[truncated]", True
+
+
+def _with_meta(
+    data: dict[str, Any],
+    *,
+    truncated: bool | None = None,
+    size_bytes: int | None = None,
+) -> dict[str, Any]:
+    output = dict(data)
+    output["_meta"] = {
+        "truncated": bool(_data_reports_truncated(data) if truncated is None else truncated),
+        "size_bytes": _json_size(data) if size_bytes is None else size_bytes,
+    }
+    return output
+
+
+def _result_truncated(result: ToolResult) -> bool:
+    meta = result.data.get("_meta")
+    if isinstance(meta, dict):
+        return bool(meta.get("truncated", False))
+    return False
+
+
+def _result_size_bytes(result: ToolResult) -> int:
+    meta = result.data.get("_meta")
+    if isinstance(meta, dict):
+        raw = meta.get("size_bytes")
+        if isinstance(raw, int):
+            return raw
+    return _text_size(result.content)
+
+
+def _data_reports_truncated(data: Any) -> bool:
+    if isinstance(data, dict):
+        for key, value in data.items():
+            if key.endswith("truncated") and value is True:
+                return True
+            if _data_reports_truncated(value):
+                return True
+    if isinstance(data, list):
+        return any(_data_reports_truncated(item) for item in data)
+    return False
+
+
+def _json_size(value: Any) -> int:
+    return _text_size(json.dumps(value, ensure_ascii=False, sort_keys=True, default=str))
+
+
+def _text_size(value: str) -> int:
+    return len(value.encode("utf-8"))
 
 
 def _validate_arguments(schema: dict[str, Any], args: dict[str, Any]) -> list[str]:
