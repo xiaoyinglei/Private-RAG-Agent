@@ -7,7 +7,12 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from rag.agent.tooling.discovery import DiscoveryPolicy, ToolDiscoveryState
-    from rag.agent.tooling.executor import ToolExecutor, ToolExecutorLoopAdapter
+    from rag.agent.tooling.executor import (
+        CanUseToolResult,
+        ToolExecutor,
+        ToolExecutorLoopAdapter,
+        canUseTool,
+    )
     from rag.agent.tooling.registry import ToolRegistry, install_minimal_workspace_tools
     from rag.agent.tooling.request_builder import ModelRequest, ModelRequestBuilder
     from rag.agent.tooling.spec import (
@@ -28,6 +33,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "DiscoveryPolicy",
+    "CanUseToolResult",
     "ModelRequest",
     "ModelRequestBuilder",
     "ModelRequestTrace",
@@ -47,13 +53,16 @@ __all__ = [
     "ToolSurfacePolicy",
     "ToolSurfaceRequest",
     "install_minimal_workspace_tools",
+    "canUseTool",
 ]
 
 _EXPORTS = {
+    "CanUseToolResult": ("rag.agent.tooling.executor", "CanUseToolResult"),
     "DiscoveryPolicy": ("rag.agent.tooling.discovery", "DiscoveryPolicy"),
     "ToolDiscoveryState": ("rag.agent.tooling.discovery", "ToolDiscoveryState"),
     "ToolExecutor": ("rag.agent.tooling.executor", "ToolExecutor"),
     "ToolExecutorLoopAdapter": ("rag.agent.tooling.executor", "ToolExecutorLoopAdapter"),
+    "canUseTool": ("rag.agent.tooling.executor", "canUseTool"),
     "ToolRegistry": ("rag.agent.tooling.registry", "ToolRegistry"),
     "install_minimal_workspace_tools": (
         "rag.agent.tooling.registry",

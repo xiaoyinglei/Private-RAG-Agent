@@ -74,7 +74,7 @@ def test_run_command_uses_allowlist_and_records_output_trace(tmp_path: Path) -> 
         _workspace(tmp_path),
         allowed_commands={"echo"},
     )
-    executor = ToolExecutor(registry)
+    executor = ToolExecutor(registry, allow_execute_tools=True)
 
     result = asyncio.run(
         executor.execute(
@@ -105,7 +105,7 @@ def test_run_command_rejects_non_allowlisted_command(tmp_path: Path) -> None:
         _workspace(tmp_path),
         allowed_commands={"echo"},
     )
-    executor = ToolExecutor(registry)
+    executor = ToolExecutor(registry, allow_execute_tools=True)
 
     result = asyncio.run(
         executor.execute(
@@ -121,3 +121,31 @@ def test_run_command_rejects_non_allowlisted_command(tmp_path: Path) -> None:
     assert result.ok is False
     assert result.recoverable is True
     assert result.error_code == "command_not_allowed"
+    assert executor.traces[-1].can_use_tool_decision == "allow"
+
+
+def test_run_command_requires_entry_execute_allow_flag(tmp_path: Path) -> None:
+    registry = ToolRegistry()
+    install_minimal_workspace_tools(
+        registry,
+        _workspace(tmp_path),
+        allowed_commands={"echo"},
+    )
+    executor = ToolExecutor(registry)
+
+    result = asyncio.run(
+        executor.execute(
+            ToolCall(
+                id="call_1",
+                name="run_command",
+                arguments={"command": "echo hello", "working_dir": "."},
+            ),
+            sent_schema_names=["run_command"],
+        )
+    )
+
+    assert result.ok is False
+    assert result.recoverable is True
+    assert result.error_code == "permission_required"
+    assert result.data["can_use_tool"]["decision"] == "ask"
+    assert executor.traces[-1].can_use_tool_decision == "ask"

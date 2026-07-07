@@ -6,21 +6,70 @@ import asyncio
 import inspect
 import json
 import time
-from typing import Any
+from collections.abc import Callable
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from rag.agent.tooling.registry import ToolRegistry, ToolRunner
-from rag.agent.tooling.spec import ToolCall, ToolResult, ToolSpec
+from rag.agent.tooling.spec import ToolCall, ToolResult, ToolRisk, ToolSpec
 from rag.agent.tooling.trace import ToolExecutionTrace
 from rag.agent.workspace import WorkspacePathError
+
+
+class CanUseToolResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    decision: Literal["allow", "ask", "deny"]
+    reason: str
+
+
+CanUseToolFn = Callable[..., CanUseToolResult | dict[str, Any]]
+
+
+def canUseTool(
+    spec: ToolSpec,
+    call: ToolCall,
+    *,
+    allow_write_tools: bool = False,
+    allow_execute_tools: bool = False,
+) -> CanUseToolResult:
+    del call
+    if spec.risk == ToolRisk.READ:
+        return CanUseToolResult(decision="allow", reason="read tools are allowed")
+    if spec.risk == ToolRisk.WRITE:
+        if allow_write_tools:
+            return CanUseToolResult(decision="allow", reason="write tools are allowed")
+        return CanUseToolResult(decision="ask", reason="write tools require entry config")
+    if spec.risk == ToolRisk.EXECUTE:
+        if allow_execute_tools:
+            return CanUseToolResult(decision="allow", reason="execute tools are allowed")
+        return CanUseToolResult(decision="ask", reason="execute tools require entry config")
+    if spec.risk == ToolRisk.NETWORK:
+        return CanUseToolResult(decision="deny", reason="network tools are denied by default")
+    if spec.risk == ToolRisk.DESTRUCTIVE:
+        return CanUseToolResult(
+            decision="deny",
+            reason="destructive tools are denied by default",
+        )
+    return CanUseToolResult(decision="deny", reason=f"unsupported tool risk: {spec.risk}")
 
 
 class ToolExecutor:
     """Validate and execute model tool calls against the sent schema surface."""
 
-    def __init__(self, registry: ToolRegistry) -> None:
+    def __init__(
+        self,
+        registry: ToolRegistry,
+        *,
+        allow_write_tools: bool = False,
+        allow_execute_tools: bool = False,
+        can_use_tool: CanUseToolFn | None = None,
+    ) -> None:
         self._registry = registry
+        self._allow_write_tools = allow_write_tools
+        self._allow_execute_tools = allow_execute_tools
+        self._can_use_tool = can_use_tool or canUseTool
         self.traces: list[ToolExecutionTrace] = []
 
     async def execute(
@@ -71,6 +120,21 @@ class ToolExecutor:
                 ),
             )
 
+        can_use_tool_result = CanUseToolResult.model_validate(
+            self._can_use_tool(
+                spec,
+                call,
+                allow_write_tools=self._allow_write_tools,
+                allow_execute_tools=self._allow_execute_tools,
+            )
+        )
+        if can_use_tool_result.decision != "allow":
+            return self._record_result(
+                start,
+                _can_use_tool_denied_result(call, can_use_tool_result),
+                can_use_tool_result=can_use_tool_result,
+            )
+
         runner = self._registry.get_runner(call.name)
         if runner is None:
             return self._record_result(
@@ -83,6 +147,7 @@ class ToolExecutor:
                     recoverable=True,
                     error_code="runner_missing",
                 ),
+                can_use_tool_result=can_use_tool_result,
             )
 
         try:
@@ -101,13 +166,28 @@ class ToolExecutor:
                     recoverable=True,
                     error_code="timeout",
                 ),
+                can_use_tool_result=can_use_tool_result,
             )
         except Exception as exc:
-            return self._record_result(start, _exception_result(call, exc))
+            return self._record_result(
+                start,
+                _exception_result(call, exc),
+                can_use_tool_result=can_use_tool_result,
+            )
 
-        return self._record_result(start, _success_result(call, spec, raw))
+        return self._record_result(
+            start,
+            _success_result(call, spec, raw),
+            can_use_tool_result=can_use_tool_result,
+        )
 
-    def _record_result(self, start: float, result: ToolResult) -> ToolResult:
+    def _record_result(
+        self,
+        start: float,
+        result: ToolResult,
+        *,
+        can_use_tool_result: CanUseToolResult | None = None,
+    ) -> ToolResult:
         self.traces.append(
             ToolExecutionTrace(
                 tool_call_id=result.tool_call_id,
@@ -115,6 +195,12 @@ class ToolExecutor:
                 status="ok" if result.ok else "error",
                 recoverable=result.recoverable,
                 error_code=result.error_code,
+                can_use_tool_decision=(
+                    can_use_tool_result.decision if can_use_tool_result else None
+                ),
+                can_use_tool_reason=(
+                    can_use_tool_result.reason if can_use_tool_result else None
+                ),
                 latency_ms=(time.monotonic() - start) * 1000,
             )
         )
@@ -234,6 +320,26 @@ def _success_result(call: ToolCall, spec: ToolSpec, raw: Any) -> ToolResult:
         content=content,
         data=data,
         recoverable=True,
+    )
+
+
+def _can_use_tool_denied_result(
+    call: ToolCall,
+    decision: CanUseToolResult,
+) -> ToolResult:
+    error_code = (
+        "permission_required"
+        if decision.decision == "ask"
+        else "permission_denied"
+    )
+    return ToolResult(
+        tool_call_id=call.id,
+        tool_name=call.name,
+        ok=False,
+        content=decision.reason,
+        data={"can_use_tool": decision.model_dump()},
+        recoverable=True,
+        error_code=error_code,
     )
 
 

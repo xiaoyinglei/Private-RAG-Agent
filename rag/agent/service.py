@@ -817,7 +817,13 @@ class AgentService:
         )
         output_finalizer = self._resolve_output_finalizer(state)
         tool_runner = (
-            ToolExecutorLoopAdapter(NewToolExecutor(tooling_registry))
+            ToolExecutorLoopAdapter(
+                NewToolExecutor(
+                    tooling_registry,
+                    allow_write_tools=tool_surface_request.allow_write_tools,
+                    allow_execute_tools=tool_surface_request.allow_execute_tools,
+                )
+            )
             if tooling_registry is not None and tool_surface_request is not None
             else ToolExecutionService(
                 tool_registry=runtime_registry,

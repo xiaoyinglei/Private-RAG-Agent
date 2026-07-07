@@ -27,4 +27,6 @@ class ToolExecutionTrace(BaseModel):
     status: str
     recoverable: bool
     error_code: str | None = None
+    can_use_tool_decision: str | None = None
+    can_use_tool_reason: str | None = None
     latency_ms: float = 0.0

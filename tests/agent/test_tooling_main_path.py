@@ -74,6 +74,36 @@ def _execute_spec(name: str = "run_command") -> ToolSpec:
     )
 
 
+def _network_spec(name: str = "fetch_url") -> ToolSpec:
+    return ToolSpec(
+        name=name,
+        description="Fetch a URL.",
+        input_schema={
+            "type": "object",
+            "properties": {"url": {"type": "string"}},
+            "required": ["url"],
+        },
+        domain=ToolDomain.KNOWLEDGE,
+        risk=ToolRisk.NETWORK,
+        timeout_seconds=3.0,
+    )
+
+
+def _destructive_spec(name: str = "delete_tree") -> ToolSpec:
+    return ToolSpec(
+        name=name,
+        description="Delete a workspace tree.",
+        input_schema={
+            "type": "object",
+            "properties": {"path": {"type": "string"}},
+            "required": ["path"],
+        },
+        domain=ToolDomain.WORKSPACE,
+        risk=ToolRisk.DESTRUCTIVE,
+        timeout_seconds=3.0,
+    )
+
+
 def _deferred_spec(name: str = "semantic_search") -> ToolSpec:
     return ToolSpec(
         name=name,
@@ -308,6 +338,35 @@ def test_executor_returns_recoverable_unknown_and_schema_not_sent_results() -> N
     assert hidden.error_code == "schema_not_sent"
 
 
+def test_executor_checks_unknown_and_schema_not_sent_before_can_use_tool() -> None:
+    registry = ToolRegistry()
+    registry.register(_read_spec(), _runner)
+
+    def fail_can_use_tool(*args: Any, **kwargs: Any) -> Any:
+        del args, kwargs
+        raise AssertionError("unknown/schema_not_sent must not call canUseTool")
+
+    executor = ToolExecutor(registry, can_use_tool=fail_can_use_tool)
+
+    unknown = asyncio.run(
+        executor.execute(
+            ToolCall(id="call_1", name="missing_tool", arguments={}),
+            sent_schema_names=[],
+        )
+    )
+    hidden = asyncio.run(
+        executor.execute(
+            ToolCall(id="call_2", name="read_file", arguments={"path": "README.md"}),
+            sent_schema_names=[],
+        )
+    )
+
+    assert unknown.error_code == "unknown_tool"
+    assert hidden.error_code == "schema_not_sent"
+    assert executor.traces[0].can_use_tool_decision is None
+    assert executor.traces[1].can_use_tool_decision is None
+
+
 def test_executor_validates_args_before_runner_call() -> None:
     registry = ToolRegistry()
     calls: list[dict[str, Any]] = []
@@ -349,6 +408,84 @@ def test_executor_runs_visible_tool_and_records_trace() -> None:
     assert result.data["path"] == "README.md"
     assert executor.traces[-1].tool_name == "read_file"
     assert executor.traces[-1].status == "ok"
+    assert executor.traces[-1].can_use_tool_decision == "allow"
+
+
+def test_executor_asks_for_write_without_entry_allow_flag() -> None:
+    registry = ToolRegistry()
+    calls: list[dict[str, Any]] = []
+    registry.register(_write_spec(), lambda args: calls.append(args) or args)
+    executor = ToolExecutor(registry)
+
+    result = asyncio.run(
+        executor.execute(
+            ToolCall(
+                id="call_1",
+                name="write_file",
+                arguments={"path": "README.md", "content": "changed"},
+            ),
+            sent_schema_names=["write_file"],
+        )
+    )
+
+    assert result.ok is False
+    assert result.error_code == "permission_required"
+    assert result.data["can_use_tool"]["decision"] == "ask"
+    assert calls == []
+    assert executor.traces[-1].can_use_tool_decision == "ask"
+
+
+def test_executor_allows_write_when_entry_allows_write_tools() -> None:
+    registry = ToolRegistry()
+    calls: list[dict[str, Any]] = []
+    registry.register(_write_spec(), lambda args: calls.append(args) or args)
+    executor = ToolExecutor(registry, allow_write_tools=True)
+
+    result = asyncio.run(
+        executor.execute(
+            ToolCall(
+                id="call_1",
+                name="write_file",
+                arguments={"path": "README.md", "content": "changed"},
+            ),
+            sent_schema_names=["write_file"],
+        )
+    )
+
+    assert result.ok is True
+    assert calls == [{"path": "README.md", "content": "changed"}]
+    assert executor.traces[-1].can_use_tool_decision == "allow"
+
+
+def test_executor_denies_network_and_destructive_tools_by_default() -> None:
+    registry = ToolRegistry()
+    calls: list[dict[str, Any]] = []
+    registry.register(_network_spec(), lambda args: calls.append(args) or args)
+    registry.register(_destructive_spec(), lambda args: calls.append(args) or args)
+    executor = ToolExecutor(registry)
+
+    network = asyncio.run(
+        executor.execute(
+            ToolCall(id="call_1", name="fetch_url", arguments={"url": "https://example.com"}),
+            sent_schema_names=["fetch_url"],
+        )
+    )
+    destructive = asyncio.run(
+        executor.execute(
+            ToolCall(id="call_2", name="delete_tree", arguments={"path": "."}),
+            sent_schema_names=["delete_tree"],
+        )
+    )
+
+    assert network.error_code == "permission_denied"
+    assert network.data["can_use_tool"]["decision"] == "deny"
+    assert destructive.error_code == "permission_denied"
+    assert destructive.data["can_use_tool"]["decision"] == "deny"
+    assert calls == []
+    assert [trace.can_use_tool_decision for trace in executor.traces[-2:]] == [
+        "deny",
+        "deny",
+    ]
 
 
 def test_loop_adapter_executes_through_new_executor_and_legacy_result_shape() -> None:
