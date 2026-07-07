@@ -97,15 +97,31 @@ def test_model_catalog_loads_runtime_specs_without_embedding_models(tmp_path: Pa
     assert local.runtime.expected_model_contains == "Qwen3-14B"
 
 
-def test_bundled_default_chat_model_is_local_qwen8() -> None:
+def test_bundled_default_chat_model_is_cloud_groq() -> None:
     catalog = ModelCatalog.from_config_file(Path("configs/models.yaml"))
 
     spec = catalog.get(catalog.default_model_id)
 
-    assert catalog.default_model_id == "qwen3_8b_mlx_4bit"
+    assert catalog.default_model_id == "groq_gpt_oss_120b"
+    assert spec.provider == "groq"
+    assert spec.provider_model == "openai/gpt-oss-120b"
+    assert spec.location == "cloud"
+    assert spec.api_key_env == "GROQ_API_KEY"
+
+
+def test_bundled_local_qwen8_runtime_is_available_for_local_testing() -> None:
+    catalog = ModelCatalog.from_config_file(Path("configs/models.yaml"))
+
+    spec = catalog.get("qwen3_8b_mlx_4bit")
+
+    assert spec.provider == "local_mlx_chat_8080"
     assert spec.provider_model == "mlx-community/Qwen3-8B-4bit"
+    assert spec.location == "local"
     assert spec.runtime is not None
+    assert spec.runtime.health_url == "http://127.0.0.1:8080/v1/models"
     assert spec.runtime.expected_model_contains == "Qwen3-8B-4bit"
+    assert "{model}" not in spec.runtime.launch_command
+    assert "mlx-community/Qwen3-8B-4bit" in spec.runtime.launch_command
 
 
 def test_bundled_tool_decision_output_budget_is_small_for_local_agent() -> None:
@@ -356,7 +372,7 @@ def test_local_runtime_manager_rejects_endpoint_conflict() -> None:
 
 
 def test_bundled_qwen14_runtime_accepts_mlx_canonical_model_id() -> None:
-    spec = ModelCatalog.from_config_file(Path("configs/models.yaml")).get("qwen3_14b_4bit")
+    spec = ModelCatalog.from_config_file(Path("configs/models.yaml")).get("qwen3_14b_mlx_4bit")
     assert spec.runtime is not None
 
     manager = LocalRuntimeManager(

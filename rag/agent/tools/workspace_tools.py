@@ -97,7 +97,10 @@ class ReadFileTool(BaseTool):
 
 class WriteFileTool(BaseTool):
     name = "write_file"
-    description = "Write content to a file in the workspace."
+    description = (
+        "Write content to a workspace file. The path must start with one of: "
+        "scratch/, artifacts/, reports/, logs/."
+    )
     input_model = WriteFileInput
     output_model = WriteFileOutput
     permissions = ToolPermissions(write_fs=True)

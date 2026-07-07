@@ -127,6 +127,13 @@ def execute_tool_search(
     """
     candidates = catalog.search(query, max_results=max_results)
     store.set_pending_candidates(query, candidates)
+    message = (
+        "No candidate tools matched this query; do not call activate_tools "
+        "for it. If the task is answerable from the current conversation, "
+        "finish directly."
+        if not candidates
+        else ToolSearchOutput.model_fields["message"].default
+    )
 
     return ToolSearchOutput(
         candidates=tuple(
@@ -141,6 +148,7 @@ def execute_tool_search(
             for c in candidates
         ),
         query=query,
+        message=str(message),
     )
 
 

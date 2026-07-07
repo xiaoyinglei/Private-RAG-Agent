@@ -123,6 +123,27 @@ _DEFAULT_ACTIVATION_GROUPS: dict[str, str] = {
 _TOKEN_RE = re.compile(
     r"[一-鿿぀-ゟ゠-ヿ가-힯]|[a-z0-9]+"
 )
+_QUERY_STOPWORDS = frozenset({
+    "a",
+    "an",
+    "and",
+    "answer",
+    "exactly",
+    "finish",
+    "just",
+    "me",
+    "no",
+    "ok",
+    "only",
+    "please",
+    "return",
+    "single",
+    "the",
+    "to",
+    "use",
+    "with",
+    "word",
+})
 
 
 def _tokenize(text: str) -> list[str]:
@@ -298,7 +319,10 @@ class ToolCatalog:
         if self._bm25 is None:
             return []
 
-        query_tokens = _tokenize(query)
+        query_tokens = [
+            token for token in _tokenize(query)
+            if token not in _QUERY_STOPWORDS
+        ]
         if not query_tokens:
             return []
 

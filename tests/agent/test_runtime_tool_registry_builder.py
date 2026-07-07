@@ -4,6 +4,8 @@ import pytest
 
 from rag.agent.builtin.generic import GENERIC_AGENT
 from rag.agent.builtin_registry import create_builtin_tool_registry
+from rag.agent.capabilities.catalog import DeferredToolStore
+from rag.agent.capabilities.tool_search import execute_tool_search
 from rag.agent.core.context import AgentRunConfig
 from rag.agent.loop.state import create_loop_state
 from rag.agent.planning import AgentPlan
@@ -11,6 +13,8 @@ from rag.agent.planning import PlanStep as PlanningStep
 from rag.agent.tools.catalog_assembly import build_tool_catalog
 from rag.agent.tools.registry import ToolExecutionContext
 from rag.agent.tools.runtime_registry_builder import RuntimeToolRegistryBuilder
+from rag.agent.tools.workspace_tools import create_workspace_tools
+from rag.agent.workspace import create_temp_workspace
 from rag.schema.runtime import AccessPolicy
 
 
@@ -84,3 +88,54 @@ def test_runtime_tool_registry_builder_clones_base_registry_for_extra_runners() 
 
     assert runtime_registry.has_runner("llm_generate")
     assert not base_registry.has_runner("llm_generate")
+
+
+def test_runtime_tool_registry_builder_indexes_workspace_deferred_tools() -> None:
+    base_registry = create_builtin_tool_registry()
+    catalog = build_tool_catalog(base_registry, GENERIC_AGENT)
+    workspace = create_temp_workspace(prefix="test_runtime_catalog_")
+
+    runtime_registry = RuntimeToolRegistryBuilder(
+        base_tool_registry=base_registry,
+        policy=GENERIC_AGENT,
+        catalog=catalog,
+    ).build(
+        _run_config(),
+        tools=create_workspace_tools(workspace),
+    )
+
+    assert runtime_registry.has_runner("run_python")
+
+    output = execute_tool_search(
+        "run python code",
+        catalog=catalog,
+        store=DeferredToolStore(max_active=8),
+        max_results=8,
+    )
+
+    assert any(candidate.name == "run_python" for candidate in output.candidates)
+
+
+def test_tool_search_ignores_plain_answer_format_instructions() -> None:
+    base_registry = create_builtin_tool_registry()
+    catalog = build_tool_catalog(base_registry, GENERIC_AGENT)
+    workspace = create_temp_workspace(prefix="test_runtime_catalog_plain_")
+    RuntimeToolRegistryBuilder(
+        base_tool_registry=base_registry,
+        policy=GENERIC_AGENT,
+        catalog=catalog,
+    ).build(
+        _run_config(),
+        tools=create_workspace_tools(workspace),
+    )
+
+    output = execute_tool_search(
+        "Answer exactly with the single word OK",
+        catalog=catalog,
+        store=DeferredToolStore(max_active=8),
+        max_results=8,
+    )
+
+    assert output.candidates == ()
+    assert "No candidate tools matched" in output.message
+    assert "do not call activate_tools" in output.message

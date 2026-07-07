@@ -106,6 +106,94 @@ def test_load_configs_models_preserves_api_key_env_for_cloud_models(
     assert provider_config.api_key == "sk-test"
 
 
+def test_load_configs_models_supports_provider_section_schema(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = tmp_path / "models.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "providers": {
+                    "local_mlx_chat_8080": {
+                        "protocol": "openai_compatible",
+                        "location": "local",
+                        "base_url": "http://127.0.0.1:8080/v1",
+                        "runtime": {
+                            "health_url": "http://127.0.0.1:8080/v1/models",
+                            "launch_command_template": [
+                                "uv",
+                                "run",
+                                "python",
+                                "-m",
+                                "mlx_lm.server",
+                                "--model",
+                                "{model}",
+                            ],
+                        },
+                    },
+                    "groq": {
+                        "protocol": "openai_compatible",
+                        "location": "cloud",
+                        "base_url": "https://api.groq.com/openai/v1",
+                        "api_key_env": "GROQ_API_KEY",
+                    },
+                },
+                "models": {
+                    "qwen3_8b_mlx_4bit": {
+                        "capability": "chat",
+                        "provider": "local_mlx_chat_8080",
+                        "model": "mlx-community/Qwen3-8B-4bit",
+                        "context_window_tokens": 32768,
+                        "runtime": {
+                            "expected_model_contains": "Qwen3-8B-4bit",
+                        },
+                    },
+                    "groq_gpt_oss_120b": {
+                        "capability": "chat",
+                        "provider": "groq",
+                        "model": "openai/gpt-oss-120b",
+                        "context_window_tokens": 131072,
+                    },
+                },
+                "defaults": {"primary_model": "groq_gpt_oss_120b"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("GROQ_API_KEY", "sk-test")
+
+    config = ModelRegistry._load_yaml_file(config_path)
+    groq = config.models["groq_gpt_oss_120b"]
+    local = config.models["qwen3_8b_mlx_4bit"]
+    provider_config = ModelRegistry(config)._spec_to_provider_config(groq)
+
+    assert config.default_model == "groq_gpt_oss_120b"
+    assert groq.provider is ModelProvider.OPENAI_COMPATIBLE
+    assert groq.provider_name == "groq"
+    assert groq.base_url == "https://api.groq.com/openai/v1"
+    assert groq.api_key_env == "GROQ_API_KEY"
+    assert groq.location == "cloud"
+    assert provider_config.api_key == "sk-test"
+    assert provider_config.base_url == "https://api.groq.com/openai/v1"
+    assert local.provider is ModelProvider.OPENAI_COMPATIBLE
+    assert local.provider_name == "local_mlx_chat_8080"
+    assert local.base_url == "http://127.0.0.1:8080/v1"
+    assert local.location == "local"
+    assert local.runtime is not None
+    assert local.runtime.health_url == "http://127.0.0.1:8080/v1/models"
+    assert local.runtime.expected_model_contains == "Qwen3-8B-4bit"
+    assert local.runtime.launch_command == (
+        "uv",
+        "run",
+        "python",
+        "-m",
+        "mlx_lm.server",
+        "--model",
+        "mlx-community/Qwen3-8B-4bit",
+    )
+
+
 def test_load_configs_models_preserves_memory_generation_config(tmp_path: Path) -> None:
     config_path = tmp_path / "models.yaml"
     config_path.write_text(

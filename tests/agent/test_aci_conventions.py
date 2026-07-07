@@ -25,7 +25,6 @@ from rag.agent.capabilities.tool_search import (
 )
 from rag.agent.tools.spec import ToolResult
 
-
 # ── Mature tools for the first ACI batch ──
 
 _MATURE_TOOLS = [
@@ -222,15 +221,9 @@ class TestACISearchActivation:
 
         # Build minimal catalog with just this tool
         from rag.agent.capabilities.catalog import (
-            SearchCandidate,
-            ToolCatalog,
+            _DEFAULT_ACTIVATION_GROUPS,
             ToolCatalogEntry,
         )
-        from rag.agent.capabilities.tool_search import (
-            execute_activate_tools,
-            execute_tool_search,
-        )
-        from rag.agent.capabilities.catalog import _DEFAULT_ACTIVATION_GROUPS
 
         catalog = ToolCatalog()
         card = spec.aci
@@ -271,3 +264,17 @@ class TestACISearchActivation:
         assert tool_name in output.activated, (
             f"{tool_name} could not be activated: {output}"
         )
+
+
+def test_write_file_aci_documents_writable_directories() -> None:
+    from rag.agent.primitive_ops import WriteFileInput
+    from rag.agent.tools.workspace_tools import WriteFileTool
+    from rag.agent.workspace import create_temp_workspace
+
+    schema = WriteFileInput.model_json_schema()
+    path_description = schema["properties"]["path"].get("description", "")
+    tool_description = WriteFileTool(create_temp_workspace()).description
+
+    for writable_dir in ("scratch/", "artifacts/", "reports/", "logs/"):
+        assert writable_dir in path_description
+        assert writable_dir in tool_description

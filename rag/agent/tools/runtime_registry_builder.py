@@ -9,7 +9,12 @@ from typing import Any, Literal, cast
 
 from pydantic import BaseModel
 
-from rag.agent.capabilities.catalog import ToolCatalog, ToolCatalogEntry
+from rag.agent.capabilities.catalog import (
+    DEFERRED_TOOLS,
+    ToolCatalog,
+    ToolCatalogEntry,
+    flatten_schema,
+)
 from rag.agent.core.context import AgentRunConfig
 from rag.agent.core.definition import AgentRuntimePolicy
 from rag.agent.core.delegation import DelegatedAgentRunner
@@ -69,8 +74,8 @@ class RuntimeToolRegistryBuilder:
             except KeyError:
                 pass
 
-    @staticmethod
     def _register_workspace_tools(
+        self,
         runtime: ToolRegistry,
         tools: list[Any] | None,
     ) -> None:
@@ -79,12 +84,48 @@ class RuntimeToolRegistryBuilder:
         for tool in tools:
             try:
                 runtime.register_tool(tool)
+                self._index_runtime_tool(runtime.get(tool.name))
             except Exception:
                 logger.warning(
                     "Failed to register tool '%s'",
                     getattr(tool, "name", "?"),
                     exc_info=True,
                 )
+
+    def _index_runtime_tool(self, spec: Any) -> None:
+        if spec.name not in DEFERRED_TOOLS or self.catalog.get(spec.name) is not None:
+            return
+
+        schema_text = ""
+        if hasattr(spec.input_model, "model_json_schema"):
+            schema_text = flatten_schema(spec.input_model.model_json_schema())
+        card = spec.aci
+        search_text = ToolCatalog.build_search_text(
+            spec.name,
+            spec.description,
+            schema_text,
+            when_to_use=card.when_to_use if card else "",
+            when_not_to_use=card.when_not_to_use if card else "",
+            domains=card.domains if card else (),
+            file_types=card.file_types if card else (),
+            selection_tags=card.selection_tags if card else (),
+        )
+        self.catalog.register(
+            ToolCatalogEntry(
+                name=spec.name,
+                description=spec.description,
+                category="deferred",
+                search_text=search_text,
+                schema_text=schema_text,
+                activation_group=card.activation_group if card else "workspace",
+                when_to_use=card.when_to_use if card else "",
+                when_not_to_use=card.when_not_to_use if card else "",
+                domains=card.domains if card else (),
+                file_types=card.file_types if card else (),
+                failure_codes=card.failure_codes if card else (),
+                selection_tags=card.selection_tags if card else (),
+            ),
+        )
 
     @staticmethod
     def _register_extra_runners(

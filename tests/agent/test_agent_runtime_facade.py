@@ -57,7 +57,7 @@ def test_agent_facade_run_maps_public_request_to_internal_service(
         ),
     )
 
-    result = Agent(model="qwen3_14b_4bit").run(
+    result = Agent(model="qwen3_14b_mlx_4bit").run(
         "summarize",
         files=["README.md"],
         run_id="sdk-run",
@@ -75,7 +75,7 @@ def test_agent_facade_run_maps_public_request_to_internal_service(
             "runtime": None,
             "checkpoint_db": None,
             "agent_type": "generic",
-            "model_alias": "qwen3_14b_4bit",
+            "model_alias": "qwen3_14b_mlx_4bit",
             "model_control_plane": built[0]["model_control_plane"],
             "runtime_diagnostics": (),
             "knowledge_runner": None,
@@ -150,7 +150,7 @@ def test_agent_facade_registers_knowledge_runner_lazily(monkeypatch: pytest.Monk
     monkeypatch.setattr(runtime_builder, "build_optional_rag_runtime", fail_rag_runtime)
     monkeypatch.setattr(runtime_builder, "build_agent_service", build_service)
 
-    result = Agent(model="qwen3_14b_4bit", knowledge=["company_docs"]).run(
+    result = Agent(model="qwen3_14b_mlx_4bit", knowledge=["company_docs"]).run(
         "lookup policy",
         run_id="knowledge-run",
     )
@@ -178,7 +178,7 @@ def test_agent_facade_closes_service_after_run(monkeypatch: pytest.MonkeyPatch) 
 
     monkeypatch.setattr(runtime_builder, "build_agent_service", lambda *_args, **_kwargs: _Service())
 
-    result = Agent(model="qwen3_14b_4bit").run("close service", run_id="close-service")
+    result = Agent(model="qwen3_14b_mlx_4bit").run("close service", run_id="close-service")
 
     assert result.answer == "closed"
     assert closed == [True]

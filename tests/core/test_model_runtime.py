@@ -83,6 +83,66 @@ def test_catalog_loads_models(catalog: ModelCatalog) -> None:
     assert catalog.get_model("qwen_local").context_window_tokens == 32768
 
 
+def test_catalog_supports_provider_section_schema(tmp_path: Path) -> None:
+    path = tmp_path / "models.yaml"
+    path.write_text(
+        """
+providers:
+  groq:
+    protocol: openai_compatible
+    location: cloud
+    base_url: https://api.groq.com/openai/v1
+    api_key_env: GROQ_API_KEY
+  local_mlx_embedding:
+    protocol: mlx_embedding
+    location: local
+  local_sentence_transformers:
+    protocol: sentence_transformers
+    location: local
+
+models:
+  groq_gpt_oss_120b:
+    capability: chat
+    provider: groq
+    model: openai/gpt-oss-120b
+    context_window_tokens: 131072
+  qwen_embedding_mlx:
+    capability: embedding
+    provider: local_mlx_embedding
+    model: mlx-community/Qwen3-Embedding-8B-4bit-DWQ
+    embedding_space: mlx/Qwen3-Embedding-8B-4bit-DWQ
+  qwen3_reranker:
+    capability: reranker
+    provider: local_sentence_transformers
+    model: Qwen/Qwen3-Reranker-4B
+
+defaults:
+  primary_model: groq_gpt_oss_120b
+  embedding_model: qwen_embedding_mlx
+  reranker_model: qwen3_reranker
+""",
+        encoding="utf-8",
+    )
+
+    catalog = ModelCatalog.from_yaml(str(path))
+    config = resolve_runtime_config(catalog=catalog)
+    overrides = to_assembly_overrides(config)
+
+    assert config.primary_model.provider == "openai_compatible"
+    assert config.primary_model.base_url == "https://api.groq.com/openai/v1"
+    assert config.primary_model.api_key_env == "GROQ_API_KEY"
+    assert config.embedding_model.provider == "mlx_embedding"
+    assert config.reranker_model is not None
+    assert config.reranker_model.provider == "sentence_transformers"
+    assert overrides.chat is not None
+    assert overrides.chat.provider_kind == "openai-compatible"
+    assert overrides.chat.chat_model == "openai/gpt-oss-120b"
+    assert overrides.embedding is not None
+    assert overrides.embedding.provider_kind == "mlx-embedding"
+    assert overrides.rerank is not None
+    assert overrides.rerank.provider_kind == "local-bge"
+
+
 def test_catalog_loads_llm_stage_budgets(catalog: ModelCatalog) -> None:
     budget = catalog.llm_stage_budgets[LLMCallStage.TOOL_DECISION]
     assert budget.max_input_tokens == 12000

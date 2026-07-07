@@ -81,7 +81,12 @@ class ReadFileOutput(BaseModel):
 
 
 class WriteFileInput(BaseModel):
-    path: str
+    path: str = Field(
+        description=(
+            "Workspace-relative destination path. Must start with one of: "
+            "scratch/, artifacts/, reports/, logs/."
+        )
+    )
     content: str
     encoding: str = "utf-8"
     overwrite: bool = False

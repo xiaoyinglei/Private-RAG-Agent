@@ -58,18 +58,25 @@ class ModelCatalog:
         raw_defaults = data.get("defaults")
         if not isinstance(raw_defaults, dict):
             raise ValueError("Model catalog must contain a 'defaults' section")
+        raw_providers = data.get("providers")
+        providers = raw_providers if isinstance(raw_providers, dict) else {}
 
         models: dict[str, ModelSpec] = {}
         for alias, entry in raw_models.items():
             if not isinstance(entry, dict):
                 raise ValueError(f"Model entry {alias!r} must be a dict, got {type(entry).__name__}")
+            merged = _merge_provider_model_entry(entry, providers)
             models[alias] = ModelSpec(
                 alias=alias,
                 capability=ModelCapability(entry["capability"]),
-                provider=entry.get("protocol") or entry["provider"],
+                provider=str(
+                    merged.get("protocol")
+                    or merged.get("provider")
+                    or entry["provider"]
+                ),
                 model=entry["model"],
-                base_url=entry.get("base_url"),
-                api_key_env=entry.get("api_key_env"),
+                base_url=_optional_str(merged.get("base_url")),
+                api_key_env=_optional_str(merged.get("api_key_env")),
                 embedding_space=entry.get("embedding_space"),
                 context_window_tokens=(
                     int(entry["context_window_tokens"])
@@ -178,3 +185,36 @@ class ModelCatalog:
         if capability is not None:
             models = [m for m in models if m.capability == capability]
         return sorted(models, key=lambda m: m.alias)
+
+
+def _merge_provider_model_entry(
+    entry: dict[str, Any],
+    providers: dict[object, object],
+) -> dict[str, object]:
+    provider_ref = entry.get("provider")
+    provider_entry = providers.get(provider_ref)
+    provider = provider_entry if isinstance(provider_entry, dict) else {}
+    return {
+        "provider": provider_ref,
+        "protocol": _first_present(entry, provider, "protocol"),
+        "base_url": _first_present(entry, provider, "base_url"),
+        "api_key_env": _first_present(entry, provider, "api_key_env"),
+    }
+
+
+def _first_present(
+    primary: dict[str, object],
+    fallback: dict[object, object],
+    key: str,
+) -> object | None:
+    value = primary.get(key)
+    if value is not None:
+        return value
+    fallback_value = fallback.get(key)
+    return fallback_value if fallback_value is not None else None
+
+
+def _optional_str(value: object | None) -> str | None:
+    if value is None:
+        return None
+    return str(value)
