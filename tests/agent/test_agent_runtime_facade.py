@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any, cast
 
@@ -16,6 +17,12 @@ from rag.agent.core.runtime_diagnostics import AgentLatencyProfile
 from rag.agent.service import AgentRunResult
 from rag.agent.tools.rag_semantic_tools import AssetSearchInput
 from rag.schema.core import AssetRecord
+
+_ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+
+
+def _strip_ansi(output: str) -> str:
+    return _ANSI_RE.sub("", output)
 
 
 def test_agent_runtime_exports_sdk_facade() -> None:
@@ -400,10 +407,16 @@ def test_agent_run_cli_passes_explicit_tool_surface_config(
 
 
 def test_agent_run_help_matches_public_api_surface() -> None:
-    result = CliRunner().invoke(agent_app, ["run", "--help"], env={"COLUMNS": "240"})
+    result = CliRunner().invoke(
+        agent_app,
+        ["run", "--help"],
+        env={"COLUMNS": "240"},
+        terminal_width=240,
+        color=False,
+    )
 
     assert result.exit_code == 0
-    output = result.output
+    output = _strip_ansi(result.output)
     assert "--model" in output
     assert "--file" in output
     assert "--knowledge" in output

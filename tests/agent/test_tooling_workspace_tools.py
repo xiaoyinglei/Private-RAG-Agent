@@ -3,6 +3,11 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
+import pytest
+
+from rag.agent.primitive_ops import PrimitiveOps
+from rag.agent.runner.python_runner import LocalSubprocessPythonRunner
+from rag.agent.tooling import registry as tooling_registry_module
 from rag.agent.tooling import (
     ToolCall,
     ToolExecutor,
@@ -153,10 +158,21 @@ def test_run_command_uses_allowlist_and_records_output_trace(tmp_path: Path) -> 
     assert executor.traces[-1].output_size_bytes == result.data["_meta"]["size_bytes"]
 
 
-def test_run_python_returns_structured_data_and_meta(tmp_path: Path) -> None:
+def test_run_python_returns_structured_data_and_meta(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     registry = ToolRegistry()
     workspace = _workspace(tmp_path)
     (workspace.scratch / "hello.py").write_text("print('hello')", encoding="utf-8")
+
+    def _local_primitive_ops(workspace: WorkspaceRuntime) -> PrimitiveOps:
+        return PrimitiveOps(
+            workspace,
+            python_runner=LocalSubprocessPythonRunner(),
+        )
+
+    monkeypatch.setattr(tooling_registry_module, "PrimitiveOps", _local_primitive_ops)
     install_minimal_workspace_tools(registry, workspace)
     executor = ToolExecutor(registry, allow_execute_tools=True)
 
