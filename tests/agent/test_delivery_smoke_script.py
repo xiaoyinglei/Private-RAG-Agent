@@ -110,7 +110,7 @@ class _SmokeFakeModelRegistry:
     default_model = "fake"
     fallback_model = "fake"
 
-    def __init__(self, generator: "_SmokeFakeGenerator") -> None:
+    def __init__(self, generator: _SmokeFakeGenerator) -> None:
         self.generator = generator
 
     def resolve_for_node(self, *, node_model: str | None, node_name: str) -> object:
@@ -174,7 +174,7 @@ class _SmokeFakeGenerator:
 
 
 def _fake_generator_for_case(case: object) -> _SmokeFakeGenerator:
-    name = getattr(case, "name")
+    name = case.name
     if name == "math_2_plus_2":
         return _SmokeFakeGenerator(
             tool_name=None,

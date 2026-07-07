@@ -7,6 +7,7 @@ import csv
 import mimetypes
 import os
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field, model_validator
@@ -114,7 +115,7 @@ class RunPythonInput(BaseModel):
     timeout_seconds: float = Field(default=30.0, gt=0, le=MAX_PYTHON_TIMEOUT)
 
     @model_validator(mode="after")
-    def _require_script_or_code(self) -> "RunPythonInput":
+    def _require_script_or_code(self) -> RunPythonInput:
         if not self.script_path and not self.code:
             raise ValueError("Either script_path or code must be provided")
         return self
@@ -526,9 +527,13 @@ class PrimitiveOps:
 
         try:
             proc = _sp.run(args, capture_output=True, text=True, timeout=15.0)
-            result = type("_R", (), {"stdout": proc.stdout or "", "stderr": proc.stderr or "", "exit_code": proc.returncode})()
+            result = SimpleNamespace(
+                stdout=proc.stdout or "",
+                stderr=proc.stderr or "",
+                exit_code=proc.returncode,
+            )
         except Exception:
-            result = type("_R", (), {"stdout": "", "stderr": "grep failed", "exit_code": 1})()
+            result = SimpleNamespace(stdout="", stderr="grep failed", exit_code=1)
         matches: list[SearchTextMatch] = []
         for line in result.stdout.split("\n")[:inp.max_results]:
             line = line.strip()
@@ -563,7 +568,11 @@ class PrimitiveOps:
         if count > 1 and not inp.replace_all:
             return ApplyPatchOutput(file_path=inp.file_path, replaced=False,
                                     occurrences=count, message="not unique, use replace_all=True")
-        new_content = content.replace(inp.old_string, inp.new_string) if inp.replace_all else content.replace(inp.old_string, inp.new_string, 1)
+        new_content = (
+            content.replace(inp.old_string, inp.new_string)
+            if inp.replace_all
+            else content.replace(inp.old_string, inp.new_string, 1)
+        )
         file_path.write_text(new_content, encoding="utf-8")
         return ApplyPatchOutput(file_path=inp.file_path, replaced=True,
                                 occurrences=count, message="ok")
@@ -576,7 +585,8 @@ class PrimitiveOps:
             inp = RunCommandInput(**payload)
         else:
             inp = payload
-        import subprocess, time
+        import subprocess
+        import time
 
         cwd = self._workspace.resolve_path(inp.working_dir)
         start = time.monotonic()
@@ -586,13 +596,11 @@ class PrimitiveOps:
                 capture_output=True, text=True,
                 timeout=inp.timeout_seconds,
             )
-            ok = proc.returncode == 0
             stdout = proc.stdout or ""
             stderr = proc.stderr or ""
             timed_out = False
             exit_code = proc.returncode
         except subprocess.TimeoutExpired:
-            ok = False
             stdout = ""
             stderr = "command timed out"
             timed_out = True

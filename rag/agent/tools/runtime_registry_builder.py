@@ -320,7 +320,7 @@ class RuntimeToolRegistryBuilder:
     ) -> None:
         if self.subagent_runner is None:
             return
-        from rag.agent.core.agent_as_tool import AgentAsToolAdapter
+        from rag.agent.core.agent_tool_contract import AgentAsToolAdapter
 
         for spec in self.base_tool_registry.list_all():
             if not spec.name.startswith("agent_"):

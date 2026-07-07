@@ -313,8 +313,8 @@ def _run_command(
         exit_code = proc.returncode
         timed_out = False
     except subprocess.TimeoutExpired as exc:
-        stdout = exc.stdout or ""
-        stderr = exc.stderr or "command timed out"
+        stdout = _timeout_output_to_text(exc.stdout)
+        stderr = _timeout_output_to_text(exc.stderr) or "command timed out"
         exit_code = -1
         timed_out = True
 
@@ -328,3 +328,11 @@ def _run_command(
         truncated=len(stdout) > len(stdout_limited) or len(stderr) > len(stderr_limited),
         duration_ms=(time.monotonic() - start) * 1000,
     )
+
+
+def _timeout_output_to_text(value: str | bytes | None) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode(errors="replace")
+    return value

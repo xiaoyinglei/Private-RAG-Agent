@@ -28,12 +28,16 @@ from rag.agent.loop.state import (
 from rag.agent.memory.models import ExternalizedToolOutput
 from rag.agent.tooling import (
     DiscoveryPolicy,
-    ModelRequestBuilder as ToolingModelRequestBuilder,
     ProviderCapability,
     ToolDiscoveryState,
-    ToolRegistry as NewToolRegistry,
     ToolSurfacePolicy,
     ToolSurfaceRequest,
+)
+from rag.agent.tooling import (
+    ModelRequestBuilder as ToolingModelRequestBuilder,
+)
+from rag.agent.tooling import (
+    ToolRegistry as NewToolRegistry,
 )
 from rag.agent.tools.spec import ToolResult, ToolSpec
 from rag.assembly.tokenizer import TokenAccountingService, TokenizerContract
@@ -170,15 +174,18 @@ class LLMLoopModelTurnProvider:
         *,
         definition: AgentRuntimePolicy,
     ) -> ModelTurnDraft:
+        tooling_registry = self._tooling_registry
+        if tooling_registry is None:
+            raise RuntimeError("tooling registry is required for tooling provider path")
         transcript = _rebuild_tool_transcript(state, formatter_resolver=self._formatter_resolver)
         surface_request = self._resolve_tool_surface_request(state)
         surface_request = DiscoveryPolicy().apply(
-            self._tooling_registry,
+            tooling_registry,
             surface_request,
             self._resolve_tool_discovery_state(state),
         )
         decision = ToolSurfacePolicy().decide(
-            self._tooling_registry,
+            tooling_registry,
             surface_request,
             provider_capability=self._provider_capability,
         )

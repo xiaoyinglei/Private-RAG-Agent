@@ -43,15 +43,23 @@ from rag.agent.memory.models import (
     StateChannelReplacement,
 )
 from rag.agent.planning import PlanStep, PlanTracker, PlanUpdate
-from rag.agent.tools.spec import ToolError, ToolPermissions, ToolResult, ToolSpec
 from rag.agent.tooling import (
     ProviderCapability,
-    ToolDomain as NewToolDomain,
-    ToolRegistry as NewToolRegistry,
-    ToolRisk as NewToolRisk,
-    ToolSpec as NewToolSpec,
     ToolSurfaceRequest,
 )
+from rag.agent.tooling import (
+    ToolDomain as NewToolDomain,
+)
+from rag.agent.tooling import (
+    ToolRegistry as NewToolRegistry,
+)
+from rag.agent.tooling import (
+    ToolRisk as NewToolRisk,
+)
+from rag.agent.tooling import (
+    ToolSpec as NewToolSpec,
+)
+from rag.agent.tools.spec import ToolError, ToolPermissions, ToolResult, ToolSpec
 from rag.assembly.tokenizer import TokenAccountingService, TokenizerContract
 from rag.schema.llm import LLMCallStage, LLMProviderResult, LLMStageBudget
 from rag.schema.runtime import AccessPolicy

@@ -72,11 +72,15 @@ from rag.agent.memory.persistent.runtime import PersistentMemoryRuntime
 from rag.agent.memory.store import WorkspaceMemoryStore
 from rag.agent.tooling import (
     ToolDiscoveryState,
-    ToolExecutor as NewToolExecutor,
     ToolExecutorLoopAdapter,
-    ToolRegistry as NewToolRegistry,
     ToolSurfaceRequest,
     install_minimal_workspace_tools,
+)
+from rag.agent.tooling import (
+    ToolExecutor as NewToolExecutor,
+)
+from rag.agent.tooling import (
+    ToolRegistry as NewToolRegistry,
 )
 from rag.agent.tools.catalog_assembly import build_tool_catalog
 from rag.agent.tools.mcp_adapter import MCPToolRegistry

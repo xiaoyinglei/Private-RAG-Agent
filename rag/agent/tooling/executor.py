@@ -27,7 +27,7 @@ class CanUseToolResult(BaseModel):
 CanUseToolFn = Callable[..., CanUseToolResult | dict[str, Any]]
 
 
-def canUseTool(
+def canUseTool(  # noqa: N802
     spec: ToolSpec,
     call: ToolCall,
     *,
@@ -143,7 +143,7 @@ class ToolExecutor:
                 _invoke_runner(runner, call.arguments),
                 timeout=spec.timeout_seconds,
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             return self._record_result(
                 start,
                 _error_result(
@@ -263,10 +263,8 @@ def _state_sent_schema_names(state: Any) -> list[str]:
 
 
 def _to_legacy_result(result: ToolResult, latency_ms: float) -> Any:
-    from rag.agent.tools.spec import (
-        ToolError as LegacyToolError,
-        ToolResult as LegacyToolResult,
-    )
+    from rag.agent.tools.spec import ToolError as LegacyToolError
+    from rag.agent.tools.spec import ToolResult as LegacyToolResult
 
     if result.ok:
         return LegacyToolResult(

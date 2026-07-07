@@ -7,7 +7,6 @@ import pytest
 
 from rag.agent.primitive_ops import PrimitiveOps
 from rag.agent.runner.python_runner import LocalSubprocessPythonRunner
-from rag.agent.tooling import registry as tooling_registry_module
 from rag.agent.tooling import (
     ToolCall,
     ToolExecutor,
@@ -16,6 +15,7 @@ from rag.agent.tooling import (
     ToolSurfaceRequest,
     install_minimal_workspace_tools,
 )
+from rag.agent.tooling import registry as tooling_registry_module
 from rag.agent.workspace import WorkspaceRuntime
 
 

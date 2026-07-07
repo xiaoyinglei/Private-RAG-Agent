@@ -57,7 +57,7 @@ class ModelRequestBuilder:
         if not tools and tool_choice is None:
             tool_choice = "none"
 
-        payload = {
+        payload: dict[str, Any] = {
             "model": self._model,
             "messages": messages,
             "tools": tools,

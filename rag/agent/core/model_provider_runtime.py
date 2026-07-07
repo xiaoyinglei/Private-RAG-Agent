@@ -12,16 +12,18 @@ from rag.agent.core.definition import AgentRuntimePolicy
 from rag.agent.core.llm_providers import create_loop_model_turn_provider
 from rag.agent.core.llm_registry import ModelResolver
 from rag.agent.core.runtime_diagnostics import RuntimeDiagnostic
-from rag.agent.tooling import (
-    ToolDiscoveryState,
-    ToolRegistry as NewToolRegistry,
-    ToolSurfaceRequest,
-)
 from rag.agent.loop.runtime import ModelTurnProvider
 from rag.agent.loop.state import (
     LoopState,
     ModelTurnDraft,
     append_loop_diagnostic,
+)
+from rag.agent.tooling import (
+    ToolDiscoveryState,
+    ToolSurfaceRequest,
+)
+from rag.agent.tooling import (
+    ToolRegistry as NewToolRegistry,
 )
 from rag.agent.tools.registry import ToolRegistry
 

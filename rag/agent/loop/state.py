@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
-from typing import TYPE_CHECKING, Literal, Self
+from typing import TYPE_CHECKING, Any, Literal, Self
 
 from langchain_core.messages import BaseMessage
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -191,6 +191,8 @@ class LoopState(TypedDict):
     approved_tool_call_ids: list[str]
     denied_tool_call_ids: list[str]
     tool_results: list[ToolResult]
+    tooling_sent_schema_names: list[str]
+    tooling_model_request_trace: dict[str, Any] | None
     runtime_diagnostics: list[RuntimeDiagnostic]
     latency_profile: AgentLatencyProfile
     last_model_turn: ModelTurn | None
@@ -248,6 +250,8 @@ def create_loop_state(
         "approved_tool_call_ids": [],
         "denied_tool_call_ids": [],
         "tool_results": [],
+        "tooling_sent_schema_names": [],
+        "tooling_model_request_trace": None,
         "runtime_diagnostics": merge_runtime_diagnostics([], runtime_diagnostics),
         "latency_profile": AgentLatencyProfile(),
         "last_model_turn": None,
