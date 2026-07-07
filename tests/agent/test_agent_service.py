@@ -20,7 +20,7 @@ from rag.agent.loop.state import LoopState, ModelTurnDraft
 from rag.agent.primitive_ops import PrimitiveOps, WriteFileOutput
 from rag.agent.runner.python_runner import LocalSubprocessPythonRunner
 from rag.agent.service import AgentRunRequest, AgentRunResult, AgentService
-from rag.agent.tooling import ToolSurfaceRequest
+from rag.agent.tooling import ToolDiscoveryState, ToolSurfaceRequest
 from rag.agent.tools.llm_tools import LLMTextOutput
 from rag.agent.workspace import WorkspaceRuntime
 from rag.schema.llm import LLMProviderResult
@@ -589,6 +589,40 @@ async def test_agent_service_new_tooling_path_does_not_call_legacy_visibility_re
             tool_surface_request=ToolSurfaceRequest(
                 requested_tool_names=["read_file"],
             ),
+        )
+    )
+
+    assert result.status == "done"
+    assert [tool["function"]["name"] for tool in generator.calls[0]["tools"]] == [
+        "read_file"
+    ]
+
+
+@pytest.mark.anyio
+async def test_agent_service_new_tooling_uses_structured_discovery_state() -> None:
+    generator = _NativeToolSequenceGenerator(
+        tool_name=None,
+        final_answer="ok",
+    )
+    service = AgentService(
+        definition=AgentRuntimePolicy.test_factory(
+            agent_type="generic",
+            description="Generic",
+            system_prompt="Use only visible tools.",
+            allowed_tools=[],
+            max_iterations=3,
+        ),
+        tool_registry=create_builtin_tool_registry(runners={}),
+        model_registry=_FakeModelRegistry(generator),  # type: ignore[arg-type]
+    )
+
+    result = await service.run(
+        AgentRunRequest(
+            task="同一句自然语言不决定工具面",
+            run_id="svc-new-tooling-discovery-state",
+            thread_id="svc-new-tooling-discovery-state",
+            tool_surface_request=ToolSurfaceRequest(allow_discovery_tools=True),
+            tool_discovery_state=ToolDiscoveryState(discovered_tool_names=["read_file"]),
         )
     )
 

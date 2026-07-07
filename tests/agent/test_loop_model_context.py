@@ -16,8 +16,10 @@ from rag.agent.core.llm_context import AgentLLMContextAssembler
 from rag.agent.core.llm_prompts import build_loop_turn_prompt
 from rag.agent.core.llm_providers import (
     LLMLoopModelTurnProvider,
+    create_loop_model_turn_provider,
     parse_loop_model_turn,
 )
+from rag.agent.core.llm_registry import ResolvedModel
 from rag.agent.core.observations import (
     AnswerCandidate,
     EvidenceRef,
@@ -43,6 +45,7 @@ from rag.agent.memory.models import (
 from rag.agent.planning import PlanStep, PlanTracker, PlanUpdate
 from rag.agent.tools.spec import ToolError, ToolPermissions, ToolResult, ToolSpec
 from rag.agent.tooling import (
+    ProviderCapability,
     ToolDomain as NewToolDomain,
     ToolRegistry as NewToolRegistry,
     ToolRisk as NewToolRisk,
@@ -544,6 +547,63 @@ async def test_loop_provider_new_tooling_surfaces_only_requested_schemas() -> No
         "read_file",
     ]
     assert state["tooling_sent_schema_names"] == ["search_text", "read_file"]
+
+
+@pytest.mark.anyio
+async def test_loop_provider_new_tooling_uses_resolved_provider_capability() -> None:
+    generator = _RecordingToolGenerator()
+    state = _state()
+    registry = NewToolRegistry()
+    registry.register(
+        NewToolSpec(
+            name="read_file",
+            description="Read a workspace file.",
+            input_schema={
+                "type": "object",
+                "properties": {"path": {"type": "string"}},
+                "required": ["path"],
+            },
+            domain=NewToolDomain.WORKSPACE,
+            risk=NewToolRisk.READ,
+            timeout_seconds=3,
+        ),
+        lambda args: args,
+    )
+
+    class _Registry:
+        default_model = "fake"
+        fallback_model = "fake"
+        generation_config = None
+
+        def resolve_for_node(self, *, node_model: str | None, node_name: str) -> ResolvedModel:
+            del node_model, node_name
+            return ResolvedModel(
+                generator=generator,
+                kwargs={},
+                provider_capability=ProviderCapability(
+                    provider="fake",
+                    model="no-tools-model",
+                    supports_tools=False,
+                ),
+            )
+
+    provider = create_loop_model_turn_provider(
+        _Registry(),  # type: ignore[arg-type]
+        _definition().model_selection,
+        tooling_registry=registry,
+        tool_surface_request=ToolSurfaceRequest(requested_tool_names=["read_file"]),
+    )
+
+    await provider.next_turn(
+        state,
+        definition=_definition(),
+        budget_remaining=5_000,
+    )
+
+    assert generator.calls[0]["tools"] == []
+    assert state["tooling_sent_schema_names"] == []
+    assert state["tooling_model_request_trace"]["provider"] == "fake"
+    assert state["tooling_model_request_trace"]["model"] == "no-tools-model"
 
 
 @pytest.mark.anyio

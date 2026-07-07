@@ -71,6 +71,7 @@ from rag.agent.memory.persistent import PersistentMemoryStore
 from rag.agent.memory.persistent.runtime import PersistentMemoryRuntime
 from rag.agent.memory.store import WorkspaceMemoryStore
 from rag.agent.tooling import (
+    ToolDiscoveryState,
     ToolExecutor as NewToolExecutor,
     ToolExecutorLoopAdapter,
     ToolRegistry as NewToolRegistry,
@@ -111,6 +112,7 @@ class AgentRunRequest(BaseModel):
     memory_policy: MemoryPolicy | None = None
     goal_spec: GoalSpec | None = None
     tool_surface_request: ToolSurfaceRequest | None = None
+    tool_discovery_state: ToolDiscoveryState | None = None
 
     def to_run_config(self, definition: AgentRuntimePolicy) -> AgentRunConfig:
         run_id = self.run_id or f"run_{uuid4().hex[:12]}"
@@ -477,6 +479,7 @@ class AgentService:
             input_files=request.input_files,
             workspace_path=request.workspace_path,
             tool_surface_request=request.tool_surface_request,
+            tool_discovery_state=request.tool_discovery_state,
         )
 
     def _prepare_run(
@@ -550,6 +553,7 @@ class AgentService:
         input_files: list[str] | None = None,
         workspace_path: str | None = None,
         tool_surface_request: ToolSurfaceRequest | None = None,
+        tool_discovery_state: ToolDiscoveryState | None = None,
     ) -> AgentRunResult:
         run_started_at = time.perf_counter()
         prepare_started_at = run_started_at
@@ -581,6 +585,9 @@ class AgentService:
         effective_tool_surface_request = (
             tool_surface_request if uses_service_model_provider else None
         )
+        effective_tool_discovery_state = (
+            tool_discovery_state if uses_service_model_provider else None
+        )
         if (
             effective_tool_surface_request is None
             and uses_service_model_provider
@@ -604,6 +611,7 @@ class AgentService:
                 scratch_dir=ctx.workspace.root / "scratch",
                 tooling_registry=ctx.tooling_registry,
                 tool_surface_request=effective_tool_surface_request,
+                tool_discovery_state=effective_tool_discovery_state,
             )
             result_state = await loop.run(state)
         except Exception:
@@ -688,6 +696,9 @@ class AgentService:
         effective_tool_surface_request = (
             request.tool_surface_request if uses_service_model_provider else None
         )
+        effective_tool_discovery_state = (
+            request.tool_discovery_state if uses_service_model_provider else None
+        )
         if (
             effective_tool_surface_request is None
             and uses_service_model_provider
@@ -710,6 +721,7 @@ class AgentService:
             scratch_dir=ctx.workspace.root / "scratch",
             tooling_registry=ctx.tooling_registry,
             tool_surface_request=effective_tool_surface_request,
+            tool_discovery_state=effective_tool_discovery_state,
         )
 
         try:
@@ -768,6 +780,7 @@ class AgentService:
         scratch_dir: Path | None = None,
         tooling_registry: NewToolRegistry | None = None,
         tool_surface_request: ToolSurfaceRequest | None = None,
+        tool_discovery_state: ToolDiscoveryState | None = None,
     ) -> AgentLoop:
         # Create and bind DeferredToolStore BEFORE resolving provider
         # (provider needs store for tool filtering)
@@ -800,6 +813,7 @@ class AgentService:
             tool_registry=runtime_registry,
             tooling_registry=tooling_registry,
             tool_surface_request=tool_surface_request,
+            tool_discovery_state=tool_discovery_state,
         )
         output_finalizer = self._resolve_output_finalizer(state)
         tool_runner = (
@@ -839,6 +853,7 @@ class AgentService:
         tool_registry: ToolRegistry | None = None,
         tooling_registry: NewToolRegistry | None = None,
         tool_surface_request: ToolSurfaceRequest | None = None,
+        tool_discovery_state: ToolDiscoveryState | None = None,
     ) -> ModelTurnProvider:
         return ModelProviderResolver(
             model_turn_provider=self._model_turn_provider,
@@ -858,6 +873,7 @@ class AgentService:
             tool_registry=tool_registry,
             tooling_registry=tooling_registry,
             tool_surface_request=tool_surface_request,
+            tool_discovery_state=tool_discovery_state,
         )
 
     def _resolve_output_finalizer(

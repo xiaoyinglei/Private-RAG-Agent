@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
 
 from rag.agent.core.llm_config import AgentModelsConfig, ModelProvider, ModelSpec
+from rag.agent.tooling.surface import ProviderCapability
 from rag.models.config import GenerationConfig, GenerationTaskConfig
 from rag.schema.llm import parse_llm_stage_budgets
 
@@ -26,6 +27,7 @@ class ResolvedModel:
     context_window_tokens: int = 32_768
     gateway: Any | None = None
     token_accounting: Any | None = None
+    provider_capability: ProviderCapability = field(default_factory=ProviderCapability)
 
 
 class ModelResolver(Protocol):
@@ -226,6 +228,11 @@ class ModelRegistry:
                 stage_budgets=self._config.llm_stage_budgets,
             ),
             token_accounting=token_accounting,
+            provider_capability=ProviderCapability(
+                provider=spec.provider_name or spec.provider.value,
+                model=spec.model,
+                supports_tools=spec.supports_tools,
+            ),
         )
         self._cache[alias] = resolved
         return resolved

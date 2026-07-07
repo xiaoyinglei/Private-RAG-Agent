@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from rag.agent.tooling.registry import ToolRegistry
 from rag.agent.tooling.spec import ToolDomain, ToolExposure, ToolRisk, ToolSpec
+
+if TYPE_CHECKING:
+    from rag.agent.tooling.registry import ToolRegistry
 
 
 class ToolSurfaceRequest(BaseModel):
@@ -19,6 +21,15 @@ class ToolSurfaceRequest(BaseModel):
     allow_write_tools: bool = False
     allow_execute_tools: bool = False
     allow_discovery_tools: bool = False
+
+
+class ProviderCapability(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    provider: str | None = None
+    model: str | None = None
+    supports_tools: bool = True
+    supports_tool_choice: bool = True
 
 
 class ToolSurfaceDecision(BaseModel):
@@ -38,14 +49,15 @@ class ToolSurfacePolicy:
         registry: ToolRegistry,
         request: ToolSurfaceRequest,
         *,
-        provider_supports_tools: bool = True,
+        provider_capability: ProviderCapability | None = None,
     ) -> ToolSurfaceDecision:
-        if request.force_empty or not provider_supports_tools:
+        capability = provider_capability or ProviderCapability()
+        if request.force_empty or not capability.supports_tools:
             return ToolSurfaceDecision(
                 visible_tools=[],
                 hidden_tools=sorted(spec.name for spec in registry.list_specs()),
                 sent_schema_names=[],
-                tool_choice="none",
+                tool_choice="none" if capability.supports_tool_choice else None,
             )
 
         disabled = set(request.disabled_tool_names)
@@ -70,7 +82,11 @@ class ToolSurfacePolicy:
             visible_tools=visible,
             hidden_tools=hidden_tools,
             sent_schema_names=sent_schema_names,
-            tool_choice="auto" if visible else "none",
+            tool_choice=(
+                ("auto" if visible else "none")
+                if capability.supports_tool_choice
+                else None
+            ),
         )
 
     def _can_surface(self, spec: ToolSpec, request: ToolSurfaceRequest) -> bool:

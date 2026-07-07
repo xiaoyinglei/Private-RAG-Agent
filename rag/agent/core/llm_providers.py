@@ -27,7 +27,10 @@ from rag.agent.loop.state import (
 )
 from rag.agent.memory.models import ExternalizedToolOutput
 from rag.agent.tooling import (
+    DiscoveryPolicy,
     ModelRequestBuilder as ToolingModelRequestBuilder,
+    ProviderCapability,
+    ToolDiscoveryState,
     ToolRegistry as NewToolRegistry,
     ToolSurfacePolicy,
     ToolSurfaceRequest,
@@ -107,6 +110,8 @@ class LLMLoopModelTurnProvider:
         skill_context_provider: Callable[[LoopState], str] | None = None,
         tooling_registry: NewToolRegistry | None = None,
         tool_surface_request: ToolSurfaceRequest | Callable[[LoopState], ToolSurfaceRequest] | None = None,
+        tool_discovery_state: ToolDiscoveryState | Callable[[LoopState], ToolDiscoveryState] | None = None,
+        provider_capability: ProviderCapability | None = None,
     ) -> None:
         self._kwargs = kwargs or {}
         self._gateway = gateway or _fallback_gateway(
@@ -133,6 +138,8 @@ class LLMLoopModelTurnProvider:
         self._stream_sink = stream_sink
         self._tooling_registry = tooling_registry
         self._tool_surface_request = tool_surface_request
+        self._tool_discovery_state = tool_discovery_state
+        self._provider_capability = provider_capability or ProviderCapability()
 
     async def next_turn(
         self,
@@ -165,7 +172,16 @@ class LLMLoopModelTurnProvider:
     ) -> ModelTurnDraft:
         transcript = _rebuild_tool_transcript(state, formatter_resolver=self._formatter_resolver)
         surface_request = self._resolve_tool_surface_request(state)
-        decision = ToolSurfacePolicy().decide(self._tooling_registry, surface_request)
+        surface_request = DiscoveryPolicy().apply(
+            self._tooling_registry,
+            surface_request,
+            self._resolve_tool_discovery_state(state),
+        )
+        decision = ToolSurfacePolicy().decide(
+            self._tooling_registry,
+            surface_request,
+            provider_capability=self._provider_capability,
+        )
         state["tooling_sent_schema_names"] = list(decision.sent_schema_names)
 
         system_msg = self._assembler.build_system_message(
@@ -178,8 +194,9 @@ class LLMLoopModelTurnProvider:
         all_messages = [system_msg, *conversation_msgs]
         openai_messages = OpenAIAdapter.messages(all_messages)
         request = ToolingModelRequestBuilder(
-            provider=type(self._gateway).__name__,
-            model="tool_decision",
+            provider=self._provider_capability.provider or type(self._gateway).__name__,
+            model=self._provider_capability.model or "tool_decision",
+            provider_capability=self._provider_capability,
         ).build(
             messages=openai_messages,
             surface=decision,
@@ -215,6 +232,12 @@ class LLMLoopModelTurnProvider:
         if callable(request):
             request = request(state)
         return ToolSurfaceRequest.model_validate(request)
+
+    def _resolve_tool_discovery_state(self, state: LoopState) -> ToolDiscoveryState:
+        discovery_state = self._tool_discovery_state
+        if callable(discovery_state):
+            discovery_state = discovery_state(state)
+        return ToolDiscoveryState.model_validate(discovery_state or {})
 
     async def _next_turn_with_tools(
         self,
@@ -570,6 +593,7 @@ def create_loop_model_turn_provider(
     skill_context_provider: Callable[[LoopState], str] | None = None,
     tooling_registry: NewToolRegistry | None = None,
     tool_surface_request: ToolSurfaceRequest | Callable[[LoopState], ToolSurfaceRequest] | None = None,
+    tool_discovery_state: ToolDiscoveryState | Callable[[LoopState], ToolDiscoveryState] | None = None,
 ) -> LLMLoopModelTurnProvider:
     resolved = registry.resolve_for_node(
         node_model=selection.tool_decision_model,
@@ -607,6 +631,8 @@ def create_loop_model_turn_provider(
         skill_context_provider=skill_context_provider,
         tooling_registry=tooling_registry,
         tool_surface_request=tool_surface_request,
+        tool_discovery_state=tool_discovery_state,
+        provider_capability=getattr(resolved, "provider_capability", ProviderCapability()),
     )
 
 

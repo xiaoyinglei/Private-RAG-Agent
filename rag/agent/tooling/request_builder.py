@@ -7,7 +7,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from rag.agent.tooling.surface import ToolSurfaceDecision
+from rag.agent.tooling.surface import ProviderCapability, ToolSurfaceDecision
 from rag.agent.tooling.trace import ModelRequestTrace
 
 
@@ -24,9 +24,16 @@ class ModelRequest(BaseModel):
 class ModelRequestBuilder:
     """Build OpenAI/Groq-compatible request payloads from a surface decision."""
 
-    def __init__(self, *, provider: str, model: str) -> None:
+    def __init__(
+        self,
+        *,
+        provider: str,
+        model: str,
+        provider_capability: ProviderCapability | None = None,
+    ) -> None:
         self._provider = provider
         self._model = model
+        self._provider_capability = provider_capability or ProviderCapability()
 
     def build(
         self,
@@ -54,15 +61,18 @@ class ModelRequestBuilder:
             "model": self._model,
             "messages": messages,
             "tools": tools,
-            "tool_choice": tool_choice,
         }
+        if self._provider_capability.supports_tool_choice:
+            payload["tool_choice"] = tool_choice
         trace = ModelRequestTrace(
             provider=self._provider,
             model=self._model,
             visible_tools=[spec.name for spec in surface.visible_tools],
             hidden_tools=surface.hidden_tools,
             schema_bytes=schema_bytes,
-            tool_choice=tool_choice,
+            tool_choice=tool_choice
+            if self._provider_capability.supports_tool_choice
+            else None,
             latency_ms=0.0,
         )
         return ModelRequest(

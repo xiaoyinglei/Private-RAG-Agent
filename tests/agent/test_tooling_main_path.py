@@ -7,11 +7,15 @@ from rag.agent.core.context import AgentRunConfig
 from rag.agent.core.tool_execution import ToolBatchRequest
 from rag.agent.core.turn_contracts import ToolCallPlan
 from rag.agent.tooling import (
+    DiscoveryPolicy,
     ToolExecutorLoopAdapter,
     ModelRequestBuilder,
+    ProviderCapability,
     ToolCall,
     ToolDomain,
     ToolExecutor,
+    ToolDiscoveryState,
+    ToolExposure,
     ToolRegistry,
     ToolRisk,
     ToolSpec,
@@ -66,6 +70,22 @@ def _execute_spec(name: str = "run_command") -> ToolSpec:
         },
         domain=ToolDomain.EXECUTION,
         risk=ToolRisk.EXECUTE,
+        timeout_seconds=3.0,
+    )
+
+
+def _deferred_spec(name: str = "semantic_search") -> ToolSpec:
+    return ToolSpec(
+        name=name,
+        description="Search a specialized workspace index.",
+        input_schema={
+            "type": "object",
+            "properties": {"query": {"type": "string"}},
+            "required": ["query"],
+        },
+        domain=ToolDomain.WORKSPACE,
+        risk=ToolRisk.READ,
+        exposure=ToolExposure.DEFERRED,
         timeout_seconds=3.0,
     )
 
@@ -130,6 +150,58 @@ def test_surface_policy_consumes_explicit_request_and_risk_flags() -> None:
     assert allowed.sent_schema_names == ["read_file", "write_file", "run_command"]
 
 
+def test_surface_policy_uses_provider_capability_to_disable_tool_schemas() -> None:
+    registry = ToolRegistry()
+    registry.register(_read_spec(), _runner)
+
+    decision = ToolSurfacePolicy().decide(
+        registry,
+        ToolSurfaceRequest(requested_tool_names=["read_file"]),
+        provider_capability=ProviderCapability(supports_tools=False),
+    )
+
+    assert decision.visible_tools == []
+    assert decision.sent_schema_names == []
+    assert decision.hidden_tools == ["read_file"]
+    assert decision.tool_choice == "none"
+
+
+def test_discovery_policy_adds_only_structured_discovered_tools() -> None:
+    registry = ToolRegistry()
+    registry.register(_read_spec(), _runner)
+    registry.register(_deferred_spec(), lambda args: args)
+
+    enriched = DiscoveryPolicy().apply(
+        registry,
+        ToolSurfaceRequest(
+            allow_discovery_tools=True,
+            disabled_tool_names=["read_file"],
+        ),
+        ToolDiscoveryState(
+            discovered_tool_names=["semantic_search", "missing_tool", "read_file"],
+        ),
+    )
+    decision = ToolSurfacePolicy().decide(registry, enriched)
+
+    assert enriched.requested_tool_names == ["semantic_search"]
+    assert decision.sent_schema_names == ["semantic_search"]
+
+
+def test_discovery_policy_ignores_discovered_tools_without_discovery_gate() -> None:
+    registry = ToolRegistry()
+    registry.register(_deferred_spec(), lambda args: args)
+
+    enriched = DiscoveryPolicy().apply(
+        registry,
+        ToolSurfaceRequest(),
+        ToolDiscoveryState(discovered_tool_names=["semantic_search"]),
+    )
+    decision = ToolSurfacePolicy().decide(registry, enriched)
+
+    assert enriched.requested_tool_names == []
+    assert decision.sent_schema_names == []
+
+
 def test_request_builder_emits_empty_schema_without_task_classification() -> None:
     registry = ToolRegistry()
     registry.register(_read_spec(), _runner)
@@ -181,6 +253,32 @@ def test_request_builder_emits_openai_compatible_tool_schema() -> None:
     assert request.payload["tool_choice"] == "auto"
     assert request.trace.visible_tools == ["read_file"]
     assert request.trace.schema_bytes > 0
+    assert request.sent_schema_names == ["read_file"]
+
+
+def test_request_builder_omits_tool_choice_when_provider_does_not_support_it() -> None:
+    registry = ToolRegistry()
+    registry.register(_read_spec(), _runner)
+    decision = ToolSurfacePolicy().decide(
+        registry,
+        ToolSurfaceRequest(requested_tool_names=["read_file"]),
+        provider_capability=ProviderCapability(supports_tools=True, supports_tool_choice=False),
+    )
+
+    request = ModelRequestBuilder(
+        provider="openai-compatible",
+        model="custom-model",
+        provider_capability=ProviderCapability(
+            supports_tools=True,
+            supports_tool_choice=False,
+        ),
+    ).build(
+        messages=[{"role": "user", "content": "读取 README"}],
+        surface=decision,
+    )
+
+    assert "tool_choice" not in request.payload
+    assert request.trace.tool_choice is None
     assert request.sent_schema_names == ["read_file"]
 
 
