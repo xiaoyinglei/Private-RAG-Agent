@@ -12,6 +12,7 @@ from rag.agent.core.definition import AgentRuntimePolicy
 from rag.agent.core.llm_providers import create_loop_model_turn_provider
 from rag.agent.core.llm_registry import ModelResolver
 from rag.agent.core.runtime_diagnostics import RuntimeDiagnostic
+from rag.agent.tooling import ToolRegistry as NewToolRegistry, ToolSurfaceRequest
 from rag.agent.loop.runtime import ModelTurnProvider
 from rag.agent.loop.state import (
     LoopState,
@@ -83,6 +84,8 @@ class ModelProviderResolver:
         state: LoopState | None,
         *,
         tool_registry: ToolRegistry | None = None,
+        tooling_registry: NewToolRegistry | None = None,
+        tool_surface_request: ToolSurfaceRequest | None = None,
     ) -> ModelTurnProvider:
         if self.model_turn_provider is not None:
             return self.model_turn_provider
@@ -110,6 +113,8 @@ class ModelProviderResolver:
                     stream_sink=self.stream_sink,
                     formatter_resolver=formatter_resolver,
                     skill_context_provider=self.skill_context_provider,
+                    tooling_registry=tooling_registry,
+                    tool_surface_request=tool_surface_request,
                 )
             except Exception as exc:
                 if self.strict_model_provider:

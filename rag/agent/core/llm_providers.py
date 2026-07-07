@@ -26,6 +26,12 @@ from rag.agent.loop.state import (
     ModelTurnDraft,
 )
 from rag.agent.memory.models import ExternalizedToolOutput
+from rag.agent.tooling import (
+    ModelRequestBuilder as ToolingModelRequestBuilder,
+    ToolRegistry as NewToolRegistry,
+    ToolSurfacePolicy,
+    ToolSurfaceRequest,
+)
 from rag.agent.tools.spec import ToolResult, ToolSpec
 from rag.assembly.tokenizer import TokenAccountingService, TokenizerContract
 from rag.providers.llm_gateway import LLMGateway
@@ -99,6 +105,8 @@ class LLMLoopModelTurnProvider:
         stream_sink: Any = None,
         formatter_resolver: Any | None = None,
         skill_context_provider: Callable[[LoopState], str] | None = None,
+        tooling_registry: NewToolRegistry | None = None,
+        tool_surface_request: ToolSurfaceRequest | Callable[[LoopState], ToolSurfaceRequest] | None = None,
     ) -> None:
         self._kwargs = kwargs or {}
         self._gateway = gateway or _fallback_gateway(
@@ -123,6 +131,8 @@ class LLMLoopModelTurnProvider:
         )
         self._formatter_resolver = formatter_resolver
         self._stream_sink = stream_sink
+        self._tooling_registry = tooling_registry
+        self._tool_surface_request = tool_surface_request
 
     async def next_turn(
         self,
@@ -131,6 +141,11 @@ class LLMLoopModelTurnProvider:
         definition: AgentRuntimePolicy,
         budget_remaining: int,
     ) -> ModelTurnDraft:
+        if self._tooling_registry is not None and self._tool_surface_request is not None:
+            return await self._next_turn_with_tooling(
+                state,
+                definition=definition,
+            )
         if self._tool_specs:
             return await self._next_turn_with_tools(
                 state,
@@ -141,6 +156,65 @@ class LLMLoopModelTurnProvider:
             definition=definition,
             budget_remaining=budget_remaining,
         )
+
+    async def _next_turn_with_tooling(
+        self,
+        state: LoopState,
+        *,
+        definition: AgentRuntimePolicy,
+    ) -> ModelTurnDraft:
+        transcript = _rebuild_tool_transcript(state, formatter_resolver=self._formatter_resolver)
+        surface_request = self._resolve_tool_surface_request(state)
+        decision = ToolSurfacePolicy().decide(self._tooling_registry, surface_request)
+        state["tooling_sent_schema_names"] = list(decision.sent_schema_names)
+
+        system_msg = self._assembler.build_system_message(
+            definition=definition,
+            state=state,
+            visible_tool_names=list(decision.sent_schema_names),
+        )
+        conversation_msgs = _base_messages_to_model_messages(state.get("messages", []))
+        conversation_msgs.extend(transcript)
+        all_messages = [system_msg, *conversation_msgs]
+        openai_messages = OpenAIAdapter.messages(all_messages)
+        request = ToolingModelRequestBuilder(
+            provider=type(self._gateway).__name__,
+            model="tool_decision",
+        ).build(
+            messages=openai_messages,
+            surface=decision,
+        )
+        openai_tools = request.payload["tools"]
+        state["tooling_model_request_trace"] = request.trace.model_dump()
+        _record_llm_payload_size(
+            state,
+            prompt_bytes=_json_payload_bytes(openai_messages),
+            tool_schema_bytes=request.trace.schema_bytes,
+        )
+
+        if self._stream_sink is not None:
+            result_value = await self._streaming_call(
+                state=state,
+                messages=openai_messages,
+                tools=openai_tools,
+            )
+        else:
+            result = await self._gateway.agenerate_with_tools(
+                stage=LLMCallStage.TOOL_DECISION,
+                messages=openai_messages,
+                tools=openai_tools,
+                kwargs=self._kwargs,
+            )
+            result_value = result.value
+
+        tool_result = OpenAIAdapter.parse_tool_calls(result_value)
+        return _tool_use_result_to_draft(tool_result, state)
+
+    def _resolve_tool_surface_request(self, state: LoopState) -> ToolSurfaceRequest:
+        request = self._tool_surface_request
+        if callable(request):
+            request = request(state)
+        return ToolSurfaceRequest.model_validate(request)
 
     async def _next_turn_with_tools(
         self,
@@ -256,10 +330,7 @@ class LLMLoopModelTurnProvider:
             message["tool_calls"] = tool_calls
         return {"choices": [{"message": message}]}
 
-    def _filter_visible_tools(
-        self,
-        definition: AgentRuntimePolicy,
-    ) -> list[ToolSpec]:
+    def _filter_visible_tools(self, definition: AgentRuntimePolicy) -> list[ToolSpec]:
         """Return only the tool specs currently visible to the model.
 
         Uses resolve_visible_tools to determine which tools are visible
@@ -497,6 +568,8 @@ def create_loop_model_turn_provider(
     stream_sink: Any = None,
     formatter_resolver: Any | None = None,
     skill_context_provider: Callable[[LoopState], str] | None = None,
+    tooling_registry: NewToolRegistry | None = None,
+    tool_surface_request: ToolSurfaceRequest | Callable[[LoopState], ToolSurfaceRequest] | None = None,
 ) -> LLMLoopModelTurnProvider:
     resolved = registry.resolve_for_node(
         node_model=selection.tool_decision_model,
@@ -513,7 +586,7 @@ def create_loop_model_turn_provider(
 
     # Resolve tool specs for native tool calling path
     tool_specs: list[ToolSpec] | None = None
-    if tool_registry is not None and definition is not None:
+    if tooling_registry is None and tool_registry is not None and definition is not None:
         tool_specs = _resolve_tool_specs(tool_registry, definition.allowed_tools)
 
     return LLMLoopModelTurnProvider(
@@ -532,6 +605,8 @@ def create_loop_model_turn_provider(
         stream_sink=stream_sink,
         formatter_resolver=formatter_resolver,
         skill_context_provider=skill_context_provider,
+        tooling_registry=tooling_registry,
+        tool_surface_request=tool_surface_request,
     )
 
 

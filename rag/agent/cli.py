@@ -865,6 +865,26 @@ def agent_run(
         list[str] | None,
         typer.Option("--file", "-f", "--input-file", help="导入 workspace 的输入文件，可多次指定"),
     ] = None,
+    tool_names: Annotated[
+        list[str] | None,
+        typer.Option("--tool", help="显式发送给模型的工具 schema，可多次指定"),
+    ] = None,
+    disabled_tool_names: Annotated[
+        list[str] | None,
+        typer.Option("--disable-tool", help="从本次工具面中禁用的工具，可多次指定"),
+    ] = None,
+    allow_write_tools: Annotated[
+        bool,
+        typer.Option("--allow-write-tools", help="允许本次工具面暴露写入类工具"),
+    ] = False,
+    allow_execute_tools: Annotated[
+        bool,
+        typer.Option("--allow-execute-tools", help="允许本次工具面暴露执行类工具"),
+    ] = False,
+    allow_discovery_tools: Annotated[
+        bool,
+        typer.Option("--allow-discovery-tools", help="允许本次工具面暴露 discovery 工具"),
+    ] = False,
 ) -> None:
     """单次 Agent 运行。传入 --checkpoint-db 后支持跨进程恢复。"""
     from rag.agent.service import AgentRunResult
@@ -884,12 +904,28 @@ def agent_run(
         vector_collection_prefix=vector_collection_prefix,
     )
     effective_run_id = run_id or f"run_{id(facade):x}"
-    result = facade.run(
-        task,
-        files=input_files or [],
-        run_id=effective_run_id,
-        max_tokens_total=budget,
-    )
+    run_kwargs: dict[str, object] = {
+        "files": input_files or [],
+        "run_id": effective_run_id,
+        "max_tokens_total": budget,
+    }
+    if (
+        tool_names
+        or disabled_tool_names
+        or allow_write_tools
+        or allow_execute_tools
+        or allow_discovery_tools
+    ):
+        run_kwargs.update(
+            {
+                "tools": tool_names or [],
+                "disabled_tools": disabled_tool_names or [],
+                "allow_write_tools": allow_write_tools,
+                "allow_execute_tools": allow_execute_tools,
+                "allow_discovery_tools": allow_discovery_tools,
+            }
+        )
+    result = facade.run(task, **run_kwargs)
     _display_agent_result(result, verbose=verbose)
 
     raw_result = result.raw if isinstance(result.raw, AgentRunResult) else None

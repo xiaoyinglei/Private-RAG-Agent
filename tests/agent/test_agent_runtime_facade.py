@@ -90,6 +90,42 @@ def test_agent_facade_run_maps_public_request_to_internal_service(
     assert request.thread_id == "sdk-run"
     assert request.llm_budget_total == 1234
     assert request.input_files == ["README.md"]
+    assert request.tool_surface_request is None
+
+
+def test_agent_facade_run_passes_explicit_tool_surface_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requests: list[Any] = []
+
+    class _Service:
+        async def run(self, request: Any) -> AgentRunResult:
+            requests.append(request)
+            return AgentRunResult(
+                run_id=request.run_id,
+                thread_id=request.thread_id,
+                status="done",
+                final_answer="configured tools",
+            )
+
+    monkeypatch.setattr(runtime_builder, "build_agent_service", lambda *_args, **_kwargs: _Service())
+
+    Agent().run(
+        "Find AgentService in this repository.",
+        run_id="sdk-tools",
+        tools=["search_text", "read_file", "run_command"],
+        disabled_tools=["read_file"],
+        allow_execute_tools=True,
+    )
+
+    assert len(requests) == 1
+    surface = requests[0].tool_surface_request
+    assert surface is not None
+    assert surface.requested_tool_names == ["search_text", "read_file", "run_command"]
+    assert surface.disabled_tool_names == ["read_file"]
+    assert surface.allow_write_tools is False
+    assert surface.allow_execute_tools is True
+    assert surface.allow_discovery_tools is False
 
 
 def test_agent_facade_registers_knowledge_runner_lazily(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -302,6 +338,67 @@ def test_agent_run_cli_delegates_to_agent_facade(monkeypatch: pytest.MonkeyPatch
     ]
 
 
+def test_agent_run_cli_passes_explicit_tool_surface_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    class _Facade:
+        def __init__(self, **kwargs: object) -> None:
+            calls.append(("init", kwargs))
+
+        def run(self, task: str, **kwargs: object) -> AgentResult:
+            calls.append(("run", {"task": task, **kwargs}))
+            return AgentResult(
+                answer="cli tools",
+                status="done",
+                files=(),
+                tool_calls=(),
+                citations=(),
+                usage=AgentUsage(),
+                diagnostics=(),
+                run_id=str(kwargs["run_id"]),
+                thread_id=str(kwargs["run_id"]),
+                raw=None,
+            )
+
+    monkeypatch.setattr(agent_cli, "_create_agent_facade", lambda **kwargs: _Facade(**kwargs))
+
+    result = CliRunner().invoke(
+        agent_app,
+        [
+            "run",
+            "Find AgentService in this repository.",
+            "--run-id",
+            "cli-tools",
+            "--tool",
+            "search_text",
+            "--tool",
+            "read_file",
+            "--disable-tool",
+            "read_file",
+            "--allow-execute-tools",
+        ],
+        env={"COLUMNS": "240"},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert calls[1] == (
+        "run",
+        {
+            "task": "Find AgentService in this repository.",
+            "files": [],
+            "run_id": "cli-tools",
+            "max_tokens_total": None,
+            "tools": ["search_text", "read_file"],
+            "disabled_tools": ["read_file"],
+            "allow_write_tools": False,
+            "allow_execute_tools": True,
+            "allow_discovery_tools": False,
+        },
+    )
+
+
 def test_agent_run_help_matches_public_api_surface() -> None:
     result = CliRunner().invoke(agent_app, ["run", "--help"], env={"COLUMNS": "240"})
 
@@ -310,6 +407,8 @@ def test_agent_run_help_matches_public_api_surface() -> None:
     assert "--model" in output
     assert "--file" in output
     assert "--knowledge" in output
+    assert "--tool" in output
+    assert "--disable-tool" in output
     assert "--input-file" in output
     assert "--budget" not in output
     assert "--embedding-model" not in output

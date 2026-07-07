@@ -68,6 +68,21 @@ uv run agent run \
   --verbose
 ```
 
+`agent run` 不会根据任务文本自动暴露工具 schema。需要工具时，由入口显式传入本轮工具面：
+
+```bash
+uv run agent run \
+  "找到 AgentService 的定义文件" \
+  --tool search_text \
+  --tool list_files \
+  --tool read_file
+
+uv run agent run \
+  "运行 echo hello" \
+  --tool run_command \
+  --allow-execute-tools
+```
+
 分析本地文件：
 
 ```bash
@@ -86,6 +101,12 @@ agent = Agent(model="qwen3_8b_mlx_4bit")
 agent.switch_model("mimo_cloud")  # 切换当前 SDK session，不修改 configs/models.yaml
 result = agent.run("总结一下这个项目")
 print(result.answer)
+
+with_tools = agent.run(
+    "找到 AgentService 的定义文件",
+    tools=["search_text", "list_files", "read_file"],
+)
+print(with_tools.answer)
 ```
 
 只有维护知识库或做底层检索诊断时，才需要启动 embedding 服务并使用 `rag ingest/query`。日常问答仍然只调用 `agent`：
@@ -128,6 +149,7 @@ uv run agent run \
 
 ## News
 
+- 2026-07-07：`agent run` 和 `agent_runtime.Agent` 支持显式工具面配置；默认不再因为任务文本关键词暴露工具 schema，工具 schema 由入口结构化配置传入主路径。
 - 2026-07-02：新增 `agent_runtime.Agent` Python SDK facade；`agent run` 改为通过 facade 调用内部 `AgentService`；RAG 从默认自动挂载改为显式 `--knowledge`，并以 lazy knowledge provider 形式在首次工具调用时初始化。
 - 2026-06-30：Agent CLI 产品化清理：`agent run/chat/resume` 默认只展示 Agent 参数；当时的 RAG runtime 自动附加行为已在 2026-07-02 改为显式 `--knowledge`。
 - 2026-06-30：项目入口产品化：项目名改为 `agent-runtime`，新增顶层 `agent` 命令；`rag` CLI 只保留 ingest/query/delete/benchmark/service 等 RAG 子系统命令；删除旧 `analyze-task` 和 `RAGRuntime.analyze_task()` 残口。

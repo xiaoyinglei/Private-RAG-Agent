@@ -66,6 +66,11 @@ class Agent:
         files: list[str] | tuple[str, ...] | None = None,
         run_id: str | None = None,
         max_tokens_total: int | None = None,
+        tools: list[str] | tuple[str, ...] | None = None,
+        disabled_tools: list[str] | tuple[str, ...] | None = None,
+        allow_write_tools: bool = False,
+        allow_execute_tools: bool = False,
+        allow_discovery_tools: bool = False,
     ) -> AgentResult:
         return asyncio.run(
             self.arun(
@@ -73,6 +78,11 @@ class Agent:
                 files=files,
                 run_id=run_id,
                 max_tokens_total=max_tokens_total,
+                tools=tools,
+                disabled_tools=disabled_tools,
+                allow_write_tools=allow_write_tools,
+                allow_execute_tools=allow_execute_tools,
+                allow_discovery_tools=allow_discovery_tools,
             )
         )
 
@@ -83,11 +93,23 @@ class Agent:
         files: list[str] | tuple[str, ...] | None = None,
         run_id: str | None = None,
         max_tokens_total: int | None = None,
+        tools: list[str] | tuple[str, ...] | None = None,
+        disabled_tools: list[str] | tuple[str, ...] | None = None,
+        allow_write_tools: bool = False,
+        allow_execute_tools: bool = False,
+        allow_discovery_tools: bool = False,
     ) -> AgentResult:
         from rag.agent.service import AgentRunRequest
 
         service, provider = self._build_service()
         effective_run_id = run_id or f"run_{id(service):x}"
+        tool_surface_request = _build_tool_surface_request(
+            tools=tools,
+            disabled_tools=disabled_tools,
+            allow_write_tools=allow_write_tools,
+            allow_execute_tools=allow_execute_tools,
+            allow_discovery_tools=allow_discovery_tools,
+        )
         try:
             raw = await service.run(
                 AgentRunRequest(
@@ -96,6 +118,7 @@ class Agent:
                     thread_id=effective_run_id,
                     llm_budget_total=max_tokens_total,
                     input_files=list(files or ()),
+                    tool_surface_request=tool_surface_request,
                 )
             )
             return AgentResult.from_internal(
@@ -116,11 +139,23 @@ class Agent:
         files: list[str] | tuple[str, ...] | None = None,
         run_id: str | None = None,
         max_tokens_total: int | None = None,
+        tools: list[str] | tuple[str, ...] | None = None,
+        disabled_tools: list[str] | tuple[str, ...] | None = None,
+        allow_write_tools: bool = False,
+        allow_execute_tools: bool = False,
+        allow_discovery_tools: bool = False,
     ) -> AsyncIterator[Any]:
         from rag.agent.service import AgentRunRequest
 
         service, provider = self._build_service()
         effective_run_id = run_id or f"run_{id(service):x}"
+        tool_surface_request = _build_tool_surface_request(
+            tools=tools,
+            disabled_tools=disabled_tools,
+            allow_write_tools=allow_write_tools,
+            allow_execute_tools=allow_execute_tools,
+            allow_discovery_tools=allow_discovery_tools,
+        )
         try:
             request = AgentRunRequest(
                 task=task,
@@ -128,6 +163,7 @@ class Agent:
                 thread_id=effective_run_id,
                 llm_budget_total=max_tokens_total,
                 input_files=list(files or ()),
+                tool_surface_request=tool_surface_request,
             )
             async for event in service.run_streaming(request):
                 yield event
@@ -190,3 +226,31 @@ class Agent:
                 session_path=self.model_session_path,
             )
         return self._model_control_plane
+
+
+def _build_tool_surface_request(
+    *,
+    tools: list[str] | tuple[str, ...] | None,
+    disabled_tools: list[str] | tuple[str, ...] | None,
+    allow_write_tools: bool,
+    allow_execute_tools: bool,
+    allow_discovery_tools: bool,
+) -> Any | None:
+    if (
+        not tools
+        and not disabled_tools
+        and not allow_write_tools
+        and not allow_execute_tools
+        and not allow_discovery_tools
+    ):
+        return None
+
+    from rag.agent.tooling.surface import ToolSurfaceRequest
+
+    return ToolSurfaceRequest(
+        requested_tool_names=list(tools or ()),
+        disabled_tool_names=list(disabled_tools or ()),
+        allow_write_tools=allow_write_tools,
+        allow_execute_tools=allow_execute_tools,
+        allow_discovery_tools=allow_discovery_tools,
+    )

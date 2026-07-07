@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
@@ -18,8 +20,10 @@ from rag.agent.loop.state import LoopState, ModelTurnDraft
 from rag.agent.primitive_ops import PrimitiveOps, WriteFileOutput
 from rag.agent.runner.python_runner import LocalSubprocessPythonRunner
 from rag.agent.service import AgentRunRequest, AgentRunResult, AgentService
+from rag.agent.tooling import ToolSurfaceRequest
 from rag.agent.tools.llm_tools import LLMTextOutput
 from rag.agent.workspace import WorkspaceRuntime
+from rag.schema.llm import LLMProviderResult
 from rag.schema.query import RetrievalSignals
 from rag.schema.runtime import AccessPolicy
 
@@ -37,6 +41,109 @@ class _TextGenerator:
         del kwargs
         self.prompts.append(prompt)
         return "model-backed summary"
+
+
+class _NativeToolGenerator:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    def generate_with_tools(
+        self,
+        *,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        **kwargs: object,
+    ) -> object:
+        from types import SimpleNamespace
+
+        del kwargs
+        self.calls.append({"messages": messages, "tools": tools})
+        if len(self.calls) == 1:
+            message = SimpleNamespace(
+                content="",
+                tool_calls=[
+                    SimpleNamespace(
+                        id="call_echo",
+                        function=SimpleNamespace(
+                            name="run_command",
+                            arguments=(
+                                '{"command": "echo hello", '
+                                '"working_dir": ".", "timeout_seconds": 3}'
+                            ),
+                        ),
+                    )
+                ],
+            )
+            return LLMProviderResult(
+                value=SimpleNamespace(
+                    choices=[SimpleNamespace(finish_reason="tool_calls", message=message)]
+                )
+            )
+        return LLMProviderResult(
+            value=SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        finish_reason="stop",
+                        message=SimpleNamespace(content="hello", tool_calls=[]),
+                    )
+                ]
+            )
+        )
+
+
+class _NativeToolSequenceGenerator:
+    def __init__(
+        self,
+        *,
+        tool_name: str | None,
+        arguments: dict[str, Any] | None = None,
+        final_answer: str,
+    ) -> None:
+        self.tool_name = tool_name
+        self.arguments = arguments or {}
+        self.final_answer = final_answer
+        self.calls: list[dict[str, Any]] = []
+
+    def generate_with_tools(
+        self,
+        *,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        **kwargs: object,
+    ) -> object:
+        del kwargs
+        self.calls.append({"messages": messages, "tools": tools})
+        if len(self.calls) == 1 and self.tool_name is not None:
+            message = SimpleNamespace(
+                content="",
+                tool_calls=[
+                    SimpleNamespace(
+                        id=f"call_{self.tool_name}",
+                        function=SimpleNamespace(
+                            name=self.tool_name,
+                            arguments=json.dumps(self.arguments),
+                        ),
+                    )
+                ],
+            )
+            return LLMProviderResult(
+                value=SimpleNamespace(
+                    choices=[SimpleNamespace(finish_reason="tool_calls", message=message)]
+                )
+            )
+        return LLMProviderResult(
+            value=SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        finish_reason="stop",
+                        message=SimpleNamespace(
+                            content=self.final_answer,
+                            tool_calls=[],
+                        ),
+                    )
+                ]
+            )
+        )
 
 
 class _ResolvedFakeModel:
@@ -408,6 +515,240 @@ async def test_agent_service_injects_model_backed_llm_tool_runners() -> None:
         citation_ids=["cit1"],
     )
     assert "tool result context" in generator.prompts[0]
+
+
+@pytest.mark.anyio
+async def test_agent_service_explicit_tool_surface_uses_new_tooling_main_path() -> None:
+    generator = _NativeToolGenerator()
+    service = AgentService(
+        definition=AgentRuntimePolicy.test_factory(
+            agent_type="generic",
+            description="Generic",
+            system_prompt="Use only visible tools.",
+            allowed_tools=[],
+            max_iterations=3,
+        ),
+        tool_registry=create_builtin_tool_registry(runners={}),
+        model_registry=_FakeModelRegistry(generator),  # type: ignore[arg-type]
+    )
+
+    result = await service.run(
+        AgentRunRequest(
+            task="运行 echo hello",
+            run_id="svc-new-tooling",
+            thread_id="svc-new-tooling",
+            tool_surface_request=ToolSurfaceRequest(
+                requested_tool_names=["run_command"],
+                allow_execute_tools=True,
+            ),
+        )
+    )
+
+    assert result.status == "done"
+    assert result.final_answer == "hello"
+    assert [tool["function"]["name"] for tool in generator.calls[0]["tools"]] == [
+        "run_command"
+    ]
+    assert result.tool_results[0].status == "ok"
+    assert result.tool_results[0].output.data["stdout"].strip() == "hello"
+
+
+@pytest.mark.anyio
+async def test_agent_service_default_tool_surface_keeps_direct_qa_no_tools() -> None:
+    generator = _NativeToolSequenceGenerator(
+        tool_name=None,
+        final_answer="4",
+    )
+    service = AgentService(
+        definition=AgentRuntimePolicy.test_factory(
+            agent_type="generic",
+            description="Generic",
+            system_prompt="Use only visible tools.",
+            allowed_tools=[],
+            max_iterations=3,
+        ),
+        tool_registry=create_builtin_tool_registry(runners={}),
+        model_registry=_FakeModelRegistry(generator),  # type: ignore[arg-type]
+    )
+
+    result = await service.run(
+        AgentRunRequest(
+            task="2+2 等于几？直接回答数字。",
+            run_id="svc-default-no-tools",
+            thread_id="svc-default-no-tools",
+        )
+    )
+
+    assert result.status == "done"
+    assert result.final_answer == "4"
+    assert generator.calls[0]["tools"] == []
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "task",
+    [
+        "Find AgentService in this repository.",
+        "Read does-not-exist.txt and report the error code.",
+        "Run echo hello and answer with stdout.",
+    ],
+)
+async def test_agent_service_does_not_infer_tools_from_task_text(task: str) -> None:
+    generator = _NativeToolSequenceGenerator(
+        tool_name=None,
+        final_answer="no tools",
+    )
+    service = AgentService(
+        definition=AgentRuntimePolicy.test_factory(
+            agent_type="generic",
+            description="Generic",
+            system_prompt="Use only visible tools.",
+            allowed_tools=[],
+            max_iterations=3,
+        ),
+        tool_registry=create_builtin_tool_registry(runners={}),
+        model_registry=_FakeModelRegistry(generator),  # type: ignore[arg-type]
+    )
+
+    result = await service.run(
+        AgentRunRequest(
+            task=task,
+            run_id=f"svc-no-infer-{abs(hash(task))}",
+            thread_id=f"svc-no-infer-{abs(hash(task))}",
+            workspace_path=str(Path(__file__).parents[2]),
+        )
+    )
+
+    assert result.status == "done"
+    assert result.final_answer == "no tools"
+    assert generator.calls[0]["tools"] == []
+    assert result.tool_results == []
+
+
+@pytest.mark.anyio
+async def test_agent_service_structured_tool_surface_finds_agent_service_via_workspace() -> None:
+    generator = _NativeToolSequenceGenerator(
+        tool_name="search_text",
+        arguments={
+            "pattern": "class AgentService",
+            "path": "rag/agent/service.py",
+            "max_results": 1,
+        },
+        final_answer="Found AgentService in rag/agent/service.py",
+    )
+    service = AgentService(
+        definition=AgentRuntimePolicy.test_factory(
+            agent_type="generic",
+            description="Generic",
+            system_prompt="Use only visible tools.",
+            allowed_tools=[],
+            max_iterations=3,
+        ),
+        tool_registry=create_builtin_tool_registry(runners={}),
+        model_registry=_FakeModelRegistry(generator),  # type: ignore[arg-type]
+    )
+
+    result = await service.run(
+        AgentRunRequest(
+            task="Find AgentService in this repository.",
+            run_id="svc-default-find-agent-service",
+            thread_id="svc-default-find-agent-service",
+            workspace_path=str(Path(__file__).parents[2]),
+            tool_surface_request=ToolSurfaceRequest(
+                requested_tool_names=["search_text", "list_files", "read_file"],
+            ),
+        )
+    )
+
+    assert result.status == "done"
+    assert "AgentService" in (result.final_answer or "")
+    assert [tool["function"]["name"] for tool in generator.calls[0]["tools"]] == [
+        "search_text",
+        "list_files",
+        "read_file",
+    ]
+    assert result.tool_results[0].status == "ok"
+    assert result.tool_results[0].output.data["total_matches"] >= 1
+
+
+@pytest.mark.anyio
+async def test_agent_service_structured_tool_surface_reads_missing_file_as_tool_error() -> None:
+    generator = _NativeToolSequenceGenerator(
+        tool_name="read_file",
+        arguments={"path": "does-not-exist.txt"},
+        final_answer="file_not_found",
+    )
+    service = AgentService(
+        definition=AgentRuntimePolicy.test_factory(
+            agent_type="generic",
+            description="Generic",
+            system_prompt="Use only visible tools.",
+            allowed_tools=[],
+            max_iterations=3,
+        ),
+        tool_registry=create_builtin_tool_registry(runners={}),
+        model_registry=_FakeModelRegistry(generator),  # type: ignore[arg-type]
+    )
+
+    result = await service.run(
+        AgentRunRequest(
+            task="Read does-not-exist.txt and report the error code.",
+            run_id="svc-default-missing-file",
+            thread_id="svc-default-missing-file",
+            tool_surface_request=ToolSurfaceRequest(
+                requested_tool_names=["list_files", "read_file"],
+            ),
+        )
+    )
+
+    assert result.status == "done"
+    assert result.final_answer == "file_not_found"
+    assert [tool["function"]["name"] for tool in generator.calls[0]["tools"]] == [
+        "list_files",
+        "read_file",
+    ]
+    assert result.tool_results[0].status == "error"
+    assert result.tool_results[0].error.code == "file_not_found"
+
+
+@pytest.mark.anyio
+async def test_agent_service_structured_tool_surface_runs_echo_command() -> None:
+    generator = _NativeToolSequenceGenerator(
+        tool_name="run_command",
+        arguments={"command": "echo hello", "working_dir": ".", "timeout_seconds": 3},
+        final_answer="hello",
+    )
+    service = AgentService(
+        definition=AgentRuntimePolicy.test_factory(
+            agent_type="generic",
+            description="Generic",
+            system_prompt="Use only visible tools.",
+            allowed_tools=[],
+            max_iterations=3,
+        ),
+        tool_registry=create_builtin_tool_registry(runners={}),
+        model_registry=_FakeModelRegistry(generator),  # type: ignore[arg-type]
+    )
+
+    result = await service.run(
+        AgentRunRequest(
+            task="Run echo hello and answer with stdout.",
+            run_id="svc-default-echo",
+            thread_id="svc-default-echo",
+            tool_surface_request=ToolSurfaceRequest(
+                requested_tool_names=["run_command"],
+                allow_execute_tools=True,
+            ),
+        )
+    )
+
+    assert result.status == "done"
+    assert result.final_answer == "hello"
+    assert [tool["function"]["name"] for tool in generator.calls[0]["tools"]] == [
+        "run_command"
+    ]
+    assert result.tool_results[0].status == "ok"
+    assert result.tool_results[0].output.data["stdout"].strip() == "hello"
 
 
 @pytest.mark.anyio

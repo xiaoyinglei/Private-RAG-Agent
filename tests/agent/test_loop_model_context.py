@@ -8,6 +8,7 @@ import pytest
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from pydantic import BaseModel
 
+from rag.agent.capabilities.catalog import DeferredToolStore, ToolCatalog
 from rag.agent.core.context import AgentRunConfig
 from rag.agent.core.definition import AgentRuntimePolicy
 from rag.agent.core.human_input import HumanInputRequest, ToolCallSummary
@@ -41,6 +42,13 @@ from rag.agent.memory.models import (
 )
 from rag.agent.planning import PlanStep, PlanTracker, PlanUpdate
 from rag.agent.tools.spec import ToolError, ToolPermissions, ToolResult, ToolSpec
+from rag.agent.tooling import (
+    ToolDomain as NewToolDomain,
+    ToolRegistry as NewToolRegistry,
+    ToolRisk as NewToolRisk,
+    ToolSpec as NewToolSpec,
+    ToolSurfaceRequest,
+)
 from rag.assembly.tokenizer import TokenAccountingService, TokenizerContract
 from rag.schema.llm import LLMCallStage, LLMProviderResult, LLMStageBudget
 from rag.schema.runtime import AccessPolicy
@@ -146,6 +154,10 @@ def _state() -> LoopState:
         task="Explain the policy with sources.",
         run_config=_run_config(),
     )
+
+
+class _LegacyToolOutput(BaseModel):
+    value: str
 
 
 def _assembler() -> AgentLLMContextAssembler:
@@ -322,6 +334,201 @@ async def test_loop_provider_records_native_prompt_and_tool_schema_bytes() -> No
     call = generator.calls[0]
     assert state["latency_profile"].prompt_bytes == _json_bytes(call["messages"])
     assert state["latency_profile"].tool_schema_bytes == _json_bytes(call["tools"])
+
+
+@pytest.mark.anyio
+async def test_loop_provider_legacy_visibility_preserves_catalog_for_literal_reply_tasks() -> None:
+    generator = _RecordingToolGenerator()
+    state = _state()
+    state["task"] = "Answer exactly with the single word: OK"
+    state["iteration"] = 1
+    definition = AgentRuntimePolicy.test_factory(
+        agent_type="generic",
+        description="Generic",
+        system_prompt="Use tools when needed.",
+        allowed_tools=["tool_search", "activate_tools"],
+    )
+    tool_specs = [
+        ToolSpec(
+            name="tool_search",
+            description="Discover tools.",
+            input_model=_NativeToolInput,
+            output_model=_ToolOutput,
+            error_model=ToolError,
+            permissions=ToolPermissions(),
+            timeout_seconds=5,
+        ),
+        ToolSpec(
+            name="activate_tools",
+            description="Activate discovered tools.",
+            input_model=_NativeToolInput,
+            output_model=_ToolOutput,
+            error_model=ToolError,
+            permissions=ToolPermissions(),
+            timeout_seconds=5,
+        ),
+    ]
+    provider = LLMLoopModelTurnProvider(
+        generator,
+        tool_specs=tool_specs,
+        catalog=ToolCatalog(),
+        deferred_store=DeferredToolStore(max_active=8),
+    )
+
+    await provider.next_turn(
+        state,
+        definition=definition,
+        budget_remaining=5_000,
+    )
+
+    assert {tool["function"]["name"] for tool in generator.calls[0]["tools"]} == {
+        "tool_search",
+        "activate_tools",
+    }
+
+
+@pytest.mark.anyio
+async def test_loop_provider_keeps_tools_for_tool_required_tasks() -> None:
+    generator = _RecordingToolGenerator()
+    state = _state()
+    state["task"] = "Use run_python to execute code and report stdout."
+    definition = AgentRuntimePolicy.test_factory(
+        agent_type="generic",
+        description="Generic",
+        system_prompt="Use tools when needed.",
+        allowed_tools=["tool_search", "activate_tools"],
+    )
+    provider = LLMLoopModelTurnProvider(
+        generator,
+        tool_specs=[
+            ToolSpec(
+                name="tool_search",
+                description="Discover tools.",
+                input_model=_NativeToolInput,
+                output_model=_ToolOutput,
+                error_model=ToolError,
+                permissions=ToolPermissions(),
+                timeout_seconds=5,
+            )
+        ],
+        catalog=ToolCatalog(),
+        deferred_store=DeferredToolStore(max_active=8),
+    )
+
+    await provider.next_turn(
+        state,
+        definition=definition,
+        budget_remaining=5_000,
+    )
+
+    assert [tool["function"]["name"] for tool in generator.calls[0]["tools"]] == ["tool_search"]
+
+
+@pytest.mark.anyio
+async def test_loop_provider_new_tooling_uses_explicit_empty_surface() -> None:
+    generator = _RecordingToolGenerator()
+    state = _state()
+    state["task"] = "Answer exactly with the single word: OK"
+    registry = NewToolRegistry()
+    registry.register(
+        NewToolSpec(
+            name="read_file",
+            description="Read a workspace file.",
+            input_schema={
+                "type": "object",
+                "properties": {"path": {"type": "string"}},
+                "required": ["path"],
+            },
+            domain=NewToolDomain.WORKSPACE,
+            risk=NewToolRisk.READ,
+            timeout_seconds=3,
+        ),
+        lambda args: args,
+    )
+    provider = LLMLoopModelTurnProvider(
+        generator,
+        tooling_registry=registry,
+        tool_surface_request=ToolSurfaceRequest(force_empty=True),
+    )
+
+    await provider.next_turn(
+        state,
+        definition=_definition(),
+        budget_remaining=5_000,
+    )
+
+    assert generator.calls[0]["tools"] == []
+    assert state["latency_profile"].tool_schema_bytes == 0
+    assert state["tooling_sent_schema_names"] == []
+
+
+@pytest.mark.anyio
+async def test_loop_provider_new_tooling_surfaces_only_requested_schemas() -> None:
+    generator = _RecordingToolGenerator()
+    state = _state()
+    registry = NewToolRegistry()
+    for name in ("search_text", "read_file", "write_file"):
+        registry.register(
+            NewToolSpec(
+                name=name,
+                description=f"{name} tool.",
+                input_schema={"type": "object", "properties": {}},
+                domain=NewToolDomain.WORKSPACE,
+                risk=NewToolRisk.WRITE if name == "write_file" else NewToolRisk.READ,
+                timeout_seconds=3,
+            ),
+            lambda args: args,
+        )
+    provider = LLMLoopModelTurnProvider(
+        generator,
+        tooling_registry=registry,
+        tool_surface_request=ToolSurfaceRequest(
+            requested_tool_names=["search_text", "read_file", "write_file"],
+        ),
+    )
+
+    await provider.next_turn(
+        state,
+        definition=_definition(),
+        budget_remaining=5_000,
+    )
+
+    assert [tool["function"]["name"] for tool in generator.calls[0]["tools"]] == [
+        "search_text",
+        "read_file",
+    ]
+    assert state["tooling_sent_schema_names"] == ["search_text", "read_file"]
+
+
+@pytest.mark.anyio
+async def test_loop_provider_legacy_visibility_does_not_classify_task_text() -> None:
+    generator = _RecordingToolGenerator()
+    state = _state()
+    state["task"] = "Answer exactly with the single word: OK"
+    provider = LLMLoopModelTurnProvider(
+        generator,
+        tool_specs=[
+            ToolSpec(
+                name="read_file",
+                description="Read a workspace file.",
+                input_model=_NativeToolInput,
+                output_model=_LegacyToolOutput,
+                error_model=_LegacyToolOutput,
+                permissions=ToolPermissions(read_fs=True),
+                timeout_seconds=3,
+            )
+        ],
+    )
+
+    await provider.next_turn(
+        state,
+        definition=_definition(),
+        budget_remaining=5_000,
+    )
+
+    assert [tool["function"]["name"] for tool in generator.calls[0]["tools"]] == [
+        "read_file"
+    ]
 
 
 def test_loop_context_keeps_approval_and_feedback_without_goal_fields() -> None:

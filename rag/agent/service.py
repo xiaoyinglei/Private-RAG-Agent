@@ -70,6 +70,13 @@ from rag.agent.memory.models import MemoryPolicy
 from rag.agent.memory.persistent import PersistentMemoryStore
 from rag.agent.memory.persistent.runtime import PersistentMemoryRuntime
 from rag.agent.memory.store import WorkspaceMemoryStore
+from rag.agent.tooling import (
+    ToolExecutor as NewToolExecutor,
+    ToolExecutorLoopAdapter,
+    ToolRegistry as NewToolRegistry,
+    ToolSurfaceRequest,
+    install_minimal_workspace_tools,
+)
 from rag.agent.tools.catalog_assembly import build_tool_catalog
 from rag.agent.tools.mcp_adapter import MCPToolRegistry
 from rag.agent.tools.registry import ToolRegistry, ToolRunner
@@ -103,6 +110,7 @@ class AgentRunRequest(BaseModel):
     workspace_path: str | None = None
     memory_policy: MemoryPolicy | None = None
     goal_spec: GoalSpec | None = None
+    tool_surface_request: ToolSurfaceRequest | None = None
 
     def to_run_config(self, definition: AgentRuntimePolicy) -> AgentRunConfig:
         run_id = self.run_id or f"run_{uuid4().hex[:12]}"
@@ -239,6 +247,7 @@ class _RunContext:
     workspace_tools: list[Any]  # list[BaseTool]
     file_tools_to_activate: set[str]
     runtime_registry: ToolRegistry
+    tooling_registry: NewToolRegistry
     memory_store: WorkspaceMemoryStore
     persistent_store: PersistentMemoryStore
 
@@ -263,6 +272,11 @@ def _profile_with_run_timings(
             "total_ms": total_ms,
         }
     )
+
+
+def _default_tool_surface_request() -> ToolSurfaceRequest:
+    """Default service surface: no model-visible tools without explicit config."""
+    return ToolSurfaceRequest(force_empty=True)
 
 
 class _TaskChildRunner:
@@ -462,6 +476,7 @@ class AgentService:
             goal_spec=request.goal_spec,
             input_files=request.input_files,
             workspace_path=request.workspace_path,
+            tool_surface_request=request.tool_surface_request,
         )
 
     def _prepare_run(
@@ -486,6 +501,12 @@ class AgentService:
 
         manifest = build_file_manifest(workspace)
         workspace_tools = create_workspace_tools(workspace)
+        tooling_registry = NewToolRegistry()
+        install_minimal_workspace_tools(
+            tooling_registry,
+            workspace,
+            allowed_commands={"echo"},
+        )
         memory_store = WorkspaceMemoryStore(
             workspace=workspace,
             policy=run_config.memory_policy,
@@ -511,6 +532,7 @@ class AgentService:
             workspace_tools=workspace_tools,
             file_tools_to_activate=file_tools_to_activate,
             runtime_registry=runtime_registry,
+            tooling_registry=tooling_registry,
             memory_store=memory_store,
             persistent_store=PersistentMemoryStore(workspace),
         )
@@ -527,6 +549,7 @@ class AgentService:
         goal_spec: GoalSpec | None = None,
         input_files: list[str] | None = None,
         workspace_path: str | None = None,
+        tool_surface_request: ToolSurfaceRequest | None = None,
     ) -> AgentRunResult:
         run_started_at = time.perf_counter()
         prepare_started_at = run_started_at
@@ -553,6 +576,17 @@ class AgentService:
             ctx.persistent_store,
             task=ctx.task,
         )
+        has_pending_tool_calls = bool(pending_tool_calls)
+        uses_service_model_provider = self._model_turn_provider is None
+        effective_tool_surface_request = (
+            tool_surface_request if uses_service_model_provider else None
+        )
+        if (
+            effective_tool_surface_request is None
+            and uses_service_model_provider
+            and not has_pending_tool_calls
+        ):
+            effective_tool_surface_request = _default_tool_surface_request()
 
         checkpoint_store = LangGraphCheckpointStore(
             self._checkpointer,
@@ -568,6 +602,8 @@ class AgentService:
                 state=state,
                 auto_activate_tools=ctx.file_tools_to_activate,
                 scratch_dir=ctx.workspace.root / "scratch",
+                tooling_registry=ctx.tooling_registry,
+                tool_surface_request=effective_tool_surface_request,
             )
             result_state = await loop.run(state)
         except Exception:
@@ -648,6 +684,16 @@ class AgentService:
             ctx.persistent_store,
             task=ctx.task,
         )
+        uses_service_model_provider = self._model_turn_provider is None
+        effective_tool_surface_request = (
+            request.tool_surface_request if uses_service_model_provider else None
+        )
+        if (
+            effective_tool_surface_request is None
+            and uses_service_model_provider
+            and not request.pending_tool_calls
+        ):
+            effective_tool_surface_request = _default_tool_surface_request()
 
         checkpoint_store = LangGraphCheckpointStore(
             self._checkpointer,
@@ -662,6 +708,8 @@ class AgentService:
             state=state,
             auto_activate_tools=ctx.file_tools_to_activate,
             scratch_dir=ctx.workspace.root / "scratch",
+            tooling_registry=ctx.tooling_registry,
+            tool_surface_request=effective_tool_surface_request,
         )
 
         try:
@@ -718,6 +766,8 @@ class AgentService:
         state: LoopState | None = None,
         auto_activate_tools: set[str] | None = None,
         scratch_dir: Path | None = None,
+        tooling_registry: NewToolRegistry | None = None,
+        tool_surface_request: ToolSurfaceRequest | None = None,
     ) -> AgentLoop:
         # Create and bind DeferredToolStore BEFORE resolving provider
         # (provider needs store for tool filtering)
@@ -745,17 +795,27 @@ class AgentService:
                     store.activate(tool_name, iteration=0, source_query="__file_manifest_auto__")
                 except (KeyError, RuntimeError):
                     pass  # Already active or not in allowed_tools
-        provider = self._resolve_model_turn_provider(state, tool_registry=runtime_registry)
+        provider = self._resolve_model_turn_provider(
+            state,
+            tool_registry=runtime_registry,
+            tooling_registry=tooling_registry,
+            tool_surface_request=tool_surface_request,
+        )
         output_finalizer = self._resolve_output_finalizer(state)
+        tool_runner = (
+            ToolExecutorLoopAdapter(NewToolExecutor(tooling_registry))
+            if tooling_registry is not None and tool_surface_request is not None
+            else ToolExecutionService(
+                tool_registry=runtime_registry,
+                record_writer=checkpoint_store,
+                stream_sink=self._stream_sink,
+            )
+        )
         return AgentLoop(
             definition=self._policy,
             model_provider=provider,
             context_manager=LoopContextCompactor(store=memory_store),
-            tool_runner=ToolExecutionService(
-                tool_registry=runtime_registry,
-                record_writer=checkpoint_store,
-                stream_sink=self._stream_sink,
-            ),
+            tool_runner=tool_runner,
             checkpoint_store=checkpoint_store,
             stop_hook_runner=StopHookRunner(
                 hooks=build_stop_hooks(
@@ -777,6 +837,8 @@ class AgentService:
         state: LoopState | None,
         *,
         tool_registry: ToolRegistry | None = None,
+        tooling_registry: NewToolRegistry | None = None,
+        tool_surface_request: ToolSurfaceRequest | None = None,
     ) -> ModelTurnProvider:
         return ModelProviderResolver(
             model_turn_provider=self._model_turn_provider,
@@ -791,7 +853,12 @@ class AgentService:
                 if self._skill_runtime is not None
                 else None
             ),
-        ).resolve(state, tool_registry=tool_registry)
+        ).resolve(
+            state,
+            tool_registry=tool_registry,
+            tooling_registry=tooling_registry,
+            tool_surface_request=tool_surface_request,
+        )
 
     def _resolve_output_finalizer(
         self,
