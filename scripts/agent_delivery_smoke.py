@@ -36,6 +36,10 @@ class SmokeResult:
     tools: tuple[str, ...]
     workspace_path: str | None
     error: str = ""
+    stop_reason: str | None = None
+    diagnostics: tuple[str, ...] = ()
+    schema_bytes: int | None = None
+    tool_errors: tuple[str, ...] = ()
 
 
 def build_cases() -> tuple[SmokeCase, ...]:
@@ -162,6 +166,14 @@ async def run_case(case: SmokeCase, *, model: str) -> SmokeResult:
             tools=tools,
             workspace_path=result.workspace_path,
             error=error,
+            stop_reason=result.stop_reason,
+            diagnostics=_diagnostic_lines(result.runtime_diagnostics),
+            schema_bytes=(
+                result.latency_profile.tool_schema_bytes
+                if result.latency_profile is not None
+                else None
+            ),
+            tool_errors=_tool_error_lines(result.tool_results),
         )
     except Exception as exc:
         return SmokeResult(
@@ -216,6 +228,52 @@ def _validate_result(
     return ""
 
 
+def _diagnostic_lines(diagnostics: object) -> tuple[str, ...]:
+    lines: list[str] = []
+    for diagnostic in diagnostics or ():
+        code = str(getattr(diagnostic, "code", "diagnostic"))
+        message = str(getattr(diagnostic, "message", ""))
+        lines.append(f"{code}: {message}" if message else code)
+    return tuple(lines)
+
+
+def _tool_error_lines(tool_results: object) -> tuple[str, ...]:
+    lines: list[str] = []
+    for result in tool_results or ():
+        error = getattr(result, "error", None)
+        if error is None:
+            continue
+        tool_name = str(getattr(result, "tool_name", "tool"))
+        code = str(getattr(error, "code", "tool_error"))
+        message = str(getattr(error, "message", ""))
+        lines.append(f"{tool_name}:{code}: {message}" if message else f"{tool_name}:{code}")
+    return tuple(lines)
+
+
+def _format_result(result: SmokeResult, *, verbose: bool) -> list[str]:
+    marker = "PASS" if result.passed else "FAIL"
+    tools = ",".join(result.tools) or "-"
+    lines = [f"{marker} {result.name} status={result.status} tools={tools}"]
+    if result.error:
+        lines.append(f"  error: {result.error}")
+    if result.answer:
+        lines.append(f"  answer: {result.answer}")
+    if result.workspace_path:
+        lines.append(f"  workspace: {result.workspace_path}")
+
+    show_diagnostics = verbose or not result.passed
+    if show_diagnostics and result.stop_reason:
+        lines.append(f"  stop_reason: {result.stop_reason}")
+    if show_diagnostics and result.schema_bytes is not None:
+        lines.append(f"  schema_bytes: {result.schema_bytes}")
+    if show_diagnostics:
+        for diagnostic in result.diagnostics:
+            lines.append(f"  diagnostic: {diagnostic}")
+        for tool_error in result.tool_errors:
+            lines.append(f"  tool_error: {tool_error}")
+    return lines
+
+
 async def run_matrix(*, model: str, only: set[str] | None = None) -> list[SmokeResult]:
     cases = [case for case in build_cases() if only is None or case.name in only]
     return [await run_case(case, model=model) for case in cases]
@@ -230,19 +288,17 @@ def main() -> int:
         dest="cases",
         help="Run only this case. Can be provided multiple times.",
     )
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Print stop reasons, request schema size, diagnostics, and tool errors.",
+    )
     args = parser.parse_args()
 
     results = asyncio.run(run_matrix(model=args.model, only=set(args.cases) if args.cases else None))
     for result in results:
-        marker = "PASS" if result.passed else "FAIL"
-        tools = ",".join(result.tools) or "-"
-        print(f"{marker} {result.name} status={result.status} tools={tools}")
-        if result.error:
-            print(f"  error: {result.error}")
-        if result.answer:
-            print(f"  answer: {result.answer}")
-        if result.workspace_path:
-            print(f"  workspace: {result.workspace_path}")
+        for line in _format_result(result, verbose=args.verbose):
+            print(line)
     return 0 if all(result.passed for result in results) else 1
 
 

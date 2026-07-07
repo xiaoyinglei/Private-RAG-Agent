@@ -80,6 +80,32 @@ def test_delivery_smoke_answer_contains_validation_is_case_insensitive() -> None
     )
 
 
+def test_delivery_smoke_verbose_output_includes_failure_diagnostics() -> None:
+    module = _load_smoke_module()
+    result = module.SmokeResult(
+        name="find_agent_service",
+        passed=False,
+        status="failed",
+        answer=None,
+        tools=("search_text", "read_file"),
+        workspace_path="/tmp/workspace",
+        error="expected status done, got failed",
+        stop_reason="model_provider_failed",
+        diagnostics=("model_provider_failed: Error code: 413",),
+        schema_bytes=14184,
+        tool_errors=("read_file:file_not_found: missing.py",),
+    )
+
+    lines = module._format_result(result, verbose=True)
+
+    assert "FAIL find_agent_service status=failed tools=search_text,read_file" in lines
+    assert "  error: expected status done, got failed" in lines
+    assert "  stop_reason: model_provider_failed" in lines
+    assert "  schema_bytes: 14184" in lines
+    assert "  diagnostic: model_provider_failed: Error code: 413" in lines
+    assert "  tool_error: read_file:file_not_found: missing.py" in lines
+
+
 class _SmokeFakeModelRegistry:
     default_model = "fake"
     fallback_model = "fake"

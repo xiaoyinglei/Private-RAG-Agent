@@ -463,6 +463,52 @@ async def test_loop_provider_new_tooling_uses_explicit_empty_surface() -> None:
 
 
 @pytest.mark.anyio
+async def test_loop_provider_new_tooling_does_not_call_legacy_visibility_resolver(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from rag.agent.core import llm_providers
+
+    def fail_legacy_visibility(*args: object, **kwargs: object) -> object:
+        del args, kwargs
+        raise AssertionError("new tooling path must not call resolve_visible_tools")
+
+    monkeypatch.setattr(llm_providers, "resolve_visible_tools", fail_legacy_visibility)
+    generator = _RecordingToolGenerator()
+    state = _state()
+    registry = NewToolRegistry()
+    registry.register(
+        NewToolSpec(
+            name="read_file",
+            description="Read a workspace file.",
+            input_schema={
+                "type": "object",
+                "properties": {"path": {"type": "string"}},
+                "required": ["path"],
+            },
+            domain=NewToolDomain.WORKSPACE,
+            risk=NewToolRisk.READ,
+            timeout_seconds=3,
+        ),
+        lambda args: args,
+    )
+    provider = LLMLoopModelTurnProvider(
+        generator,
+        tooling_registry=registry,
+        tool_surface_request=ToolSurfaceRequest(requested_tool_names=["read_file"]),
+    )
+
+    await provider.next_turn(
+        state,
+        definition=_definition(),
+        budget_remaining=5_000,
+    )
+
+    assert [tool["function"]["name"] for tool in generator.calls[0]["tools"]] == [
+        "read_file"
+    ]
+
+
+@pytest.mark.anyio
 async def test_loop_provider_new_tooling_surfaces_only_requested_schemas() -> None:
     generator = _RecordingToolGenerator()
     state = _state()

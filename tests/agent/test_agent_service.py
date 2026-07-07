@@ -554,6 +554,51 @@ async def test_agent_service_explicit_tool_surface_uses_new_tooling_main_path() 
 
 
 @pytest.mark.anyio
+async def test_agent_service_new_tooling_path_does_not_call_legacy_visibility_resolver(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from rag.agent.core import llm_providers
+
+    def fail_legacy_visibility(*args: object, **kwargs: object) -> object:
+        del args, kwargs
+        raise AssertionError("new tooling service path must not call resolve_visible_tools")
+
+    monkeypatch.setattr(llm_providers, "resolve_visible_tools", fail_legacy_visibility)
+    generator = _NativeToolSequenceGenerator(
+        tool_name="read_file",
+        arguments={"path": "does-not-exist.txt"},
+        final_answer="file_not_found",
+    )
+    service = AgentService(
+        definition=AgentRuntimePolicy.test_factory(
+            agent_type="generic",
+            description="Generic",
+            system_prompt="Use only visible tools.",
+            allowed_tools=[],
+            max_iterations=3,
+        ),
+        tool_registry=create_builtin_tool_registry(runners={}),
+        model_registry=_FakeModelRegistry(generator),  # type: ignore[arg-type]
+    )
+
+    result = await service.run(
+        AgentRunRequest(
+            task="Read does-not-exist.txt and report the error code.",
+            run_id="svc-new-tooling-no-legacy-visibility",
+            thread_id="svc-new-tooling-no-legacy-visibility",
+            tool_surface_request=ToolSurfaceRequest(
+                requested_tool_names=["read_file"],
+            ),
+        )
+    )
+
+    assert result.status == "done"
+    assert [tool["function"]["name"] for tool in generator.calls[0]["tools"]] == [
+        "read_file"
+    ]
+
+
+@pytest.mark.anyio
 async def test_agent_service_default_tool_surface_keeps_direct_qa_no_tools() -> None:
     generator = _NativeToolSequenceGenerator(
         tool_name=None,
