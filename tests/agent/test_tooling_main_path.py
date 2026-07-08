@@ -564,6 +564,10 @@ def test_loop_adapter_executes_through_new_executor_and_legacy_result_shape() ->
     registry = ToolRegistry()
     registry.register(_read_spec(), _runner)
     adapter = ToolExecutorLoopAdapter(ToolExecutor(registry))
+    state: dict[str, Any] = {
+        "tooling_sent_schema_names": ["read_file"],
+        "runtime_diagnostics": [],
+    }
     call = ToolCallPlan(
         tool_call_id="call_1",
         tool_name="read_file",
@@ -577,7 +581,7 @@ def test_loop_adapter_executes_through_new_executor_and_legacy_result_shape() ->
                 run_config=_run_config(),
                 allowed_tools=frozenset(),
             ),
-            state={"tooling_sent_schema_names": ["read_file"]},
+            state=state,
             definition=None,
         )
     )
@@ -587,6 +591,19 @@ def test_loop_adapter_executes_through_new_executor_and_legacy_result_shape() ->
     assert legacy.status == "ok"
     assert legacy.output.content == "read README.md"
     assert legacy.output.data["path"] == "README.md"
+    trace_diagnostic = state["runtime_diagnostics"][0]
+    assert trace_diagnostic.code == "tool_execution_trace"
+    assert trace_diagnostic.component == "tool_execution:call_1"
+    assert trace_diagnostic.degraded is False
+    assert trace_diagnostic.severity == "warning"
+    assert "tool=read_file" in trace_diagnostic.message
+    assert "ok=true" in trace_diagnostic.message
+    assert "error_code=-" in trace_diagnostic.message
+    assert "truncated=false" in trace_diagnostic.message
+    assert "output_size_bytes=" in trace_diagnostic.message
+    assert "latency_ms=" in trace_diagnostic.message
+    assert "can_use_tool_decision=allow" in trace_diagnostic.message
+    assert "can_use_tool_reason=read tools are allowed" in trace_diagnostic.message
 
 
 def test_loop_adapter_maps_schema_not_sent_to_recoverable_legacy_error() -> None:

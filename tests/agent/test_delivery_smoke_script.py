@@ -259,3 +259,26 @@ async def test_delivery_smoke_cases_run_against_agent_service_with_fake_model() 
             ]
         else:
             assert generator.calls[0]["tools"] == []
+        diagnostics = module._diagnostic_lines(result.runtime_diagnostics)
+        if case.expected_tools:
+            assert any(
+                line.startswith(
+                    f"tool_execution_trace: tool={case.expected_tools[0]} "
+                )
+                for line in diagnostics
+            )
+            smoke_result = module.SmokeResult(
+                name=case.name,
+                passed=True,
+                status=result.status,
+                answer=result.final_answer,
+                tools=tools,
+                workspace_path=result.workspace_path,
+                diagnostics=diagnostics,
+            )
+            assert any(
+                line.startswith(
+                    f"  diagnostic: tool_execution_trace: tool={case.expected_tools[0]} "
+                )
+                for line in module._format_result(smoke_result, verbose=True)
+            )

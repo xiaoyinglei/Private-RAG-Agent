@@ -551,6 +551,17 @@ async def test_agent_service_explicit_tool_surface_uses_new_tooling_main_path() 
     ]
     assert result.tool_results[0].status == "ok"
     assert result.tool_results[0].output.data["stdout"].strip() == "hello"
+    trace_diagnostics = [
+        diagnostic
+        for diagnostic in result.runtime_diagnostics
+        if diagnostic.code == "tool_execution_trace"
+    ]
+    assert len(trace_diagnostics) == 1
+    assert trace_diagnostics[0].component == "tool_execution:call_echo"
+    assert "tool=run_command" in trace_diagnostics[0].message
+    assert "ok=true" in trace_diagnostics[0].message
+    assert "error_code=-" in trace_diagnostics[0].message
+    assert "can_use_tool_decision=allow" in trace_diagnostics[0].message
 
 
 @pytest.mark.anyio

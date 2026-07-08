@@ -222,7 +222,9 @@ class ToolExecutorLoopAdapter:
                 ),
                 sent_schema_names=sent_schema_names,
             )
-            legacy_results.append(_to_legacy_result(result, self._last_latency_ms()))
+            trace = self._executor.traces[-1]
+            _append_trace_diagnostic(state, trace)
+            legacy_results.append(_to_legacy_result(result, trace.latency_ms))
 
         return ToolBatchResult(
             status="completed",
@@ -232,12 +234,6 @@ class ToolExecutorLoopAdapter:
             run_config=request.run_config,
             record_persistence="volatile",
         )
-
-    def _last_latency_ms(self) -> float:
-        if not self._executor.traces:
-            return 0.0
-        return self._executor.traces[-1].latency_ms
-
 
 class ToolingAdapterOutput(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -260,6 +256,63 @@ def _state_sent_schema_names(state: Any) -> list[str]:
     if not isinstance(raw, list):
         return []
     return [str(name) for name in raw]
+
+
+def _append_trace_diagnostic(state: Any, trace: ToolExecutionTrace) -> None:
+    from rag.agent.core.runtime_diagnostics import merge_runtime_diagnostics
+
+    diagnostic = _trace_to_runtime_diagnostic(trace)
+    if isinstance(state, dict):
+        state["runtime_diagnostics"] = merge_runtime_diagnostics(
+            state.get("runtime_diagnostics", []),
+            [diagnostic],
+        )
+        return
+
+    state.runtime_diagnostics = merge_runtime_diagnostics(
+        getattr(state, "runtime_diagnostics", []),
+        [diagnostic],
+    )
+
+
+def _trace_to_runtime_diagnostic(trace: ToolExecutionTrace) -> Any:
+    from rag.agent.core.runtime_diagnostics import RuntimeDiagnostic
+
+    message = _compact_trace_value(
+        " ".join(
+            (
+                f"tool={_compact_trace_value(trace.tool_name, limit=80)}",
+                f"tool_call_id={_compact_trace_value(trace.tool_call_id, limit=80)}",
+                f"ok={_trace_bool(trace.ok)}",
+                f"error_code={trace.error_code or '-'}",
+                f"truncated={_trace_bool(trace.truncated)}",
+                f"output_size_bytes={trace.output_size_bytes}",
+                f"latency_ms={trace.latency_ms:.2f}",
+                f"can_use_tool_decision={trace.can_use_tool_decision or '-'}",
+                f"can_use_tool_reason={_compact_trace_value(trace.can_use_tool_reason or '-', limit=160)}",
+            )
+        ),
+        limit=500,
+    )
+    return RuntimeDiagnostic(
+        code="tool_execution_trace",
+        component=f"tool_execution:{_compact_trace_value(trace.tool_call_id, limit=105)}",
+        message=message,
+        severity="warning" if trace.ok else "error",
+        degraded=not trace.ok,
+        error_type=None if trace.error_code is None else _compact_trace_value(trace.error_code, limit=120),
+    )
+
+
+def _trace_bool(value: bool) -> str:
+    return "true" if value else "false"
+
+
+def _compact_trace_value(value: str, *, limit: int) -> str:
+    text = str(value).replace("\n", " ").strip()
+    if len(text) <= limit:
+        return text
+    return f"{text[: limit - 3]}..."
 
 
 def _to_legacy_result(result: ToolResult, latency_ms: float) -> Any:
