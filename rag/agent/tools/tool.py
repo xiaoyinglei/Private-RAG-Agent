@@ -4,6 +4,7 @@ import math
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
+from numbers import Real
 from types import MappingProxyType
 from typing import Literal
 
@@ -54,12 +55,64 @@ def _require_non_empty_string(value: object, *, field_name: str) -> None:
         raise ValueError(f"{field_name} must not be empty")
 
 
+def _require_exact_bool(value: object, *, field_name: str) -> None:
+    if type(value) is not bool:
+        raise TypeError(f"{field_name} must be a bool")
+
+
+def _validate_error_fields(
+    *,
+    is_error: object,
+    error_code: object,
+    error_message: object,
+    retryable: object,
+) -> None:
+    _require_exact_bool(is_error, field_name="is_error")
+    _require_exact_bool(retryable, field_name="retryable")
+    if error_code is not None:
+        _require_non_empty_string(error_code, field_name="error_code")
+    if error_message is not None and not isinstance(error_message, str):
+        raise TypeError("error_message must be a string when provided")
+    if is_error and error_code is None:
+        raise ValueError("error_code is required when is_error=True")
+    if not is_error and (
+        error_code is not None or error_message is not None or retryable
+    ):
+        raise ValueError("error fields require is_error=True")
+
+
 class ToolEffect(StrEnum):
     READ_WORKSPACE = "read_workspace"
     WRITE_WORKSPACE = "write_workspace"
     EXECUTE_PROCESS = "execute_process"
     NETWORK = "network"
     DESTRUCTIVE = "destructive"
+
+
+@dataclass(frozen=True, slots=True)
+class ToolTarget:
+    kind: str
+    value: str
+
+    def __post_init__(self) -> None:
+        _require_non_empty_string(self.kind, field_name="target kind")
+        _require_non_empty_string(self.value, field_name="target value")
+
+
+@dataclass(frozen=True, slots=True)
+class ResolvedToolUse:
+    effects: frozenset[ToolEffect]
+    targets: tuple[ToolTarget, ...]
+
+    def __post_init__(self) -> None:
+        effects = frozenset(self.effects)
+        if any(not isinstance(effect, ToolEffect) for effect in effects):
+            raise TypeError("effects must contain ToolEffect values")
+        targets = tuple(self.targets)
+        if any(not isinstance(target, ToolTarget) for target in targets):
+            raise TypeError("targets must contain ToolTarget values")
+        object.__setattr__(self, "effects", effects)
+        object.__setattr__(self, "targets", targets)
 
 
 class CancellationMode(StrEnum):
@@ -164,6 +217,63 @@ class ArtifactReference:
             raise TypeError("name must be a string when provided")
 
 
+def _freeze_content(
+    content: tuple[ToolContentBlock, ...],
+) -> tuple[ToolContentBlock, ...]:
+    content = tuple(content)
+    if any(not isinstance(block, ToolContentBlock) for block in content):
+        raise TypeError("content must contain ToolContentBlock values")
+    return content
+
+
+def _freeze_attachments(
+    attachments: tuple[ArtifactReference, ...],
+) -> tuple[ArtifactReference, ...]:
+    attachments = tuple(attachments)
+    if any(not isinstance(item, ArtifactReference) for item in attachments):
+        raise TypeError("attachments must contain ArtifactReference values")
+    return attachments
+
+
+@dataclass(frozen=True, slots=True)
+class NormalizedToolOutput:
+    """Identity-free canonical output produced by a tool adapter."""
+
+    content: tuple[ToolContentBlock, ...] = ()
+    structured_content: JsonValue | None = None
+    is_error: bool = False
+    error_code: str | None = None
+    error_message: str | None = None
+    retryable: bool = False
+    metadata: Mapping[str, JsonValue] = field(default_factory=dict)
+    attachments: tuple[ArtifactReference, ...] = ()
+
+    def __post_init__(self) -> None:
+        _validate_error_fields(
+            is_error=self.is_error,
+            error_code=self.error_code,
+            error_message=self.error_message,
+            retryable=self.retryable,
+        )
+        object.__setattr__(self, "content", _freeze_content(self.content))
+        object.__setattr__(
+            self,
+            "attachments",
+            _freeze_attachments(self.attachments),
+        )
+        if self.structured_content is not None:
+            object.__setattr__(
+                self,
+                "structured_content",
+                _freeze_json(self.structured_content, path="structured_content"),
+            )
+        object.__setattr__(
+            self,
+            "metadata",
+            _freeze_mapping(self.metadata, path="metadata"),
+        )
+
+
 @dataclass(frozen=True, slots=True)
 class ToolResult:
     """Tool outcome with model-visible content separated from runtime metadata."""
@@ -183,19 +293,19 @@ class ToolResult:
     def __post_init__(self) -> None:
         _require_non_empty_string(self.tool_call_id, field_name="tool_call_id")
         _require_non_empty_string(self.tool_name, field_name="tool_name")
-        if self.is_error and not self.error_code:
-            raise ValueError("error_code is required when is_error=True")
-        if not self.is_error and (
-            self.error_code is not None or self.error_message is not None or self.retryable
-        ):
-            raise ValueError("error fields require is_error=True")
-        if any(not isinstance(block, ToolContentBlock) for block in self.content):
-            raise TypeError("content must contain ToolContentBlock values")
-        if any(not isinstance(item, ArtifactReference) for item in self.attachments):
-            raise TypeError("attachments must contain ArtifactReference values")
-
-        object.__setattr__(self, "content", tuple(self.content))
-        object.__setattr__(self, "attachments", tuple(self.attachments))
+        _validate_error_fields(
+            is_error=self.is_error,
+            error_code=self.error_code,
+            error_message=self.error_message,
+            retryable=self.retryable,
+        )
+        _require_exact_bool(self.truncated, field_name="truncated")
+        object.__setattr__(self, "content", _freeze_content(self.content))
+        object.__setattr__(
+            self,
+            "attachments",
+            _freeze_attachments(self.attachments),
+        )
         if self.structured_content is not None:
             object.__setattr__(
                 self,
@@ -211,8 +321,8 @@ class ToolResult:
 
 type ValidateInput = Callable[[Mapping[str, JsonValue]], Mapping[str, JsonValue]]
 type ToolRunner = Callable[[Mapping[str, JsonValue]], object | Awaitable[object]]
-type NormalizeOutput = Callable[[object], ToolResult]
-type ResolveToolUse = Callable[[Mapping[str, JsonValue]], frozenset[ToolEffect]]
+type NormalizeOutput = Callable[[object], NormalizedToolOutput]
+type ResolveToolUse = Callable[[Mapping[str, JsonValue]], ResolvedToolUse]
 
 
 _LOCAL_SIDE_EFFECTS = frozenset(
@@ -252,6 +362,12 @@ class Tool:
         if any(not isinstance(effect, ToolEffect) for effect in static_effects):
             raise TypeError("static_effects must contain ToolEffect values")
         object.__setattr__(self, "static_effects", static_effects)
+        if not isinstance(self.cancellation_mode, CancellationMode):
+            raise TypeError("cancellation_mode must be a CancellationMode")
+        if not isinstance(self.interrupt_behavior, InterruptBehavior):
+            raise TypeError("interrupt_behavior must be an InterruptBehavior")
+        _require_exact_bool(self.idempotent, field_name="idempotent")
+        _require_exact_bool(self.concurrency_safe, field_name="concurrency_safe")
         if (
             static_effects & _LOCAL_SIDE_EFFECTS
             and self.cancellation_mode is CancellationMode.NOT_CANCELLABLE
@@ -264,6 +380,11 @@ class Tool:
             self.execution_revision,
             field_name="execution_revision",
         )
+        if isinstance(self.timeout_seconds, bool) or not isinstance(
+            self.timeout_seconds,
+            Real,
+        ):
+            raise TypeError("timeout_seconds must be a real number")
         if not math.isfinite(self.timeout_seconds) or self.timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be a positive finite number")
         if not isinstance(self.max_model_output_bytes, int) or isinstance(

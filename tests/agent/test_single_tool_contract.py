@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import FrozenInstanceError, fields, replace
+from dataclasses import FrozenInstanceError, replace
 
 import pytest
 
@@ -9,6 +9,8 @@ from rag.agent.tools.tool import (
     ArtifactReference,
     CancellationMode,
     InterruptBehavior,
+    NormalizedToolOutput,
+    ResolvedToolUse,
     Tool,
     ToolCall,
     ToolCallOrigin,
@@ -16,14 +18,15 @@ from rag.agent.tools.tool import (
     ToolDefinition,
     ToolEffect,
     ToolResult,
+    ToolTarget,
 )
 
 
-def _normalize_output(output: object) -> ToolResult:
-    return ToolResult(
-        tool_call_id="fixture-call",
-        tool_name="read_text",
-        structured_content={"output": str(output)},
+def _normalize_output(output: object) -> NormalizedToolOutput:
+    text = str(output)
+    return NormalizedToolOutput(
+        content=(ToolContentBlock(type="text", data={"text": text}),),
+        structured_content={"output": text},
     )
 
 
@@ -54,7 +57,7 @@ def _tool(**changes: object) -> Tool:
             "properties": {"text": {"type": "string"}},
         },
         static_effects=frozenset({ToolEffect.READ_WORKSPACE}),
-        resolve_use=lambda _arguments: frozenset(),
+        resolve_use=lambda _arguments: ResolvedToolUse(effects=frozenset(), targets=()),
         execution_revision="read-text-v1",
         idempotent=True,
         concurrency_safe=True,
@@ -107,11 +110,9 @@ def test_tool_call_origin_preserves_checkpoint_evidence() -> None:
         origin=origin,
     )
 
-    assert tuple(field.name for field in fields(origin)) == (
-        "request_id",
-        "toolset_revision",
-        "exposed_tool_names",
-    )
+    assert origin.request_id == "request-1"
+    assert origin.toolset_revision == "toolset-v3"
+    assert origin.exposed_tool_names == ("read_text", "list_files")
     assert call.origin == origin
     with pytest.raises(FrozenInstanceError):
         origin.request_id = "other"  # type: ignore[misc]
@@ -277,3 +278,169 @@ def test_tool_result_metadata_is_not_model_content() -> None:
     assert all("runtime-only" not in repr(block.data) for block in result.content)
     assert not hasattr(result, "model_content")
     assert result.attachments[0].artifact_id == "artifact-1"
+
+
+def test_tool_rejects_string_cancellation_mode_before_effect_comparison() -> None:
+    with pytest.raises(TypeError, match="cancellation_mode"):
+        _tool(
+            static_effects=frozenset({ToolEffect.WRITE_WORKSPACE}),
+            cancellation_mode="not_cancellable",
+        )
+
+
+def test_tool_rejects_invalid_interrupt_behavior() -> None:
+    with pytest.raises(TypeError, match="interrupt_behavior"):
+        _tool(interrupt_behavior="cancel")
+
+
+@pytest.mark.parametrize("field_name", ["idempotent", "concurrency_safe"])
+def test_tool_requires_exact_boolean_flags(field_name: str) -> None:
+    with pytest.raises(TypeError, match=field_name):
+        _tool(**{field_name: 1})
+
+
+@pytest.mark.parametrize(
+    ("value", "error_type"),
+    [
+        pytest.param(True, TypeError, id="bool"),
+        pytest.param("10", TypeError, id="string"),
+        pytest.param(float("inf"), ValueError, id="infinite"),
+        pytest.param(float("nan"), ValueError, id="nan"),
+    ],
+)
+def test_tool_requires_positive_finite_real_timeout(
+    value: object,
+    error_type: type[Exception],
+) -> None:
+    with pytest.raises(error_type, match="timeout_seconds"):
+        _tool(timeout_seconds=value)
+
+
+@pytest.mark.parametrize("field_name", ["is_error", "retryable", "truncated"])
+def test_tool_result_requires_exact_boolean_flags(field_name: str) -> None:
+    values: dict[str, object] = {
+        "tool_call_id": "call-1",
+        "tool_name": "read_text",
+        "is_error": False,
+        "retryable": False,
+        "truncated": False,
+    }
+    values[field_name] = 1
+    if field_name in {"is_error", "retryable"}:
+        values["is_error"] = 1 if field_name == "is_error" else True
+        values["error_code"] = "tool_error"
+
+    with pytest.raises(TypeError, match=field_name):
+        ToolResult(**values)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("field_name", ["error_code", "error_message"])
+def test_tool_result_requires_string_error_fields(field_name: str) -> None:
+    values: dict[str, object] = {
+        "tool_call_id": "call-1",
+        "tool_name": "read_text",
+        "is_error": True,
+        "error_code": "tool_error",
+        "error_message": "failed",
+    }
+    values[field_name] = ["mutable"]
+
+    with pytest.raises(TypeError, match=field_name):
+        ToolResult(**values)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("field_name", ["kind", "value"])
+def test_tool_target_requires_non_empty_strings(field_name: str) -> None:
+    values = {"kind": "workspace_path", "value": "notes.txt"}
+    values[field_name] = ""
+
+    with pytest.raises(ValueError, match=field_name):
+        ToolTarget(**values)
+
+
+def test_resolved_tool_use_freezes_effects_and_targets() -> None:
+    effects = {ToolEffect.READ_WORKSPACE}
+    targets = [ToolTarget(kind="workspace_path", value="notes.txt")]
+
+    resolved = ResolvedToolUse(effects=effects, targets=targets)  # type: ignore[arg-type]
+    effects.add(ToolEffect.NETWORK)
+    targets.append(ToolTarget(kind="workspace_path", value="other.txt"))
+
+    assert resolved.effects == frozenset({ToolEffect.READ_WORKSPACE})
+    assert resolved.targets == (
+        ToolTarget(kind="workspace_path", value="notes.txt"),
+    )
+
+
+def test_resolved_tool_use_validates_members() -> None:
+    with pytest.raises(TypeError, match="effects"):
+        ResolvedToolUse(effects=frozenset({"read_workspace"}), targets=())  # type: ignore[arg-type]
+    with pytest.raises(TypeError, match="targets"):
+        ResolvedToolUse(effects=frozenset(), targets=("notes.txt",))  # type: ignore[arg-type]
+
+
+def test_normalized_output_is_identity_free_and_reusable() -> None:
+    normalized = _normalize_output("same output")
+
+    first = ToolResult(
+        tool_call_id="call-1",
+        tool_name="read_text",
+        content=normalized.content,
+        structured_content=normalized.structured_content,
+        is_error=normalized.is_error,
+        error_code=normalized.error_code,
+        error_message=normalized.error_message,
+        retryable=normalized.retryable,
+        metadata=normalized.metadata,
+        attachments=normalized.attachments,
+    )
+    second = ToolResult(
+        tool_call_id="call-2",
+        tool_name="read_text",
+        content=normalized.content,
+        structured_content=normalized.structured_content,
+        is_error=normalized.is_error,
+        error_code=normalized.error_code,
+        error_message=normalized.error_message,
+        retryable=normalized.retryable,
+        metadata=normalized.metadata,
+        attachments=normalized.attachments,
+    )
+
+    assert not hasattr(normalized, "tool_call_id")
+    assert not hasattr(normalized, "tool_name")
+    assert first.tool_call_id == "call-1"
+    assert second.tool_call_id == "call-2"
+    assert first.content == second.content == normalized.content
+
+
+def test_normalized_output_freezes_canonical_payload() -> None:
+    content = [ToolContentBlock(type="text", data={"text": "result"})]
+    structured_content = {"items": ["one"]}
+    metadata = {"adapter": "fixture"}
+    attachments = [ArtifactReference(artifact_id="artifact-1")]
+
+    normalized = NormalizedToolOutput(
+        content=content,  # type: ignore[arg-type]
+        structured_content=structured_content,
+        metadata=metadata,
+        attachments=attachments,  # type: ignore[arg-type]
+    )
+    content.append(ToolContentBlock(type="text", data={"text": "mutated"}))
+    structured_content["items"].append("mutated")
+    metadata["adapter"] = "mutated"
+    attachments.append(ArtifactReference(artifact_id="artifact-2"))
+
+    assert len(normalized.content) == 1
+    assert normalized.structured_content == {"items": ("one",)}
+    assert normalized.metadata == {"adapter": "fixture"}
+    assert len(normalized.attachments) == 1
+
+
+def test_normalized_output_validates_members_and_error_semantics() -> None:
+    with pytest.raises(TypeError, match="content"):
+        NormalizedToolOutput(content=("text",))  # type: ignore[arg-type]
+    with pytest.raises(TypeError, match="attachments"):
+        NormalizedToolOutput(attachments=(object(),))  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="error_code"):
+        NormalizedToolOutput(is_error=True)
