@@ -1,12 +1,22 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 from numbers import Real
 from types import MappingProxyType
 from typing import Literal
+
+from jsonschema import exceptions as jsonschema_exceptions  # type: ignore[import-untyped]
+from jsonschema.protocols import (  # type: ignore[import-untyped]
+    Validator as JsonSchemaValidator,
+)
+from jsonschema.validators import validator_for  # type: ignore[import-untyped]
+from pydantic import BaseModel
+from pydantic import ValidationError as PydanticValidationError
+from referencing import Registry
+from referencing.exceptions import Unresolvable
 
 type JsonValue = (
     str
@@ -17,6 +27,42 @@ type JsonValue = (
     | tuple[JsonValue, ...]
     | Mapping[str, JsonValue]
 )
+
+type _MutableJsonValue = (
+    str
+    | int
+    | float
+    | bool
+    | None
+    | list[_MutableJsonValue]
+    | dict[str, _MutableJsonValue]
+)
+
+
+_MAX_VALIDATION_PATH_LENGTH = 256
+_MAX_VALIDATION_MESSAGE_LENGTH = 512
+
+
+def _bounded_text(value: str, *, limit: int) -> str:
+    value = " ".join(value.split())
+    if len(value) <= limit:
+        return value
+    return f"{value[: limit - 1]}…"
+
+
+class ToolValidationError(ValueError):
+    """Bounded, caller-safe details for one tool schema validation failure."""
+
+    path: str
+    message: str
+
+    def __init__(self, *, path: str, message: str) -> None:
+        self.path = _bounded_text(path, limit=_MAX_VALIDATION_PATH_LENGTH)
+        self.message = _bounded_text(
+            message,
+            limit=_MAX_VALIDATION_MESSAGE_LENGTH,
+        )
+        super().__init__(f"{self.path}: {self.message}")
 
 
 def _freeze_json(value: object, *, path: str) -> JsonValue:
@@ -46,6 +92,35 @@ def _freeze_mapping(value: Mapping[str, object], *, path: str) -> Mapping[str, J
     if not isinstance(frozen, Mapping):
         raise TypeError(f"{path} must be a mapping")
     return frozen
+
+
+def _thaw_json(value: JsonValue) -> _MutableJsonValue:
+    if isinstance(value, Mapping):
+        return {key: _thaw_json(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return [_thaw_json(item) for item in value]
+    return value
+
+
+def _canonical_json(value: object, *, subject: str) -> JsonValue:
+    try:
+        return _freeze_json(value, path=subject)
+    except (TypeError, ValueError):
+        raise ToolValidationError(
+            path="$",
+            message=f"{subject} must contain only finite JSON-compatible values",
+        ) from None
+
+
+def _canonical_mapping(
+    value: Mapping[str, object],
+    *,
+    subject: str,
+) -> Mapping[str, JsonValue]:
+    canonical = _canonical_json(value, subject=subject)
+    if not isinstance(canonical, Mapping):
+        raise ToolValidationError(path="$", message=f"{subject} must be an object")
+    return canonical
 
 
 def _require_non_empty_string(value: object, *, field_name: str) -> None:
@@ -323,6 +398,175 @@ type ValidateInput = Callable[[Mapping[str, JsonValue]], Mapping[str, JsonValue]
 type ToolRunner = Callable[[Mapping[str, JsonValue]], object | Awaitable[object]]
 type NormalizeOutput = Callable[[object], NormalizedToolOutput]
 type ResolveToolUse = Callable[[Mapping[str, JsonValue]], ResolvedToolUse]
+
+
+def _json_path(parts: Iterable[str | int]) -> str:
+    path = "$"
+    for part in parts:
+        path += f"[{part}]" if isinstance(part, int) else f".{part}"
+    return _bounded_text(path, limit=_MAX_VALIDATION_PATH_LENGTH)
+
+
+def _jsonschema_error_path(error: jsonschema_exceptions.ValidationError) -> str:
+    parts = list(error.absolute_path)
+    if error.validator == "required" and isinstance(error.instance, Mapping):
+        for name in error.validator_value:
+            if isinstance(name, str) and name not in error.instance:
+                parts.append(name)
+                break
+    elif (
+        error.validator == "additionalProperties"
+        and isinstance(error.instance, Mapping)
+        and not error.schema.get("patternProperties")
+    ):
+        properties = error.schema.get("properties", {})
+        if isinstance(properties, Mapping):
+            for name in error.instance:
+                if name not in properties:
+                    parts.append(name)
+                    break
+    return _json_path(parts)
+
+
+def _tool_error_from_jsonschema(
+    error: jsonschema_exceptions.ValidationError | jsonschema_exceptions.SchemaError,
+) -> ToolValidationError:
+    path = (
+        _jsonschema_error_path(error)
+        if isinstance(error, jsonschema_exceptions.ValidationError)
+        else _json_path(error.absolute_path)
+    )
+    validator = error.validator if isinstance(error.validator, str) else "schema"
+    return ToolValidationError(
+        path=path,
+        message=f"{validator}: {error.message}",
+    )
+
+
+def _close_pydantic_object_schemas(value: _MutableJsonValue) -> None:
+    if isinstance(value, list):
+        for item in value:
+            _close_pydantic_object_schemas(item)
+        return
+    if not isinstance(value, dict):
+        return
+    if (
+        value.get("type") == "object"
+        and "properties" in value
+        and "additionalProperties" not in value
+    ):
+        value["additionalProperties"] = False
+    for item in value.values():
+        _close_pydantic_object_schemas(item)
+
+
+def _json_schema_validator(
+    schema: Mapping[str, JsonValue],
+) -> JsonSchemaValidator:
+    canonical_schema = _canonical_mapping(schema, subject="schema")
+    schema_copy = _thaw_json(canonical_schema)
+    if not isinstance(schema_copy, dict):
+        raise ToolValidationError(path="$", message="schema must be an object")
+
+    if "$schema" in schema_copy:
+        validator_type = validator_for(schema_copy, default=None)
+        if validator_type is None:
+            raise ToolValidationError(
+                path="$.$schema",
+                message="unsupported JSON Schema dialect",
+            )
+    else:
+        validator_type = validator_for(schema_copy)
+    try:
+        validator_type.check_schema(schema_copy)
+    except jsonschema_exceptions.SchemaError as error:
+        raise _tool_error_from_jsonschema(error) from None
+    return validator_type(schema_copy, registry=Registry())
+
+
+def _validate_with_json_schema(
+    validator: JsonSchemaValidator,
+    canonical_value: JsonValue,
+) -> None:
+    instance = _thaw_json(canonical_value)
+    try:
+        error = next(validator.iter_errors(instance), None)
+    except Unresolvable:
+        raise ToolValidationError(
+            path="$",
+            message="schema reference could not be resolved locally",
+        ) from None
+    if error is not None:
+        raise _tool_error_from_jsonschema(error)
+
+
+def _tool_error_from_pydantic(error: PydanticValidationError) -> ToolValidationError:
+    details = error.errors(
+        include_url=False,
+        include_context=False,
+        include_input=False,
+    )
+    if not details:
+        return ToolValidationError(path="$", message="input validation failed")
+    first = details[0]
+    error_type = first.get("type", "validation")
+    message = first.get("msg", "input validation failed")
+    return ToolValidationError(
+        path=_json_path(first.get("loc", ())),
+        message=f"{error_type}: {message}",
+    )
+
+
+def pydantic_input(
+    model: type[BaseModel],
+) -> tuple[dict[str, JsonValue], ValidateInput]:
+    """Build a closed builtin schema and its canonical Pydantic validator."""
+
+    if not isinstance(model, type) or not issubclass(model, BaseModel):
+        raise TypeError("model must be a BaseModel subclass")
+    schema: _MutableJsonValue = model.model_json_schema(mode="validation")
+    _close_pydantic_object_schemas(schema)
+    if not isinstance(schema, dict):
+        raise ToolValidationError(path="$", message="Pydantic schema must be an object")
+    canonical_schema = _canonical_mapping(schema, subject="schema")
+    schema_validator = _json_schema_validator(canonical_schema)
+
+    def validate(arguments: Mapping[str, JsonValue]) -> Mapping[str, JsonValue]:
+        try:
+            validated = model.model_validate(arguments)
+        except PydanticValidationError as error:
+            raise _tool_error_from_pydantic(error) from None
+        canonical_arguments = _canonical_mapping(arguments, subject="input")
+        _validate_with_json_schema(schema_validator, canonical_arguments)
+        dumped = validated.model_dump(mode="json")
+        return _canonical_mapping(dumped, subject="input")
+
+    return dict(canonical_schema), validate
+
+
+def json_schema_input(schema: Mapping[str, JsonValue]) -> ValidateInput:
+    """Build an input validator directly from a complete JSON Schema document."""
+
+    validator = _json_schema_validator(schema)
+
+    def validate(arguments: Mapping[str, JsonValue]) -> Mapping[str, JsonValue]:
+        canonical_arguments = _canonical_mapping(arguments, subject="input")
+        _validate_with_json_schema(validator, canonical_arguments)
+        return canonical_arguments
+
+    return validate
+
+
+def json_schema_output(
+    schema: Mapping[str, JsonValue] | None,
+    value: JsonValue,
+) -> JsonValue:
+    """Canonicalize output and, when declared, validate its complete schema."""
+
+    canonical_output = _canonical_json(value, subject="output")
+    if schema is not None:
+        _validate_with_json_schema(_json_schema_validator(schema), canonical_output)
+    return canonical_output
 
 
 _LOCAL_SIDE_EFFECTS = frozenset(
