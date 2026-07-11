@@ -26,6 +26,20 @@ class ExtensibleArguments(BaseModel):
     query: str
 
 
+class AliasedArguments(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    internal_name: str = Field(alias="externalName")
+
+
+class NestedArguments(BaseModel):
+    label: str
+
+
+class ParentArguments(BaseModel):
+    nested: NestedArguments
+
+
 def _raw_input_validator() -> Callable[
     [Mapping[str, JsonValue]], Mapping[str, JsonValue]
 ]:
@@ -91,6 +105,40 @@ def test_pydantic_input_preserves_extras_only_when_model_explicitly_allows_them(
 
     assert schema["additionalProperties"] is True
     assert arguments == {"query": "status", "limit": 3}
+
+
+def test_pydantic_input_returns_coerced_canonical_arguments() -> None:
+    _, validate = pydantic_input(BuiltinArguments)
+
+    arguments = validate({"count": "7", "mode": "fast"})  # type: ignore[dict-item]
+
+    assert arguments == {"count": 7, "mode": "fast"}
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        pytest.param({"externalName": "status"}, id="schema-alias"),
+        pytest.param({"internal_name": "status"}, id="python-field-name"),
+    ],
+)
+def test_pydantic_input_accepts_aliases_and_dumps_canonical_field_names(
+    arguments: dict[str, str],
+) -> None:
+    _, validate = pydantic_input(AliasedArguments)
+
+    assert validate(arguments) == {"internal_name": "status"}
+
+
+def test_pydantic_input_rejects_nested_unknown_arguments() -> None:
+    schema, validate = pydantic_input(ParentArguments)
+
+    nested_schema = schema["$defs"]["NestedArguments"]  # type: ignore[index]
+    assert nested_schema["additionalProperties"] is False  # type: ignore[index]
+    with pytest.raises(ToolValidationError) as error:
+        validate({"nested": {"label": "ready", "discarded": True}})  # type: ignore[dict-item]
+
+    assert error.value.path == "$.nested.discarded"
 
 
 @pytest.mark.parametrize(

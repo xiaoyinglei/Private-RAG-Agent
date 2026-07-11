@@ -529,15 +529,17 @@ def pydantic_input(
     if not isinstance(schema, dict):
         raise ToolValidationError(path="$", message="Pydantic schema must be an object")
     canonical_schema = _canonical_mapping(schema, subject="schema")
-    schema_validator = _json_schema_validator(canonical_schema)
+    allows_extras = model.model_config.get("extra") == "allow"
 
     def validate(arguments: Mapping[str, JsonValue]) -> Mapping[str, JsonValue]:
         try:
-            validated = model.model_validate(arguments)
+            validated = (
+                model.model_validate(arguments)
+                if allows_extras
+                else model.model_validate(arguments, extra="forbid")
+            )
         except PydanticValidationError as error:
             raise _tool_error_from_pydantic(error) from None
-        canonical_arguments = _canonical_mapping(arguments, subject="input")
-        _validate_with_json_schema(schema_validator, canonical_arguments)
         dumped = validated.model_dump(mode="json")
         return _canonical_mapping(dumped, subject="input")
 
