@@ -28,6 +28,12 @@ boundaries are:
 - `from agent_runtime import Agent` and its documented behavior;
 - explicitly committed checkpoint and persistence formats.
 
+For the CLI and `agent_runtime.Agent`, compatibility preserves command names,
+method signatures, accepted parameter types, and documented result shapes. The
+default execution behavior intentionally changes from the current accidental
+tool-less surface to the approved coding-agent resident baseline. Section 9.4
+defines the exact behavior of every existing public tool option.
+
 An old import may temporarily re-export a final type. It must not contain
 runtime logic, state, conversion, routing, or a second registry, executor, or
 visibility path.
@@ -136,6 +142,10 @@ class Tool:
     resolve_use: ResolveToolUse
     timeout_seconds: float
     max_model_output_bytes: int
+    idempotent: bool
+    concurrency_safe: bool
+    cancellation_mode: CancellationMode
+    interrupt_behavior: InterruptBehavior
 ```
 
 ### 6.1 Input schemas
@@ -174,7 +184,27 @@ floor. Unknown or unparseable shell behavior is treated conservatively.
 Workspace escape is a non-bypassable guard, not an approvable higher risk.
 MCP annotations are hints and cannot weaken local policy.
 
-### 6.3 Output normalization
+### 6.3 Execution semantics
+
+Idempotency, concurrency, cancellation, and interrupt behavior are executable
+contract facts:
+
+- `idempotent` controls whether an ambiguous operation may reuse the same
+  operation identity or requires reconciliation;
+- `concurrency_safe` permits consideration for parallel execution but does not
+  override target-conflict checks;
+- `cancellation_mode` is one of cooperative cancellation, managed child
+  process, remote best-effort, or non-cancellable;
+- `interrupt_behavior` says whether a user interrupt cancels immediately or
+  waits for the current atomic operation to finish.
+
+A locally side-effecting tool cannot register as non-cancellable. Parallel
+execution requires every tool to be concurrency-safe and their resolved
+targets/effects to be non-conflicting. The executor, not the model, makes that
+decision. Sandbox selection remains derived from resolved effects and runtime
+environment; it is not a self-declared `sandboxed=True` escape hatch.
+
+### 6.4 Output normalization
 
 `normalize_output` converts a runner-specific value into canonical content.
 It is not a CLI, Rich, JSON, or UI presenter.
@@ -322,6 +352,27 @@ The runner returns matched and proposed names in `ToolResult.metadata`.
 AgentLoop applies the ToolResult and active-name delta together before one
 checkpoint save. The runner and executor do not write checkpoints.
 
+### 9.4 Public CLI and Agent option mapping
+
+The existing CLI flags and `Agent.run/arun/stream` parameters remain accepted.
+Their final semantics are:
+
+| Public option | Final meaning |
+|---|---|
+| `tools=None` or an empty sequence | use the approved default resident coding set plus product-configured resident extensions |
+| non-empty `tools=[...]` | replace the default resident-name set with exactly these installed names, preserving caller order |
+| `disabled_tools=[...]` | subtract these names from resident, active, discovery results, and execution eligibility |
+| `allow_write_tools=True` | pre-authorize eligible write effects subject to all hard guards; false leaves the decision at ask/deny rather than hiding the schema |
+| `allow_execute_tools=True` | pre-authorize eligible process execution subject to sandbox and hard guards; false leaves the decision at ask/deny rather than hiding the schema |
+| `allow_discovery_tools=True` | expose `find_tools` when hidden discoverable tools exist; false prevents client-side discovery and active-set growth |
+
+Unknown explicit `tools` or `disabled_tools` names fail before the first model
+call with a clear configuration error. A disabled name wins over every other
+source. Explicit knowledge configuration contributes `search_knowledge` to
+the default resident extensions, but a non-empty `tools=[...]` remains an exact
+caller override. These semantics apply identically in CLI, sync Agent, async
+Agent, streaming, and resume.
+
 ## 10. Permission and Execution
 
 Every model tool call follows one executor path:
@@ -350,6 +401,10 @@ guards.
 Trace recording covers every exit, including unknown tools, schema-not-sent,
 validation failure, denial, timeout, cancellation, and runner failure.
 
+The schema-exposure check uses the originating model request recorded on the
+ToolCall, not the current turn's visible set. Approval pauses, discovery,
+compaction, and resume must not change the evidence used for this check.
+
 ### 10.1 Cancellation
 
 Timeout means the runtime attempts real termination, not merely returning
@@ -377,12 +432,31 @@ Conceptual shape:
 ```python
 class ModelRequest:
     messages: tuple[ModelMessage, ...]
-    tools: tuple[Tool, ...]
+    tools: tuple[ToolDefinition, ...]
     tool_choice: ToolChoice
     settings: ModelSettings
+    request_id: str
+    exposed_tool_names: tuple[str, ...]
     prompt_revision: str
     toolset_revision: str
 ```
+
+`ToolDefinition` is an immutable model-facing projection of `Tool`: name,
+description, input schema, and provider-supported model annotations. It never
+contains a runner, permission callback, or mutable runtime state.
+
+Every accepted `ToolCall` carries a checkpoint-safe origin record containing:
+
+```text
+request_id
+toolset_revision
+exposed_tool_names
+```
+
+The AgentLoop persists this origin with the call before scheduling execution.
+`ToolExecutor` checks `schema_not_exposed` against that record. A single mutable
+`LoopState.sent_schema_names` field is not an authoritative execution input and
+is removed with the old path.
 
 Core semantics are ordered from stable to dynamic:
 
@@ -507,6 +581,19 @@ runtime state described here.
 New checkpoints persist canonical model transcript content rather than
 rebuilding it from ToolResult formatters on every turn.
 
+They also persist a versioned model-facing tool manifest for the run:
+
+```text
+resident and explicit tool order
+active tool activation order
+tool name
+canonical description hash
+canonical input-schema hash
+static-effects hash
+toolset revision
+provider serializer revision
+```
+
 Resume guarantees:
 
 - the same canonical transcript semantics;
@@ -516,6 +603,23 @@ Resume guarantees:
 
 It does not promise byte-identical wire output across arbitrary serializer
 upgrades.
+
+Resume compares the rebuilt frozen Registry projection with the persisted
+manifest before any pending tool executes:
+
+- if the manifest and serializer revision match, the run retains its toolset
+  revision and deterministic wire-hash guarantee;
+- if a pending or paused ToolCall's tool is missing or its executable contract
+  changed, resume pauses with `tool_definition_changed` and requires explicit
+  reconciliation; it never executes against the new definition silently;
+- if no pending call depends on the drifted definition, resume creates an
+  explicit new context/toolset revision, removes unavailable active names,
+  and records the drift diagnostic. The old cache-hit guarantee ends at that
+  revision boundary.
+
+The persisted manifest is evidence and model-facing replay data, not an
+executable registry. Execution always uses the newly assembled registry after
+compatibility checks.
 
 Legacy checkpoints remain readable through migration:
 
@@ -583,6 +687,8 @@ No public request option may select a legacy path.
 - registry freeze prevents mutation;
 - deterministic assembly and selection order;
 - unknown and schema-not-exposed calls return structured recoverable errors;
+- every scheduled ToolCall persists its originating request ID, exposed names,
+  and toolset revision;
 - dynamic effects can add but not remove the static floor;
 - workspace and cwd escape cannot be approved;
 - allow/ask/deny ordering is exact;
@@ -590,6 +696,9 @@ No public request option may select a legacy path.
 - every executor exit emits a trace;
 - local process timeout actually terminates and reaps the child;
 - remote ambiguous timeout reports `timeout_outcome_unknown`.
+- non-idempotent ambiguous operations enter reconciliation rather than silent
+  replay;
+- parallel batches require concurrency-safe tools and non-conflicting targets.
 
 ### 17.2 Visibility and discovery tests
 
@@ -601,6 +710,8 @@ No public request option may select a legacy path.
 - activation and ToolResult are checkpointed together;
 - budget overflow is explicit and never silently evicts a tool;
 - resume restores active names or diagnoses missing tools.
+- public `tools`, `disabled_tools`, and `allow_*` options have identical tested
+  semantics across CLI, sync, async, streaming, and resume.
 
 ### 17.3 Context and cache tests
 
@@ -613,6 +724,8 @@ No public request option may select a legacy path.
 - one client-side discovery batch creates exactly one new revision;
 - compaction creates an explicit new revision and bounded transcript;
 - old checkpoints migrate once into canonical transcript storage;
+- manifest drift with a pending call pauses before execution;
+- safe manifest drift without pending calls creates one explicit new revision;
 - normalized usage preserves provider cache reads and writes;
 - missing cache usage is `None` and estimated usage is labeled;
 - streaming and non-streaming usage reach the Agent result.
