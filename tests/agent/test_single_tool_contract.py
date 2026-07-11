@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import FrozenInstanceError, fields, replace
 
 import pytest
@@ -23,6 +24,14 @@ def _normalize_output(output: object) -> ToolResult:
         tool_call_id="fixture-call",
         tool_name="read_text",
         structured_content={"output": str(output)},
+    )
+
+
+def _origin() -> ToolCallOrigin:
+    return ToolCallOrigin(
+        request_id="request-1",
+        toolset_revision="toolset-v3",
+        exposed_tool_names=("read_text",),
     )
 
 
@@ -106,6 +115,125 @@ def test_tool_call_origin_preserves_checkpoint_evidence() -> None:
     assert call.origin == origin
     with pytest.raises(FrozenInstanceError):
         origin.request_id = "other"  # type: ignore[misc]
+
+
+@pytest.mark.parametrize("field_name", ["request_id", "toolset_revision"])
+def test_tool_call_origin_rejects_mutable_scalar_evidence(field_name: str) -> None:
+    values: dict[str, object] = {
+        "request_id": "request-1",
+        "toolset_revision": "toolset-v3",
+        "exposed_tool_names": (),
+    }
+    values[field_name] = ["mutable"]
+
+    with pytest.raises(TypeError, match=field_name):
+        ToolCallOrigin(**values)  # type: ignore[arg-type]
+
+
+def test_tool_call_origin_freezes_exposed_names_without_splitting_strings() -> None:
+    exposed_names = ["read_text"]
+    origin = ToolCallOrigin(
+        request_id="request-1",
+        toolset_revision="toolset-v3",
+        exposed_tool_names=exposed_names,  # type: ignore[arg-type]
+    )
+
+    exposed_names.append("mutated")
+
+    assert origin.exposed_tool_names == ("read_text",)
+    with pytest.raises(TypeError, match="exposed_tool_names"):
+        ToolCallOrigin(
+            request_id="request-1",
+            toolset_revision="toolset-v3",
+            exposed_tool_names="read_text",  # type: ignore[arg-type]
+        )
+
+
+def test_tool_call_rejects_non_origin_record() -> None:
+    with pytest.raises(TypeError, match="origin"):
+        ToolCall(
+            tool_call_id="call-1",
+            tool_name="read_text",
+            arguments={"path": "notes.txt"},
+            origin={"request_id": "request-1"},  # type: ignore[arg-type]
+        )
+
+
+@pytest.mark.parametrize("field_name", ["artifact_id", "media_type", "name"])
+def test_artifact_reference_rejects_mutable_string_fields(field_name: str) -> None:
+    values: dict[str, object] = {
+        "artifact_id": "artifact-1",
+        "media_type": "text/plain",
+        "name": "result.txt",
+    }
+    values[field_name] = ["mutable"]
+
+    with pytest.raises(TypeError, match=field_name):
+        ArtifactReference(**values)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    "factory",
+    [
+        pytest.param(
+            lambda: ToolDefinition(
+                name=["read_text"],  # type: ignore[arg-type]
+                description="Read text.",
+                input_schema={},
+            ),
+            id="definition-name",
+        ),
+        pytest.param(
+            lambda: ToolDefinition(
+                name="read_text",
+                description=["Read text."],  # type: ignore[arg-type]
+                input_schema={},
+            ),
+            id="definition-description",
+        ),
+        pytest.param(
+            lambda: ToolCall(
+                tool_call_id=["call-1"],  # type: ignore[arg-type]
+                tool_name="read_text",
+                arguments={},
+                origin=_origin(),
+            ),
+            id="call-id",
+        ),
+        pytest.param(
+            lambda: ToolCall(
+                tool_call_id="call-1",
+                tool_name=["read_text"],  # type: ignore[arg-type]
+                arguments={},
+                origin=_origin(),
+            ),
+            id="call-name",
+        ),
+        pytest.param(
+            lambda: ToolResult(
+                tool_call_id=["call-1"],  # type: ignore[arg-type]
+                tool_name="read_text",
+            ),
+            id="result-id",
+        ),
+        pytest.param(
+            lambda: ToolResult(
+                tool_call_id="call-1",
+                tool_name=["read_text"],  # type: ignore[arg-type]
+            ),
+            id="result-name",
+        ),
+        pytest.param(
+            lambda: _tool(execution_revision=["read-text-v1"]),
+            id="execution-revision",
+        ),
+    ],
+)
+def test_required_contract_strings_reject_non_string_values(
+    factory: Callable[[], object],
+) -> None:
+    with pytest.raises(TypeError):
+        factory()
 
 
 def test_tool_content_blocks_support_extensible_json_payloads() -> None:

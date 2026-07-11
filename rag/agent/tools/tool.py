@@ -47,6 +47,13 @@ def _freeze_mapping(value: Mapping[str, object], *, path: str) -> Mapping[str, J
     return frozen
 
 
+def _require_non_empty_string(value: object, *, field_name: str) -> None:
+    if not isinstance(value, str):
+        raise TypeError(f"{field_name} must be a string")
+    if not value:
+        raise ValueError(f"{field_name} must not be empty")
+
+
 class ToolEffect(StrEnum):
     READ_WORKSPACE = "read_workspace"
     WRITE_WORKSPACE = "write_workspace"
@@ -74,13 +81,17 @@ class ToolCallOrigin:
     exposed_tool_names: tuple[str, ...]
 
     def __post_init__(self) -> None:
-        if not self.request_id:
-            raise ValueError("origin request_id must not be empty")
-        if not self.toolset_revision:
-            raise ValueError("origin toolset_revision must not be empty")
-        if any(not isinstance(name, str) or not name for name in self.exposed_tool_names):
-            raise ValueError("origin exposed_tool_names must contain non-empty strings")
-        object.__setattr__(self, "exposed_tool_names", tuple(self.exposed_tool_names))
+        _require_non_empty_string(self.request_id, field_name="origin request_id")
+        _require_non_empty_string(
+            self.toolset_revision,
+            field_name="origin toolset_revision",
+        )
+        if not isinstance(self.exposed_tool_names, (list, tuple)):
+            raise TypeError("origin exposed_tool_names must be a list or tuple")
+        exposed_tool_names = tuple(self.exposed_tool_names)
+        for name in exposed_tool_names:
+            _require_non_empty_string(name, field_name="origin exposed tool name")
+        object.__setattr__(self, "exposed_tool_names", exposed_tool_names)
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,10 +103,8 @@ class ToolDefinition:
     input_schema: Mapping[str, JsonValue]
 
     def __post_init__(self) -> None:
-        if not self.name:
-            raise ValueError("tool name must not be empty")
-        if not self.description:
-            raise ValueError("tool description must not be empty")
+        _require_non_empty_string(self.name, field_name="tool name")
+        _require_non_empty_string(self.description, field_name="tool description")
         object.__setattr__(
             self,
             "input_schema",
@@ -111,10 +120,10 @@ class ToolCall:
     origin: ToolCallOrigin
 
     def __post_init__(self) -> None:
-        if not self.tool_call_id:
-            raise ValueError("tool_call_id must not be empty")
-        if not self.tool_name:
-            raise ValueError("tool_name must not be empty")
+        _require_non_empty_string(self.tool_call_id, field_name="tool_call_id")
+        _require_non_empty_string(self.tool_name, field_name="tool_name")
+        if not isinstance(self.origin, ToolCallOrigin):
+            raise TypeError("origin must be a ToolCallOrigin")
         object.__setattr__(
             self,
             "arguments",
@@ -148,8 +157,11 @@ class ArtifactReference:
     name: str | None = None
 
     def __post_init__(self) -> None:
-        if not self.artifact_id:
-            raise ValueError("artifact_id must not be empty")
+        _require_non_empty_string(self.artifact_id, field_name="artifact_id")
+        if self.media_type is not None and not isinstance(self.media_type, str):
+            raise TypeError("media_type must be a string when provided")
+        if self.name is not None and not isinstance(self.name, str):
+            raise TypeError("name must be a string when provided")
 
 
 @dataclass(frozen=True, slots=True)
@@ -169,10 +181,8 @@ class ToolResult:
     attachments: tuple[ArtifactReference, ...] = ()
 
     def __post_init__(self) -> None:
-        if not self.tool_call_id:
-            raise ValueError("tool_call_id must not be empty")
-        if not self.tool_name:
-            raise ValueError("tool_name must not be empty")
+        _require_non_empty_string(self.tool_call_id, field_name="tool_call_id")
+        _require_non_empty_string(self.tool_name, field_name="tool_name")
         if self.is_error and not self.error_code:
             raise ValueError("error_code is required when is_error=True")
         if not self.is_error and (
@@ -250,8 +260,10 @@ class Tool:
                 "local side-effecting tools cannot use cancellation mode not_cancellable"
             )
 
-        if not self.execution_revision:
-            raise ValueError("execution_revision must not be empty")
+        _require_non_empty_string(
+            self.execution_revision,
+            field_name="execution_revision",
+        )
         if not math.isfinite(self.timeout_seconds) or self.timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be a positive finite number")
         if not isinstance(self.max_model_output_bytes, int) or isinstance(
