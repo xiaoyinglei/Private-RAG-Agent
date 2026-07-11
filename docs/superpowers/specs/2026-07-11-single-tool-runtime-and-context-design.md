@@ -378,6 +378,19 @@ the default resident extensions, but a non-empty `tools=[...]` remains an exact
 caller override. These semantics apply identically in CLI, sync Agent, async
 Agent, streaming, and resume.
 
+The precedence for discovery combinations is authoritative:
+
+1. `disabled_tools` always wins, including for `find_tools`.
+2. With `tools=None` or an empty sequence, `allow_discovery_tools=True`
+   automatically adds `find_tools` only when hidden discoverable tools exist.
+3. With a non-empty `tools=[...]`, the list remains exact. Enabling discovery
+   permits `find_tools` but does not append it; the caller must include
+   `find_tools` explicitly.
+4. Explicitly listing `find_tools` while `allow_discovery_tools=False` is a
+   configuration error before the first model call, not a silent suppression.
+5. Without `find_tools`, active names cannot grow through client-side
+   discovery even when the permission gate is enabled.
+
 ## 10. Permission and Execution
 
 Every model tool call follows one executor path:
@@ -717,6 +730,11 @@ No public request option may select a legacy path.
 - `find_tools` searches multilingual metadata and returns bounded matches;
 - hidden extensions expose `find_tools` only when discovery is enabled;
 - disabled discovery never grows the active set;
+- default tools plus enabled discovery auto-add `find_tools` only when hidden
+  discoverable tools exist;
+- an exact non-empty tools list adds `find_tools` only when explicitly named;
+- explicit `find_tools` with disabled discovery fails before the model call;
+- `disabled_tools` overrides every discovery combination;
 - activation is monotonic and ordered;
 - activation and ToolResult are checkpointed together;
 - budget overflow is explicit and never silently evicts a tool;
