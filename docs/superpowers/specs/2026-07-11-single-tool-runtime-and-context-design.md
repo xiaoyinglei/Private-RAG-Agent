@@ -142,6 +142,7 @@ class Tool:
     resolve_use: ResolveToolUse
     timeout_seconds: float
     max_model_output_bytes: int
+    execution_revision: str
     idempotent: bool
     concurrency_safe: bool
     cancellation_mode: CancellationMode
@@ -189,6 +190,8 @@ MCP annotations are hints and cannot weaken local policy.
 Idempotency, concurrency, cancellation, and interrupt behavior are executable
 contract facts:
 
+- `execution_revision` is a stable source-supplied revision for runner and
+  output-normalization semantics; changing either requires a new revision;
 - `idempotent` controls whether an ambiguous operation may reuse the same
   operation identity or requires reconciliation;
 - `concurrency_safe` permits consideration for parallel execution but does not
@@ -284,7 +287,9 @@ run_command
 update_plan
 ```
 
-When hidden extension tools exist, `find_tools` is also resident.
+When hidden extension tools exist and the public run enables discovery,
+`find_tools` is also resident. Discovery is disabled by default because the
+stable public `allow_discovery_tools` option defaults to false.
 
 This set is an evaluated baseline, not a permanent law. Changes require ACI
 evaluation rather than ad-hoc additions.
@@ -590,6 +595,8 @@ tool name
 canonical description hash
 canonical input-schema hash
 static-effects hash
+execution-contract hash, including execution revision, idempotency,
+concurrency, cancellation, interrupt behavior, and output-schema revision
 toolset revision
 provider serializer revision
 ```
@@ -633,9 +640,11 @@ old checkpoint
 Migration lives in checkpoint decoding. It does not preserve legacy registry,
 visibility, executor, formatter, or resume paths.
 
-Active tool names are persisted, not Tool objects. If a named tool is missing
-from the new frozen snapshot on resume, the runtime removes the name and emits
-a bounded diagnostic.
+Active tool names are persisted, not Tool objects. If a missing active tool has
+no dependent pending or paused call, the runtime removes the name while
+creating the new revision and emits a bounded diagnostic. If a dependent call
+exists, the name and origin evidence remain intact until explicit
+`tool_definition_changed` reconciliation resolves the call.
 
 ## 15. Source Boundaries
 
@@ -706,6 +715,8 @@ No public request option may select a legacy path.
 - installed does not imply visible;
 - explicit knowledge configuration makes `search_knowledge` resident;
 - `find_tools` searches multilingual metadata and returns bounded matches;
+- hidden extensions expose `find_tools` only when discovery is enabled;
+- disabled discovery never grows the active set;
 - activation is monotonic and ordered;
 - activation and ToolResult are checkpointed together;
 - budget overflow is explicit and never silently evicts a tool;
@@ -725,6 +736,8 @@ No public request option may select a legacy path.
 - compaction creates an explicit new revision and bounded transcript;
 - old checkpoints migrate once into canonical transcript storage;
 - manifest drift with a pending call pauses before execution;
+- a missing active tool with a dependent paused call is retained for
+  reconciliation;
 - safe manifest drift without pending calls creates one explicit new revision;
 - normalized usage preserves provider cache reads and writes;
 - missing cache usage is `None` and estimated usage is labeled;
