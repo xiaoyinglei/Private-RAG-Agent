@@ -67,9 +67,20 @@ class InterruptBehavior(StrEnum):
     FINISH_CURRENT = "finish_current"
 
 
-class ToolCallOrigin(StrEnum):
-    MODEL = "model"
-    RUNTIME = "runtime"
+@dataclass(frozen=True, slots=True)
+class ToolCallOrigin:
+    request_id: str
+    toolset_revision: str
+    exposed_tool_names: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        if not self.request_id:
+            raise ValueError("origin request_id must not be empty")
+        if not self.toolset_revision:
+            raise ValueError("origin toolset_revision must not be empty")
+        if any(not isinstance(name, str) or not name for name in self.exposed_tool_names):
+            raise ValueError("origin exposed_tool_names must contain non-empty strings")
+        object.__setattr__(self, "exposed_tool_names", tuple(self.exposed_tool_names))
 
 
 @dataclass(frozen=True, slots=True)
@@ -97,7 +108,7 @@ class ToolCall:
     tool_call_id: str
     tool_name: str
     arguments: Mapping[str, JsonValue]
-    origin: ToolCallOrigin = ToolCallOrigin.MODEL
+    origin: ToolCallOrigin
 
     def __post_init__(self) -> None:
         if not self.tool_call_id:
@@ -113,14 +124,19 @@ class ToolCall:
 
 @dataclass(frozen=True, slots=True)
 class ToolContentBlock:
-    """One model-visible text block; tuple order is presentation order."""
+    """One model-visible block with an immutable JSON-compatible payload."""
 
-    text: str
-    type: Literal["text"] = "text"
+    type: Literal["text", "image", "resource"]
+    data: Mapping[str, JsonValue]
 
     def __post_init__(self) -> None:
-        if self.type != "text":
-            raise ValueError("tool model content blocks must have type='text'")
+        if self.type not in {"text", "image", "resource"}:
+            raise ValueError("tool content block type must be text, image, or resource")
+        object.__setattr__(
+            self,
+            "data",
+            _freeze_mapping(self.data, path="content block data"),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -142,7 +158,7 @@ class ToolResult:
 
     tool_call_id: str
     tool_name: str
-    model_content: tuple[ToolContentBlock, ...] = ()
+    content: tuple[ToolContentBlock, ...] = ()
     structured_content: JsonValue | None = None
     is_error: bool = False
     error_code: str | None = None
@@ -163,12 +179,12 @@ class ToolResult:
             self.error_code is not None or self.error_message is not None or self.retryable
         ):
             raise ValueError("error fields require is_error=True")
-        if any(not isinstance(block, ToolContentBlock) for block in self.model_content):
-            raise TypeError("model_content must contain ToolContentBlock values")
+        if any(not isinstance(block, ToolContentBlock) for block in self.content):
+            raise TypeError("content must contain ToolContentBlock values")
         if any(not isinstance(item, ArtifactReference) for item in self.attachments):
             raise TypeError("attachments must contain ArtifactReference values")
 
-        object.__setattr__(self, "model_content", tuple(self.model_content))
+        object.__setattr__(self, "content", tuple(self.content))
         object.__setattr__(self, "attachments", tuple(self.attachments))
         if self.structured_content is not None:
             object.__setattr__(

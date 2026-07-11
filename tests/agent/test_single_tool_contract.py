@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import FrozenInstanceError, replace
+from dataclasses import FrozenInstanceError, fields, replace
 
 import pytest
 
@@ -9,6 +9,8 @@ from rag.agent.tools.tool import (
     CancellationMode,
     InterruptBehavior,
     Tool,
+    ToolCall,
+    ToolCallOrigin,
     ToolContentBlock,
     ToolDefinition,
     ToolEffect,
@@ -83,13 +85,49 @@ def test_tool_rejects_local_side_effect_with_non_cancellable_mode() -> None:
         )
 
 
+def test_tool_call_origin_preserves_checkpoint_evidence() -> None:
+    origin = ToolCallOrigin(
+        request_id="request-1",
+        toolset_revision="toolset-v3",
+        exposed_tool_names=("read_text", "list_files"),
+    )
+    call = ToolCall(
+        tool_call_id="call-1",
+        tool_name="read_text",
+        arguments={"path": "notes.txt"},
+        origin=origin,
+    )
+
+    assert tuple(field.name for field in fields(origin)) == (
+        "request_id",
+        "toolset_revision",
+        "exposed_tool_names",
+    )
+    assert call.origin == origin
+    with pytest.raises(FrozenInstanceError):
+        origin.request_id = "other"  # type: ignore[misc]
+
+
+def test_tool_content_blocks_support_extensible_json_payloads() -> None:
+    blocks = (
+        ToolContentBlock(type="text", data={"text": "first"}),
+        ToolContentBlock(type="image", data={"artifact_id": "image-1"}),
+        ToolContentBlock(type="resource", data={"uri": "artifact://result-1"}),
+    )
+
+    assert [block.type for block in blocks] == ["text", "image", "resource"]
+    assert blocks[1].data == {"artifact_id": "image-1"}
+    with pytest.raises(TypeError, match="JSON-compatible"):
+        ToolContentBlock(type="image", data={"value": object()})
+
+
 def test_tool_result_metadata_is_not_model_content() -> None:
     result = ToolResult(
         tool_call_id="call-1",
         tool_name="read_text",
-        model_content=(
-            ToolContentBlock(type="text", text="first"),
-            ToolContentBlock(type="text", text="second"),
+        content=(
+            ToolContentBlock(type="text", data={"text": "first"}),
+            ToolContentBlock(type="text", data={"text": "second"}),
         ),
         structured_content={"text": "first\nsecond"},
         is_error=False,
@@ -106,7 +144,8 @@ def test_tool_result_metadata_is_not_model_content() -> None:
         ),
     )
 
-    assert [block.text for block in result.model_content] == ["first", "second"]
+    assert [block.data["text"] for block in result.content] == ["first", "second"]
     assert result.metadata == {"trace_id": "runtime-only"}
-    assert all("runtime-only" not in (block.text or "") for block in result.model_content)
+    assert all("runtime-only" not in repr(block.data) for block in result.content)
+    assert not hasattr(result, "model_content")
     assert result.attachments[0].artifact_id == "artifact-1"
