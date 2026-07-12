@@ -40,6 +40,22 @@ class ParentArguments(BaseModel):
     nested: NestedArguments
 
 
+class ExtensibleNestedArguments(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    label: str
+
+
+class ParentWithExtensibleNestedArguments(BaseModel):
+    nested: ExtensibleNestedArguments
+
+
+class ExtensibleParentWithClosedNestedArguments(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    nested: NestedArguments
+
+
 def _raw_input_validator() -> Callable[
     [Mapping[str, JsonValue]], Mapping[str, JsonValue]
 ]:
@@ -137,6 +153,32 @@ def test_pydantic_input_rejects_nested_unknown_arguments() -> None:
     assert nested_schema["additionalProperties"] is False  # type: ignore[index]
     with pytest.raises(ToolValidationError) as error:
         validate({"nested": {"label": "ready", "discarded": True}})  # type: ignore[dict-item]
+
+    assert error.value.path == "$.nested.discarded"
+
+
+def test_pydantic_input_preserves_explicitly_allowed_nested_extras() -> None:
+    schema, validate = pydantic_input(ParentWithExtensibleNestedArguments)
+
+    nested_schema = schema["$defs"]["ExtensibleNestedArguments"]  # type: ignore[index]
+    assert nested_schema["additionalProperties"] is True  # type: ignore[index]
+    assert validate({"nested": {"label": "ready", "detail": "kept"}}) == {  # type: ignore[dict-item]
+        "nested": {"label": "ready", "detail": "kept"}
+    }
+
+
+def test_pydantic_input_rejects_ignored_nested_extras_under_extensible_parent() -> None:
+    schema, validate = pydantic_input(ExtensibleParentWithClosedNestedArguments)
+
+    nested_schema = schema["$defs"]["NestedArguments"]  # type: ignore[index]
+    assert nested_schema["additionalProperties"] is False  # type: ignore[index]
+    with pytest.raises(ToolValidationError) as error:
+        validate(
+            {
+                "nested": {"label": "ready", "discarded": True},
+                "root_detail": "kept",
+            }  # type: ignore[dict-item]
+        )
 
     assert error.value.path == "$.nested.discarded"
 

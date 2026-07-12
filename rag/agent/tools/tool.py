@@ -13,8 +13,9 @@ from jsonschema.protocols import (  # type: ignore[import-untyped]
     Validator as JsonSchemaValidator,
 )
 from jsonschema.validators import validator_for  # type: ignore[import-untyped]
-from pydantic import BaseModel
+from pydantic import AliasChoices, AliasPath, BaseModel
 from pydantic import ValidationError as PydanticValidationError
+from pydantic.fields import FieldInfo
 from referencing import Registry
 from referencing.exceptions import Unresolvable
 
@@ -517,6 +518,125 @@ def _tool_error_from_pydantic(error: PydanticValidationError) -> ToolValidationE
     )
 
 
+def _field_input_paths(
+    model: type[BaseModel],
+    field_name: str,
+    field: FieldInfo,
+) -> tuple[tuple[str | int, ...], ...]:
+    paths: list[tuple[str | int, ...]] = []
+    validation_alias = field.validation_alias
+    has_alias = validation_alias is not None or field.alias is not None
+    if model.model_config.get("validate_by_alias", True):
+        if isinstance(validation_alias, str):
+            paths.append((validation_alias,))
+        elif isinstance(validation_alias, AliasPath):
+            paths.append(tuple(validation_alias.path))
+        elif isinstance(validation_alias, AliasChoices):
+            for choice in validation_alias.choices:
+                paths.append(
+                    tuple(choice.path)
+                    if isinstance(choice, AliasPath)
+                    else (choice,)
+                )
+        elif field.alias is not None:
+            paths.append((field.alias,))
+    if not has_alias or model.model_config.get("validate_by_name", False):
+        paths.append((field_name,))
+    return tuple(paths)
+
+
+def _value_at_input_path(
+    value: object,
+    path: tuple[str | int, ...],
+) -> tuple[bool, object]:
+    current = value
+    for part in path:
+        if isinstance(part, str) and isinstance(current, Mapping):
+            if part not in current:
+                return False, None
+            current = current[part]
+        elif isinstance(part, int) and isinstance(current, (list, tuple)):
+            if part < 0 or part >= len(current):
+                return False, None
+            current = current[part]
+        else:
+            return False, None
+    return True, current
+
+
+def _reject_ignored_extras_in_value(
+    validated: object,
+    original: object,
+    *,
+    path: tuple[str | int, ...],
+) -> None:
+    if isinstance(validated, BaseModel) and isinstance(original, Mapping):
+        _reject_ignored_model_extras(validated, original, path=path)
+        return
+    if isinstance(validated, (list, tuple)) and isinstance(original, (list, tuple)):
+        for index, (validated_item, original_item) in enumerate(
+            zip(validated, original, strict=False)
+        ):
+            _reject_ignored_extras_in_value(
+                validated_item,
+                original_item,
+                path=(*path, index),
+            )
+        return
+    if isinstance(validated, Mapping) and isinstance(original, Mapping):
+        for (original_key, original_item), validated_item in zip(
+            original.items(),
+            validated.values(),
+            strict=False,
+        ):
+            _reject_ignored_extras_in_value(
+                validated_item,
+                original_item,
+                path=(*path, original_key),
+            )
+
+
+def _reject_ignored_model_extras(
+    validated: BaseModel,
+    original: Mapping[str, object],
+    *,
+    path: tuple[str | int, ...],
+) -> None:
+    model = type(validated)
+    consumed_keys: set[str] = set()
+    for field_name, model_field in model.model_fields.items():
+        for input_path in _field_input_paths(model, field_name, model_field):
+            found, original_value = _value_at_input_path(original, input_path)
+            if not found:
+                continue
+            top_level_key = input_path[0]
+            if isinstance(top_level_key, str):
+                consumed_keys.add(top_level_key)
+            _reject_ignored_extras_in_value(
+                getattr(validated, field_name),
+                original_value,
+                path=(*path, *input_path),
+            )
+            break
+
+    extra_policy = model.model_config.get("extra")
+    if extra_policy in (None, "ignore"):
+        for key in original:
+            if key not in consumed_keys:
+                raise ToolValidationError(
+                    path=_json_path((*path, key)),
+                    message="extra_forbidden: Extra inputs are not permitted",
+                )
+    elif extra_policy == "allow" and validated.model_extra:
+        for key, extra_value in validated.model_extra.items():
+            if key in original:
+                _reject_ignored_extras_in_value(
+                    extra_value,
+                    original[key],
+                    path=(*path, key),
+                )
+
+
 def pydantic_input(
     model: type[BaseModel],
 ) -> tuple[dict[str, JsonValue], ValidateInput]:
@@ -529,17 +649,13 @@ def pydantic_input(
     if not isinstance(schema, dict):
         raise ToolValidationError(path="$", message="Pydantic schema must be an object")
     canonical_schema = _canonical_mapping(schema, subject="schema")
-    allows_extras = model.model_config.get("extra") == "allow"
 
     def validate(arguments: Mapping[str, JsonValue]) -> Mapping[str, JsonValue]:
         try:
-            validated = (
-                model.model_validate(arguments)
-                if allows_extras
-                else model.model_validate(arguments, extra="forbid")
-            )
+            validated = model.model_validate(arguments)
         except PydanticValidationError as error:
             raise _tool_error_from_pydantic(error) from None
+        _reject_ignored_model_extras(validated, arguments, path=())
         dumped = validated.model_dump(mode="json")
         return _canonical_mapping(dumped, subject="input")
 
