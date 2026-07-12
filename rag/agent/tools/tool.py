@@ -690,6 +690,7 @@ def pydantic_input(
     if not isinstance(schema, dict):
         raise ToolValidationError(path="$", message="Pydantic schema must be an object")
     canonical_schema = _canonical_mapping(schema, subject="schema")
+    _json_schema_validator(canonical_schema)
 
     def validate(arguments: Mapping[str, JsonValue]) -> Mapping[str, JsonValue]:
         try:

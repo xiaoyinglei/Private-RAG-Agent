@@ -73,6 +73,14 @@ class AliasChoicesWithPathArguments(BaseModel):
     )
 
 
+class InvalidGeneratedSchemaArguments(BaseModel):
+    model_config = ConfigDict(
+        json_schema_extra={"type": "not-a-json-schema-type"}
+    )
+
+    value: str
+
+
 def _raw_input_validator() -> Callable[
     [Mapping[str, JsonValue]], Mapping[str, JsonValue]
 ]:
@@ -233,6 +241,14 @@ def test_pydantic_input_rejects_lossy_validation_aliases(
 
     assert error.value.path == "$.value"
     assert "unsupported validation alias" in error.value.message
+    assert len(error.value.message) <= 512
+
+
+def test_pydantic_input_rejects_invalid_generated_schema() -> None:
+    with pytest.raises(ToolValidationError) as error:
+        pydantic_input(InvalidGeneratedSchemaArguments)
+
+    assert error.value.path == "$.type"
     assert len(error.value.message) <= 512
 
 
