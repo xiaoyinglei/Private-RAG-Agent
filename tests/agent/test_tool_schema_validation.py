@@ -48,6 +48,22 @@ class AliasedArguments(BaseModel):
     internal_name: str = Field(alias="externalName")
 
 
+class AliasDisabledArguments(BaseModel):
+    model_config = ConfigDict(validate_by_alias=False, validate_by_name=True)
+
+    internal_name: str = Field(alias="externalName")
+
+
+class ParentWithAliasDisabledArguments(BaseModel):
+    nested: AliasDisabledArguments
+
+
+class SerializeByAliasArguments(BaseModel):
+    model_config = ConfigDict(serialize_by_alias=True)
+
+    internal_name: str = Field(alias="externalName")
+
+
 class NestedArguments(BaseModel):
     label: str
 
@@ -487,6 +503,43 @@ def test_pydantic_input_accepts_aliases_and_dumps_canonical_field_names(
     _, validate = pydantic_input(AliasedArguments)
 
     assert validate(arguments) == {"internal_name": "status"}
+
+
+@pytest.mark.parametrize(
+    ("model", "path"),
+    [
+        pytest.param(AliasDisabledArguments, "$.internal_name", id="top-level"),
+        pytest.param(
+            ParentWithAliasDisabledArguments,
+            "$.nested.internal_name",
+            id="nested",
+        ),
+    ],
+)
+def test_pydantic_input_rejects_aliases_when_alias_validation_is_disabled(
+    model: type[BaseModel],
+    path: str,
+) -> None:
+    properties = AliasDisabledArguments.model_json_schema(mode="validation")[
+        "properties"
+    ]
+    assert "externalName" in properties
+
+    with pytest.raises(ToolValidationError) as error:
+        pydantic_input(model)
+
+    assert error.value.path == path
+    assert "validate_by_alias" in error.value.message
+    assert len(error.value.message) <= 512
+
+
+def test_pydantic_input_ignores_serialize_by_alias_for_canonical_dump() -> None:
+    schema, validate = pydantic_input(SerializeByAliasArguments)
+
+    properties = schema["properties"]
+    assert "externalName" in properties  # type: ignore[operator]
+    assert "internal_name" not in properties  # type: ignore[operator]
+    assert validate({"externalName": "status"}) == {"internal_name": "status"}
 
 
 def test_pydantic_input_rejects_nested_unknown_arguments() -> None:

@@ -816,6 +816,16 @@ def _audit_pydantic_model(
     structural_fields: set[str] = set()
     for field_name, model_field in model.model_fields.items():
         validation_alias = model_field.validation_alias
+        if (
+            validation_alias is not None or model_field.alias is not None
+        ) and model.model_config.get("validate_by_alias", True) is False:
+            raise ToolValidationError(
+                path=_json_path((*path, field_name)),
+                message=(
+                    "unsupported alias configuration: validate_by_alias=False "
+                    "conflicts with generated validation schema"
+                ),
+            )
         if isinstance(validation_alias, (AliasPath, AliasChoices)):
             raise ToolValidationError(
                 path=_json_path((*path, field_name)),
@@ -903,7 +913,7 @@ def pydantic_input(
         except PydanticValidationError as error:
             raise _tool_error_from_pydantic(error) from None
         _reject_ignored_model_extras(validated, arguments, path=())
-        dumped = validated.model_dump(mode="json")
+        dumped = validated.model_dump(mode="json", by_alias=False)
         return _canonical_mapping(dumped, subject="input")
 
     return dict(canonical_schema), validate
