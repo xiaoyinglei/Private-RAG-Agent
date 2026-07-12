@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+from collections import deque
 from collections.abc import Callable, Mapping
+from collections.abc import Iterable as IterableABC
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass as stdlib_dataclass
-from typing import Any, Literal
+from typing import Any, Literal, TypeAliasType
 
 import pytest
 from pydantic import (
@@ -20,6 +23,7 @@ from typing_extensions import TypedDict
 from rag.agent.tools.tool import (
     JsonValue,
     ToolValidationError,
+    _reject_ignored_extras_in_value,
     json_schema_input,
     json_schema_output,
     pydantic_input,
@@ -157,6 +161,52 @@ class SecretValidatorArguments(BaseModel):
     @classmethod
     def reject_secret(cls, value: str) -> str:
         raise ValueError(f"rejected runtime value TOP_SECRET_123: {value}")
+
+
+class DequeArguments(BaseModel):
+    children: deque[NestedArguments]
+
+
+class IterableArguments(BaseModel):
+    children: IterableABC[NestedArguments]
+
+
+class AbstractSetArguments(BaseModel):
+    children: AbstractSet[FrozenNestedArguments]
+
+
+AliasSetArgumentsType = TypeAliasType(  # noqa: UP040
+    "AliasSetArgumentsType",
+    set[FrozenNestedArguments],
+)
+
+
+class TypeAliasSetArguments(BaseModel):
+    children: AliasSetArgumentsType
+
+
+class DroppingListArguments(BaseModel):
+    children: list[NestedArguments]
+
+    @field_validator("children", mode="after")
+    @classmethod
+    def drop_last_child(
+        cls,
+        value: list[NestedArguments],
+    ) -> list[NestedArguments]:
+        return value[:-1]
+
+
+class DroppingTupleArguments(BaseModel):
+    children: tuple[NestedArguments, ...]
+
+    @field_validator("children", mode="after")
+    @classmethod
+    def drop_last_child(
+        cls,
+        value: tuple[NestedArguments, ...],
+    ) -> tuple[NestedArguments, ...]:
+        return value[:-1]
 
 
 def _raw_input_validator() -> Callable[
@@ -430,6 +480,78 @@ def test_pydantic_input_redacts_custom_validator_messages_and_values() -> None:
     assert error.value.path == "$.secret"
     assert error.value.message == "value_error: validation failed"
     assert "TOP_SECRET_123" not in str(error.value)
+
+
+@pytest.mark.parametrize(
+    "model",
+    [
+        pytest.param(DequeArguments, id="deque"),
+        pytest.param(IterableArguments, id="iterable-abc"),
+        pytest.param(AbstractSetArguments, id="set-abc"),
+        pytest.param(TypeAliasSetArguments, id="type-alias-set"),
+    ],
+)
+def test_pydantic_input_rejects_composites_outside_lossless_grammar(
+    model: type[BaseModel],
+) -> None:
+    with pytest.raises(ToolValidationError) as error:
+        pydantic_input(model)
+
+    assert error.value.path == "$.children"
+    assert "unsupported Pydantic input shape" in error.value.message
+
+
+@pytest.mark.parametrize(
+    "model",
+    [
+        pytest.param(DroppingListArguments, id="list"),
+        pytest.param(DroppingTupleArguments, id="tuple"),
+    ],
+)
+def test_pydantic_input_rejects_structural_field_validators(
+    model: type[BaseModel],
+) -> None:
+    with pytest.raises(ToolValidationError) as error:
+        pydantic_input(model)
+
+    assert error.value.path == "$.children"
+    assert "structural validator" in error.value.message
+
+
+@pytest.mark.parametrize(
+    ("validated", "original"),
+    [
+        pytest.param(
+            [NestedArguments(label="first")],
+            [
+                {"label": "first"},
+                {"label": "second", "discarded": True},
+            ],
+            id="list",
+        ),
+        pytest.param(
+            (NestedArguments(label="first"),),
+            (
+                {"label": "first"},
+                {"label": "second", "discarded": True},
+            ),
+            id="tuple",
+        ),
+    ],
+)
+def test_pydantic_runtime_walker_rejects_sequence_cardinality_changes(
+    validated: object,
+    original: object,
+) -> None:
+    with pytest.raises(ToolValidationError) as error:
+        _reject_ignored_extras_in_value(
+            validated,
+            original,
+            path=("children",),
+        )
+
+    assert error.value.path == "$.children"
+    assert "cardinality" in error.value.message
 
 
 @pytest.mark.parametrize(

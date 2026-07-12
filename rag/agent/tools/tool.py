@@ -3,10 +3,10 @@ from __future__ import annotations
 import math
 from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass, field, is_dataclass
-from enum import StrEnum
+from enum import Enum, StrEnum
 from numbers import Real
-from types import MappingProxyType
-from typing import Literal, get_args, get_origin
+from types import MappingProxyType, UnionType
+from typing import Annotated, Any, Literal, TypeAliasType, Union, get_args, get_origin
 
 from jsonschema import exceptions as jsonschema_exceptions  # type: ignore[import-untyped]
 from jsonschema.protocols import (  # type: ignore[import-untyped]
@@ -570,6 +570,11 @@ def _reject_ignored_extras_in_value(
         _reject_ignored_model_extras(validated, original, path=path)
         return
     if isinstance(validated, (list, tuple)) and isinstance(original, (list, tuple)):
+        if len(validated) != len(original):
+            raise ToolValidationError(
+                path=_json_path(path),
+                message="sequence cardinality changed during validation",
+            )
         for index, (validated_item, original_item) in enumerate(
             zip(validated, original, strict=False)
         ):
@@ -654,7 +659,18 @@ def _audit_pydantic_annotation(
     *,
     path: tuple[str | int, ...],
     visited: set[type[BaseModel]],
-) -> None:
+    seen_aliases: set[TypeAliasType],
+) -> bool:
+    if isinstance(annotation, TypeAliasType):
+        if annotation in seen_aliases:
+            return False
+        seen_aliases.add(annotation)
+        return _audit_pydantic_annotation(
+            annotation.__value__,
+            path=path,
+            visited=visited,
+            seen_aliases=seen_aliases,
+        )
     if is_dataclass(annotation):
         raise ToolValidationError(
             path=_json_path(path),
@@ -665,16 +681,79 @@ def _audit_pydantic_annotation(
             path=_json_path(path),
             message="unsupported Pydantic input shape: TypedDict",
         )
-    if get_origin(annotation) in (set, frozenset):
-        raise ToolValidationError(
-            path=_json_path(path),
-            message="unsupported Pydantic input shape: set or frozenset",
-        )
     if isinstance(annotation, type) and issubclass(annotation, BaseModel):
         _audit_pydantic_model(annotation, path=path, visited=visited)
-        return
-    for argument in get_args(annotation):
-        _audit_pydantic_annotation(argument, path=path, visited=visited)
+        return True
+
+    origin = get_origin(annotation)
+    arguments = get_args(annotation)
+    if origin is Annotated:
+        contains_model = _audit_pydantic_annotation(
+            arguments[0],
+            path=path,
+            visited=visited,
+            seen_aliases=seen_aliases,
+        )
+        if contains_model and any(
+            type(metadata).__module__ == "pydantic.functional_validators"
+            for metadata in arguments[1:]
+        ):
+            raise ToolValidationError(
+                path=_json_path(path),
+                message="unsupported Pydantic input shape: structural validator",
+            )
+        return contains_model
+    if origin is Literal:
+        return False
+    if origin in (Union, UnionType):
+        return any(
+            _audit_pydantic_annotation(
+                argument,
+                path=path,
+                visited=visited,
+                seen_aliases=seen_aliases,
+            )
+            for argument in arguments
+        )
+    if origin in (list, tuple):
+        return any(
+            _audit_pydantic_annotation(
+                argument,
+                path=path,
+                visited=visited,
+                seen_aliases=seen_aliases,
+            )
+            for argument in arguments
+            if argument is not Ellipsis
+        )
+    if origin in (dict, Mapping):
+        if not arguments:
+            return False
+        key_contains_model = _audit_pydantic_annotation(
+            arguments[0],
+            path=path,
+            visited=visited,
+            seen_aliases=seen_aliases,
+        )
+        if key_contains_model:
+            raise ToolValidationError(
+                path=_json_path(path),
+                message="unsupported Pydantic input shape: model mapping key",
+            )
+        return _audit_pydantic_annotation(
+            arguments[1],
+            path=path,
+            visited=visited,
+            seen_aliases=seen_aliases,
+        )
+    if annotation in (Any, str, int, float, bool, type(None), list, tuple, dict, Mapping):
+        return False
+    if isinstance(annotation, type) and issubclass(annotation, Enum):
+        return False
+    raise ToolValidationError(
+        path=_json_path(path),
+        message="unsupported Pydantic input shape: composite annotation",
+    )
 
 
 def _audit_pydantic_model(
@@ -693,6 +772,7 @@ def _audit_pydantic_model(
     if model in visited:
         return
     visited.add(model)
+    structural_fields: set[str] = set()
     for field_name, model_field in model.model_fields.items():
         validation_alias = model_field.validation_alias
         if isinstance(validation_alias, (AliasPath, AliasChoices)):
@@ -703,10 +783,43 @@ def _audit_pydantic_model(
                     "cannot be represented faithfully in tool JSON Schema"
                 ),
             )
-        _audit_pydantic_annotation(
+        contains_model = _audit_pydantic_annotation(
             model_field.annotation,
             path=(*path, field_name),
             visited=visited,
+            seen_aliases=set(),
+        )
+        if contains_model:
+            structural_fields.add(field_name)
+            if any(
+                type(metadata).__module__ == "pydantic.functional_validators"
+                for metadata in model_field.metadata
+            ):
+                raise ToolValidationError(
+                    path=_json_path((*path, field_name)),
+                    message="unsupported Pydantic input shape: structural validator",
+                )
+
+    decorators = model.__pydantic_decorators__
+    for decorator in decorators.field_validators.values():
+        targeted_fields = set(decorator.info.fields)
+        for field_name in model.model_fields:
+            if field_name in structural_fields and (
+                field_name in targeted_fields or "*" in targeted_fields
+            ):
+                raise ToolValidationError(
+                    path=_json_path((*path, field_name)),
+                    message="unsupported Pydantic input shape: structural validator",
+                )
+    if structural_fields and decorators.model_validators:
+        first_structural_field = next(
+            field_name
+            for field_name in model.model_fields
+            if field_name in structural_fields
+        )
+        raise ToolValidationError(
+            path=_json_path((*path, first_structural_field)),
+            message="unsupported Pydantic input shape: structural validator",
         )
 
 
