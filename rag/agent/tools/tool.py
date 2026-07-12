@@ -662,6 +662,25 @@ def _metadata_can_transform_validation(metadata: object) -> bool:
     )
 
 
+def _pydantic_model_has_custom_lifecycle(model: type[BaseModel]) -> bool:
+    namespace = model.__dict__
+    for hook_name in (
+        "__get_pydantic_core_schema__",
+        "__get_validators__",
+        "model_validate",
+    ):
+        descriptor = namespace.get(hook_name)
+        if (
+            descriptor is not None
+            and descriptor is not BaseModel.__dict__.get(hook_name)
+            and callable(getattr(model, hook_name, None))
+        ):
+            return True
+    return bool(getattr(model, "__pydantic_custom_init__", False)) or (
+        getattr(model, "__pydantic_post_init__", None) is not None
+    )
+
+
 def _audit_pydantic_annotation(
     annotation: object,
     *,
@@ -814,6 +833,26 @@ def _audit_pydantic_model(
                     ),
                 )
 
+    first_structural_field = next(
+        (
+            field_name
+            for field_name in model.model_fields
+            if field_name in structural_fields
+        ),
+        None,
+    )
+    if (
+        first_structural_field is not None
+        and _pydantic_model_has_custom_lifecycle(model)
+    ):
+        raise ToolValidationError(
+            path=_json_path((*path, first_structural_field)),
+            message=(
+                "unsupported Pydantic input shape: "
+                "structural model lifecycle hook"
+            ),
+        )
+
     decorators = model.__pydantic_decorators__
     for decorator in decorators.field_validators.values():
         targeted_fields = set(decorator.info.fields)
@@ -825,12 +864,7 @@ def _audit_pydantic_model(
                     path=_json_path((*path, field_name)),
                     message="unsupported Pydantic input shape: structural validator",
                 )
-    if structural_fields and decorators.model_validators:
-        first_structural_field = next(
-            field_name
-            for field_name in model.model_fields
-            if field_name in structural_fields
-        )
+    if first_structural_field is not None and decorators.model_validators:
         raise ToolValidationError(
             path=_json_path((*path, first_structural_field)),
             message="unsupported Pydantic input shape: structural validator",

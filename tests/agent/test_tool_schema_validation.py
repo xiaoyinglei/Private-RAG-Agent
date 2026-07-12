@@ -246,6 +246,109 @@ class CoreSchemaMetadataArguments(BaseModel):
     ]
 
 
+class LifecycleNestedA(BaseModel):
+    kind: Literal["a"]
+    payload: str
+
+
+class LifecycleNestedB(BaseModel):
+    kind: Literal["b"]
+    payload: str
+    discarded: bool = False
+
+
+def _reverse_structural_children(model: Any) -> Any:
+    model.children.reverse()
+    return model
+
+
+class CoreSchemaLifecycleArguments(BaseModel):
+    children: list[LifecycleNestedA | LifecycleNestedB]
+
+    @classmethod
+    def __get_pydantic_core_schema__(
+        cls,
+        source_type: Any,
+        handler: Any,
+    ) -> Any:
+        schema = handler(source_type)
+        return core_schema.no_info_after_validator_function(
+            _reverse_structural_children,
+            schema,
+        )
+
+
+class CustomInitLifecycleArguments(BaseModel):
+    children: list[LifecycleNestedA | LifecycleNestedB]
+
+    def __init__(self, **data: Any) -> None:
+        super().__init__(**data)
+        self.children.reverse()
+
+
+class PostInitLifecycleArguments(BaseModel):
+    children: list[LifecycleNestedA | LifecycleNestedB]
+
+    def model_post_init(self, context: Any) -> None:
+        self.children.reverse()
+
+
+class ModelValidateLifecycleArguments(BaseModel):
+    children: list[LifecycleNestedA | LifecycleNestedB]
+
+    @classmethod
+    def model_validate(cls, obj: Any, **kwargs: Any) -> Any:
+        validated = super().model_validate(obj, **kwargs)
+        validated.children.reverse()
+        return validated
+
+
+def _reverse_scalar_value(model: Any) -> Any:
+    model.value = model.value[::-1]
+    return model
+
+
+class ScalarCoreSchemaLifecycleArguments(BaseModel):
+    value: str
+
+    @classmethod
+    def __get_pydantic_core_schema__(
+        cls,
+        source_type: Any,
+        handler: Any,
+    ) -> Any:
+        schema = handler(source_type)
+        return core_schema.no_info_after_validator_function(
+            _reverse_scalar_value,
+            schema,
+        )
+
+
+class ScalarCustomInitLifecycleArguments(BaseModel):
+    value: str
+
+    def __init__(self, **data: Any) -> None:
+        super().__init__(**data)
+        self.value = self.value[::-1]
+
+
+class ScalarPostInitLifecycleArguments(BaseModel):
+    value: str
+
+    def model_post_init(self, context: Any) -> None:
+        self.value = self.value[::-1]
+
+
+class ScalarModelValidateLifecycleArguments(BaseModel):
+    value: str
+
+    @classmethod
+    def model_validate(cls, obj: Any, **kwargs: Any) -> Any:
+        validated = super().model_validate(obj, **kwargs)
+        validated.value = validated.value[::-1]
+        return validated
+
+
 def _raw_input_validator() -> Callable[
     [Mapping[str, JsonValue]], Mapping[str, JsonValue]
 ]:
@@ -621,6 +724,66 @@ def test_pydantic_input_rejects_structural_core_schema_metadata() -> None:
 
     assert error.value.path == "$.children"
     assert "structural core-schema hook" in error.value.message
+
+
+@pytest.mark.parametrize(
+    ("model", "lifecycle_marker"),
+    [
+        pytest.param(
+            CoreSchemaLifecycleArguments,
+            "__get_pydantic_core_schema__",
+            id="core-schema",
+        ),
+        pytest.param(
+            CustomInitLifecycleArguments,
+            "__pydantic_custom_init__",
+            id="custom-init",
+        ),
+        pytest.param(
+            PostInitLifecycleArguments,
+            "__pydantic_post_init__",
+            id="post-init",
+        ),
+        pytest.param(
+            ModelValidateLifecycleArguments,
+            "model_validate",
+            id="model-validate",
+        ),
+    ],
+)
+def test_pydantic_input_rejects_structural_model_lifecycle_hooks(
+    model: type[BaseModel],
+    lifecycle_marker: str,
+) -> None:
+    if lifecycle_marker in {"__get_pydantic_core_schema__", "model_validate"}:
+        descriptor = model.__dict__.get(lifecycle_marker)
+        assert descriptor is not None
+        assert descriptor is not BaseModel.__dict__.get(lifecycle_marker)
+    else:
+        assert getattr(model, lifecycle_marker, None)
+
+    with pytest.raises(ToolValidationError) as error:
+        pydantic_input(model)
+
+    assert error.value.path == "$.children"
+    assert "structural model lifecycle hook" in error.value.message
+
+
+@pytest.mark.parametrize(
+    "model",
+    [
+        pytest.param(ScalarCoreSchemaLifecycleArguments, id="core-schema"),
+        pytest.param(ScalarCustomInitLifecycleArguments, id="custom-init"),
+        pytest.param(ScalarPostInitLifecycleArguments, id="post-init"),
+        pytest.param(ScalarModelValidateLifecycleArguments, id="model-validate"),
+    ],
+)
+def test_pydantic_input_allows_scalar_only_lifecycle_hooks(
+    model: type[BaseModel],
+) -> None:
+    _, validate = pydantic_input(model)
+
+    assert validate({"value": "abc"}) == {"value": "cba"}
 
 
 @pytest.mark.parametrize(
