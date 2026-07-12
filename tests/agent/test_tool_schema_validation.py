@@ -4,7 +4,7 @@ from collections.abc import Callable, Mapping
 from typing import Any, Literal
 
 import pytest
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AliasChoices, AliasPath, BaseModel, ConfigDict, Field
 
 from rag.agent.tools.tool import (
     JsonValue,
@@ -54,6 +54,23 @@ class ExtensibleParentWithClosedNestedArguments(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     nested: NestedArguments
+
+
+class MappingArguments(BaseModel):
+    children: dict[int, NestedArguments]
+
+
+class AliasPathArguments(BaseModel):
+    value: str = Field(validation_alias=AliasPath("payload", "value"))
+
+
+class AliasChoicesWithPathArguments(BaseModel):
+    value: str = Field(
+        validation_alias=AliasChoices(
+            "value",
+            AliasPath("payload", "value"),
+        )
+    )
 
 
 def _raw_input_validator() -> Callable[
@@ -181,6 +198,42 @@ def test_pydantic_input_rejects_ignored_nested_extras_under_extensible_parent() 
         )
 
     assert error.value.path == "$.nested.discarded"
+
+
+def test_pydantic_input_rejects_mapping_key_normalization_collisions() -> None:
+    _, validate = pydantic_input(MappingArguments)
+
+    with pytest.raises(ToolValidationError) as error:
+        validate(
+            {
+                "children": {
+                    "1": {"label": "first"},
+                    "01": {"label": "second", "discarded": True},
+                }
+            }  # type: ignore[dict-item]
+        )
+
+    assert error.value.path == "$.children"
+    assert "mapping keys" in error.value.message
+    assert len(error.value.message) <= 512
+
+
+@pytest.mark.parametrize(
+    "model",
+    [
+        pytest.param(AliasPathArguments, id="alias-path"),
+        pytest.param(AliasChoicesWithPathArguments, id="alias-choices-path"),
+    ],
+)
+def test_pydantic_input_rejects_lossy_validation_aliases(
+    model: type[BaseModel],
+) -> None:
+    with pytest.raises(ToolValidationError) as error:
+        pydantic_input(model)
+
+    assert error.value.path == "$.value"
+    assert "unsupported validation alias" in error.value.message
+    assert len(error.value.message) <= 512
 
 
 @pytest.mark.parametrize(

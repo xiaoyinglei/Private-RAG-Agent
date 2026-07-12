@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from numbers import Real
 from types import MappingProxyType
-from typing import Literal
+from typing import Literal, get_args
 
 from jsonschema import exceptions as jsonschema_exceptions  # type: ignore[import-untyped]
 from jsonschema.protocols import (  # type: ignore[import-untyped]
@@ -529,15 +529,6 @@ def _field_input_paths(
     if model.model_config.get("validate_by_alias", True):
         if isinstance(validation_alias, str):
             paths.append((validation_alias,))
-        elif isinstance(validation_alias, AliasPath):
-            paths.append(tuple(validation_alias.path))
-        elif isinstance(validation_alias, AliasChoices):
-            for choice in validation_alias.choices:
-                paths.append(
-                    tuple(choice.path)
-                    if isinstance(choice, AliasPath)
-                    else (choice,)
-                )
         elif field.alias is not None:
             paths.append((field.alias,))
     if not has_alias or model.model_config.get("validate_by_name", False):
@@ -584,6 +575,14 @@ def _reject_ignored_extras_in_value(
             )
         return
     if isinstance(validated, Mapping) and isinstance(original, Mapping):
+        if len(validated) != len(original):
+            raise ToolValidationError(
+                path=_json_path(path),
+                message=(
+                    "mapping keys changed cardinality during validation; "
+                    "normalized keys must remain unique"
+                ),
+            )
         for (original_key, original_item), validated_item in zip(
             original.items(),
             validated.values(),
@@ -637,6 +636,47 @@ def _reject_ignored_model_extras(
                 )
 
 
+def _pydantic_models_in_annotation(
+    annotation: object,
+) -> tuple[type[BaseModel], ...]:
+    if isinstance(annotation, type) and issubclass(annotation, BaseModel):
+        return (annotation,)
+    return tuple(
+        nested_model
+        for argument in get_args(annotation)
+        for nested_model in _pydantic_models_in_annotation(argument)
+    )
+
+
+def _reject_lossy_pydantic_aliases(
+    model: type[BaseModel],
+    *,
+    path: tuple[str | int, ...] = (),
+    visited: set[type[BaseModel]] | None = None,
+) -> None:
+    if visited is None:
+        visited = set()
+    if model in visited:
+        return
+    visited.add(model)
+    for field_name, model_field in model.model_fields.items():
+        validation_alias = model_field.validation_alias
+        if isinstance(validation_alias, (AliasPath, AliasChoices)):
+            raise ToolValidationError(
+                path=_json_path((*path, field_name)),
+                message=(
+                    "unsupported validation alias: complex alias paths and choices "
+                    "cannot be represented faithfully in tool JSON Schema"
+                ),
+            )
+        for nested_model in _pydantic_models_in_annotation(model_field.annotation):
+            _reject_lossy_pydantic_aliases(
+                nested_model,
+                path=(*path, field_name),
+                visited=visited,
+            )
+
+
 def pydantic_input(
     model: type[BaseModel],
 ) -> tuple[dict[str, JsonValue], ValidateInput]:
@@ -644,6 +684,7 @@ def pydantic_input(
 
     if not isinstance(model, type) or not issubclass(model, BaseModel):
         raise TypeError("model must be a BaseModel subclass")
+    _reject_lossy_pydantic_aliases(model)
     schema: _MutableJsonValue = model.model_json_schema(mode="validation")
     _close_pydantic_object_schemas(schema)
     if not isinstance(schema, dict):
