@@ -654,6 +654,14 @@ def _reject_ignored_model_extras(
                 )
 
 
+def _metadata_can_transform_validation(metadata: object) -> bool:
+    return (
+        callable(getattr(metadata, "__get_pydantic_core_schema__", None))
+        or callable(getattr(metadata, "__get_validators__", None))
+        or hasattr(metadata, "__pydantic_core_schema__")
+    )
+
+
 def _audit_pydantic_annotation(
     annotation: object,
     *,
@@ -695,12 +703,12 @@ def _audit_pydantic_annotation(
             seen_aliases=seen_aliases,
         )
         if contains_model and any(
-            type(metadata).__module__ == "pydantic.functional_validators"
+            _metadata_can_transform_validation(metadata)
             for metadata in arguments[1:]
         ):
             raise ToolValidationError(
                 path=_json_path(path),
-                message="unsupported Pydantic input shape: structural validator",
+                message="unsupported Pydantic input shape: structural core-schema hook",
             )
         return contains_model
     if origin is Literal:
@@ -795,12 +803,15 @@ def _audit_pydantic_model(
         if contains_model:
             structural_fields.add(field_name)
             if any(
-                type(metadata).__module__ == "pydantic.functional_validators"
+                _metadata_can_transform_validation(metadata)
                 for metadata in model_field.metadata
             ):
                 raise ToolValidationError(
                     path=_json_path((*path, field_name)),
-                    message="unsupported Pydantic input shape: structural validator",
+                    message=(
+                        "unsupported Pydantic input shape: "
+                        "structural core-schema hook"
+                    ),
                 )
 
     decorators = model.__pydantic_decorators__

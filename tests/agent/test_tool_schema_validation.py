@@ -5,7 +5,7 @@ from collections.abc import Callable, Mapping
 from collections.abc import Iterable as IterableABC
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass as stdlib_dataclass
-from typing import Any, Literal, TypeAliasType
+from typing import Annotated, Any, Literal, TypeAliasType
 
 import pytest
 from pydantic import (
@@ -18,6 +18,7 @@ from pydantic import (
     field_validator,
 )
 from pydantic.dataclasses import dataclass as pydantic_dataclass
+from pydantic_core import core_schema
 from typing_extensions import TypedDict
 
 from rag.agent.tools.tool import (
@@ -219,6 +220,30 @@ class ListUnionWithDataclassArguments(BaseModel):
 
 class TupleWithDataclassArguments(BaseModel):
     nested: tuple[NestedArguments, DataclassArguments]
+
+
+class AlternateNestedArguments(BaseModel):
+    alternate: str
+
+
+class ReverseStructuralMetadata:
+    def __get_pydantic_core_schema__(
+        self,
+        source_type: Any,
+        handler: Any,
+    ) -> Any:
+        schema = handler(source_type)
+        return core_schema.no_info_after_validator_function(
+            lambda value: list(reversed(value)),
+            schema,
+        )
+
+
+class CoreSchemaMetadataArguments(BaseModel):
+    children: Annotated[
+        list[NestedArguments | AlternateNestedArguments],
+        ReverseStructuralMetadata(),
+    ]
 
 
 def _raw_input_validator() -> Callable[
@@ -582,6 +607,20 @@ def test_pydantic_input_audits_every_composite_branch(
 
     assert error.value.path == "$.nested"
     assert "unsupported Pydantic input shape: dataclass" == error.value.message
+
+
+def test_pydantic_input_rejects_structural_core_schema_metadata() -> None:
+    metadata = CoreSchemaMetadataArguments.model_fields["children"].metadata
+    assert any(
+        callable(getattr(item, "__get_pydantic_core_schema__", None))
+        for item in metadata
+    )
+
+    with pytest.raises(ToolValidationError) as error:
+        pydantic_input(CoreSchemaMetadataArguments)
+
+    assert error.value.path == "$.children"
+    assert "structural core-schema hook" in error.value.message
 
 
 @pytest.mark.parametrize(
