@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import math
 from collections.abc import Awaitable, Callable, Iterable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, is_dataclass
 from enum import StrEnum
 from numbers import Real
 from types import MappingProxyType
-from typing import Literal, get_args
+from typing import Literal, get_args, get_origin
 
 from jsonschema import exceptions as jsonschema_exceptions  # type: ignore[import-untyped]
 from jsonschema.protocols import (  # type: ignore[import-untyped]
@@ -18,6 +18,7 @@ from pydantic import ValidationError as PydanticValidationError
 from pydantic.fields import FieldInfo
 from referencing import Registry
 from referencing.exceptions import Unresolvable
+from typing_extensions import is_typeddict
 
 type JsonValue = (
     str
@@ -429,17 +430,22 @@ def _jsonschema_error_path(error: jsonschema_exceptions.ValidationError) -> str:
     return _json_path(parts)
 
 
-def _tool_error_from_jsonschema(
-    error: jsonschema_exceptions.ValidationError | jsonschema_exceptions.SchemaError,
+def _tool_error_from_jsonschema_validation(
+    error: jsonschema_exceptions.ValidationError,
 ) -> ToolValidationError:
-    path = (
-        _jsonschema_error_path(error)
-        if isinstance(error, jsonschema_exceptions.ValidationError)
-        else _json_path(error.absolute_path)
+    validator = error.validator if isinstance(error.validator, str) else "validation"
+    return ToolValidationError(
+        path=_jsonschema_error_path(error),
+        message=f"{validator}: validation failed",
     )
+
+
+def _tool_error_from_jsonschema_schema(
+    error: jsonschema_exceptions.SchemaError,
+) -> ToolValidationError:
     validator = error.validator if isinstance(error.validator, str) else "schema"
     return ToolValidationError(
-        path=path,
+        path=_json_path(error.absolute_path),
         message=f"{validator}: {error.message}",
     )
 
@@ -481,7 +487,7 @@ def _json_schema_validator(
     try:
         validator_type.check_schema(schema_copy)
     except jsonschema_exceptions.SchemaError as error:
-        raise _tool_error_from_jsonschema(error) from None
+        raise _tool_error_from_jsonschema_schema(error) from None
     return validator_type(schema_copy, registry=Registry())
 
 
@@ -498,7 +504,7 @@ def _validate_with_json_schema(
             message="schema reference could not be resolved locally",
         ) from None
     if error is not None:
-        raise _tool_error_from_jsonschema(error)
+        raise _tool_error_from_jsonschema_validation(error)
 
 
 def _tool_error_from_pydantic(error: PydanticValidationError) -> ToolValidationError:
@@ -511,10 +517,9 @@ def _tool_error_from_pydantic(error: PydanticValidationError) -> ToolValidationE
         return ToolValidationError(path="$", message="input validation failed")
     first = details[0]
     error_type = first.get("type", "validation")
-    message = first.get("msg", "input validation failed")
     return ToolValidationError(
         path=_json_path(first.get("loc", ())),
-        message=f"{error_type}: {message}",
+        message=f"{error_type}: validation failed",
     )
 
 
@@ -602,6 +607,14 @@ def _reject_ignored_model_extras(
     path: tuple[str | int, ...],
 ) -> None:
     model = type(validated)
+    if validated.model_extra:
+        canonical_names = set(model.model_fields) | set(model.model_computed_fields)
+        for key in original:
+            if key in validated.model_extra and key in canonical_names:
+                raise ToolValidationError(
+                    path=_json_path((*path, key)),
+                    message="extra key collides with canonical field name",
+                )
     consumed_keys: set[str] = set()
     for field_name, model_field in model.model_fields.items():
         for input_path in _field_input_paths(model, field_name, model_field):
@@ -636,19 +649,35 @@ def _reject_ignored_model_extras(
                 )
 
 
-def _pydantic_models_in_annotation(
+def _audit_pydantic_annotation(
     annotation: object,
-) -> tuple[type[BaseModel], ...]:
+    *,
+    path: tuple[str | int, ...],
+    visited: set[type[BaseModel]],
+) -> None:
+    if is_dataclass(annotation):
+        raise ToolValidationError(
+            path=_json_path(path),
+            message="unsupported Pydantic input shape: dataclass",
+        )
+    if is_typeddict(annotation):
+        raise ToolValidationError(
+            path=_json_path(path),
+            message="unsupported Pydantic input shape: TypedDict",
+        )
+    if get_origin(annotation) in (set, frozenset):
+        raise ToolValidationError(
+            path=_json_path(path),
+            message="unsupported Pydantic input shape: set or frozenset",
+        )
     if isinstance(annotation, type) and issubclass(annotation, BaseModel):
-        return (annotation,)
-    return tuple(
-        nested_model
-        for argument in get_args(annotation)
-        for nested_model in _pydantic_models_in_annotation(argument)
-    )
+        _audit_pydantic_model(annotation, path=path, visited=visited)
+        return
+    for argument in get_args(annotation):
+        _audit_pydantic_annotation(argument, path=path, visited=visited)
 
 
-def _reject_lossy_pydantic_aliases(
+def _audit_pydantic_model(
     model: type[BaseModel],
     *,
     path: tuple[str | int, ...] = (),
@@ -656,6 +685,11 @@ def _reject_lossy_pydantic_aliases(
 ) -> None:
     if visited is None:
         visited = set()
+    if getattr(model, "__pydantic_root_model__", False):
+        raise ToolValidationError(
+            path=_json_path(path),
+            message="unsupported Pydantic input shape: RootModel",
+        )
     if model in visited:
         return
     visited.add(model)
@@ -669,12 +703,11 @@ def _reject_lossy_pydantic_aliases(
                     "cannot be represented faithfully in tool JSON Schema"
                 ),
             )
-        for nested_model in _pydantic_models_in_annotation(model_field.annotation):
-            _reject_lossy_pydantic_aliases(
-                nested_model,
-                path=(*path, field_name),
-                visited=visited,
-            )
+        _audit_pydantic_annotation(
+            model_field.annotation,
+            path=(*path, field_name),
+            visited=visited,
+        )
 
 
 def pydantic_input(
@@ -684,7 +717,7 @@ def pydantic_input(
 
     if not isinstance(model, type) or not issubclass(model, BaseModel):
         raise TypeError("model must be a BaseModel subclass")
-    _reject_lossy_pydantic_aliases(model)
+    _audit_pydantic_model(model)
     schema: _MutableJsonValue = model.model_json_schema(mode="validation")
     _close_pydantic_object_schemas(schema)
     if not isinstance(schema, dict):

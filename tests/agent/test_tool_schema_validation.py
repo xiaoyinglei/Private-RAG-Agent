@@ -1,10 +1,21 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass as stdlib_dataclass
 from typing import Any, Literal
 
 import pytest
-from pydantic import AliasChoices, AliasPath, BaseModel, ConfigDict, Field
+from pydantic import (
+    AliasChoices,
+    AliasPath,
+    BaseModel,
+    ConfigDict,
+    Field,
+    RootModel,
+    field_validator,
+)
+from pydantic.dataclasses import dataclass as pydantic_dataclass
+from typing_extensions import TypedDict
 
 from rag.agent.tools.tool import (
     JsonValue,
@@ -79,6 +90,73 @@ class InvalidGeneratedSchemaArguments(BaseModel):
     )
 
     value: str
+
+
+class ExtensibleAliasedArguments(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    internal: str = Field(alias="external")
+
+
+class ParentWithExtensibleAliasedArguments(BaseModel):
+    nested: ExtensibleAliasedArguments
+
+
+@pydantic_dataclass
+class DataclassArguments:
+    label: str
+
+
+class ParentWithDataclassArguments(BaseModel):
+    nested: DataclassArguments
+
+
+@stdlib_dataclass
+class StandardDataclassArguments:
+    label: str
+
+
+class ParentWithStandardDataclassArguments(BaseModel):
+    nested: StandardDataclassArguments
+
+
+class FrozenNestedArguments(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    label: str
+
+
+class SetArguments(BaseModel):
+    children: set[FrozenNestedArguments]
+
+
+class FrozenSetArguments(BaseModel):
+    children: frozenset[FrozenNestedArguments]
+
+
+class ListRootArguments(RootModel[list[str]]):
+    pass
+
+
+class DictRootArguments(RootModel[dict[str, str]]):
+    pass
+
+
+class TypedDictArguments(TypedDict):
+    label: str
+
+
+class ParentWithTypedDictArguments(BaseModel):
+    nested: TypedDictArguments
+
+
+class SecretValidatorArguments(BaseModel):
+    secret: str
+
+    @field_validator("secret")
+    @classmethod
+    def reject_secret(cls, value: str) -> str:
+        raise ValueError(f"rejected runtime value TOP_SECRET_123: {value}")
 
 
 def _raw_input_validator() -> Callable[
@@ -250,6 +328,108 @@ def test_pydantic_input_rejects_invalid_generated_schema() -> None:
 
     assert error.value.path == "$.type"
     assert len(error.value.message) <= 512
+
+
+@pytest.mark.parametrize(
+    ("model", "arguments", "path"),
+    [
+        pytest.param(
+            ExtensibleAliasedArguments,
+            {"external": "FIELD", "internal": "EXTRA"},
+            "$.internal",
+            id="top-level",
+        ),
+        pytest.param(
+            ParentWithExtensibleAliasedArguments,
+            {"nested": {"external": "FIELD", "internal": "EXTRA"}},
+            "$.nested.internal",
+            id="nested",
+        ),
+    ],
+)
+def test_pydantic_input_rejects_alias_extra_output_collisions(
+    model: type[BaseModel],
+    arguments: dict[str, Any],
+    path: str,
+) -> None:
+    _, validate = pydantic_input(model)
+
+    with pytest.raises(ToolValidationError) as error:
+        validate(arguments)
+
+    assert error.value.path == path
+    assert error.value.message == "extra key collides with canonical field name"
+
+
+@pytest.mark.parametrize(
+    ("model", "path"),
+    [
+        pytest.param(ParentWithDataclassArguments, "$.nested", id="dataclass"),
+        pytest.param(
+            ParentWithStandardDataclassArguments,
+            "$.nested",
+            id="standard-dataclass",
+        ),
+        pytest.param(SetArguments, "$.children", id="set"),
+        pytest.param(FrozenSetArguments, "$.children", id="frozenset"),
+        pytest.param(ListRootArguments, "$", id="list-root-model"),
+        pytest.param(DictRootArguments, "$", id="dict-root-model"),
+        pytest.param(ParentWithTypedDictArguments, "$.nested", id="typed-dict"),
+    ],
+)
+def test_pydantic_input_rejects_unsupported_lossy_shapes(
+    model: type[BaseModel],
+    path: str,
+) -> None:
+    with pytest.raises(ToolValidationError) as error:
+        pydantic_input(model)
+
+    assert error.value.path == path
+    assert "unsupported Pydantic input shape" in error.value.message
+    assert len(error.value.message) <= 512
+
+
+def test_json_schema_input_redacts_runtime_values() -> None:
+    validate = json_schema_input(
+        {
+            "type": "object",
+            "properties": {"secret": {"type": "integer"}},
+            "required": ["secret"],
+        }
+    )
+
+    with pytest.raises(ToolValidationError) as error:
+        validate({"secret": "TOP_SECRET_123"})
+
+    assert error.value.path == "$.secret"
+    assert error.value.message == "type: validation failed"
+    assert "TOP_SECRET_123" not in str(error.value)
+
+
+def test_json_schema_output_redacts_runtime_values() -> None:
+    schema = {
+        "type": "object",
+        "properties": {"secret": {"type": "integer"}},
+        "required": ["secret"],
+    }
+
+    with pytest.raises(ToolValidationError) as error:
+        json_schema_output(schema, {"secret": "TOP_SECRET_123"})  # type: ignore[arg-type]
+
+    assert error.value.path == "$.secret"
+    assert error.value.message == "type: validation failed"
+    assert "TOP_SECRET_123" not in str(error.value)
+
+
+def test_pydantic_input_redacts_custom_validator_messages_and_values() -> None:
+    _, validate = pydantic_input(SecretValidatorArguments)
+
+    with pytest.raises(ToolValidationError) as error:
+        validate({"secret": "TOP_SECRET_123"})
+
+    assert error.value.path == "$.secret"
+    assert error.value.message == "value_error: validation failed"
+    assert "TOP_SECRET_123" not in str(error.value)
 
 
 @pytest.mark.parametrize(
