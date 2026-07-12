@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import warnings
 from collections import deque
 from collections.abc import Callable, Mapping
 from collections.abc import Iterable as IterableABC
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass as stdlib_dataclass
+from enum import StrEnum
 from typing import Annotated, Any, Literal, TypeAliasType
 
 import pytest
@@ -15,7 +17,10 @@ from pydantic import (
     ConfigDict,
     Field,
     RootModel,
+    computed_field,
+    field_serializer,
     field_validator,
+    model_serializer,
 )
 from pydantic.dataclasses import dataclass as pydantic_dataclass
 from pydantic_core import core_schema
@@ -62,6 +67,26 @@ class SerializeByAliasArguments(BaseModel):
     model_config = ConfigDict(serialize_by_alias=True)
 
     internal_name: str = Field(alias="externalName")
+
+
+class DuplicateAliasArguments(BaseModel):
+    first: str = Field(alias="shared")
+    second: str = Field(alias="shared")
+
+
+class AliasCanonicalCollisionArguments(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    first: str = Field(alias="second")
+    second: str
+
+
+class ParentWithDuplicateAliasArguments(BaseModel):
+    nested: DuplicateAliasArguments
+
+
+class ParentWithAliasCanonicalCollisionArguments(BaseModel):
+    nested: AliasCanonicalCollisionArguments
 
 
 class NestedArguments(BaseModel):
@@ -260,6 +285,190 @@ class CoreSchemaMetadataArguments(BaseModel):
         list[NestedArguments | AlternateNestedArguments],
         ReverseStructuralMetadata(),
     ]
+
+
+class FieldSerializerArguments(BaseModel):
+    value: int
+
+    @field_serializer("value")
+    def serialize_value(self, value: int) -> str:
+        return str(value)
+
+
+class ModelSerializerArguments(BaseModel):
+    value: int
+
+    @model_serializer
+    def serialize_model(self) -> dict[str, Any]:
+        return {"renamed": self.value}
+
+
+class ComputedFieldArguments(BaseModel):
+    value: int
+
+    @computed_field
+    @property
+    def doubled(self) -> int:
+        return self.value * 2
+
+
+class ExcludedFieldArguments(BaseModel):
+    value: int = Field(exclude=True)
+
+
+class ConditionallyExcludedFieldArguments(BaseModel):
+    value: int = Field(exclude_if=lambda value: value == 0)
+
+
+class InheritedSerializerBase(BaseModel):
+    value: int
+
+    @field_serializer("value")
+    def serialize_value(self, value: int) -> str:
+        return str(value)
+
+
+class InheritedSerializerArguments(InheritedSerializerBase):
+    label: str
+
+
+class CustomModelDumpBase(BaseModel):
+    def model_dump(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        dumped = super().model_dump(*args, **kwargs)
+        dumped.pop("value", None)
+        return dumped
+
+
+class CustomModelDumpArguments(CustomModelDumpBase):
+    value: int
+
+
+with warnings.catch_warnings():
+    warnings.simplefilter("ignore", DeprecationWarning)
+
+    class JsonEncoderArguments(BaseModel):
+        model_config = ConfigDict(json_encoders={int: str})
+
+        value: int
+
+
+class DivergentSerializationAliasArguments(BaseModel):
+    value: int = Field(
+        validation_alias="providerValue",
+        serialization_alias="dumpedValue",
+    )
+
+
+class FieldSchemaOverrideArguments(BaseModel):
+    value: int = Field(json_schema_extra={"type": "string"})
+
+
+class ModelSchemaOverrideArguments(BaseModel):
+    model_config = ConfigDict(json_schema_extra={"type": "string"})
+
+    value: int
+
+
+def _force_string_schema(schema: dict[str, Any]) -> None:
+    schema["type"] = "string"
+
+
+class CallableSchemaOverrideArguments(BaseModel):
+    value: int = Field(json_schema_extra=_force_string_schema)
+
+
+class JsonSchemaMetadata:
+    def __get_pydantic_json_schema__(
+        self,
+        core: Any,
+        handler: Any,
+    ) -> Any:
+        schema = handler(core)
+        schema["type"] = "string"
+        return schema
+
+
+class MetadataSchemaOverrideArguments(BaseModel):
+    value: Annotated[int, JsonSchemaMetadata()]
+
+
+class InheritedJsonSchemaHookBase(BaseModel):
+    @classmethod
+    def __get_pydantic_json_schema__(
+        cls,
+        core: Any,
+        handler: Any,
+    ) -> Any:
+        schema = handler(core)
+        schema["type"] = "string"
+        return schema
+
+
+class InheritedJsonSchemaHookArguments(InheritedJsonSchemaHookBase):
+    value: int
+
+
+class ParentWithInheritedJsonSchemaHookArguments(BaseModel):
+    nested: InheritedJsonSchemaHookArguments
+
+
+class CustomModelJsonSchemaBase(BaseModel):
+    @classmethod
+    def model_json_schema(cls, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        schema = super().model_json_schema(*args, **kwargs)
+        schema["type"] = "string"
+        return schema
+
+
+class CustomModelJsonSchemaArguments(CustomModelJsonSchemaBase):
+    value: int
+
+
+class SchemaModeOverrideArguments(BaseModel):
+    model_config = ConfigDict(json_schema_mode_override="serialization")
+
+    value: int
+
+
+with warnings.catch_warnings():
+    warnings.simplefilter("ignore", DeprecationWarning)
+
+    class CustomSchemaGeneratorArguments(BaseModel):
+        model_config = ConfigDict(schema_generator=object)
+
+        value: int
+
+
+class DocumentationSchemaMetadataArguments(BaseModel):
+    model_config = ConfigDict(
+        json_schema_extra={
+            "title": "Documented arguments",
+            "description": "Documentation only",
+            "examples": [{"value": 1}],
+            "default": {"value": 1},
+            "x-contract-note": "safe",
+        }
+    )
+
+    value: int = Field(
+        default=1,
+        title="Documented value",
+        description="Documentation only",
+        examples=[1],
+        json_schema_extra={"x-field-note": "safe"},
+    )
+
+
+class UnvalidatedDefaultArguments(BaseModel):
+    count: int = Field(default=0, ge=1)
+
+
+class DefaultEncodedState(StrEnum):
+    READY = "ready"
+
+
+class DefaultEncodedEnumArguments(BaseModel):
+    state: DefaultEncodedState
 
 
 class LifecycleNestedA(BaseModel):
@@ -540,6 +749,152 @@ def test_pydantic_input_ignores_serialize_by_alias_for_canonical_dump() -> None:
     assert "externalName" in properties  # type: ignore[operator]
     assert "internal_name" not in properties  # type: ignore[operator]
     assert validate({"externalName": "status"}) == {"internal_name": "status"}
+
+
+@pytest.mark.parametrize(
+    ("model", "path"),
+    [
+        pytest.param(DuplicateAliasArguments, "$.second", id="duplicate-top-level"),
+        pytest.param(
+            ParentWithDuplicateAliasArguments,
+            "$.nested.second",
+            id="duplicate-nested",
+        ),
+        pytest.param(
+            AliasCanonicalCollisionArguments,
+            "$.second",
+            id="alias-canonical-top-level",
+        ),
+        pytest.param(
+            ParentWithAliasCanonicalCollisionArguments,
+            "$.nested.second",
+            id="alias-canonical-nested",
+        ),
+    ],
+)
+def test_pydantic_input_rejects_accepted_input_name_collisions(
+    model: type[BaseModel],
+    path: str,
+) -> None:
+    with pytest.raises(ToolValidationError) as error:
+        pydantic_input(model)
+
+    assert error.value.path == path
+    assert "input name collision" in error.value.message
+    assert len(error.value.message) <= 512
+
+
+@pytest.mark.parametrize(
+    ("model", "path"),
+    [
+        pytest.param(FieldSerializerArguments, "$.value", id="field-serializer"),
+        pytest.param(ModelSerializerArguments, "$", id="model-serializer"),
+        pytest.param(ComputedFieldArguments, "$.doubled", id="computed-field"),
+        pytest.param(ExcludedFieldArguments, "$.value", id="exclude"),
+        pytest.param(
+            ConditionallyExcludedFieldArguments,
+            "$.value",
+            id="exclude-if",
+        ),
+        pytest.param(
+            InheritedSerializerArguments,
+            "$.value",
+            id="inherited-field-serializer",
+        ),
+        pytest.param(CustomModelDumpArguments, "$", id="inherited-model-dump"),
+        pytest.param(JsonEncoderArguments, "$", id="json-encoders"),
+        pytest.param(
+            DivergentSerializationAliasArguments,
+            "$.value",
+            id="serialization-alias",
+        ),
+    ],
+)
+def test_pydantic_input_rejects_custom_serialization_surfaces(
+    model: type[BaseModel],
+    path: str,
+) -> None:
+    with pytest.raises(ToolValidationError) as error:
+        pydantic_input(model)
+
+    assert error.value.path == path
+    assert "serialization" in error.value.message.lower()
+    assert len(error.value.message) <= 512
+
+
+@pytest.mark.parametrize(
+    ("model", "path"),
+    [
+        pytest.param(
+            FieldSchemaOverrideArguments,
+            "$.value.type",
+            id="field-extra",
+        ),
+        pytest.param(ModelSchemaOverrideArguments, "$.type", id="model-extra"),
+        pytest.param(
+            CallableSchemaOverrideArguments,
+            "$.value",
+            id="callable-field-extra",
+        ),
+        pytest.param(
+            MetadataSchemaOverrideArguments,
+            "$.value",
+            id="metadata-hook",
+        ),
+        pytest.param(
+            InheritedJsonSchemaHookArguments,
+            "$",
+            id="inherited-class-hook",
+        ),
+        pytest.param(
+            ParentWithInheritedJsonSchemaHookArguments,
+            "$.nested",
+            id="nested-inherited-class-hook",
+        ),
+        pytest.param(
+            CustomModelJsonSchemaArguments,
+            "$",
+            id="inherited-model-json-schema",
+        ),
+        pytest.param(SchemaModeOverrideArguments, "$", id="mode-override"),
+        pytest.param(CustomSchemaGeneratorArguments, "$", id="schema-generator"),
+    ],
+)
+def test_pydantic_input_rejects_validation_affecting_schema_customization(
+    model: type[BaseModel],
+    path: str,
+) -> None:
+    with pytest.raises(ToolValidationError) as error:
+        pydantic_input(model)
+
+    assert error.value.path == path
+    assert "schema customization" in error.value.message.lower()
+    assert len(error.value.message) <= 512
+
+
+def test_pydantic_input_allows_documentation_only_schema_metadata() -> None:
+    schema, validate = pydantic_input(DocumentationSchemaMetadataArguments)
+
+    assert schema["x-contract-note"] == "safe"
+    field_schema = schema["properties"]["value"]  # type: ignore[index]
+    assert field_schema["x-field-note"] == "safe"  # type: ignore[index]
+    assert validate({}) == {"value": 1}
+
+
+def test_pydantic_input_validates_provider_dump_not_raw_coercion_input() -> None:
+    _, validate = pydantic_input(UnvalidatedDefaultArguments)
+
+    with pytest.raises(ToolValidationError) as error:
+        validate({})
+
+    assert error.value.path == "$.count"
+    assert "minimum" in error.value.message
+
+
+def test_pydantic_input_preserves_default_enum_json_encoding() -> None:
+    _, validate = pydantic_input(DefaultEncodedEnumArguments)
+
+    assert validate({"state": "ready"}) == {"state": "ready"}
 
 
 def test_pydantic_input_rejects_nested_unknown_arguments() -> None:

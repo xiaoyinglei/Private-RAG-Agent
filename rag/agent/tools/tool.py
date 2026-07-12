@@ -43,6 +43,62 @@ type _MutableJsonValue = (
 
 _MAX_VALIDATION_PATH_LENGTH = 256
 _MAX_VALIDATION_MESSAGE_LENGTH = 512
+_VALIDATION_AFFECTING_JSON_SCHEMA_KEYS = frozenset(
+    {
+        "$anchor",
+        "$defs",
+        "$dynamicAnchor",
+        "$dynamicRef",
+        "$id",
+        "$ref",
+        "$schema",
+        "additionalItems",
+        "additionalProperties",
+        "allOf",
+        "anyOf",
+        "const",
+        "contains",
+        "contentEncoding",
+        "contentMediaType",
+        "contentSchema",
+        "definitions",
+        "dependencies",
+        "dependentRequired",
+        "dependentSchemas",
+        "discriminator",
+        "else",
+        "enum",
+        "exclusiveMaximum",
+        "exclusiveMinimum",
+        "format",
+        "if",
+        "items",
+        "maxContains",
+        "maxItems",
+        "maxLength",
+        "maxProperties",
+        "maximum",
+        "minContains",
+        "minItems",
+        "minLength",
+        "minProperties",
+        "minimum",
+        "multipleOf",
+        "not",
+        "oneOf",
+        "pattern",
+        "patternProperties",
+        "prefixItems",
+        "properties",
+        "propertyNames",
+        "required",
+        "then",
+        "type",
+        "unevaluatedItems",
+        "unevaluatedProperties",
+        "uniqueItems",
+    }
+)
 
 
 def _bounded_text(value: str, *, limit: int) -> str:
@@ -662,34 +718,78 @@ def _metadata_can_transform_validation(metadata: object) -> bool:
     )
 
 
+def _pydantic_hook_differs_from_base(
+    model: type[BaseModel],
+    hook_name: str,
+) -> bool:
+    resolved_hook = next(
+        (
+            (owner, owner.__dict__[hook_name])
+            for owner in model.__mro__
+            if hook_name in owner.__dict__
+        ),
+        None,
+    )
+    if resolved_hook is None:
+        return False
+    _, descriptor = resolved_hook
+    base_descriptor = BaseModel.__dict__.get(hook_name)
+    matches_base = descriptor is base_descriptor or (
+        isinstance(descriptor, classmethod)
+        and isinstance(base_descriptor, classmethod)
+        and descriptor.__func__ is base_descriptor.__func__
+    )
+    return not matches_base and callable(getattr(model, hook_name, None))
+
+
 def _pydantic_model_has_custom_lifecycle(model: type[BaseModel]) -> bool:
-    for hook_name in (
-        "__get_pydantic_core_schema__",
-        "__get_validators__",
-        "model_validate",
+    if any(
+        _pydantic_hook_differs_from_base(model, hook_name)
+        for hook_name in (
+            "__get_pydantic_core_schema__",
+            "__get_validators__",
+            "model_validate",
+        )
     ):
-        resolved_hook = next(
-            (
-                (owner, owner.__dict__[hook_name])
-                for owner in model.__mro__
-                if hook_name in owner.__dict__
-            ),
-            None,
-        )
-        if resolved_hook is None:
-            continue
-        _, descriptor = resolved_hook
-        base_descriptor = BaseModel.__dict__.get(hook_name)
-        matches_base = descriptor is base_descriptor or (
-            isinstance(descriptor, classmethod)
-            and isinstance(base_descriptor, classmethod)
-            and descriptor.__func__ is base_descriptor.__func__
-        )
-        if not matches_base and callable(getattr(model, hook_name, None)):
-            return True
+        return True
     return bool(getattr(model, "__pydantic_custom_init__", False)) or (
         getattr(model, "__pydantic_post_init__", None) is not None
     )
+
+
+def _audit_json_schema_extra(
+    extra: object,
+    *,
+    path: tuple[str | int, ...],
+) -> None:
+    if extra is None:
+        return
+    if callable(extra):
+        raise ToolValidationError(
+            path=_json_path(path),
+            message="unsupported Pydantic JSON Schema customization: callable extra",
+        )
+    if not isinstance(extra, Mapping):
+        raise ToolValidationError(
+            path=_json_path(path),
+            message="unsupported Pydantic JSON Schema customization",
+        )
+    keyword = next(
+        (
+            key
+            for key in extra
+            if key in _VALIDATION_AFFECTING_JSON_SCHEMA_KEYS
+        ),
+        None,
+    )
+    if keyword is not None:
+        raise ToolValidationError(
+            path=_json_path((*path, keyword)),
+            message=(
+                "unsupported Pydantic JSON Schema customization: "
+                f"validation keyword {keyword}"
+            ),
+        )
 
 
 def _audit_pydantic_annotation(
@@ -813,7 +913,31 @@ def _audit_pydantic_model(
     if model in visited:
         return
     visited.add(model)
+    _audit_json_schema_extra(model.model_config.get("json_schema_extra"), path=path)
+    if (
+        model.model_config.get("json_schema_mode_override") is not None
+        or model.model_config.get("schema_generator") is not None
+        or _pydantic_hook_differs_from_base(
+            model,
+            "__get_pydantic_json_schema__",
+        )
+        or _pydantic_hook_differs_from_base(model, "model_json_schema")
+    ):
+        raise ToolValidationError(
+            path=_json_path(path),
+            message="unsupported Pydantic JSON Schema customization",
+        )
+    if (
+        model.model_config.get("json_encoders")
+        or _pydantic_hook_differs_from_base(model, "model_dump")
+    ):
+        raise ToolValidationError(
+            path=_json_path(path),
+            message="unsupported Pydantic serialization customization",
+        )
+
     structural_fields: set[str] = set()
+    input_name_fields: dict[str, str] = {}
     for field_name, model_field in model.model_fields.items():
         validation_alias = model_field.validation_alias
         if (
@@ -833,6 +957,57 @@ def _audit_pydantic_model(
                     "unsupported validation alias: complex alias paths and choices "
                     "cannot be represented faithfully in tool JSON Schema"
                 ),
+            )
+        for input_path in _field_input_paths(model, field_name, model_field):
+            input_name = input_path[0]
+            if not isinstance(input_name, str):
+                continue
+            prior_field = input_name_fields.get(input_name)
+            if prior_field is not None and prior_field != field_name:
+                raise ToolValidationError(
+                    path=_json_path((*path, field_name)),
+                    message=(
+                        "unsupported Pydantic input name collision: "
+                        f"{input_name} maps to multiple fields"
+                    ),
+                )
+            input_name_fields[input_name] = field_name
+
+        provider_name = (
+            validation_alias
+            if isinstance(validation_alias, str)
+            else model_field.alias or field_name
+        )
+        dump_name = (
+            model_field.serialization_alias or model_field.alias or field_name
+        )
+        if dump_name != provider_name:
+            raise ToolValidationError(
+                path=_json_path((*path, field_name)),
+                message=(
+                    "unsupported Pydantic serialization customization: "
+                    "serialization name differs from validation schema"
+                ),
+            )
+        if model_field.exclude or model_field.exclude_if is not None:
+            raise ToolValidationError(
+                path=_json_path((*path, field_name)),
+                message=(
+                    "unsupported Pydantic serialization customization: "
+                    "field exclusion"
+                ),
+            )
+        _audit_json_schema_extra(
+            model_field.json_schema_extra,
+            path=(*path, field_name),
+        )
+        if any(
+            callable(getattr(metadata, "__get_pydantic_json_schema__", None))
+            for metadata in model_field.metadata
+        ):
+            raise ToolValidationError(
+                path=_json_path((*path, field_name)),
+                message="unsupported Pydantic JSON Schema customization: metadata hook",
             )
         contains_model = _audit_pydantic_annotation(
             model_field.annotation,
@@ -875,6 +1050,29 @@ def _audit_pydantic_model(
         )
 
     decorators = model.__pydantic_decorators__
+    if decorators.field_serializers:
+        first_serializer = next(iter(decorators.field_serializers.values()))
+        serialized_field = next(iter(first_serializer.info.fields), None)
+        serializer_path = (
+            (*path, serialized_field)
+            if isinstance(serialized_field, str) and serialized_field != "*"
+            else path
+        )
+        raise ToolValidationError(
+            path=_json_path(serializer_path),
+            message="unsupported Pydantic serialization customization: field serializer",
+        )
+    if decorators.model_serializers:
+        raise ToolValidationError(
+            path=_json_path(path),
+            message="unsupported Pydantic serialization customization: model serializer",
+        )
+    if decorators.computed_fields:
+        computed_field = next(iter(decorators.computed_fields))
+        raise ToolValidationError(
+            path=_json_path((*path, computed_field)),
+            message="unsupported Pydantic serialization customization: computed field",
+        )
     for decorator in decorators.field_validators.values():
         targeted_fields = set(decorator.info.fields)
         for field_name in model.model_fields:
@@ -905,7 +1103,7 @@ def pydantic_input(
     if not isinstance(schema, dict):
         raise ToolValidationError(path="$", message="Pydantic schema must be an object")
     canonical_schema = _canonical_mapping(schema, subject="schema")
-    _json_schema_validator(canonical_schema)
+    schema_validator = _json_schema_validator(canonical_schema)
 
     def validate(arguments: Mapping[str, JsonValue]) -> Mapping[str, JsonValue]:
         try:
@@ -913,6 +1111,9 @@ def pydantic_input(
         except PydanticValidationError as error:
             raise _tool_error_from_pydantic(error) from None
         _reject_ignored_model_extras(validated, arguments, path=())
+        provider_dumped = validated.model_dump(mode="json", by_alias=True)
+        provider_arguments = _canonical_mapping(provider_dumped, subject="input")
+        _validate_with_json_schema(schema_validator, provider_arguments)
         dumped = validated.model_dump(mode="json", by_alias=False)
         return _canonical_mapping(dumped, subject="input")
 
