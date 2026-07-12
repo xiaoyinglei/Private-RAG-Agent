@@ -209,6 +209,18 @@ class DroppingTupleArguments(BaseModel):
         return value[:-1]
 
 
+class UnionWithDataclassArguments(BaseModel):
+    nested: NestedArguments | DataclassArguments
+
+
+class ListUnionWithDataclassArguments(BaseModel):
+    nested: list[NestedArguments | DataclassArguments]
+
+
+class TupleWithDataclassArguments(BaseModel):
+    nested: tuple[NestedArguments, DataclassArguments]
+
+
 def _raw_input_validator() -> Callable[
     [Mapping[str, JsonValue]], Mapping[str, JsonValue]
 ]:
@@ -552,6 +564,24 @@ def test_pydantic_runtime_walker_rejects_sequence_cardinality_changes(
 
     assert error.value.path == "$.children"
     assert "cardinality" in error.value.message
+
+
+@pytest.mark.parametrize(
+    "model",
+    [
+        pytest.param(UnionWithDataclassArguments, id="union"),
+        pytest.param(ListUnionWithDataclassArguments, id="list-union"),
+        pytest.param(TupleWithDataclassArguments, id="tuple"),
+    ],
+)
+def test_pydantic_input_audits_every_composite_branch(
+    model: type[BaseModel],
+) -> None:
+    with pytest.raises(ToolValidationError) as error:
+        pydantic_input(model)
+
+    assert error.value.path == "$.nested"
+    assert "unsupported Pydantic input shape: dataclass" == error.value.message
 
 
 @pytest.mark.parametrize(

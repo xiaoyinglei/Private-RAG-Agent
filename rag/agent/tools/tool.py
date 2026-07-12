@@ -706,26 +706,29 @@ def _audit_pydantic_annotation(
     if origin is Literal:
         return False
     if origin in (Union, UnionType):
-        return any(
-            _audit_pydantic_annotation(
+        contains_model = False
+        for argument in arguments:
+            branch_contains_model = _audit_pydantic_annotation(
                 argument,
                 path=path,
                 visited=visited,
                 seen_aliases=seen_aliases,
             )
-            for argument in arguments
-        )
+            contains_model = contains_model or branch_contains_model
+        return contains_model
     if origin in (list, tuple):
-        return any(
-            _audit_pydantic_annotation(
+        contains_model = False
+        for argument in arguments:
+            if argument is Ellipsis:
+                continue
+            branch_contains_model = _audit_pydantic_annotation(
                 argument,
                 path=path,
                 visited=visited,
                 seen_aliases=seen_aliases,
             )
-            for argument in arguments
-            if argument is not Ellipsis
-        )
+            contains_model = contains_model or branch_contains_model
+        return contains_model
     if origin in (dict, Mapping):
         if not arguments:
             return False
