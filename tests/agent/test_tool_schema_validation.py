@@ -11,12 +11,19 @@ from typing import Annotated, Any, Literal, TypeAliasType
 
 import pytest
 from pydantic import (
+    AfterValidator,
     AliasChoices,
     AliasPath,
     BaseModel,
+    BeforeValidator,
     ConfigDict,
     Field,
+    PlainSerializer,
+    PlainValidator,
     RootModel,
+    Strict,
+    WrapSerializer,
+    WrapValidator,
     computed_field,
     field_serializer,
     field_validator,
@@ -471,6 +478,85 @@ class DefaultEncodedEnumArguments(BaseModel):
     state: DefaultEncodedState
 
 
+class ScalarPlainSerializerArguments(BaseModel):
+    value: Annotated[
+        int,
+        PlainSerializer(lambda value: value + 1, return_type=int),
+    ]
+
+
+class ScalarWrapSerializerArguments(BaseModel):
+    value: Annotated[
+        int,
+        WrapSerializer(
+            lambda value, handler: handler(value) + 1,
+            return_type=int,
+        ),
+    ]
+
+
+class UnknownCoreSchemaMetadata:
+    def __get_pydantic_core_schema__(
+        self,
+        source_type: Any,
+        handler: Any,
+    ) -> Any:
+        schema = handler(source_type)
+        schema["serialization"] = core_schema.plain_serializer_function_ser_schema(
+            lambda value: value + 1,
+            return_schema=core_schema.int_schema(),
+        )
+        return schema
+
+
+class ScalarUnknownCoreSchemaArguments(BaseModel):
+    value: Annotated[int, UnknownCoreSchemaMetadata()]
+
+
+def _increment_before(value: Any) -> int:
+    return int(value) + 1
+
+
+def _increment_after(value: int) -> int:
+    return value + 1
+
+
+def _increment_plain(value: Any) -> int:
+    return int(value) + 1
+
+
+def _increment_wrap(value: Any, handler: Any) -> int:
+    return handler(value) + 1
+
+
+class ScalarBeforeValidatorArguments(BaseModel):
+    value: Annotated[int, BeforeValidator(_increment_before)]
+
+
+class ScalarAfterValidatorArguments(BaseModel):
+    value: Annotated[int, AfterValidator(_increment_after)]
+
+
+class ScalarPlainValidatorArguments(BaseModel):
+    value: Annotated[int, PlainValidator(_increment_plain)]
+
+
+class ScalarWrapValidatorArguments(BaseModel):
+    value: Annotated[int, WrapValidator(_increment_wrap)]
+
+
+def _reject_metadata_secret(value: str) -> str:
+    raise ValueError(f"rejected metadata TOP_SECRET_456: {value}")
+
+
+class SecretMetadataValidatorArguments(BaseModel):
+    value: Annotated[str, AfterValidator(_reject_metadata_secret)]
+
+
+class ScalarFieldAndStrictArguments(BaseModel):
+    value: Annotated[int, Strict()] = Field(ge=1, le=3)
+
+
 class LifecycleNestedA(BaseModel):
     kind: Literal["a"]
     payload: str
@@ -895,6 +981,78 @@ def test_pydantic_input_preserves_default_enum_json_encoding() -> None:
     _, validate = pydantic_input(DefaultEncodedEnumArguments)
 
     assert validate({"state": "ready"}) == {"state": "ready"}
+
+
+@pytest.mark.parametrize(
+    "model",
+    [
+        pytest.param(ScalarPlainSerializerArguments, id="plain-serializer"),
+        pytest.param(ScalarWrapSerializerArguments, id="wrap-serializer"),
+        pytest.param(
+            ScalarUnknownCoreSchemaArguments,
+            id="unknown-core-schema-metadata",
+        ),
+    ],
+)
+def test_pydantic_input_rejects_scalar_serialization_metadata(
+    model: type[BaseModel],
+) -> None:
+    with pytest.raises(ToolValidationError) as error:
+        pydantic_input(model)
+
+    assert error.value.path == "$.value"
+    assert "serialization metadata" in error.value.message
+    assert len(error.value.message) <= 512
+
+
+@pytest.mark.parametrize(
+    ("model", "arguments"),
+    [
+        pytest.param(
+            ScalarBeforeValidatorArguments,
+            {"value": "1"},
+            id="before-validator",
+        ),
+        pytest.param(
+            ScalarAfterValidatorArguments,
+            {"value": 1},
+            id="after-validator",
+        ),
+        pytest.param(
+            ScalarPlainValidatorArguments,
+            {"value": "1"},
+            id="plain-validator",
+        ),
+        pytest.param(
+            ScalarWrapValidatorArguments,
+            {"value": 1},
+            id="wrap-validator",
+        ),
+    ],
+)
+def test_pydantic_input_allows_known_scalar_validation_metadata(
+    model: type[BaseModel],
+    arguments: dict[str, Any],
+) -> None:
+    _, validate = pydantic_input(model)
+
+    assert validate(arguments) == {"value": 2}  # type: ignore[arg-type]
+
+
+def test_pydantic_input_redacts_scalar_metadata_validator_errors() -> None:
+    _, validate = pydantic_input(SecretMetadataValidatorArguments)
+
+    with pytest.raises(ToolValidationError) as error:
+        validate({"value": "TOP_SECRET_456"})
+
+    assert "TOP_SECRET_456" not in error.value.message
+    assert len(error.value.message) <= 512
+
+
+def test_pydantic_input_allows_ordinary_field_and_strict_constraints() -> None:
+    _, validate = pydantic_input(ScalarFieldAndStrictArguments)
+
+    assert validate({"value": 2}) == {"value": 2}
 
 
 def test_pydantic_input_rejects_nested_unknown_arguments() -> None:

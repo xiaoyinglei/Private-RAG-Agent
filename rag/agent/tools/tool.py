@@ -13,7 +13,17 @@ from jsonschema.protocols import (  # type: ignore[import-untyped]
     Validator as JsonSchemaValidator,
 )
 from jsonschema.validators import validator_for  # type: ignore[import-untyped]
-from pydantic import AliasChoices, AliasPath, BaseModel
+from pydantic import (
+    AfterValidator,
+    AliasChoices,
+    AliasPath,
+    BaseModel,
+    BeforeValidator,
+    PlainSerializer,
+    PlainValidator,
+    WrapSerializer,
+    WrapValidator,
+)
 from pydantic import ValidationError as PydanticValidationError
 from pydantic.fields import FieldInfo
 from referencing import Registry
@@ -43,6 +53,13 @@ type _MutableJsonValue = (
 
 _MAX_VALIDATION_PATH_LENGTH = 256
 _MAX_VALIDATION_MESSAGE_LENGTH = 512
+_PYDANTIC_VALIDATION_ONLY_METADATA_TYPES = (
+    BeforeValidator,
+    AfterValidator,
+    PlainValidator,
+    WrapValidator,
+)
+_PYDANTIC_SERIALIZATION_METADATA_TYPES = (PlainSerializer, WrapSerializer)
 _VALIDATION_AFFECTING_JSON_SCHEMA_KEYS = frozenset(
     {
         "$anchor",
@@ -710,12 +727,43 @@ def _reject_ignored_model_extras(
                 )
 
 
-def _metadata_can_transform_validation(metadata: object) -> bool:
+def _metadata_has_core_schema_capability(metadata: object) -> bool:
     return (
         callable(getattr(metadata, "__get_pydantic_core_schema__", None))
         or callable(getattr(metadata, "__get_validators__", None))
         or hasattr(metadata, "__pydantic_core_schema__")
     )
+
+
+def _audit_pydantic_metadata(
+    metadata_items: Iterable[object],
+    *,
+    path: tuple[str | int, ...],
+    contains_model: bool,
+) -> None:
+    for metadata in metadata_items:
+        if callable(getattr(metadata, "__get_pydantic_json_schema__", None)):
+            raise ToolValidationError(
+                path=_json_path(path),
+                message="unsupported Pydantic JSON Schema customization: metadata hook",
+            )
+        has_core_schema = _metadata_has_core_schema_capability(metadata)
+        if contains_model and has_core_schema:
+            raise ToolValidationError(
+                path=_json_path(path),
+                message="unsupported Pydantic input shape: structural core-schema hook",
+            )
+        if isinstance(metadata, _PYDANTIC_SERIALIZATION_METADATA_TYPES) or (
+            has_core_schema
+            and not isinstance(
+                metadata,
+                _PYDANTIC_VALIDATION_ONLY_METADATA_TYPES,
+            )
+        ):
+            raise ToolValidationError(
+                path=_json_path(path),
+                message="unsupported Pydantic serialization metadata",
+            )
 
 
 def _pydantic_hook_differs_from_base(
@@ -832,14 +880,11 @@ def _audit_pydantic_annotation(
             visited=visited,
             seen_aliases=seen_aliases,
         )
-        if contains_model and any(
-            _metadata_can_transform_validation(metadata)
-            for metadata in arguments[1:]
-        ):
-            raise ToolValidationError(
-                path=_json_path(path),
-                message="unsupported Pydantic input shape: structural core-schema hook",
-            )
+        _audit_pydantic_metadata(
+            arguments[1:],
+            path=path,
+            contains_model=contains_model,
+        )
         return contains_model
     if origin is Literal:
         return False
@@ -1001,33 +1046,19 @@ def _audit_pydantic_model(
             model_field.json_schema_extra,
             path=(*path, field_name),
         )
-        if any(
-            callable(getattr(metadata, "__get_pydantic_json_schema__", None))
-            for metadata in model_field.metadata
-        ):
-            raise ToolValidationError(
-                path=_json_path((*path, field_name)),
-                message="unsupported Pydantic JSON Schema customization: metadata hook",
-            )
         contains_model = _audit_pydantic_annotation(
             model_field.annotation,
             path=(*path, field_name),
             visited=visited,
             seen_aliases=set(),
         )
+        _audit_pydantic_metadata(
+            model_field.metadata,
+            path=(*path, field_name),
+            contains_model=contains_model,
+        )
         if contains_model:
             structural_fields.add(field_name)
-            if any(
-                _metadata_can_transform_validation(metadata)
-                for metadata in model_field.metadata
-            ):
-                raise ToolValidationError(
-                    path=_json_path((*path, field_name)),
-                    message=(
-                        "unsupported Pydantic input shape: "
-                        "structural core-schema hook"
-                    ),
-                )
 
     first_structural_field = next(
         (
