@@ -303,6 +303,56 @@ class ModelValidateLifecycleArguments(BaseModel):
         return validated
 
 
+class InheritedCoreSchemaLifecycleBase(BaseModel):
+    @classmethod
+    def __get_pydantic_core_schema__(
+        cls,
+        source_type: Any,
+        handler: Any,
+    ) -> Any:
+        schema = handler(source_type)
+        return core_schema.no_info_after_validator_function(
+            _reverse_structural_children,
+            schema,
+        )
+
+
+class InheritedCoreSchemaLifecycleArguments(InheritedCoreSchemaLifecycleBase):
+    children: list[LifecycleNestedA | LifecycleNestedB]
+
+
+class InheritedModelValidateLifecycleBase(BaseModel):
+    @classmethod
+    def model_validate(cls, obj: Any, **kwargs: Any) -> Any:
+        validated = super().model_validate(obj, **kwargs)
+        validated.children.reverse()
+        return validated
+
+
+class InheritedModelValidateLifecycleArguments(
+    InheritedModelValidateLifecycleBase
+):
+    children: list[LifecycleNestedA | LifecycleNestedB]
+
+
+class InheritedLegacyLifecycleBase(BaseModel):
+    @classmethod
+    def __get_validators__(cls) -> Any:
+        yield _reverse_structural_children
+
+
+class InheritedLegacyLifecycleArguments(InheritedLegacyLifecycleBase):
+    children: list[LifecycleNestedA | LifecycleNestedB]
+
+
+class DeclarativeInheritanceBase(BaseModel):
+    inherited_value: str
+
+
+class DeclarativeInheritedStructuralArguments(DeclarativeInheritanceBase):
+    children: list[LifecycleNestedA | LifecycleNestedB]
+
+
 def _reverse_scalar_value(model: Any) -> Any:
     model.value = model.value[::-1]
     return model
@@ -767,6 +817,58 @@ def test_pydantic_input_rejects_structural_model_lifecycle_hooks(
 
     assert error.value.path == "$.children"
     assert "structural model lifecycle hook" in error.value.message
+
+
+@pytest.mark.parametrize(
+    ("model", "owner", "hook_name"),
+    [
+        pytest.param(
+            InheritedCoreSchemaLifecycleArguments,
+            InheritedCoreSchemaLifecycleBase,
+            "__get_pydantic_core_schema__",
+            id="core-schema",
+        ),
+        pytest.param(
+            InheritedModelValidateLifecycleArguments,
+            InheritedModelValidateLifecycleBase,
+            "model_validate",
+            id="model-validate",
+        ),
+        pytest.param(
+            InheritedLegacyLifecycleArguments,
+            InheritedLegacyLifecycleBase,
+            "__get_validators__",
+            id="legacy-validators",
+        ),
+    ],
+)
+def test_pydantic_input_rejects_inherited_structural_model_lifecycle_hooks(
+    model: type[BaseModel],
+    owner: type[BaseModel],
+    hook_name: str,
+) -> None:
+    assert hook_name not in model.__dict__
+    assert hook_name in owner.__dict__
+
+    with pytest.raises(ToolValidationError) as error:
+        pydantic_input(model)
+
+    assert error.value.path == "$.children"
+    assert "structural model lifecycle hook" in error.value.message
+
+
+def test_pydantic_input_allows_ordinary_declarative_model_inheritance() -> None:
+    _, validate = pydantic_input(DeclarativeInheritedStructuralArguments)
+
+    assert validate(
+        {
+            "inherited_value": "kept",
+            "children": [{"kind": "a", "payload": "first"}],
+        }
+    ) == {
+        "inherited_value": "kept",
+        "children": ({"kind": "a", "payload": "first"},),
+    }
 
 
 @pytest.mark.parametrize(

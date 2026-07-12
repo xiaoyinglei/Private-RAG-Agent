@@ -663,18 +663,29 @@ def _metadata_can_transform_validation(metadata: object) -> bool:
 
 
 def _pydantic_model_has_custom_lifecycle(model: type[BaseModel]) -> bool:
-    namespace = model.__dict__
     for hook_name in (
         "__get_pydantic_core_schema__",
         "__get_validators__",
         "model_validate",
     ):
-        descriptor = namespace.get(hook_name)
-        if (
-            descriptor is not None
-            and descriptor is not BaseModel.__dict__.get(hook_name)
-            and callable(getattr(model, hook_name, None))
-        ):
+        resolved_hook = next(
+            (
+                (owner, owner.__dict__[hook_name])
+                for owner in model.__mro__
+                if hook_name in owner.__dict__
+            ),
+            None,
+        )
+        if resolved_hook is None:
+            continue
+        _, descriptor = resolved_hook
+        base_descriptor = BaseModel.__dict__.get(hook_name)
+        matches_base = descriptor is base_descriptor or (
+            isinstance(descriptor, classmethod)
+            and isinstance(base_descriptor, classmethod)
+            and descriptor.__func__ is base_descriptor.__func__
+        )
+        if not matches_base and callable(getattr(model, hook_name, None)):
             return True
     return bool(getattr(model, "__pydantic_custom_init__", False)) or (
         getattr(model, "__pydantic_post_init__", None) is not None
