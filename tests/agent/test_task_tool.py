@@ -5,6 +5,10 @@ Verifies end-to-end: task tool → child loop → tool execution → result.
 
 from __future__ import annotations
 
+import ast
+from collections.abc import Mapping
+from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
@@ -14,8 +18,13 @@ from rag.agent.core.context import AgentRunConfig
 from rag.agent.core.delegation import AgentDelegationRequest, ParentAgentContext
 from rag.agent.core.turn_contracts import ToolCallPlan
 from rag.agent.service import AgentRunRequest, _TaskChildRunner
+from rag.agent.tools.executor import ToolExecutor
+from rag.agent.tools.integrations import subagent as subagent_module
+from rag.agent.tools.integrations.subagent import create_subagent_tool
+from rag.agent.tools.permissions import ToolExecutionContext as FinalToolExecutionContext
 from rag.agent.tools.registry import ToolRegistry
 from rag.agent.tools.task_tool import TaskInput, TaskOutput, TaskToolRunner, task_tool_spec
+from rag.agent.tools.tool import Tool, ToolCall, ToolCallOrigin
 from rag.schema.runtime import AccessPolicy
 
 # ── Helpers ──────────────────────────────────────────────────────
@@ -272,3 +281,81 @@ async def test_task_tool_with_context_summary() -> None:
     assert output.status == "done"
     # Child should have received the context
     assert "Q1: 1M" in output.conclusion or "Summarize" in output.conclusion
+
+
+@pytest.mark.anyio
+async def test_final_subagent_factory_projects_an_injected_runner() -> None:
+    calls: list[Mapping[str, Any]] = []
+
+    async def run_child(arguments: Mapping[str, Any]) -> Mapping[str, Any]:
+        calls.append(arguments)
+        return {
+            "conclusion": "child conclusion",
+            "key_facts": ["fact one"],
+            "evidence_refs": [{"evidence_id": "ev-1"}],
+            "citations": [
+                {
+                    "citation_id": "cit-1",
+                    "evidence_id": "ev-1",
+                    "record_type": "section",
+                    "citation_anchor": "doc#1",
+                    "doc_id": 7,
+                    "file_name": "report.pdf",
+                }
+            ],
+            "status": "done",
+            "child_run_id": "child-1",
+            "stop_reason": "finished",
+        }
+
+    tool = create_subagent_tool(
+        run_child,
+        execution_revision="child-v2",
+    )
+    call = ToolCall(
+        tool_call_id="call_task",
+        tool_name="task",
+        arguments={
+            "task": "Investigate the isolated question",
+            "context_summary": "Only bounded parent context.",
+        },
+        origin=ToolCallOrigin(
+            request_id="req_task",
+            toolset_revision="tools_task_v1",
+            exposed_tool_names=("task",),
+        ),
+    )
+    execution = await ToolExecutor({"task": tool}).execute(
+        call,
+        context=FinalToolExecutionContext(
+            approved_tool_call_ids=frozenset({"call_task"})
+        ),
+    )
+
+    assert isinstance(tool, Tool)
+    assert tool.execution_revision.endswith(":child-v2")
+    assert calls[0]["task"] == "Investigate the isolated question"
+    assert execution.result.is_error is False
+    assert execution.result.structured_content is not None
+    assert execution.result.structured_content["status"] == "done"
+    assert execution.result.structured_content["conclusion"] == "child conclusion"
+    assert execution.result.structured_content["key_facts"] == ("fact one",)
+    assert execution.result.structured_content["citations"][0]["record_type"] == (
+        "section"
+    )
+
+
+def test_final_subagent_factory_does_not_own_the_child_loop() -> None:
+    module_path = Path(subagent_module.__file__ or "")
+    source = module_path.read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    imports = {
+        node.module
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom) and node.module is not None
+    }
+
+    assert not any(module.startswith("rag.agent.loop") for module in imports)
+    assert "AgentLoop" not in source
+    assert "AgentService" not in source
+    assert "DelegatedAgentRunner" not in source

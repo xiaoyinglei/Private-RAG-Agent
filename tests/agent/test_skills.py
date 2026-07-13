@@ -5,8 +5,11 @@ Covers: loader, catalog, context, policy, invocation, and integration.
 
 from __future__ import annotations
 
+import ast
 import tempfile
+from collections.abc import Mapping
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -46,7 +49,16 @@ from rag.agent.skills.models import (
     SkillSummary,
 )
 from rag.agent.skills.policy import SkillPolicy
+from rag.agent.tools.executor import ToolExecutor
+from rag.agent.tools.integrations import skills as skill_integration_module
+from rag.agent.tools.integrations.skills import (
+    MAX_SKILL_INSTRUCTIONS_CHARS,
+    create_invoke_skill_tool,
+    create_materialize_skill_asset_tool,
+)
+from rag.agent.tools.permissions import ToolExecutionContext as FinalToolExecutionContext
 from rag.agent.tools.registry import ToolExecutionContext
+from rag.agent.tools.tool import Tool, ToolCall, ToolCallOrigin
 from rag.agent.workspace import open_workspace
 from rag.schema.runtime import AccessPolicy
 
@@ -998,3 +1010,120 @@ class TestServiceSkillIntegration:
 
             assert registry.has_runner("invoke_skill")
             assert registry.has_runner("materialize_skill_asset")
+
+
+class TestFinalSkillToolFactories:
+    @pytest.mark.anyio
+    async def test_invoke_skill_returns_a_bounded_activation_event(self) -> None:
+        calls: list[Mapping[str, Any]] = []
+
+        async def invoke(arguments: Mapping[str, Any]) -> Mapping[str, Any]:
+            calls.append(arguments)
+            return {
+                "success": True,
+                "name": "demo",
+                "skill_id": "project:demo",
+                "source": "project",
+                "fingerprint": "f" * 64,
+                "instructions": "x" * (MAX_SKILL_INSTRUCTIONS_CHARS + 100),
+                "args": arguments.get("args"),
+            }
+
+        tool = create_invoke_skill_tool(
+            invoke,
+            execution_revision="skills-v2",
+        )
+        call = ToolCall(
+            tool_call_id="call_invoke_skill",
+            tool_name="invoke_skill",
+            arguments={"name": "project:demo", "args": "input.csv"},
+            origin=ToolCallOrigin(
+                request_id="req_skill",
+                toolset_revision="tools_skill_v1",
+                exposed_tool_names=("invoke_skill",),
+            ),
+        )
+        execution = await ToolExecutor({"invoke_skill": tool}).execute(
+            call,
+            context=FinalToolExecutionContext(),
+        )
+
+        assert isinstance(tool, Tool)
+        assert tool.execution_revision.endswith(":skills-v2")
+        assert calls[0]["name"] == "project:demo"
+        assert execution.result.is_error is False
+        assert execution.result.structured_content is not None
+        event = execution.result.structured_content
+        assert event["event_type"] == "skill_activation"
+        assert event["skill_id"] == "project:demo"
+        assert event["args"] == "input.csv"
+        assert event["truncated"] is True
+        assert len(event["instructions"]) == MAX_SKILL_INSTRUCTIONS_CHARS
+        assert "activation_event" not in execution.result.metadata
+
+    @pytest.mark.anyio
+    async def test_materialize_skill_asset_uses_injected_active_root(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        skill_root = tmp_path / "skill"
+        script = skill_root / "scripts" / "helper.py"
+        script.parent.mkdir(parents=True)
+        script.write_text("print('ok')\n", encoding="utf-8")
+        workspace = open_workspace(tmp_path / "workspace", create=True)
+
+        def active_root(skill_id: str) -> Path | None:
+            return skill_root if skill_id == "project:demo" else None
+
+        tool = create_materialize_skill_asset_tool(
+            workspace,
+            active_skill_root=active_root,
+        )
+        call = ToolCall(
+            tool_call_id="call_materialize_skill",
+            tool_name="materialize_skill_asset",
+            arguments={
+                "skill_id": "project:demo",
+                "relative_path": "scripts/helper.py",
+            },
+            origin=ToolCallOrigin(
+                request_id="req_skill_asset",
+                toolset_revision="tools_skill_v1",
+                exposed_tool_names=("materialize_skill_asset",),
+            ),
+        )
+        execution = await ToolExecutor({tool.definition.name: tool}).execute(
+            call,
+            context=FinalToolExecutionContext(
+                workspace_root=workspace.root,
+                cwd=workspace.root,
+                allow_write_tools=True,
+            ),
+        )
+
+        assert execution.result.is_error is False
+        assert execution.result.structured_content is not None
+        output = execution.result.structured_content
+        assert output["workspace_path"] == (
+            "scratch/skills/project_demo/scripts/helper.py"
+        )
+        materialized = workspace.root / output["workspace_path"]
+        assert materialized.read_text(encoding="utf-8") == "print('ok')\n"
+        assert len(output["source_fingerprint"]) == 64
+
+    def test_skill_integration_does_not_own_catalog_or_loader(self) -> None:
+        module_path = Path(skill_integration_module.__file__ or "")
+        source = module_path.read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        imports = {
+            node.module
+            for node in ast.walk(tree)
+            if isinstance(node, ast.ImportFrom) and node.module is not None
+        }
+
+        assert not any(
+            module.endswith(("skills.catalog", "skills.loader"))
+            for module in imports
+        )
+        assert "SkillCatalog" not in source
+        assert "SkillLoader" not in source

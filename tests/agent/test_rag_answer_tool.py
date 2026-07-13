@@ -1,15 +1,24 @@
 from __future__ import annotations
 
+import ast
+from collections.abc import Mapping
+from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
 from rag.agent.core.context import AgentRunConfig, RunRegistry
+from rag.agent.tools.executor import ToolExecutor
+from rag.agent.tools.integrations import knowledge as knowledge_module
+from rag.agent.tools.integrations.knowledge import create_knowledge_tools
+from rag.agent.tools.permissions import ToolExecutionContext as FinalToolExecutionContext
 from rag.agent.tools.rag_answer_tools import (
     RAGSearchAnswerInput,
     RAGSearchAnswerRunner,
 )
 from rag.agent.tools.registry import ToolExecutionContext
+from rag.agent.tools.tool import Tool, ToolCall, ToolCallOrigin
 from rag.providers.llm_gateway import current_llm_budget_ledger
 from rag.schema.query import (
     AnswerCitation,
@@ -93,3 +102,84 @@ async def test_rag_search_answer_runner_uses_fast_runtime_query_and_preserves_co
         RunRegistry.get(run_config.run_id).llm_budget_ledger
     ]
     RunRegistry.remove(run_config.run_id)
+
+
+def test_knowledge_tool_is_installed_only_for_explicit_configuration() -> None:
+    assert create_knowledge_tools(None) == ()
+
+    tools = create_knowledge_tools(
+        lambda _arguments: {"results": []},
+        execution_revision="knowledge-v2",
+    )
+
+    assert len(tools) == 1
+    assert isinstance(tools[0], Tool)
+    assert tools[0].definition.name == "search_knowledge"
+    assert tools[0].execution_revision.endswith(":knowledge-v2")
+
+
+@pytest.mark.anyio
+async def test_knowledge_runner_is_projected_into_canonical_tool_output() -> None:
+    calls: list[Mapping[str, Any]] = []
+
+    async def search(arguments: Mapping[str, Any]) -> Mapping[str, Any]:
+        calls.append(arguments)
+        return {
+            "results": [
+                {
+                    "evidence_id": "ev-1",
+                    "doc_id": "doc-7",
+                    "citation_anchor": "doc-7#p1",
+                    "text": "Canonical knowledge evidence",
+                    "score": 0.91,
+                    "source_type": "document",
+                    "file_name": "report.pdf",
+                }
+            ],
+            "answer_text": "Grounded answer",
+            "citations": ["doc-7#p1"],
+            "groundedness_flag": True,
+            "insufficient_evidence": False,
+            "total_found": 1,
+        }
+
+    [tool] = create_knowledge_tools(search)
+    call = ToolCall(
+        tool_call_id="call_knowledge",
+        tool_name="search_knowledge",
+        arguments={"query": "What is canonical?", "top_k": 4},
+        origin=ToolCallOrigin(
+            request_id="req_knowledge",
+            toolset_revision="tools_knowledge_v1",
+            exposed_tool_names=("search_knowledge",),
+        ),
+    )
+    execution = await ToolExecutor({"search_knowledge": tool}).execute(
+        call,
+        context=FinalToolExecutionContext(),
+    )
+
+    assert execution.result.is_error is False
+    assert calls[0]["query"] == "What is canonical?"
+    assert calls[0]["top_k"] == 4
+    assert execution.result.structured_content is not None
+    assert execution.result.structured_content["results"][0]["evidence_id"] == "ev-1"
+    assert execution.result.structured_content["citations"] == ("doc-7#p1",)
+
+
+def test_knowledge_integration_does_not_own_retrieval_or_ingestion_lifecycle() -> None:
+    module_path = Path(knowledge_module.__file__ or "")
+    source = module_path.read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    imports = {
+        node.module
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom) and node.module is not None
+    }
+
+    assert not any(
+        module.startswith(("rag.retrieval", "rag.ingestion"))
+        for module in imports
+    )
+    assert "VectorStore" not in source
+    assert "ingest" not in source.lower()

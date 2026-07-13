@@ -1,238 +1,211 @@
-"""B2a: MCP Adapter unit tests — naming, permissions, schema, spec building, runner type."""
-
 from __future__ import annotations
 
+import ast
+from collections.abc import Mapping
+from pathlib import Path
+from typing import Any
+
 import pytest
-from pydantic import BaseModel
 
-from rag.agent.tools.mcp_adapter import (
-    MCPToolConfig,
-    MCPToolOutput,
-    MCPToolRegistry,
-    MCPUnsupportedSchemaError,
-    build_input_model,
+from rag.agent.tools.executor import ToolExecutor
+from rag.agent.tools.integrations import mcp as mcp_module
+from rag.agent.tools.integrations.mcp import (
+    MCPToolDescriptor,
     canonical_mcp_name,
-    map_mcp_annotations,
-    normalize_name,
-    server_from_canonical,
+    create_mcp_tools,
+    normalize_mcp_name,
 )
-from rag.agent.tools.spec import ExecutionCategory, RiskLevel
+from rag.agent.tools.permissions import ToolExecutionContext
+from rag.agent.tools.tool import (
+    Tool,
+    ToolCall,
+    ToolCallOrigin,
+    ToolEffect,
+    ToolValidationError,
+)
 
 
-class TestMCPNaming:
-    def test_canonical_name_format(self) -> None:
-        assert canonical_mcp_name("github", "search_repos") == "mcp__github__search_repos"
-
-    def test_canonical_name_normalizes_case(self) -> None:
-        assert canonical_mcp_name("GitHub", "Search_Repos") == "mcp__github__search_repos"
-
-    def test_canonical_name_strips_special_chars(self) -> None:
-        name = canonical_mcp_name("my-server", "get file!")
-        assert "__" in name
-        assert "!" not in name
-
-    def test_normalize_name_handles_empty(self) -> None:
-        assert normalize_name("") == ""
-
-    def test_server_from_canonical(self) -> None:
-        assert server_from_canonical("mcp__github__search") == "github"
-        assert server_from_canonical("builtin_tool") is None
-        assert server_from_canonical("mcp__") is None
-
-
-class TestMCPAnnotations:
-    def test_readonly_hint_maps_to_network_with_idempotent(self) -> None:
-        """readOnlyHint → NETWORK (not READ!). risk=MEDIUM (NETWORK floor), idempotent, concurrency_safe."""
-        behavior = map_mcp_annotations(read_only_hint=True)
-        assert behavior["execution_category"] == ExecutionCategory.NETWORK
-        # NETWORK has minimum risk MEDIUM (spec.py _minimum_risk_level).
-        # readOnly upgrades idempotent+concurrency_safe, not risk level.
-        assert behavior["risk_level"] == RiskLevel.MEDIUM
-        assert behavior["idempotent"] is True
-        assert behavior["concurrency_safe"] is True
-
-    def test_destructive_hint_maps_to_mutate(self) -> None:
-        """destructiveHint → MUTATE, HIGH risk, requires confirmation."""
-        behavior = map_mcp_annotations(destructive_hint=True)
-        assert behavior["execution_category"] == ExecutionCategory.MUTATE
-        assert behavior["risk_level"] == RiskLevel.HIGH
-        assert behavior["requires_confirmation"] is True
-        assert behavior["audit_log"] is True
-
-    def test_default_maps_to_network_medium(self) -> None:
-        """No hints → NETWORK, MEDIUM risk."""
-        behavior = map_mcp_annotations()
-        assert behavior["execution_category"] == ExecutionCategory.NETWORK
-        assert behavior["risk_level"] == RiskLevel.MEDIUM
-
-    def test_destructive_overrides_readonly(self) -> None:
-        """destructiveHint=True takes priority over readOnlyHint=True."""
-        behavior = map_mcp_annotations(read_only_hint=True, destructive_hint=True)
-        assert behavior["execution_category"] == ExecutionCategory.MUTATE
+def _descriptor(
+    *,
+    server_name: str = "GitHub",
+    tool_name: str = "Search Repos",
+    input_schema: Mapping[str, Any] | None = None,
+    read_only_hint: bool = False,
+    destructive_hint: bool = False,
+    execution_revision: str = "server-v1",
+) -> MCPToolDescriptor:
+    return MCPToolDescriptor(
+        server_name=server_name,
+        tool_name=tool_name,
+        description="Search repositories exposed by the configured MCP server.",
+        input_schema=input_schema
+        or {
+            "type": "object",
+            "properties": {"query": {"type": "string"}},
+            "required": ["query"],
+            "additionalProperties": False,
+        },
+        read_only_hint=read_only_hint,
+        destructive_hint=destructive_hint,
+        execution_revision=execution_revision,
+    )
 
 
-class TestJSONSchemaToPydantic:
-    def test_flat_schema(self) -> None:
-        model = build_input_model(
-            {
-                "type": "object",
-                "properties": {
-                    "query": {"type": "string", "description": "search term"},
-                    "limit": {"type": "integer", "description": "max results"},
-                },
-                "required": ["query"],
-            },
-            "test_tool",
-        )
-        instance = model(query="hello")
-        assert instance.query == "hello"
-        assert instance.limit is None  # not required
-        assert "limit" in model.model_fields
+def _thaw(value: object) -> object:
+    if isinstance(value, Mapping):
+        return {key: _thaw(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return [_thaw(item) for item in value]
+    return value
 
-    def test_empty_schema(self) -> None:
-        model = build_input_model({}, "no_args")
-        assert issubclass(model, BaseModel)
 
-    def test_no_properties(self) -> None:
-        model = build_input_model({"type": "object"}, "no_props")
-        assert issubclass(model, BaseModel)
+def test_mcp_names_are_canonical_and_empty_components_fail() -> None:
+    assert normalize_mcp_name("Git-Hub Server!") == "git_hub_server"
+    assert canonical_mcp_name("GitHub", "Search Repos") == (
+        "mcp__github__search_repos"
+    )
+    with pytest.raises(ValueError, match="non-empty"):
+        canonical_mcp_name("---", "search")
 
-    def test_enum_field(self) -> None:
-        model = build_input_model(
-            {
-                "type": "object",
-                "properties": {
-                    "status": {"type": "string", "enum": ["open", "closed"]},
-                },
-            },
-            "enum_test",
-        )
-        instance = model(status="open")
-        assert instance.status == "open"
 
-    def test_complex_schema_raises(self) -> None:
-        """Schema with $ref raises MCPUnsupportedSchemaError."""
-        with pytest.raises(MCPUnsupportedSchemaError):
-            build_input_model(
-                {
-                    "type": "object",
-                    "properties": {
-                        "item": {"$ref": "#/definitions/Item"},
+def test_mcp_factory_preserves_complete_raw_input_schema() -> None:
+    schema = {
+        "$defs": {
+            "Filter": {
+                "oneOf": [
+                    {
+                        "type": "object",
+                        "properties": {"owner": {"type": "string"}},
+                        "required": ["owner"],
+                        "additionalProperties": False,
                     },
-                },
-                "ref_test",
-            )
-
-    def test_deep_nesting_raises(self) -> None:
-        """Nested objects > 1 level deep raise MCPUnsupportedSchemaError."""
-        with pytest.raises(MCPUnsupportedSchemaError):
-            build_input_model(
-                {
-                    "type": "object",
-                    "properties": {
-                        "outer": {
-                            "type": "object",
-                            "properties": {
-                                "inner": {
-                                    "type": "object",
-                                    "properties": {"deep": {"type": "string"}},
-                                },
-                            },
-                        },
+                    {
+                        "type": "object",
+                        "properties": {"language": {"type": "string"}},
+                        "required": ["language"],
+                        "additionalProperties": False,
                     },
-                },
-                "deep_test",
-            )
+                ]
+            }
+        },
+        "type": "object",
+        "properties": {
+            "filter": {"$ref": "#/$defs/Filter"},
+            "query": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+        },
+        "required": ["filter"],
+        "additionalProperties": False,
+    }
+    descriptor = _descriptor(
+        input_schema=schema,
+        execution_revision="github-tools-v2",
+    )
+    [tool] = create_mcp_tools((descriptor,), lambda *_args: {"content": []})
+
+    assert isinstance(tool, Tool)
+    assert tool.execution_revision == "integration-mcp-v1:github-tools-v2"
+    assert _thaw(tool.definition.input_schema) == schema
+    assert tool.validate_input({"filter": {"owner": "openai"}})["filter"] == {
+        "owner": "openai"
+    }
+    with pytest.raises(ToolValidationError):
+        tool.validate_input({"filter": {"unknown": "value"}})
 
 
-class TestMCPToolConfig:
-    def test_minimal_config(self) -> None:
-        cfg = MCPToolConfig(
-            name="test",
-            command="echo",
-            tools_allowlist=["hello"],
-        )
-        assert cfg.enabled is False
-        assert cfg.transport == "stdio"
+def test_duplicate_canonical_mcp_names_fail_loudly() -> None:
+    descriptors = (
+        _descriptor(server_name="My Server", tool_name="Get-File"),
+        _descriptor(server_name="my-server", tool_name="get file"),
+    )
 
-    def test_resolve_env(self) -> None:
-        import os
-
-        os.environ["_TEST_MCP_TOKEN"] = "secret123"
-        cfg = MCPToolConfig(
-            name="test",
-            command="npx",
-            env={"API_KEY": "${_TEST_MCP_TOKEN}"},
-            tools_allowlist=["x"],
-        )
-        resolved = cfg.resolve_env()
-        assert resolved["API_KEY"] == "secret123"
-        del os.environ["_TEST_MCP_TOKEN"]
+    with pytest.raises(ValueError, match="duplicate canonical MCP tool name"):
+        create_mcp_tools(descriptors, lambda *_args: {"content": []})
 
 
-class TestMCPToolOutput:
-    def test_ok_output(self) -> None:
-        out = MCPToolOutput(text="result text")
-        assert out.text == "result text"
-        assert out.is_error is False
+def test_mcp_annotations_never_remove_network_policy_floor() -> None:
+    read_only = create_mcp_tools(
+        (_descriptor(read_only_hint=True),),
+        lambda *_args: {"content": []},
+    )[0]
+    destructive = create_mcp_tools(
+        (_descriptor(tool_name="delete", destructive_hint=True),),
+        lambda *_args: {"content": []},
+    )[0]
 
-    def test_error_output(self) -> None:
-        out = MCPToolOutput(is_error=True, raw={"error": "timeout"})
-        assert out.is_error is True
-
-    def test_images_counted(self) -> None:
-        out = MCPToolOutput(images=["base64data"])
-        assert len(out.images) == 1
-
-
-class TestMCPToolRegistry:
-    def test_load_configs_only_enabled(self) -> None:
-        registry = MCPToolRegistry()
-        registry.load_configs([
-            MCPToolConfig(name="a", enabled=False, tools_allowlist=["x"]),
-            MCPToolConfig(name="b", enabled=True, tools_allowlist=["y"]),
-            MCPToolConfig(name="c", enabled=True, tools_allowlist=[]),  # no allowlist → skipped
-        ])
-        assert "a" not in registry.adapters
-        assert "b" in registry.adapters
-        assert "c" not in registry.adapters  # skipped due to empty allowlist
+    assert read_only.static_effects == frozenset({ToolEffect.NETWORK})
+    assert read_only.idempotent is True
+    assert read_only.concurrency_safe is True
+    assert destructive.static_effects == frozenset(
+        {ToolEffect.NETWORK, ToolEffect.DESTRUCTIVE}
+    )
+    assert destructive.idempotent is False
+    assert destructive.concurrency_safe is False
 
 
-class TestMCPErrorPropagation:
-    """P2-4: MCP errors produce ok=False in MCPToolOutput."""
+@pytest.mark.anyio
+async def test_mcp_concrete_tools_execute_through_the_final_tool_contract() -> None:
+    calls: list[tuple[str, str, Mapping[str, Any]]] = []
 
-    def test_error_output_has_ok_false(self) -> None:
-        out = MCPToolOutput(ok=False, is_error=True, raw={"error": "timeout"})
-        assert out.ok is False
-        assert out.is_error is True
+    async def call_tool(
+        server_name: str,
+        tool_name: str,
+        arguments: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        calls.append((server_name, tool_name, arguments))
+        return {
+            "content": [
+                {"type": "text", "text": "found repository"},
+                {"type": "image", "data": "aW1hZ2U=", "mimeType": "image/png"},
+                {"type": "resource", "uri": "file:///repo/readme.md"},
+            ],
+            "structuredContent": {"count": 1},
+            "isError": False,
+        }
 
-    def test_ok_output_has_ok_true(self) -> None:
-        out = MCPToolOutput(text="success")
-        assert out.ok is True
+    [tool] = create_mcp_tools((_descriptor(read_only_hint=True),), call_tool)
+    call = ToolCall(
+        tool_call_id="call_mcp",
+        tool_name=tool.definition.name,
+        arguments={"query": "runtime"},
+        origin=ToolCallOrigin(
+            request_id="req_mcp",
+            toolset_revision="tools_mcp_v1",
+            exposed_tool_names=(tool.definition.name,),
+        ),
+    )
+    execution = await ToolExecutor({tool.definition.name: tool}).execute(
+        call,
+        context=ToolExecutionContext(
+            approved_tool_call_ids=frozenset({"call_mcp"})
+        ),
+    )
+
+    assert execution.result.is_error is False
+    assert calls == [("GitHub", "Search Repos", {"query": "runtime"})]
+    assert [block.type for block in execution.result.content] == [
+        "text",
+        "image",
+        "resource",
+    ]
+    assert execution.result.content[0].data["text"] == "found repository"
+    assert execution.result.content[1].data["mime_type"] == "image/png"
+    assert execution.result.content[2].data["uri"] == "file:///repo/readme.md"
+    assert execution.result.structured_content == {"count": 1}
+    assert execution.result.metadata["mcp_server"] == "GitHub"
+    assert execution.result.metadata["mcp_tool"] == "Search Repos"
 
 
-class TestMCPFallbackInputModel:
-    """P1-3: Fallback input model preserves arguments."""
+def test_mcp_integration_does_not_own_client_or_session_lifecycle() -> None:
+    module_path = Path(mcp_module.__file__ or "")
+    source = module_path.read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    imports = {
+        node.module
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom) and node.module is not None
+    }
 
-    def test_fallback_model_preserves_dict_args(self) -> None:
-        """Fallback model has explicit 'arguments' field, not empty."""
-        from rag.agent.tools.mcp_adapter import build_mcp_tool_spec
-
-        # Simulate a MCP tool with a complex schema
-        class MockMCPTool:
-            name = "complex_tool"
-            description = "A tool with complex schema"
-            annotations = None
-            inputSchema = {"type": "object", "properties": {"item": {"$ref": "#/defs/X"}}}
-
-        result = build_mcp_tool_spec(MockMCPTool(), "test_server")
-        spec = result.spec
-        # Should have an 'arguments' field, not be empty
-        assert spec.input_model is not None
-        # Fallback model should accept arbitrary dict
-        instance = spec.input_model(arguments={"x": 1, "y": "hello"})
-        assert instance.arguments == {"x": 1, "y": "hello"}
-
-    def test_server_names_empty_by_default(self) -> None:
-        registry = MCPToolRegistry()
-        assert registry.server_names == []
+    assert not any(module.startswith("mcp.client") for module in imports)
+    assert "ClientSession" not in source
+    assert "connect(" not in source
+    assert "disconnect(" not in source
