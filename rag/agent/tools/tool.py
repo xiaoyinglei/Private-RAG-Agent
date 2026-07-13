@@ -799,17 +799,21 @@ def _pydantic_hook_differs_from_base(
     return not matches_base and callable(getattr(model, hook_name, None))
 
 
-def _pydantic_model_has_custom_lifecycle(model: type[BaseModel]) -> bool:
-    if any(
+def _pydantic_model_has_unverifiable_lifecycle(model: type[BaseModel]) -> bool:
+    return any(
         _pydantic_hook_differs_from_base(model, hook_name)
         for hook_name in (
             "__get_pydantic_core_schema__",
             "__get_validators__",
             "model_validate",
         )
-    ):
-        return True
-    return bool(getattr(model, "__pydantic_custom_init__", False)) or (
+    )
+
+
+def _pydantic_model_has_custom_lifecycle(model: type[BaseModel]) -> bool:
+    return _pydantic_model_has_unverifiable_lifecycle(model) or bool(
+        getattr(model, "__pydantic_custom_init__", False)
+    ) or (
         getattr(model, "__pydantic_post_init__", None) is not None
     )
 
@@ -1120,6 +1124,14 @@ def _audit_pydantic_model(
                 "unsupported Pydantic input shape: "
                 "structural model lifecycle hook"
             ),
+        )
+    if (
+        first_structural_field is None
+        and _pydantic_model_has_unverifiable_lifecycle(model)
+    ):
+        raise ToolValidationError(
+            path=_json_path(path),
+            message="unsupported Pydantic input shape: model lifecycle hook",
         )
 
     decorators = model.__pydantic_decorators__

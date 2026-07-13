@@ -763,6 +763,25 @@ class ScalarCoreSchemaLifecycleArguments(BaseModel):
         )
 
 
+class DivergentScalarCoreSchemaLifecycleArguments(BaseModel):
+    value: str
+
+    @classmethod
+    def __get_pydantic_core_schema__(
+        cls,
+        source_type: Any,
+        handler: Any,
+    ) -> Any:
+        schema = handler(source_type)
+        schema["serialization"] = core_schema.plain_serializer_function_ser_schema(
+            lambda model, info: {
+                "value": model.value if info.by_alias else 123,
+            },
+            info_arg=True,
+        )
+        return schema
+
+
 class ScalarCustomInitLifecycleArguments(BaseModel):
     value: str
 
@@ -786,6 +805,23 @@ class ScalarModelValidateLifecycleArguments(BaseModel):
         validated = super().model_validate(obj, **kwargs)
         validated.value = validated.value[::-1]
         return validated
+
+
+class DivergentModelValidateResult(BaseModel):
+    value: str
+
+    def model_dump(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        if kwargs.get("by_alias"):
+            return {"value": self.value}
+        return {"value": 123}
+
+
+class DivergentScalarModelValidateLifecycleArguments(BaseModel):
+    value: str
+
+    @classmethod
+    def model_validate(cls, obj: Any, **kwargs: Any) -> Any:
+        return DivergentModelValidateResult.model_validate(obj, **kwargs)
 
 
 def _raw_input_validator() -> Callable[
@@ -1575,10 +1611,8 @@ def test_pydantic_input_allows_ordinary_declarative_model_inheritance() -> None:
 @pytest.mark.parametrize(
     "model",
     [
-        pytest.param(ScalarCoreSchemaLifecycleArguments, id="core-schema"),
         pytest.param(ScalarCustomInitLifecycleArguments, id="custom-init"),
         pytest.param(ScalarPostInitLifecycleArguments, id="post-init"),
-        pytest.param(ScalarModelValidateLifecycleArguments, id="model-validate"),
     ],
 )
 def test_pydantic_input_allows_scalar_only_lifecycle_hooks(
@@ -1587,6 +1621,38 @@ def test_pydantic_input_allows_scalar_only_lifecycle_hooks(
     _, validate = pydantic_input(model)
 
     assert validate({"value": "abc"}) == {"value": "cba"}
+
+
+@pytest.mark.parametrize(
+    "model",
+    [
+        pytest.param(
+            ScalarCoreSchemaLifecycleArguments,
+            id="core-schema-validator",
+        ),
+        pytest.param(
+            DivergentScalarCoreSchemaLifecycleArguments,
+            id="core-schema-serializer",
+        ),
+        pytest.param(
+            ScalarModelValidateLifecycleArguments,
+            id="model-validate",
+        ),
+        pytest.param(
+            DivergentScalarModelValidateLifecycleArguments,
+            id="alternate-model-result",
+        ),
+    ],
+)
+def test_pydantic_input_rejects_unverifiable_scalar_model_hooks(
+    model: type[BaseModel],
+) -> None:
+    with pytest.raises(ToolValidationError) as error:
+        pydantic_input(model)
+
+    assert error.value.path == "$"
+    assert "model lifecycle hook" in error.value.message
+    assert len(error.value.message) <= 512
 
 
 @pytest.mark.parametrize(
