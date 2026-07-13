@@ -15,6 +15,7 @@ from rag.agent.core.messages import (
     snapshot_model_message,
     tool_result_message,
 )
+from rag.agent.core.turn_contracts import ToolManifest, ToolManifestEntry
 from rag.agent.tools.tool import (
     JsonValue,
     Tool,
@@ -419,10 +420,7 @@ def build_model_request(
     if not isinstance(choice, ToolChoice):
         raise TypeError("tool_choice must be a ToolChoice")
     tail = _snapshot_messages(dynamic_tail, field_name="dynamic_tail")
-    toolset_revision = _revision(
-        "tools",
-        tuple(_tool_contract_payload(tool) for tool in tools),
-    )
+    toolset_revision = toolset_revision_for_tools(tools)
     prompt_revision = _revision(
         "prompt",
         {
@@ -460,6 +458,54 @@ def bind_model_call_record(
         toolset_revision=request.toolset_revision,
         provider_wire_hash=provider_wire_hash,
         usage=usage,
+    )
+
+
+def toolset_revision_for_tools(tools: Sequence[Tool]) -> str:
+    ordered_tools = _ordered_tools(tools)
+    return _revision(
+        "tools",
+        tuple(_tool_contract_payload(tool) for tool in ordered_tools),
+    )
+
+
+def build_tool_manifest(
+    *,
+    tools: Sequence[Tool],
+    resident_tool_names: Sequence[str] = (),
+    explicit_tool_names: Sequence[str] = (),
+    active_tool_names: Sequence[str] = (),
+    provider_serializer_revision: str,
+) -> ToolManifest:
+    ordered_tools = _ordered_tools(tools)
+    resident = _ordered_names(
+        resident_tool_names,
+        field_name="resident_tool_names",
+    )
+    explicit = _ordered_names(
+        explicit_tool_names,
+        field_name="explicit_tool_names",
+    )
+    active = _ordered_names(
+        active_tool_names,
+        field_name="active_tool_names",
+    )
+    ordered_names = (*resident, *explicit, *active)
+    if len(set(ordered_names)) != len(ordered_names):
+        raise ValueError("tool manifest orders must contain unique names")
+    if tuple(tool.definition.name for tool in ordered_tools) != ordered_names:
+        raise ValueError("tools must match resident, explicit, and active order")
+    _require_non_empty_string(
+        provider_serializer_revision,
+        field_name="provider_serializer_revision",
+    )
+    return ToolManifest(
+        entries=tuple(_tool_manifest_entry(tool) for tool in ordered_tools),
+        resident_tool_names=resident,
+        explicit_tool_names=explicit,
+        active_tool_names=active,
+        toolset_revision=toolset_revision_for_tools(ordered_tools),
+        provider_serializer_revision=provider_serializer_revision,
     )
 
 
@@ -575,6 +621,18 @@ def _tool_contract_payload(tool: Tool) -> Mapping[str, JsonValue]:
     }
 
 
+def _tool_manifest_entry(tool: Tool) -> ToolManifestEntry:
+    return ToolManifestEntry(
+        name=tool.definition.name,
+        description_hash=canonical_hash(tool.definition.description),
+        input_schema_hash=canonical_hash(tool.definition.input_schema),
+        static_effects_hash=canonical_hash(
+            tuple(sorted(effect.value for effect in tool.static_effects))
+        ),
+        execution_contract_hash=canonical_hash(_tool_contract_payload(tool)),
+    )
+
+
 def _stable_context_payload(
     context: StableModelContext,
 ) -> Mapping[str, JsonValue]:
@@ -601,6 +659,18 @@ def _snapshot_messages(
     if isinstance(messages, (str, bytes)) or not isinstance(messages, Sequence):
         raise TypeError(f"{field_name} must be a sequence of ModelMessage values")
     return tuple(snapshot_model_message(message) for message in messages)
+
+
+def _ordered_tools(tools: Sequence[Tool]) -> tuple[Tool, ...]:
+    if isinstance(tools, (str, bytes)) or not isinstance(tools, Sequence):
+        raise TypeError("tools must be a sequence of Tool values")
+    ordered = tuple(tools)
+    if any(not isinstance(tool, Tool) for tool in ordered):
+        raise TypeError("tools must contain Tool values")
+    names = tuple(tool.definition.name for tool in ordered)
+    if len(set(names)) != len(names):
+        raise ValueError("tools must have unique names")
+    return ordered
 
 
 def _ordered_names(
@@ -670,6 +740,7 @@ __all__ = [
     "bind_model_call_record",
     "build_model_request",
     "build_stable_context",
+    "build_tool_manifest",
     "canonical_hash",
     "canonical_model_request_json",
     "freeze_json_mapping",
@@ -678,4 +749,5 @@ __all__ = [
     "stable_context_json",
     "tool_choice_payload",
     "tool_definition_payload",
+    "toolset_revision_for_tools",
 ]

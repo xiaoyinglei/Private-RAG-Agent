@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import sqlite3
-from collections.abc import AsyncIterator, Iterator, Sequence
+from collections.abc import AsyncIterator, Iterator, Mapping, Sequence
 from copy import deepcopy
-from dataclasses import replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Protocol, cast
 
@@ -31,11 +31,30 @@ from rag.agent.core.human_input import (
     HumanInputRequestIdMismatchError,
     HumanInputResponse,
 )
+from rag.agent.core.messages import (
+    ModelMessage,
+    canonical_json_text,
+    model_message_payload,
+    snapshot_model_message,
+)
+from rag.agent.core.messages import (
+    ToolCall as ModelToolCall,
+)
+from rag.agent.core.model_request import (
+    ModelCallRecord,
+    model_call_record_payload,
+)
 from rag.agent.core.runtime_diagnostics import RuntimeDiagnostic
 from rag.agent.core.tool_execution import (
     ExecutionRecordWriter,
     ToolExecutionRecord,
     apply_tool_reconciliation,
+)
+from rag.agent.core.turn_contracts import (
+    ToolManifest,
+    ToolManifestDriftDecision,
+    ToolManifestDriftStatus,
+    ToolManifestEntry,
 )
 from rag.agent.loop.state import (
     LoopPause,
@@ -51,10 +70,91 @@ from rag.agent.loop.substate import (
     PersistentMemorySnapshot,
     PlanState,
 )
+from rag.agent.tools.tool import (
+    JsonValue,
+    ToolCallOrigin,
+)
+from rag.agent.tools.tool import (
+    ToolCall as CanonicalToolCall,
+)
+from rag.schema.llm import LLMUsage
 
 LOOP_CHECKPOINT_NAMESPACE = "agent_loop"
 LOOP_COMPATIBILITY_CHANNEL = "loop_compatibility"
 LOOP_STATE_CHANNEL = "loop_state"
+TOOL_CHECKPOINT_FORMAT_VERSION = 2
+
+
+@dataclass(frozen=True, slots=True)
+class CanonicalToolCheckpoint:
+    context_revision: str
+    prompt_revision: str
+    transcript: tuple[ModelMessage, ...]
+    manifest: ToolManifest
+    tool_calls: tuple[CanonicalToolCall, ...] = ()
+    pending_tool_calls: tuple[CanonicalToolCall, ...] = ()
+    paused_tool_calls: tuple[CanonicalToolCall, ...] = ()
+    model_call_records: tuple[ModelCallRecord, ...] = ()
+    legacy_migrated: bool = False
+    format_version: int = field(
+        default=TOOL_CHECKPOINT_FORMAT_VERSION,
+        init=False,
+    )
+
+    def __post_init__(self) -> None:
+        _checkpoint_string(self.context_revision, field_name="context_revision")
+        _checkpoint_string(self.prompt_revision, field_name="prompt_revision")
+        if not isinstance(self.manifest, ToolManifest):
+            raise TypeError("manifest must be a ToolManifest")
+        transcript = tuple(
+            snapshot_model_message(message)
+            for message in self.transcript
+        )
+        pending = _checkpoint_tool_calls(
+            self.pending_tool_calls,
+            field_name="pending_tool_calls",
+        )
+        paused = _checkpoint_tool_calls(
+            self.paused_tool_calls,
+            field_name="paused_tool_calls",
+        )
+        calls = _checkpoint_tool_calls(
+            self.tool_calls or (*pending, *paused),
+            field_name="tool_calls",
+        )
+        pending_ids = {call.tool_call_id for call in pending}
+        paused_ids = {call.tool_call_id for call in paused}
+        if pending_ids & paused_ids:
+            raise ValueError("a tool call cannot be both pending and paused")
+        calls_by_id = {call.tool_call_id: call for call in calls}
+        dependent_calls = (*pending, *paused)
+        if any(call.tool_call_id not in calls_by_id for call in dependent_calls):
+            raise ValueError("pending and paused tool calls must exist in tool_calls")
+        if any(
+            calls_by_id[call.tool_call_id] != call
+            for call in dependent_calls
+        ):
+            raise ValueError("pending and paused tool calls must exactly match tool_calls")
+        records: list[ModelCallRecord] = []
+        for record in self.model_call_records:
+            if not isinstance(record, ModelCallRecord):
+                raise TypeError("model_call_records must contain ModelCallRecord values")
+            records.append(
+                ModelCallRecord(
+                    request_id=record.request_id,
+                    prompt_revision=record.prompt_revision,
+                    toolset_revision=record.toolset_revision,
+                    provider_wire_hash=record.provider_wire_hash,
+                    usage=record.usage,
+                )
+            )
+        if type(self.legacy_migrated) is not bool:
+            raise TypeError("legacy_migrated must be a bool")
+        object.__setattr__(self, "transcript", transcript)
+        object.__setattr__(self, "tool_calls", calls)
+        object.__setattr__(self, "pending_tool_calls", pending)
+        object.__setattr__(self, "paused_tool_calls", paused)
+        object.__setattr__(self, "model_call_records", tuple(records))
 
 AGENT_CHECKPOINT_MSGPACK_ALLOWLIST: tuple[tuple[str, ...], ...] = (
     ("rag.agent.core.messages", "ModelMessage"),
@@ -145,12 +245,18 @@ AGENT_CHECKPOINT_MSGPACK_ALLOWLIST: tuple[tuple[str, ...], ...] = (
 
 __all__ = [
     # Checkpoint store API
+    "CanonicalToolCheckpoint",
     "CheckpointPersistenceError",
     "CheckpointStore",
     "LangGraphCheckpointStore",
     "agent_checkpoint_serde",
     "create_agent_checkpointer",
     "aclose_agent_checkpointer",
+    "decode_legacy_tool_state_v1",
+    "decode_tool_checkpoint",
+    "encode_tool_checkpoint",
+    "reconcile_tool_manifest",
+    "TOOL_CHECKPOINT_FORMAT_VERSION",
     # Migration helpers (used by Tasks 6, 8)
     "_migrate_legacy_state",
     "_digest_text",
@@ -598,6 +704,724 @@ class LangGraphCheckpointStore:
                 }
             },
         )
+
+
+def encode_tool_checkpoint(
+    checkpoint: CanonicalToolCheckpoint,
+) -> dict[str, object]:
+    """Encode the dormant v2 tool checkpoint as plain JSON data."""
+
+    if not isinstance(checkpoint, CanonicalToolCheckpoint):
+        raise TypeError("checkpoint must be a CanonicalToolCheckpoint")
+    return {
+        "format_version": TOOL_CHECKPOINT_FORMAT_VERSION,
+        "context_revision": checkpoint.context_revision,
+        "prompt_revision": checkpoint.prompt_revision,
+        "transcript": [
+            _plain_checkpoint_json(model_message_payload(message))
+            for message in checkpoint.transcript
+        ],
+        "manifest": checkpoint.manifest.model_dump(mode="json"),
+        "tool_calls": [
+            _encode_checkpoint_tool_call(call)
+            for call in checkpoint.tool_calls
+        ],
+        "pending_tool_calls": [
+            _encode_checkpoint_tool_call(call)
+            for call in checkpoint.pending_tool_calls
+        ],
+        "paused_tool_calls": [
+            _encode_checkpoint_tool_call(call)
+            for call in checkpoint.paused_tool_calls
+        ],
+        "model_call_records": [
+            model_call_record_payload(record)
+            for record in checkpoint.model_call_records
+        ],
+        "legacy_migrated": checkpoint.legacy_migrated,
+    }
+
+
+def decode_tool_checkpoint(raw: object) -> CanonicalToolCheckpoint:
+    """Decode only the canonical v2 value; legacy migration stays explicit."""
+
+    payload = _checkpoint_mapping(raw, field_name="checkpoint")
+    version = payload.get("format_version")
+    if (
+        not isinstance(version, int)
+        or isinstance(version, bool)
+        or version != TOOL_CHECKPOINT_FORMAT_VERSION
+    ):
+        raise ValueError(
+            f"unsupported tool checkpoint format_version: {version!r}"
+        )
+    return CanonicalToolCheckpoint(
+        context_revision=_checkpoint_string(
+            payload.get("context_revision"),
+            field_name="context_revision",
+        ),
+        prompt_revision=_checkpoint_string(
+            payload.get("prompt_revision"),
+            field_name="prompt_revision",
+        ),
+        transcript=tuple(
+            _decode_checkpoint_message(item)
+            for item in _checkpoint_sequence(
+                payload.get("transcript"),
+                field_name="transcript",
+            )
+        ),
+        manifest=ToolManifest.model_validate(
+            _checkpoint_mapping(
+                payload.get("manifest"),
+                field_name="manifest",
+            )
+        ),
+        tool_calls=tuple(
+            _decode_checkpoint_tool_call(item)
+            for item in _checkpoint_sequence(
+                payload.get("tool_calls", ()),
+                field_name="tool_calls",
+            )
+        ),
+        pending_tool_calls=tuple(
+            _decode_checkpoint_tool_call(item)
+            for item in _checkpoint_sequence(
+                payload.get("pending_tool_calls", ()),
+                field_name="pending_tool_calls",
+            )
+        ),
+        paused_tool_calls=tuple(
+            _decode_checkpoint_tool_call(item)
+            for item in _checkpoint_sequence(
+                payload.get("paused_tool_calls", ()),
+                field_name="paused_tool_calls",
+            )
+        ),
+        model_call_records=tuple(
+            _decode_model_call_record(item)
+            for item in _checkpoint_sequence(
+                payload.get("model_call_records", ()),
+                field_name="model_call_records",
+            )
+        ),
+        legacy_migrated=_checkpoint_bool(
+            payload.get("legacy_migrated", False),
+            field_name="legacy_migrated",
+        ),
+    )
+
+
+def decode_legacy_tool_state_v1(raw: object) -> CanonicalToolCheckpoint:
+    """Pure one-time migration from the committed legacy tool-state shape."""
+
+    payload = _checkpoint_mapping(raw, field_name="legacy checkpoint")
+    legacy_version = payload.get("format_version")
+    if legacy_version is not None and (
+        not isinstance(legacy_version, int)
+        or isinstance(legacy_version, bool)
+        or legacy_version != 1
+    ):
+        raise ValueError("legacy tool checkpoint format_version must be absent or 1")
+    trace_value = payload.get("tooling_model_request_trace", {})
+    trace = _checkpoint_mapping(trace_value, field_name="tooling_model_request_trace")
+    exposed_names = _checkpoint_names(
+        payload.get("tooling_sent_schema_names", ()),
+        field_name="tooling_sent_schema_names",
+    )
+    active_names = _checkpoint_names(
+        payload.get("discovery_active_tools", ()),
+        field_name="discovery_active_tools",
+    )
+    if not set(active_names) <= set(exposed_names):
+        raise ValueError("legacy active tools must be present in sent schema names")
+    resident_names = tuple(
+        name for name in exposed_names if name not in set(active_names)
+    )
+    ordered_manifest_names = (*resident_names, *active_names)
+    legacy_hash = "legacy_unverified_v1"
+    toolset_revision = _checkpoint_string_or_default(
+        trace.get("toolset_revision"),
+        default="legacy_tools_unverified_v1",
+        field_name="toolset_revision",
+    )
+    manifest = ToolManifest(
+        entries=tuple(
+            ToolManifestEntry(
+                name=name,
+                description_hash=legacy_hash,
+                input_schema_hash=legacy_hash,
+                static_effects_hash=legacy_hash,
+                execution_contract_hash=legacy_hash,
+            )
+            for name in ordered_manifest_names
+        ),
+        resident_tool_names=resident_names,
+        explicit_tool_names=(),
+        active_tool_names=active_names,
+        toolset_revision=toolset_revision,
+        provider_serializer_revision=_checkpoint_string_or_default(
+            trace.get("provider_serializer_revision"),
+            default="legacy_provider_serializer_v1",
+            field_name="provider_serializer_revision",
+        ),
+    )
+    origin = ToolCallOrigin(
+        request_id=_checkpoint_string_or_default(
+            trace.get("request_id"),
+            default="legacy_request_v1",
+            field_name="request_id",
+        ),
+        toolset_revision=toolset_revision,
+        exposed_tool_names=exposed_names,
+    )
+    result_by_id = _legacy_tool_results(payload.get("tool_results", ()))
+    pending_statuses = _legacy_pending_statuses(
+        payload.get(
+            "pending_loop_tool_calls",
+            payload.get("pending_tool_calls", ()),
+        )
+    )
+    ledger_value = _checkpoint_mapping(
+        payload.get("tool_call_ledger", {}),
+        field_name="tool_call_ledger",
+    )
+    ledger_entries = list(
+        _checkpoint_sequence(
+            ledger_value.get("entries", ()),
+            field_name="tool_call_ledger.entries",
+        )
+    )
+    ledger_entries.sort(key=_legacy_ledger_order)
+
+    initial_task = _checkpoint_string_or_default(
+        payload.get("initial_user_task"),
+        default="Legacy checkpoint task unavailable.",
+        field_name="initial_user_task",
+    )
+    transcript: list[ModelMessage] = [
+        ModelMessage(role="user", content=initial_task)
+    ]
+    calls: list[CanonicalToolCall] = []
+    pending: list[CanonicalToolCall] = []
+    paused: list[CanonicalToolCall] = []
+    seen_call_ids: set[str] = set()
+    for raw_entry in ledger_entries:
+        entry = _checkpoint_mapping(
+            raw_entry,
+            field_name="tool_call_ledger entry",
+        )
+        plan_value = entry.get("plan", entry)
+        plan = _checkpoint_mapping(plan_value, field_name="tool call plan")
+        call_id = _checkpoint_string(
+            plan.get("tool_call_id"),
+            field_name="tool_call_id",
+        )
+        if call_id in seen_call_ids:
+            raise ValueError(f"duplicate legacy tool_call_id: {call_id}")
+        seen_call_ids.add(call_id)
+        tool_name = _checkpoint_string(
+            plan.get("tool_name"),
+            field_name="tool_name",
+        )
+        arguments = _checkpoint_mapping(
+            plan.get("arguments", {}),
+            field_name="tool call arguments",
+        )
+        plain_arguments = _plain_checkpoint_json(arguments)
+        if not isinstance(plain_arguments, dict):
+            raise TypeError("legacy tool arguments must serialize as an object")
+        transcript.append(
+            ModelMessage(
+                role="assistant",
+                content="",
+                tool_calls=(
+                    ModelToolCall(
+                        id=call_id,
+                        name=tool_name,
+                        input=plain_arguments,
+                    ),
+                ),
+            )
+        )
+        call = CanonicalToolCall(
+            tool_call_id=call_id,
+            tool_name=tool_name,
+            arguments=cast(Mapping[str, JsonValue], arguments),
+            origin=origin,
+        )
+        calls.append(call)
+        result = result_by_id.get(call_id)
+        if result is not None:
+            visible_result: dict[str, object] = {
+                "status": result.get("status"),
+                "output": result.get("output"),
+                "error": result.get("error"),
+            }
+            transcript.append(
+                ModelMessage(
+                    role="tool",
+                    content=canonical_json_text(
+                        cast(JsonValue, visible_result)
+                    ),
+                    tool_call_id=call_id,
+                )
+            )
+        status = pending_statuses.get(call_id)
+        if status == "paused":
+            paused.append(call)
+        elif status is not None or result is None:
+            pending.append(call)
+
+    unknown_pending = set(pending_statuses) - seen_call_ids
+    unknown_results = set(result_by_id) - seen_call_ids
+    if unknown_pending:
+        raise ValueError("legacy pending calls are missing from the tool-call ledger")
+    if unknown_results:
+        raise ValueError("legacy tool results are missing from the tool-call ledger")
+    return CanonicalToolCheckpoint(
+        context_revision=_checkpoint_string_or_default(
+            trace.get("context_revision"),
+            default="legacy_context_v1",
+            field_name="context_revision",
+        ),
+        prompt_revision=_checkpoint_string_or_default(
+            trace.get("prompt_revision"),
+            default="legacy_prompt_unverified_v1",
+            field_name="prompt_revision",
+        ),
+        transcript=tuple(transcript),
+        manifest=manifest,
+        tool_calls=tuple(calls),
+        pending_tool_calls=tuple(pending),
+        paused_tool_calls=tuple(paused),
+        model_call_records=(),
+        legacy_migrated=True,
+    )
+
+
+def reconcile_tool_manifest(
+    *,
+    persisted: ToolManifest,
+    rebuilt: ToolManifest,
+    pending_tool_calls: Sequence[CanonicalToolCall],
+    paused_tool_calls: Sequence[CanonicalToolCall],
+) -> ToolManifestDriftDecision:
+    """Compare persisted evidence with rebuilt tools without mutating runtime state."""
+
+    if not isinstance(persisted, ToolManifest):
+        raise TypeError("persisted must be a ToolManifest")
+    if not isinstance(rebuilt, ToolManifest):
+        raise TypeError("rebuilt must be a ToolManifest")
+    pending = _checkpoint_tool_calls(
+        pending_tool_calls,
+        field_name="pending_tool_calls",
+    )
+    paused = _checkpoint_tool_calls(
+        paused_tool_calls,
+        field_name="paused_tool_calls",
+    )
+    persisted_entries = {entry.name: entry for entry in persisted.entries}
+    rebuilt_entries = {entry.name: entry for entry in rebuilt.entries}
+    missing = tuple(
+        entry.name
+        for entry in persisted.entries
+        if entry.name not in rebuilt_entries
+    )
+    changed_existing = tuple(
+        entry.name
+        for entry in persisted.entries
+        if entry.name in rebuilt_entries
+        and entry != rebuilt_entries[entry.name]
+    )
+    added = tuple(
+        entry.name
+        for entry in rebuilt.entries
+        if entry.name not in persisted_entries
+    )
+    changed = (*changed_existing, *added)
+    affected_existing = set(missing) | set(changed_existing)
+    dependents = tuple(
+        call
+        for call in (*pending, *paused)
+        if call.tool_name in affected_existing
+    )
+
+    if persisted == rebuilt:
+        return ToolManifestDriftDecision(
+            status=ToolManifestDriftStatus.MATCH,
+            reason="manifest_match",
+            toolset_revision=persisted.toolset_revision,
+            active_tool_names=persisted.active_tool_names,
+            provider_wire_hash_guaranteed=True,
+        )
+    if dependents:
+        return ToolManifestDriftDecision(
+            status=ToolManifestDriftStatus.RECONCILIATION_REQUIRED,
+            reason="tool_definition_changed",
+            toolset_revision=persisted.toolset_revision,
+            active_tool_names=persisted.active_tool_names,
+            missing_tool_names=missing,
+            changed_tool_names=changed,
+            dependent_tool_calls=dependents,
+            provider_wire_hash_guaranteed=False,
+        )
+
+    serializer_changed = (
+        persisted.provider_serializer_revision
+        != rebuilt.provider_serializer_revision
+    )
+    available_names = set(rebuilt_entries)
+    active_names = tuple(
+        name
+        for name in persisted.active_tool_names
+        if name in available_names
+    )
+    return ToolManifestDriftDecision(
+        status=ToolManifestDriftStatus.NEW_REVISION_REQUIRED,
+        reason=(
+            "provider_serializer_changed"
+            if serializer_changed
+            and not missing
+            and not changed
+            and persisted.toolset_revision == rebuilt.toolset_revision
+            else "tool_manifest_changed"
+        ),
+        toolset_revision=rebuilt.toolset_revision,
+        active_tool_names=active_names,
+        missing_tool_names=missing,
+        changed_tool_names=changed,
+        provider_wire_hash_guaranteed=False,
+    )
+
+
+def _encode_checkpoint_tool_call(
+    call: CanonicalToolCall,
+) -> dict[str, object]:
+    if not isinstance(call, CanonicalToolCall):
+        raise TypeError("tool call must be a canonical ToolCall")
+    return {
+        "tool_call_id": call.tool_call_id,
+        "tool_name": call.tool_name,
+        "arguments": _plain_checkpoint_json(call.arguments),
+        "origin": {
+            "request_id": call.origin.request_id,
+            "toolset_revision": call.origin.toolset_revision,
+            "exposed_tool_names": list(call.origin.exposed_tool_names),
+        },
+    }
+
+
+def _decode_checkpoint_tool_call(raw: object) -> CanonicalToolCall:
+    payload = _checkpoint_mapping(raw, field_name="tool call")
+    origin_payload = _checkpoint_mapping(
+        payload.get("origin"),
+        field_name="tool call origin",
+    )
+    arguments = _checkpoint_mapping(
+        payload.get("arguments", {}),
+        field_name="tool call arguments",
+    )
+    return CanonicalToolCall(
+        tool_call_id=_checkpoint_string(
+            payload.get("tool_call_id"),
+            field_name="tool_call_id",
+        ),
+        tool_name=_checkpoint_string(
+            payload.get("tool_name"),
+            field_name="tool_name",
+        ),
+        arguments=cast(Mapping[str, JsonValue], arguments),
+        origin=ToolCallOrigin(
+            request_id=_checkpoint_string(
+                origin_payload.get("request_id"),
+                field_name="origin request_id",
+            ),
+            toolset_revision=_checkpoint_string(
+                origin_payload.get("toolset_revision"),
+                field_name="origin toolset_revision",
+            ),
+            exposed_tool_names=_checkpoint_names(
+                origin_payload.get("exposed_tool_names", ()),
+                field_name="origin exposed_tool_names",
+            ),
+        ),
+    )
+
+
+def _decode_checkpoint_message(raw: object) -> ModelMessage:
+    payload = _checkpoint_mapping(raw, field_name="model message")
+    role = _checkpoint_string(payload.get("role"), field_name="message role")
+    content = payload.get("content")
+    if not isinstance(content, str):
+        raise TypeError("message content must be a string")
+    tool_calls: list[ModelToolCall] = []
+    for raw_call in _checkpoint_sequence(
+        payload.get("tool_calls", ()),
+        field_name="message tool_calls",
+    ):
+        call = _checkpoint_mapping(raw_call, field_name="message tool call")
+        arguments = _plain_checkpoint_json(
+            _checkpoint_mapping(
+                call.get("arguments", {}),
+                field_name="message tool-call arguments",
+            )
+        )
+        if not isinstance(arguments, dict):
+            raise TypeError("message tool-call arguments must be an object")
+        tool_calls.append(
+            ModelToolCall(
+                id=_checkpoint_string(
+                    call.get("id"),
+                    field_name="message tool-call id",
+                ),
+                name=_checkpoint_string(
+                    call.get("name"),
+                    field_name="message tool-call name",
+                ),
+                input=arguments,
+            )
+        )
+    tool_call_id = payload.get("tool_call_id")
+    if tool_call_id is not None and not isinstance(tool_call_id, str):
+        raise TypeError("message tool_call_id must be a string or None")
+    return snapshot_model_message(
+        ModelMessage(
+            role=cast(Any, role),
+            content=content,
+            tool_calls=tuple(tool_calls),
+            tool_call_id=tool_call_id,
+        )
+    )
+
+
+def _decode_model_call_record(raw: object) -> ModelCallRecord:
+    payload = _checkpoint_mapping(raw, field_name="model call record")
+    usage_payload = _checkpoint_mapping(
+        payload.get("usage"),
+        field_name="model call usage",
+    )
+    usage_source = _checkpoint_string(
+        usage_payload.get("usage_source"),
+        field_name="usage_source",
+    )
+    if usage_source not in {"provider", "tokenizer_estimate"}:
+        raise ValueError(f"unsupported usage_source: {usage_source}")
+    logical_input = _checkpoint_optional_int(
+        usage_payload.get("logical_input_tokens"),
+        field_name="logical_input_tokens",
+    )
+    uncached_input = _checkpoint_optional_int(
+        usage_payload.get("uncached_input_tokens"),
+        field_name="uncached_input_tokens",
+    )
+    cache_read = _checkpoint_optional_int(
+        usage_payload.get("cache_read_input_tokens"),
+        field_name="cache_read_input_tokens",
+    )
+    cache_write = _checkpoint_optional_int(
+        usage_payload.get("cache_write_input_tokens"),
+        field_name="cache_write_input_tokens",
+    )
+    output_tokens = _checkpoint_int(
+        usage_payload.get("output_tokens"),
+        field_name="output_tokens",
+    )
+    raw_usage = usage_payload.get("raw_provider_usage")
+    if raw_usage is not None and not isinstance(raw_usage, Mapping):
+        raise TypeError("raw_provider_usage must be an object or None")
+    if (
+        logical_input is not None
+        and uncached_input is not None
+        and cache_read is not None
+        and logical_input
+        != uncached_input + cache_read + (cache_write or 0)
+    ):
+        raise ValueError("checkpoint contains inconsistent normalized usage")
+    if usage_source == "tokenizer_estimate" and (
+        cache_read is not None
+        or cache_write is not None
+        or raw_usage is not None
+    ):
+        raise ValueError("tokenizer usage cannot contain provider cache evidence")
+    usage = LLMUsage(
+        input_tokens=(
+            logical_input
+            if logical_input is not None
+            else (uncached_input or 0)
+        ),
+        output_tokens=output_tokens,
+        cached_input_tokens=cache_read or 0,
+        source=cast(Any, usage_source),
+        logical_input_tokens=logical_input,
+        uncached_input_tokens=uncached_input,
+        cache_read_input_tokens=cache_read,
+        cache_write_input_tokens=cache_write,
+        usage_source=cast(Any, usage_source),
+        raw_provider_usage=cast(Any, raw_usage),
+    )
+    return ModelCallRecord(
+        request_id=_checkpoint_string(
+            payload.get("request_id"),
+            field_name="request_id",
+        ),
+        prompt_revision=_checkpoint_string(
+            payload.get("prompt_revision"),
+            field_name="prompt_revision",
+        ),
+        toolset_revision=_checkpoint_string(
+            payload.get("toolset_revision"),
+            field_name="toolset_revision",
+        ),
+        provider_wire_hash=_checkpoint_string(
+            payload.get("provider_wire_hash"),
+            field_name="provider_wire_hash",
+        ),
+        usage=usage,
+    )
+
+
+def _legacy_tool_results(raw: object) -> dict[str, Mapping[str, object]]:
+    results: dict[str, Mapping[str, object]] = {}
+    for item in _checkpoint_sequence(raw, field_name="tool_results"):
+        result = _checkpoint_mapping(item, field_name="legacy tool result")
+        call_id = _checkpoint_string(
+            result.get("tool_call_id"),
+            field_name="legacy result tool_call_id",
+        )
+        if call_id in results:
+            raise ValueError(f"duplicate legacy tool result: {call_id}")
+        results[call_id] = result
+    return results
+
+
+def _legacy_pending_statuses(raw: object) -> dict[str, str]:
+    statuses: dict[str, str] = {}
+    for item in _checkpoint_sequence(raw, field_name="pending tool calls"):
+        pending = _checkpoint_mapping(item, field_name="legacy pending tool call")
+        call_id = _checkpoint_string(
+            pending.get("tool_call_id"),
+            field_name="legacy pending tool_call_id",
+        )
+        status = pending.get("status", "pending")
+        if not isinstance(status, str) or not status:
+            raise ValueError("legacy pending status must be a non-empty string")
+        statuses[call_id] = status
+    return statuses
+
+
+def _legacy_ledger_order(raw: object) -> tuple[int, int]:
+    entry = _checkpoint_mapping(raw, field_name="tool-call ledger entry")
+    return (
+        _checkpoint_int(entry.get("turn", 0), field_name="ledger turn"),
+        _checkpoint_int(
+            entry.get("sequence", 0),
+            field_name="ledger sequence",
+        ),
+    )
+
+
+def _checkpoint_tool_calls(
+    calls: Sequence[CanonicalToolCall],
+    *,
+    field_name: str,
+) -> tuple[CanonicalToolCall, ...]:
+    if isinstance(calls, (str, bytes)) or not isinstance(calls, Sequence):
+        raise TypeError(f"{field_name} must be a sequence of canonical ToolCall values")
+    result = tuple(calls)
+    if any(not isinstance(call, CanonicalToolCall) for call in result):
+        raise TypeError(f"{field_name} must contain canonical ToolCall values")
+    ids = tuple(call.tool_call_id for call in result)
+    if len(set(ids)) != len(ids):
+        raise ValueError(f"{field_name} must contain unique tool_call_id values")
+    return result
+
+
+def _checkpoint_mapping(
+    value: object,
+    *,
+    field_name: str,
+) -> Mapping[str, object]:
+    if not isinstance(value, Mapping):
+        raise TypeError(f"{field_name} must be an object")
+    for key in value:
+        if not isinstance(key, str):
+            raise TypeError(f"{field_name} keys must be strings")
+    return cast(Mapping[str, object], value)
+
+
+def _checkpoint_sequence(
+    value: object,
+    *,
+    field_name: str,
+) -> Sequence[object]:
+    if isinstance(value, (str, bytes)) or not isinstance(value, Sequence):
+        raise TypeError(f"{field_name} must be an array")
+    return cast(Sequence[object], value)
+
+
+def _checkpoint_names(value: object, *, field_name: str) -> tuple[str, ...]:
+    names = tuple(
+        _checkpoint_string(item, field_name=field_name)
+        for item in _checkpoint_sequence(value, field_name=field_name)
+    )
+    if len(set(names)) != len(names):
+        raise ValueError(f"{field_name} must contain unique names")
+    return names
+
+
+def _checkpoint_string(value: object, *, field_name: str) -> str:
+    if not isinstance(value, str):
+        raise TypeError(f"{field_name} must be a string")
+    if not value:
+        raise ValueError(f"{field_name} must not be empty")
+    return value
+
+
+def _checkpoint_string_or_default(
+    value: object,
+    *,
+    default: str,
+    field_name: str,
+) -> str:
+    if value is None:
+        return default
+    return _checkpoint_string(value, field_name=field_name)
+
+
+def _checkpoint_int(value: object, *, field_name: str) -> int:
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise TypeError(f"{field_name} must be an integer")
+    if value < 0:
+        raise ValueError(f"{field_name} must be non-negative")
+    return value
+
+
+def _checkpoint_optional_int(value: object, *, field_name: str) -> int | None:
+    if value is None:
+        return None
+    return _checkpoint_int(value, field_name=field_name)
+
+
+def _checkpoint_bool(value: object, *, field_name: str) -> bool:
+    if type(value) is not bool:
+        raise TypeError(f"{field_name} must be a bool")
+    return value
+
+
+def _plain_checkpoint_json(value: object) -> object:
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, Mapping):
+        result: dict[str, object] = {}
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise TypeError("checkpoint JSON keys must be strings")
+            result[key] = _plain_checkpoint_json(item)
+        return result
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+        return [_plain_checkpoint_json(item) for item in value]
+    raise TypeError("checkpoint value must contain only JSON-compatible values")
 
 
 def _uuid_suffix() -> str:

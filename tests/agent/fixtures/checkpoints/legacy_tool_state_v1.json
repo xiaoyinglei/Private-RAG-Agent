@@ -1,0 +1,65 @@
+{
+  "initial_user_task": "Inspect README.md and search the runtime docs.",
+  "tooling_model_request_trace": {
+    "request_id": "legacy_req_a",
+    "prompt_revision": "legacy_prompt_a",
+    "toolset_revision": "legacy_tools_a",
+    "provider_serializer_revision": "legacy_openai_v0"
+  },
+  "tooling_sent_schema_names": [
+    "read_file",
+    "mcp__docs__search"
+  ],
+  "discovery_active_tools": [
+    "mcp__docs__search"
+  ],
+  "tool_call_ledger": {
+    "entries": [
+      {
+        "plan": {
+          "tool_call_id": "legacy_read",
+          "tool_name": "read_file",
+          "arguments": {
+            "path": "README.md"
+          }
+        },
+        "turn": 1,
+        "sequence": 0
+      },
+      {
+        "plan": {
+          "tool_call_id": "legacy_search",
+          "tool_name": "mcp__docs__search",
+          "arguments": {
+            "query": "runtime"
+          }
+        },
+        "turn": 2,
+        "sequence": 1
+      }
+    ]
+  },
+  "tool_results": [
+    {
+      "tool_call_id": "legacy_read",
+      "tool_name": "read_file",
+      "status": "ok",
+      "output": {
+        "text": "legacy read result"
+      },
+      "error": null,
+      "latency_ms": 3.0
+    }
+  ],
+  "pending_loop_tool_calls": [
+    {
+      "tool_call_id": "legacy_search",
+      "tool_name": "mcp__docs__search",
+      "arguments": {
+        "query": "runtime"
+      },
+      "status": "paused",
+      "summary": "approval required"
+    }
+  ]
+}
