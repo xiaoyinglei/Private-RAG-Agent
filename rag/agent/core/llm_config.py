@@ -47,6 +47,8 @@ class ModelSpec(BaseModel):
     location: Literal["local", "cloud"] | None = None
     input_cost_per_1m: float | None = None
     output_cost_per_1m: float | None = None
+    cache_read_cost_per_1m: float | None = Field(default=None, ge=0)
+    cache_write_cost_per_1m: float | None = Field(default=None, ge=0)
     runtime: ModelRuntimeConfig | None = None
 
 

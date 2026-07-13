@@ -22,6 +22,7 @@ from rag.agent.tools.tool import (
     ToolResult,
     json_schema_output,
 )
+from rag.schema.llm import LLMUsage
 
 CANONICAL_REQUEST_REVISION = "canonical-model-request-v1"
 STABLE_CONTEXT_REVISION = "stable-model-context-v1"
@@ -314,6 +315,35 @@ class ModelRequest:
         object.__setattr__(self, "exposed_tool_names", exposed_names)
 
 
+@dataclass(frozen=True, slots=True)
+class ModelCallRecord:
+    request_id: str
+    prompt_revision: str
+    toolset_revision: str
+    provider_wire_hash: str
+    usage: LLMUsage
+
+    def __post_init__(self) -> None:
+        _require_non_empty_string(self.request_id, field_name="request_id")
+        _require_non_empty_string(
+            self.prompt_revision,
+            field_name="prompt_revision",
+        )
+        _require_non_empty_string(
+            self.toolset_revision,
+            field_name="toolset_revision",
+        )
+        _require_non_empty_string(
+            self.provider_wire_hash,
+            field_name="provider_wire_hash",
+        )
+        if not isinstance(self.usage, LLMUsage):
+            raise TypeError("usage must be an LLMUsage")
+        if self.usage.usage_source is None:
+            raise ValueError("ModelCallRecord requires normalized usage")
+        object.__setattr__(self, "usage", self.usage.model_copy(deep=True))
+
+
 def build_stable_context(
     *,
     instructions: Sequence[str],
@@ -414,6 +444,46 @@ def build_model_request(
         prompt_revision=prompt_revision,
         toolset_revision=toolset_revision,
     )
+
+
+def bind_model_call_record(
+    *,
+    request: ModelRequest,
+    provider_wire_hash: str,
+    usage: LLMUsage,
+) -> ModelCallRecord:
+    if not isinstance(request, ModelRequest):
+        raise TypeError("request must be a ModelRequest")
+    return ModelCallRecord(
+        request_id=request.request_id,
+        prompt_revision=request.prompt_revision,
+        toolset_revision=request.toolset_revision,
+        provider_wire_hash=provider_wire_hash,
+        usage=usage,
+    )
+
+
+def model_call_record_payload(
+    record: ModelCallRecord,
+) -> dict[str, object]:
+    if not isinstance(record, ModelCallRecord):
+        raise TypeError("record must be a ModelCallRecord")
+    usage: dict[str, object] = {
+        "logical_input_tokens": record.usage.logical_input_tokens,
+        "uncached_input_tokens": record.usage.uncached_input_tokens,
+        "cache_read_input_tokens": record.usage.cache_read_input_tokens,
+        "cache_write_input_tokens": record.usage.cache_write_input_tokens,
+        "output_tokens": record.usage.output_tokens,
+        "usage_source": record.usage.usage_source,
+        "raw_provider_usage": record.usage.raw_provider_usage,
+    }
+    return {
+        "request_id": record.request_id,
+        "prompt_revision": record.prompt_revision,
+        "toolset_revision": record.toolset_revision,
+        "provider_wire_hash": record.provider_wire_hash,
+        "usage": usage,
+    }
 
 
 def canonical_model_request_json(request: ModelRequest) -> str:
@@ -591,17 +661,20 @@ __all__ = [
     "COMPACTION_REVISION",
     "STABLE_CONTEXT_REVISION",
     "ContextBlock",
+    "ModelCallRecord",
     "ModelRequest",
     "ModelSettings",
     "StableModelContext",
     "ToolChoice",
     "ToolChoiceMode",
+    "bind_model_call_record",
     "build_model_request",
     "build_stable_context",
     "canonical_hash",
     "canonical_model_request_json",
     "freeze_json_mapping",
     "model_settings_payload",
+    "model_call_record_payload",
     "stable_context_json",
     "tool_choice_payload",
     "tool_definition_payload",

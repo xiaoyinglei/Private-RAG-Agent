@@ -21,6 +21,7 @@ from rag.agent.core.model_request import (
     freeze_json_mapping,
 )
 from rag.agent.tools.tool import JsonValue, json_schema_output
+from rag.schema.llm import LLMUsage, normalize_llm_usage
 
 OPENAI_WIRE_REVISION = "openai-compatible-chat-v1"
 _RESERVED_PAYLOAD_FIELDS = frozenset(
@@ -182,6 +183,53 @@ def parse_openai_response(response: object) -> ToolUseResult:
     )
 
 
+def parse_openai_usage(response: object) -> LLMUsage | None:
+    """Normalize reported OpenAI-compatible usage without guessing cache data."""
+
+    raw_usage = _field(response, "usage", default=None)
+    if raw_usage is None:
+        return None
+    usage_payload = _plain_usage_mapping(raw_usage)
+    prompt_details = _field(raw_usage, "prompt_tokens_details", default=None)
+    if prompt_details is None:
+        prompt_details = _field(raw_usage, "input_tokens_details", default=None)
+    input_tokens = _first_token_count(
+        raw_usage,
+        ("prompt_tokens", "input_tokens"),
+    )
+    output_tokens = _first_token_count(
+        raw_usage,
+        ("completion_tokens", "output_tokens"),
+    )
+    cache_read = _first_token_count(
+        prompt_details,
+        ("cached_tokens", "cache_read_tokens"),
+    )
+    if cache_read is None:
+        cache_read = _first_token_count(
+            raw_usage,
+            ("cache_read_input_tokens",),
+        )
+    cache_write = _first_token_count(
+        prompt_details,
+        ("cache_write_tokens", "cache_creation_tokens"),
+    )
+    if cache_write is None:
+        cache_write = _first_token_count(
+            raw_usage,
+            ("cache_write_input_tokens", "cache_creation_input_tokens"),
+        )
+    return normalize_llm_usage(
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        cache_read_input_tokens=cache_read,
+        cache_write_input_tokens=cache_write,
+        input_tokens_include_cache=True,
+        usage_source="provider",
+        raw_provider_usage=usage_payload,
+    )
+
+
 def _message_payload(message: ModelMessage) -> Mapping[str, JsonValue]:
     message = snapshot_model_message(message)
     if message.role in {"system", "user"}:
@@ -243,6 +291,61 @@ def _parse_arguments(raw: object) -> dict[str, object]:
     return {key: _thaw_json(value) for key, value in frozen.items()}
 
 
+def _first_token_count(
+    raw: object,
+    names: Sequence[str],
+) -> int | None:
+    if raw is None:
+        return None
+    missing = object()
+    for name in names:
+        value = _field(raw, name, default=missing)
+        if value is missing or value is None:
+            continue
+        if not isinstance(value, int) or isinstance(value, bool):
+            raise TypeError(f"usage field {name} must be an integer or None")
+        if value < 0:
+            raise ValueError(f"usage field {name} must be non-negative")
+        return value
+    return None
+
+
+def _plain_usage_mapping(raw: object) -> Mapping[str, object]:
+    plain = _plain_usage_value(raw, depth=0)
+    if not isinstance(plain, Mapping):
+        raise TypeError("provider usage must serialize as an object")
+    return plain
+
+
+def _plain_usage_value(raw: object, *, depth: int) -> object:
+    if depth > 20:
+        raise ValueError("provider usage exceeds maximum nesting depth")
+    if raw is None or isinstance(raw, (str, int, float, bool)):
+        return raw
+    model_dump = getattr(raw, "model_dump", None)
+    if callable(model_dump):
+        return _plain_usage_value(model_dump(mode="json"), depth=depth + 1)
+    if isinstance(raw, Mapping):
+        result: dict[str, object] = {}
+        for key, value in raw.items():
+            if not isinstance(key, str):
+                raise TypeError("provider usage keys must be strings")
+            result[key] = _plain_usage_value(value, depth=depth + 1)
+        return result
+    if isinstance(raw, Sequence) and not isinstance(raw, (str, bytes)):
+        return [_plain_usage_value(value, depth=depth + 1) for value in raw]
+    try:
+        attributes = vars(raw)
+    except TypeError:
+        attributes = None
+    if isinstance(attributes, Mapping):
+        return _plain_usage_value(
+            {key: value for key, value in attributes.items() if isinstance(key, str) and not key.startswith("_")},
+            depth=depth + 1,
+        )
+    raise TypeError("provider usage must contain only JSON-compatible values")
+
+
 def _thaw_json(value: JsonValue) -> object:
     if isinstance(value, Mapping):
         return {key: _thaw_json(item) for key, item in value.items()}
@@ -272,5 +375,6 @@ __all__ = [
     "OPENAI_WIRE_REVISION",
     "OpenAIWireRequest",
     "parse_openai_response",
+    "parse_openai_usage",
     "serialize_openai_request",
 ]

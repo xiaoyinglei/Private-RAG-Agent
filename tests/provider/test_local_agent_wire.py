@@ -28,6 +28,7 @@ from rag.agent.tools.tool import (
 from rag.providers import local_agent_wire as local_wire_module
 from rag.providers.local_agent_wire import (
     LocalAgentWireMode,
+    estimate_local_agent_usage,
     parse_local_agent_response,
     render_local_agent_request,
     resolve_local_agent_wire,
@@ -212,6 +213,18 @@ def test_local_response_parser_returns_the_same_provider_neutral_turn_type() -> 
     assert local_turn.stop_reason is StopReason.TOOL_USE
     assert local_turn.text == openai_turn.text
     assert local_turn.tool_calls == openai_turn.tool_calls
+
+
+def test_local_tokenizer_estimate_never_fabricates_cache_hits() -> None:
+    usage = estimate_local_agent_usage(input_tokens=14, output_tokens=5)
+
+    assert usage.logical_input_tokens == 14
+    assert usage.uncached_input_tokens is None
+    assert usage.cache_read_input_tokens is None
+    assert usage.cache_write_input_tokens is None
+    assert usage.output_tokens == 5
+    assert usage.usage_source == "tokenizer_estimate"
+    assert usage.raw_provider_usage is None
 
 
 def test_local_response_parser_requires_one_strict_validated_envelope() -> None:

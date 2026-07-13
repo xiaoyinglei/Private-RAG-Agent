@@ -29,6 +29,7 @@ from rag.agent.tools.tool import (
 from rag.providers import openai_wire as openai_wire_module
 from rag.providers.openai_wire import (
     parse_openai_response,
+    parse_openai_usage,
     serialize_openai_request,
 )
 
@@ -257,6 +258,90 @@ def test_openai_response_parser_accepts_mapping_responses_deterministically() ->
     assert first == second
     assert first.stop_reason is StopReason.END_TURN
     assert first.text == "Done."
+
+
+def test_openai_usage_treats_cached_tokens_as_part_of_total_input() -> None:
+    usage = parse_openai_usage(
+        {
+            "usage": {
+                "prompt_tokens": 100,
+                "completion_tokens": 20,
+                "prompt_tokens_details": {"cached_tokens": 40},
+            }
+        }
+    )
+
+    assert usage is not None
+    assert usage.logical_input_tokens == 100
+    assert usage.uncached_input_tokens == 60
+    assert usage.cache_read_input_tokens == 40
+    assert usage.cache_write_input_tokens is None
+    assert usage.output_tokens == 20
+    assert usage.usage_source == "provider"
+    assert usage.raw_provider_usage == {
+        "completion_tokens": 20,
+        "prompt_tokens": 100,
+        "prompt_tokens_details": {"cached_tokens": 40},
+    }
+
+
+def test_openai_usage_preserves_reported_cache_write_details() -> None:
+    usage = parse_openai_usage(
+        {
+            "usage": {
+                "prompt_tokens": 90,
+                "completion_tokens": 8,
+                "prompt_tokens_details": {
+                    "cached_tokens": 30,
+                    "cache_write_tokens": 12,
+                },
+            }
+        }
+    )
+
+    assert usage is not None
+    assert usage.logical_input_tokens == 90
+    assert usage.uncached_input_tokens == 48
+    assert usage.cache_read_input_tokens == 30
+    assert usage.cache_write_input_tokens == 12
+    assert usage.logical_input_tokens == (
+        usage.uncached_input_tokens
+        + usage.cache_read_input_tokens
+        + usage.cache_write_input_tokens
+    )
+
+
+def test_openai_usage_keeps_unreported_cache_values_unknown() -> None:
+    usage = parse_openai_usage({"usage": {"prompt_tokens": 17, "completion_tokens": 3}})
+
+    assert usage is not None
+    assert usage.logical_input_tokens == 17
+    assert usage.uncached_input_tokens is None
+    assert usage.cache_read_input_tokens is None
+    assert usage.cache_write_input_tokens is None
+    assert parse_openai_usage({"choices": []}) is None
+
+
+def test_openai_usage_accepts_sdk_style_objects() -> None:
+    usage = parse_openai_usage(
+        SimpleNamespace(
+            usage=SimpleNamespace(
+                prompt_tokens=12,
+                completion_tokens=2,
+                prompt_tokens_details=SimpleNamespace(cached_tokens=5),
+            )
+        )
+    )
+
+    assert usage is not None
+    assert usage.logical_input_tokens == 12
+    assert usage.uncached_input_tokens == 7
+    assert usage.cache_read_input_tokens == 5
+    assert usage.raw_provider_usage == {
+        "completion_tokens": 2,
+        "prompt_tokens": 12,
+        "prompt_tokens_details": {"cached_tokens": 5},
+    }
 
 
 def test_openai_wire_is_only_a_serializer_and_parser() -> None:

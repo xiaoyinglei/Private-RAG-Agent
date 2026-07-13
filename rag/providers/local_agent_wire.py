@@ -23,6 +23,7 @@ from rag.agent.core.model_request import (
     tool_definition_payload,
 )
 from rag.agent.tools.tool import JsonValue
+from rag.schema.llm import LLMUsage, normalize_llm_usage
 
 LOCAL_AGENT_WIRE_REVISION = "local-agent-flat-json-v1"
 _SUPPORTED_PROVIDERS = frozenset({"mlx", "ollama"})
@@ -199,10 +200,26 @@ def parse_local_agent_response(raw: str | Mapping[str, object]) -> ToolUseResult
     )
 
 
+def estimate_local_agent_usage(
+    *,
+    input_tokens: int,
+    output_tokens: int,
+) -> LLMUsage:
+    """Record tokenizer totals without claiming unobserved cache behavior."""
+
+    return normalize_llm_usage(
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        input_tokens_include_cache=True,
+        usage_source="tokenizer_estimate",
+    )
+
+
 __all__ = [
     "LOCAL_AGENT_WIRE_REVISION",
     "LocalAgentWireMode",
     "LocalAgentWireRequest",
+    "estimate_local_agent_usage",
     "parse_local_agent_response",
     "render_local_agent_request",
     "resolve_local_agent_wire",
