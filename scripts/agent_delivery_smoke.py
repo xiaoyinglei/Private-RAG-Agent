@@ -80,6 +80,18 @@ class SmokeResult:
 
 
 @dataclass(frozen=True)
+class DeliveryMetricEvidence:
+    """Measured delivery facts reused by the deterministic ACI evaluation."""
+
+    schema_bytes: int
+    cache_read_tokens: int | None
+    cache_write_tokens: int | None
+    cache_usage_source: str | None
+    recovery_successes: int
+    recovery_cases: int
+
+
+@dataclass(frozen=True)
 class _FakeTurn:
     text: str = ""
     tool_name: str | None = None
@@ -912,6 +924,38 @@ async def run_matrix(
         await run_case(case, model=model, fake_model=fake_model)
         for case in cases
     ]
+
+
+def delivery_metric_evidence(
+    results: Sequence[SmokeResult],
+) -> DeliveryMetricEvidence:
+    """Extract cache and recovery evidence from completed delivery cases."""
+
+    by_name = {result.name: result for result in results}
+    required = {"cache_usage", "missing_file_recovery"}
+    missing = required - set(by_name)
+    if missing:
+        names = ", ".join(sorted(missing))
+        raise ValueError(f"delivery metric cases missing: {names}")
+
+    cache = by_name["cache_usage"]
+    recovery = by_name["missing_file_recovery"]
+    recovered = (
+        recovery.passed
+        and recovery.status == "done"
+        and any(
+            error.startswith("read_file:runner_failed:")
+            for error in recovery.tool_errors
+        )
+    )
+    return DeliveryMetricEvidence(
+        schema_bytes=cache.schema_bytes,
+        cache_read_tokens=cache.cache_read_input_tokens,
+        cache_write_tokens=cache.cache_write_input_tokens,
+        cache_usage_source=cache.usage_source,
+        recovery_successes=int(recovered),
+        recovery_cases=1,
+    )
 
 
 def main() -> int:

@@ -1,0 +1,224 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {
+      "id": "direct_answer",
+      "category": "direct_answer",
+      "prompt": "What is 2 + 2? Answer directly.",
+      "tools": null,
+      "allow_discovery_tools": false,
+      "expected_surface": [
+        "list_files",
+        "search_text",
+        "read_file",
+        "apply_patch",
+        "run_command",
+        "update_plan"
+      ],
+      "expected_tool": null,
+      "fake_tool": null,
+      "fake_arguments": {}
+    },
+    {
+      "id": "workspace_navigation",
+      "category": "navigation",
+      "prompt": "List the Python files in the imported workspace.",
+      "tools": ["list_files"],
+      "allow_discovery_tools": false,
+      "expected_surface": ["list_files"],
+      "expected_tool": "list_files",
+      "fake_tool": "list_files",
+      "fake_arguments": {
+        "path": "input_files",
+        "glob": "*.py",
+        "limit": 20
+      }
+    },
+    {
+      "id": "workspace_grep",
+      "category": "grep",
+      "prompt": "Use Grep to locate class AgentService in workspace source.",
+      "tools": ["search_text"],
+      "allow_discovery_tools": false,
+      "expected_surface": ["search_text"],
+      "expected_tool": "search_text",
+      "fake_tool": "search_text",
+      "fake_arguments": {
+        "pattern": "class AgentService",
+        "path": "input_files",
+        "glob": "*.py",
+        "regex": false,
+        "context_lines": 1,
+        "max_results": 5
+      }
+    },
+    {
+      "id": "workspace_read",
+      "category": "read",
+      "prompt": "Read input_files/README.md and summarize the first section.",
+      "tools": ["read_file"],
+      "allow_discovery_tools": false,
+      "expected_surface": ["read_file"],
+      "expected_tool": "read_file",
+      "fake_tool": "read_file",
+      "fake_arguments": {
+        "path": "input_files/README.md",
+        "offset": 0,
+        "max_bytes": 4096
+      }
+    },
+    {
+      "id": "workspace_patch",
+      "category": "patch",
+      "prompt": "Replace before with after in input_files/fixture.txt.",
+      "tools": ["apply_patch"],
+      "allow_discovery_tools": false,
+      "expected_surface": ["apply_patch"],
+      "expected_tool": "apply_patch",
+      "fake_tool": "apply_patch",
+      "fake_arguments": {
+        "file_path": "input_files/fixture.txt",
+        "old_string": "before",
+        "new_string": "after",
+        "replace_all": false
+      }
+    },
+    {
+      "id": "workspace_command",
+      "category": "command",
+      "prompt": "Run the focused pytest command in the workspace.",
+      "tools": ["run_command"],
+      "allow_discovery_tools": false,
+      "expected_surface": ["run_command"],
+      "expected_tool": "run_command",
+      "fake_tool": "run_command",
+      "fake_arguments": {
+        "command": "uv run pytest -q",
+        "working_dir": ".",
+        "timeout_seconds": 120.0
+      }
+    },
+    {
+      "id": "knowledge_evidence",
+      "category": "knowledge",
+      "prompt": "Search the configured policy knowledge source for the approval limit and cite evidence.",
+      "tools": ["search_knowledge"],
+      "allow_discovery_tools": false,
+      "expected_surface": ["search_knowledge"],
+      "expected_tool": "search_knowledge",
+      "fake_tool": "search_knowledge",
+      "fake_arguments": {
+        "query": "What is the approval limit?",
+        "constraints": "policy",
+        "top_k": 5
+      }
+    },
+    {
+      "id": "hidden_mcp_discovery",
+      "category": "hidden_mcp",
+      "prompt": "Discover a tool that searches external runtime documentation.",
+      "tools": null,
+      "allow_discovery_tools": true,
+      "expected_surface": [
+        "list_files",
+        "search_text",
+        "read_file",
+        "apply_patch",
+        "run_command",
+        "update_plan",
+        "find_tools"
+      ],
+      "expected_tool": "find_tools",
+      "fake_tool": "find_tools",
+      "fake_arguments": {
+        "query": "external runtime documentation search",
+        "limit": 5
+      },
+      "discovery_query": "external runtime documentation search",
+      "expected_discovery": "mcp__docs__search"
+    },
+    {
+      "id": "subagent_delegation",
+      "category": "subagent",
+      "prompt": "Delegate a bounded review of the tool runtime boundary.",
+      "tools": ["task"],
+      "allow_discovery_tools": false,
+      "expected_surface": ["task"],
+      "expected_tool": "task",
+      "fake_tool": "task",
+      "fake_arguments": {
+        "task": "Review the tool runtime boundary.",
+        "context_summary": "Focus on the single Tool contract.",
+        "tool_query": "read source files",
+        "max_turns": 3,
+        "llm_budget_total": 500
+      }
+    },
+    {
+      "id": "hidden_tool_hallucination",
+      "category": "hidden_hallucination",
+      "prompt": "Answer hidden_disabled directly; discovery is disabled.",
+      "tools": null,
+      "allow_discovery_tools": false,
+      "expected_surface": [
+        "list_files",
+        "search_text",
+        "read_file",
+        "apply_patch",
+        "run_command",
+        "update_plan"
+      ],
+      "expected_tool": null,
+      "fake_tool": "mcp__docs__search",
+      "fake_arguments": {
+        "query": "hidden docs"
+      },
+      "recoverable": true,
+      "fake_recovery": {
+        "tool": null
+      }
+    },
+    {
+      "id": "similar_tool_confusion",
+      "category": "similar_tool_confusion",
+      "prompt": "Find the AgentService class in current workspace source, not in the knowledge base.",
+      "tools": ["search_text", "search_knowledge"],
+      "allow_discovery_tools": false,
+      "expected_surface": ["search_text", "search_knowledge"],
+      "expected_tool": "search_text",
+      "fake_tool": "search_text",
+      "fake_arguments": {
+        "pattern": "class AgentService",
+        "path": "input_files",
+        "glob": "*.py",
+        "regex": false,
+        "context_lines": 0,
+        "max_results": 10
+      }
+    },
+    {
+      "id": "chinese_discovery",
+      "category": "chinese_discovery",
+      "prompt": "请找到能查询外部运行时文档的工具。",
+      "tools": null,
+      "allow_discovery_tools": true,
+      "expected_surface": [
+        "list_files",
+        "search_text",
+        "read_file",
+        "apply_patch",
+        "run_command",
+        "update_plan",
+        "find_tools"
+      ],
+      "expected_tool": "find_tools",
+      "fake_tool": "find_tools",
+      "fake_arguments": {
+        "query": "查询外部文档 运行时资料",
+        "limit": 5
+      },
+      "discovery_query": "查询外文档 搜索运行时资料",
+      "expected_discovery": "mcp__docs__search"
+    }
+  ]
+}
