@@ -1004,19 +1004,21 @@ def _audit_pydantic_model(
             message="unsupported Pydantic serialization customization",
         )
 
+    structural_fields: set[str] = set()
     if model.model_config.get("extra") == "allow":
         extra_annotation = get_type_hints(model, include_extras=True).get(
             "__pydantic_extra__"
         )
         if extra_annotation is not None:
-            _audit_pydantic_annotation(
+            contains_model = _audit_pydantic_annotation(
                 extra_annotation,
                 path=(*path, "__pydantic_extra__"),
                 visited=visited,
                 seen_aliases=set(),
             )
+            if contains_model:
+                structural_fields.add("__pydantic_extra__")
 
-    structural_fields: set[str] = set()
     input_name_fields: dict[str, str] = {}
     for field_name, model_field in model.model_fields.items():
         validation_alias = model_field.validation_alias
@@ -1103,6 +1105,11 @@ def _audit_pydantic_model(
         ),
         None,
     )
+    if (
+        first_structural_field is None
+        and "__pydantic_extra__" in structural_fields
+    ):
+        first_structural_field = "__pydantic_extra__"
     if (
         first_structural_field is not None
         and _pydantic_model_has_custom_lifecycle(model)

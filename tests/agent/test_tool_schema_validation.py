@@ -28,6 +28,7 @@ from pydantic import (
     field_serializer,
     field_validator,
     model_serializer,
+    model_validator,
 )
 from pydantic.dataclasses import dataclass as pydantic_dataclass
 from pydantic_core import core_schema
@@ -59,6 +60,40 @@ class TypedExtraArguments(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     query: str
+
+
+class StructuralExtraChild(BaseModel):
+    label: str
+
+
+class StructuralTypedExtraArguments(BaseModel):
+    __pydantic_extra__: dict[str, StructuralExtraChild] = Field(init=False)
+    model_config = ConfigDict(extra="allow")
+
+
+class DroppingStructuralExtraValidatorArguments(BaseModel):
+    __pydantic_extra__: dict[str, StructuralExtraChild] = Field(init=False)
+    model_config = ConfigDict(extra="allow")
+
+    @model_validator(mode="after")
+    def drop_structural_extras(self) -> DroppingStructuralExtraValidatorArguments:
+        self.__pydantic_extra__.clear()
+        return self
+
+
+class DroppingStructuralExtraLifecycleBase(BaseModel):
+    @classmethod
+    def model_validate(cls, obj: Any, **kwargs: Any) -> Any:
+        validated = super().model_validate(obj, **kwargs)
+        validated.__pydantic_extra__ = {}
+        return validated
+
+
+class DroppingStructuralExtraLifecycleArguments(
+    DroppingStructuralExtraLifecycleBase
+):
+    __pydantic_extra__: dict[str, StructuralExtraChild] = Field(init=False)
+    model_config = ConfigDict(extra="allow")
 
 
 class AliasedArguments(BaseModel):
@@ -829,6 +864,17 @@ def test_pydantic_input_preserves_schema_safe_typed_extras() -> None:
     assert arguments == {"query": "status", "limit": 3}
 
 
+def test_pydantic_input_preserves_schema_safe_structural_typed_extras() -> None:
+    schema, validate = pydantic_input(StructuralTypedExtraArguments)
+
+    arguments = validate({"bonus": {"label": "kept"}})
+
+    assert schema["additionalProperties"] == {
+        "$ref": "#/$defs/StructuralExtraChild"
+    }
+    assert arguments == {"bonus": {"label": "kept"}}
+
+
 def test_pydantic_input_returns_coerced_canonical_arguments() -> None:
     _, validate = pydantic_input(BuiltinArguments)
 
@@ -1342,6 +1388,25 @@ def test_pydantic_input_rejects_structural_field_validators(
 
     assert error.value.path == "$.children"
     assert "structural validator" in error.value.message
+
+
+def test_pydantic_input_rejects_structural_typed_extra_model_validator() -> None:
+    with pytest.raises(ToolValidationError) as error:
+        pydantic_input(DroppingStructuralExtraValidatorArguments)
+
+    assert error.value.path == "$.__pydantic_extra__"
+    assert "structural validator" in error.value.message
+
+
+def test_pydantic_input_rejects_structural_typed_extra_lifecycle_hook() -> None:
+    assert "model_validate" not in DroppingStructuralExtraLifecycleArguments.__dict__
+    assert "model_validate" in DroppingStructuralExtraLifecycleBase.__dict__
+
+    with pytest.raises(ToolValidationError) as error:
+        pydantic_input(DroppingStructuralExtraLifecycleArguments)
+
+    assert error.value.path == "$.__pydantic_extra__"
+    assert "structural model lifecycle hook" in error.value.message
 
 
 @pytest.mark.parametrize(
