@@ -54,6 +54,13 @@ class ExtensibleArguments(BaseModel):
     query: str
 
 
+class TypedExtraArguments(BaseModel):
+    __pydantic_extra__: dict[str, int] = Field(init=False)
+    model_config = ConfigDict(extra="allow")
+
+    query: str
+
+
 class AliasedArguments(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
@@ -478,6 +485,42 @@ class DefaultEncodedEnumArguments(BaseModel):
     state: DefaultEncodedState
 
 
+class CoreSchemaSerializedState(StrEnum):
+    READY = "ready"
+
+    @classmethod
+    def __get_pydantic_core_schema__(
+        cls,
+        source_type: Any,
+        handler: Any,
+    ) -> Any:
+        schema = handler(source_type)
+        schema["serialization"] = core_schema.plain_serializer_function_ser_schema(
+            lambda value, info: (
+                value.value if info.by_alias else "outside-schema"
+            ),
+            info_arg=True,
+            return_schema=core_schema.str_schema(),
+        )
+        return schema
+
+
+class CoreSchemaSerializedEnumArguments(BaseModel):
+    state: CoreSchemaSerializedState
+
+
+def _serialize_extra_by_alias(value: int, info: Any) -> int | str:
+    return value if info.by_alias else str(value)
+
+
+class SerializedTypedExtraArguments(BaseModel):
+    __pydantic_extra__: dict[
+        str,
+        Annotated[int, PlainSerializer(_serialize_extra_by_alias)],
+    ] = Field(init=False)
+    model_config = ConfigDict(extra="allow")
+
+
 class ScalarPlainSerializerArguments(BaseModel):
     value: Annotated[
         int,
@@ -777,6 +820,15 @@ def test_pydantic_input_preserves_extras_only_when_model_explicitly_allows_them(
     assert arguments == {"query": "status", "limit": 3}
 
 
+def test_pydantic_input_preserves_schema_safe_typed_extras() -> None:
+    schema, validate = pydantic_input(TypedExtraArguments)
+
+    arguments = validate({"query": "status", "limit": "3"})  # type: ignore[dict-item]
+
+    assert schema["additionalProperties"] == {"type": "integer"}
+    assert arguments == {"query": "status", "limit": 3}
+
+
 def test_pydantic_input_returns_coerced_canonical_arguments() -> None:
     _, validate = pydantic_input(BuiltinArguments)
 
@@ -981,6 +1033,24 @@ def test_pydantic_input_preserves_default_enum_json_encoding() -> None:
     _, validate = pydantic_input(DefaultEncodedEnumArguments)
 
     assert validate({"state": "ready"}) == {"state": "ready"}
+
+
+def test_pydantic_input_rejects_enum_core_schema_serialization_hook() -> None:
+    with pytest.raises(ToolValidationError) as error:
+        pydantic_input(CoreSchemaSerializedEnumArguments)
+
+    assert error.value.path == "$.state"
+    assert "serialization" in error.value.message.lower()
+    assert len(error.value.message) <= 512
+
+
+def test_pydantic_input_rejects_typed_extra_serialization_metadata() -> None:
+    with pytest.raises(ToolValidationError) as error:
+        pydantic_input(SerializedTypedExtraArguments)
+
+    assert error.value.path == "$.__pydantic_extra__"
+    assert "serialization metadata" in error.value.message.lower()
+    assert len(error.value.message) <= 512
 
 
 @pytest.mark.parametrize(

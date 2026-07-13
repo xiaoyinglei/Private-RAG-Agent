@@ -6,7 +6,16 @@ from dataclasses import dataclass, field, is_dataclass
 from enum import Enum, StrEnum
 from numbers import Real
 from types import MappingProxyType, UnionType
-from typing import Annotated, Any, Literal, TypeAliasType, Union, get_args, get_origin
+from typing import (
+    Annotated,
+    Any,
+    Literal,
+    TypeAliasType,
+    Union,
+    get_args,
+    get_origin,
+    get_type_hints,
+)
 
 from jsonschema import exceptions as jsonschema_exceptions  # type: ignore[import-untyped]
 from jsonschema.protocols import (  # type: ignore[import-untyped]
@@ -935,6 +944,20 @@ def _audit_pydantic_annotation(
     if annotation in (Any, str, int, float, bool, type(None), list, tuple, dict, Mapping):
         return False
     if isinstance(annotation, type) and issubclass(annotation, Enum):
+        if (
+            _metadata_has_core_schema_capability(annotation)
+            or callable(
+                getattr(annotation, "__get_pydantic_json_schema__", None)
+            )
+            or hasattr(annotation, "__pydantic_serializer__")
+        ):
+            raise ToolValidationError(
+                path=_json_path(path),
+                message=(
+                    "unsupported Pydantic Enum core/schema/serialization "
+                    "customization"
+                ),
+            )
         return False
     raise ToolValidationError(
         path=_json_path(path),
@@ -980,6 +1003,18 @@ def _audit_pydantic_model(
             path=_json_path(path),
             message="unsupported Pydantic serialization customization",
         )
+
+    if model.model_config.get("extra") == "allow":
+        extra_annotation = get_type_hints(model, include_extras=True).get(
+            "__pydantic_extra__"
+        )
+        if extra_annotation is not None:
+            _audit_pydantic_annotation(
+                extra_annotation,
+                path=(*path, "__pydantic_extra__"),
+                visited=visited,
+                seen_aliases=set(),
+            )
 
     structural_fields: set[str] = set()
     input_name_fields: dict[str, str] = {}
