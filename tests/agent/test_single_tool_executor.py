@@ -1,0 +1,1079 @@
+from __future__ import annotations
+
+import asyncio
+import json
+import os
+import signal
+import sys
+import time
+from collections.abc import Callable, Mapping
+from dataclasses import replace
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from rag.agent.tools.executor import (
+    ExecutionBoundary,
+    ExecutionStatus,
+    ToolExecutionRecord,
+    ToolExecutor,
+)
+from rag.agent.tools.permissions import (
+    CanUseToolResult,
+    ToolExecutionContext,
+    ToolGuardError,
+    UseToolDecision,
+    can_use_tool,
+)
+from rag.agent.tools.tool import (
+    CancellationMode,
+    InterruptBehavior,
+    NormalizedToolOutput,
+    ResolvedToolUse,
+    Tool,
+    ToolCall,
+    ToolCallOrigin,
+    ToolContentBlock,
+    ToolDefinition,
+    ToolEffect,
+    ToolTarget,
+    ToolValidationError,
+)
+
+
+def _origin(*exposed_names: str) -> ToolCallOrigin:
+    return ToolCallOrigin(
+        request_id="req_1",
+        toolset_revision="tools_v1",
+        exposed_tool_names=exposed_names,
+    )
+
+
+def _call(
+    name: str = "demo",
+    *,
+    call_id: str = "call_1",
+    exposed_names: tuple[str, ...] | None = None,
+    arguments: Mapping[str, Any] | None = None,
+) -> ToolCall:
+    return ToolCall(
+        tool_call_id=call_id,
+        tool_name=name,
+        arguments=arguments or {"value": "ok"},
+        origin=_origin(*(exposed_names if exposed_names is not None else (name,))),
+    )
+
+
+def _normalized(value: str = "ok") -> NormalizedToolOutput:
+    return NormalizedToolOutput(
+        content=(ToolContentBlock(type="text", data={"text": value}),),
+        structured_content={"value": value},
+    )
+
+
+def _tool(
+    name: str = "demo",
+    *,
+    validate_input: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None,
+    run: Callable[[Mapping[str, Any]], object] | None = None,
+    normalize_output: Callable[[object], NormalizedToolOutput] | None = None,
+    resolve_use: Callable[[Mapping[str, Any]], ResolvedToolUse] | None = None,
+    static_effects: frozenset[ToolEffect] = frozenset({ToolEffect.READ_WORKSPACE}),
+    output_schema: Mapping[str, Any] | None = None,
+    cancellation_mode: CancellationMode = CancellationMode.COOPERATIVE,
+    interrupt_behavior: InterruptBehavior = InterruptBehavior.CANCEL,
+    timeout_seconds: float = 1.0,
+    idempotent: bool = True,
+    concurrency_safe: bool = True,
+    max_model_output_bytes: int = 4096,
+) -> Tool:
+    return Tool(
+        definition=ToolDefinition(
+            name=name,
+            description=f"{name} description",
+            input_schema={
+                "type": "object",
+                "properties": {"value": {"type": "string"}},
+                "required": ["value"],
+                "additionalProperties": False,
+            },
+        ),
+        validate_input=validate_input or (lambda arguments: dict(arguments)),
+        run=run or (lambda arguments: {"value": arguments["value"]}),
+        normalize_output=normalize_output or (lambda raw: _normalized(str(raw["value"]))),
+        output_schema=output_schema,
+        static_effects=static_effects,
+        resolve_use=resolve_use
+        or (lambda _arguments: ResolvedToolUse(effects=frozenset(), targets=())),
+        execution_revision="1",
+        idempotent=idempotent,
+        concurrency_safe=concurrency_safe,
+        cancellation_mode=cancellation_mode,
+        interrupt_behavior=interrupt_behavior,
+        timeout_seconds=timeout_seconds,
+        max_model_output_bytes=max_model_output_bytes,
+    )
+
+
+def _context(
+    *,
+    workspace_root: Path | None = None,
+    approved: frozenset[str] = frozenset(),
+    denied: frozenset[str] = frozenset(),
+    allow_write: bool = False,
+    allow_execute: bool = False,
+    deny_effects: frozenset[ToolEffect] = frozenset(),
+) -> ToolExecutionContext:
+    return ToolExecutionContext(
+        workspace_root=workspace_root,
+        cwd=workspace_root,
+        approved_tool_call_ids=approved,
+        denied_tool_call_ids=denied,
+        allow_write_tools=allow_write,
+        allow_execute_tools=allow_execute,
+        deny_effects=deny_effects,
+    )
+
+
+def _assert_one_trace(executor: ToolExecutor, call_id: str, code: str | None) -> None:
+    traces = [trace for trace in executor.traces if trace.tool_call_id == call_id]
+    assert len(traces) == 1
+    assert traces[0].error_code == code
+
+
+@pytest.mark.anyio
+async def test_executor_uses_the_exact_success_order() -> None:
+    events: list[str] = []
+
+    def validate(arguments: Mapping[str, Any]) -> Mapping[str, Any]:
+        events.append("validate")
+        return dict(arguments)
+
+    def resolve(_arguments: Mapping[str, Any]) -> ResolvedToolUse:
+        events.append("resolve")
+        return ResolvedToolUse(effects=frozenset(), targets=())
+
+    def guard(*_args: object) -> None:
+        events.append("guard")
+
+    def boundary(*_args: object) -> ExecutionBoundary:
+        events.append("boundary")
+        return ExecutionBoundary.DIRECT
+
+    def permission(*_args: object) -> CanUseToolResult:
+        events.append("permission")
+        return CanUseToolResult(UseToolDecision.ASK, "approval required")
+
+    def approval(*_args: object) -> bool:
+        events.append("approval")
+        return True
+
+    async def runner(_arguments: Mapping[str, Any]) -> object:
+        events.append("runner")
+        return {"value": "ok"}
+
+    def normalize(raw: object) -> NormalizedToolOutput:
+        events.append("normalize")
+        assert raw == {"value": "ok"}
+        return _normalized()
+
+    def validate_output(
+        _tool_value: Tool,
+        output: NormalizedToolOutput,
+    ) -> NormalizedToolOutput:
+        events.append("output_validation")
+        return output
+
+    def externalize(
+        _tool_value: Tool,
+        output: NormalizedToolOutput,
+    ) -> tuple[NormalizedToolOutput, bool]:
+        events.append("externalize")
+        return output, False
+
+    def trace_sink(_trace: object) -> None:
+        events.append("trace")
+
+    tool = _tool(
+        validate_input=validate,
+        resolve_use=resolve,
+        run=runner,
+        normalize_output=normalize,
+    )
+    executor = ToolExecutor(
+        {"demo": tool},
+        hard_guard=guard,
+        boundary_resolver=boundary,
+        permission_decider=permission,
+        approval_resolver=approval,
+        output_validator=validate_output,
+        externalizer=externalize,
+        trace_sink=trace_sink,
+    )
+
+    execution = await executor.execute(_call(), context=_context())
+
+    assert events == [
+        "validate",
+        "resolve",
+        "guard",
+        "boundary",
+        "permission",
+        "approval",
+        "runner",
+        "normalize",
+        "output_validation",
+        "externalize",
+        "trace",
+    ]
+    assert execution.result.is_error is False
+    assert execution.record is not None
+    assert execution.record.status is ExecutionStatus.COMPLETED
+    _assert_one_trace(executor, "call_1", None)
+
+
+@pytest.mark.anyio
+async def test_unknown_tool_never_reaches_permission() -> None:
+    permission_calls = 0
+
+    def permission(*_args: object) -> CanUseToolResult:
+        nonlocal permission_calls
+        permission_calls += 1
+        return CanUseToolResult(UseToolDecision.ALLOW, "allowed")
+
+    executor = ToolExecutor({}, permission_decider=permission)
+    execution = await executor.execute(_call("missing"), context=_context())
+
+    assert execution.result.error_code == "unknown_tool"
+    assert permission_calls == 0
+    _assert_one_trace(executor, "call_1", "unknown_tool")
+
+
+@pytest.mark.anyio
+async def test_schema_not_exposed_never_reaches_permission() -> None:
+    permission_calls = 0
+
+    def permission(*_args: object) -> CanUseToolResult:
+        nonlocal permission_calls
+        permission_calls += 1
+        return CanUseToolResult(UseToolDecision.ALLOW, "allowed")
+
+    executor = ToolExecutor({"demo": _tool()}, permission_decider=permission)
+    execution = await executor.execute(
+        _call(exposed_names=()),
+        context=_context(),
+    )
+
+    assert execution.result.error_code == "schema_not_exposed"
+    assert permission_calls == 0
+    _assert_one_trace(executor, "call_1", "schema_not_exposed")
+
+
+@pytest.mark.anyio
+async def test_validation_failure_is_bounded_and_traced_once() -> None:
+    def reject(_arguments: Mapping[str, Any]) -> Mapping[str, Any]:
+        raise ToolValidationError(path="$.value", message="invalid value")
+
+    executor = ToolExecutor({"demo": _tool(validate_input=reject)})
+    execution = await executor.execute(_call(), context=_context())
+
+    assert execution.result.error_code == "invalid_arguments"
+    assert execution.result.error_message == "$.value: invalid value"
+    assert execution.record is None
+    _assert_one_trace(executor, "call_1", "invalid_arguments")
+
+
+@pytest.mark.anyio
+async def test_static_effects_cannot_be_removed_by_dynamic_resolution() -> None:
+    observed: list[frozenset[ToolEffect]] = []
+
+    def permission(
+        _tool_value: Tool,
+        _arguments: Mapping[str, Any],
+        resolved: ResolvedToolUse,
+        _context_value: ToolExecutionContext,
+    ) -> CanUseToolResult:
+        observed.append(resolved.effects)
+        return CanUseToolResult(UseToolDecision.DENY, "test complete")
+
+    tool = _tool(
+        static_effects=frozenset({ToolEffect.WRITE_WORKSPACE}),
+        resolve_use=lambda _arguments: ResolvedToolUse(
+            effects=frozenset(),
+            targets=(),
+        ),
+    )
+    executor = ToolExecutor(
+        {"demo": tool},
+        hard_guard=lambda *_args: None,
+        permission_decider=permission,
+    )
+
+    await executor.execute(_call(), context=_context())
+
+    assert observed == [frozenset({ToolEffect.WRITE_WORKSPACE})]
+
+
+@pytest.mark.anyio
+async def test_hard_guard_runs_before_permission_and_cannot_be_approved(
+    tmp_path: Path,
+) -> None:
+    events: list[str] = []
+
+    def guard(*_args: object) -> None:
+        events.append("guard")
+        raise ToolGuardError("workspace_escape", "target escapes workspace")
+
+    def permission(*_args: object) -> CanUseToolResult:
+        events.append("permission")
+        return CanUseToolResult(UseToolDecision.ALLOW, "allowed")
+
+    async def runner(_arguments: Mapping[str, Any]) -> object:
+        events.append("runner")
+        return {"value": "wrong"}
+
+    executor = ToolExecutor(
+        {"demo": _tool(run=runner)},
+        hard_guard=guard,
+        permission_decider=permission,
+    )
+    execution = await executor.execute(
+        _call(),
+        context=_context(
+            workspace_root=tmp_path,
+            approved=frozenset({"call_1"}),
+        ),
+    )
+
+    assert events == ["guard"]
+    assert execution.result.error_code == "workspace_escape"
+    _assert_one_trace(executor, "call_1", "workspace_escape")
+
+
+@pytest.mark.anyio
+async def test_default_workspace_guard_rejects_escape_before_permission(
+    tmp_path: Path,
+) -> None:
+    permission_calls = 0
+    outside = tmp_path.parent / "outside.txt"
+    tool = _tool(
+        resolve_use=lambda _arguments: ResolvedToolUse(
+            effects=frozenset({ToolEffect.WRITE_WORKSPACE}),
+            targets=(ToolTarget(kind="workspace_path", value=str(outside)),),
+        ),
+        static_effects=frozenset({ToolEffect.WRITE_WORKSPACE}),
+    )
+
+    def permission(*_args: object) -> CanUseToolResult:
+        nonlocal permission_calls
+        permission_calls += 1
+        return CanUseToolResult(UseToolDecision.ALLOW, "allowed")
+
+    executor = ToolExecutor({"demo": tool}, permission_decider=permission)
+    execution = await executor.execute(
+        _call(),
+        context=_context(
+            workspace_root=tmp_path,
+            approved=frozenset({"call_1"}),
+        ),
+    )
+
+    assert execution.result.error_code == "workspace_escape"
+    assert permission_calls == 0
+
+
+@pytest.mark.anyio
+async def test_permission_denial_never_runs_runner() -> None:
+    runner_calls = 0
+
+    async def runner(_arguments: Mapping[str, Any]) -> object:
+        nonlocal runner_calls
+        runner_calls += 1
+        return {"value": "wrong"}
+
+    executor = ToolExecutor(
+        {"demo": _tool(run=runner)},
+        permission_decider=lambda *_args: CanUseToolResult(
+            UseToolDecision.DENY,
+            "denied by policy",
+        ),
+    )
+    execution = await executor.execute(_call(), context=_context())
+
+    assert execution.result.error_code == "tool_denied"
+    assert runner_calls == 0
+    _assert_one_trace(executor, "call_1", "tool_denied")
+
+
+@pytest.mark.anyio
+async def test_approval_can_defer_or_deny_without_running() -> None:
+    runner_calls = 0
+
+    async def runner(_arguments: Mapping[str, Any]) -> object:
+        nonlocal runner_calls
+        runner_calls += 1
+        return {"value": "wrong"}
+
+    tool = _tool(
+        run=runner,
+        static_effects=frozenset({ToolEffect.WRITE_WORKSPACE}),
+    )
+    executor = ToolExecutor({"demo": tool}, hard_guard=lambda *_args: None)
+
+    deferred = await executor.execute(_call(call_id="defer"), context=_context())
+    denied = await executor.execute(
+        _call(call_id="deny"),
+        context=_context(denied=frozenset({"deny"})),
+    )
+
+    assert deferred.result.error_code == "approval_required"
+    assert deferred.result.retryable is True
+    assert denied.result.error_code == "tool_denied"
+    assert runner_calls == 0
+    _assert_one_trace(executor, "defer", "approval_required")
+    _assert_one_trace(executor, "deny", "tool_denied")
+
+
+@pytest.mark.parametrize(
+    ("effects", "context", "decision"),
+    [
+        pytest.param(
+            frozenset({ToolEffect.READ_WORKSPACE}),
+            _context(),
+            UseToolDecision.ALLOW,
+            id="read",
+        ),
+        pytest.param(
+            frozenset({ToolEffect.WRITE_WORKSPACE}),
+            _context(),
+            UseToolDecision.ASK,
+            id="write-asks",
+        ),
+        pytest.param(
+            frozenset({ToolEffect.WRITE_WORKSPACE}),
+            _context(allow_write=True),
+            UseToolDecision.ALLOW,
+            id="write-preauthorized",
+        ),
+        pytest.param(
+            frozenset({ToolEffect.EXECUTE_PROCESS}),
+            _context(),
+            UseToolDecision.ASK,
+            id="execute-asks",
+        ),
+        pytest.param(
+            frozenset({ToolEffect.EXECUTE_PROCESS}),
+            _context(allow_execute=True),
+            UseToolDecision.ALLOW,
+            id="execute-preauthorized",
+        ),
+        pytest.param(
+            frozenset({ToolEffect.NETWORK}),
+            _context(),
+            UseToolDecision.ASK,
+            id="network-conservative",
+        ),
+        pytest.param(
+            frozenset({ToolEffect.DESTRUCTIVE}),
+            _context(),
+            UseToolDecision.ASK,
+            id="destructive-conservative",
+        ),
+        pytest.param(
+            frozenset({ToolEffect.READ_WORKSPACE}),
+            _context(deny_effects=frozenset({ToolEffect.READ_WORKSPACE})),
+            UseToolDecision.DENY,
+            id="hard-policy-deny",
+        ),
+    ],
+)
+def test_can_use_tool_is_a_pure_effect_decision(
+    effects: frozenset[ToolEffect],
+    context: ToolExecutionContext,
+    decision: UseToolDecision,
+) -> None:
+    tool = _tool(static_effects=effects)
+    resolved = ResolvedToolUse(effects=effects, targets=())
+
+    result = can_use_tool(tool, {"value": "ok"}, resolved, context)
+
+    assert result.decision is decision
+    assert result.reason
+
+
+@pytest.mark.anyio
+async def test_runner_normalizer_output_validator_and_externalizer_failures_trace_once() -> None:
+    async def runner_failure(_arguments: Mapping[str, Any]) -> object:
+        raise RuntimeError("secret runner detail")
+
+    def normalize_failure(_raw: object) -> NormalizedToolOutput:
+        raise RuntimeError("secret normalizer detail")
+
+    def output_failure(
+        _tool_value: Tool,
+        _output: NormalizedToolOutput,
+    ) -> NormalizedToolOutput:
+        raise ToolValidationError(path="$.value", message="invalid output")
+
+    def externalizer_failure(
+        _tool_value: Tool,
+        _output: NormalizedToolOutput,
+    ) -> tuple[NormalizedToolOutput, bool]:
+        raise RuntimeError("secret storage detail")
+
+    cases = (
+        (
+            "runner",
+            ToolExecutor({"runner": _tool("runner", run=runner_failure)}),
+            "runner_failed",
+        ),
+        (
+            "normalizer",
+            ToolExecutor(
+                {
+                    "normalizer": _tool(
+                        "normalizer",
+                        normalize_output=normalize_failure,
+                    )
+                }
+            ),
+            "normalization_failed",
+        ),
+        (
+            "output",
+            ToolExecutor(
+                {"output": _tool("output")},
+                output_validator=output_failure,
+            ),
+            "output_validation_failed",
+        ),
+        (
+            "externalizer",
+            ToolExecutor(
+                {"externalizer": _tool("externalizer")},
+                externalizer=externalizer_failure,
+            ),
+            "externalization_failed",
+        ),
+    )
+
+    for name, executor, error_code in cases:
+        execution = await executor.execute(
+            _call(name, call_id=name),
+            context=_context(),
+        )
+        assert execution.result.error_code == error_code
+        assert "secret" not in (execution.result.error_message or "")
+        _assert_one_trace(executor, name, error_code)
+
+
+@pytest.mark.anyio
+async def test_each_pre_runner_failure_path_emits_exactly_one_trace() -> None:
+    def resolution_failure(_arguments: Mapping[str, Any]) -> ResolvedToolUse:
+        raise RuntimeError("resolution detail")
+
+    def boundary_failure(*_args: object) -> ExecutionBoundary:
+        raise RuntimeError("boundary detail")
+
+    def permission_failure(*_args: object) -> CanUseToolResult:
+        raise RuntimeError("permission detail")
+
+    def approval_failure(*_args: object) -> bool:
+        raise RuntimeError("approval detail")
+
+    cases = (
+        (
+            "resolution",
+            ToolExecutor(
+                {"resolution": _tool("resolution", resolve_use=resolution_failure)}
+            ),
+            "use_resolution_failed",
+        ),
+        (
+            "boundary",
+            ToolExecutor(
+                {"boundary": _tool("boundary")},
+                boundary_resolver=boundary_failure,
+            ),
+            "execution_boundary_failed",
+        ),
+        (
+            "permission",
+            ToolExecutor(
+                {"permission": _tool("permission")},
+                permission_decider=permission_failure,
+            ),
+            "permission_failed",
+        ),
+        (
+            "approval",
+            ToolExecutor(
+                {"approval": _tool("approval")},
+                permission_decider=lambda *_args: CanUseToolResult(
+                    UseToolDecision.ASK,
+                    "approval required",
+                ),
+                approval_resolver=approval_failure,
+            ),
+            "approval_failed",
+        ),
+    )
+
+    for name, executor, error_code in cases:
+        execution = await executor.execute(
+            _call(name, call_id=name),
+            context=_context(),
+        )
+        assert execution.result.error_code == error_code
+        _assert_one_trace(executor, name, error_code)
+
+
+@pytest.mark.anyio
+async def test_text_bounding_applies_to_final_model_visible_json_bytes() -> None:
+    text = "\"\\汉" * 200
+    tool = _tool(
+        normalize_output=lambda _raw: NormalizedToolOutput(
+            content=(
+                ToolContentBlock(
+                    type="text",
+                    data={"text": text, "format": "plain"},
+                ),
+            ),
+        ),
+        max_model_output_bytes=160,
+    )
+    executor = ToolExecutor({"demo": tool})
+
+    execution = await executor.execute(_call(), context=_context())
+
+    assert execution.result.is_error is False
+    assert execution.result.truncated is True
+    model_visible = {
+        "content": [
+            {"type": block.type, "data": dict(block.data)}
+            for block in execution.result.content
+        ],
+        "structured_content": execution.result.structured_content,
+    }
+    encoded = json.dumps(
+        model_visible,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    assert len(encoded) <= tool.max_model_output_bytes
+    assert execution.result.content[0].data["format"] == "plain"
+
+
+@pytest.mark.anyio
+async def test_declared_output_schema_is_enforced_after_normalization() -> None:
+    tool = _tool(
+        output_schema={
+            "type": "object",
+            "properties": {"value": {"enum": ["expected"]}},
+            "required": ["value"],
+            "additionalProperties": False,
+        }
+    )
+    executor = ToolExecutor({"demo": tool})
+
+    execution = await executor.execute(_call(), context=_context())
+
+    assert execution.result.error_code == "output_validation_failed"
+    _assert_one_trace(executor, "call_1", "output_validation_failed")
+
+
+@pytest.mark.anyio
+async def test_managed_timeout_waits_for_process_group_cleanup(
+    tmp_path: Path,
+) -> None:
+    sentinel = tmp_path / "should-not-exist.txt"
+    process_group: asyncio.Future[int] = asyncio.get_running_loop().create_future()
+
+    async def managed_runner(_arguments: Mapping[str, Any]) -> object:
+        script = (
+            "import pathlib,subprocess,sys,time;"
+            "subprocess.Popen([sys.executable,'-c',"
+            f"\"import pathlib,time;time.sleep(0.3);pathlib.Path({str(sentinel)!r}).write_text('late')\"]);"
+            "time.sleep(5)"
+        )
+        process = await asyncio.create_subprocess_exec(
+            sys.executable,
+            "-c",
+            script,
+            start_new_session=True,
+        )
+        process_group.set_result(process.pid)
+        try:
+            await process.wait()
+        except asyncio.CancelledError:
+            os.killpg(process.pid, signal.SIGTERM)
+            try:
+                await asyncio.wait_for(process.wait(), timeout=0.2)
+            except TimeoutError:
+                os.killpg(process.pid, signal.SIGKILL)
+                await process.wait()
+            raise
+        return {"value": "late"}
+
+    tool = _tool(
+        run=managed_runner,
+        cancellation_mode=CancellationMode.MANAGED_PROCESS,
+        timeout_seconds=0.05,
+    )
+    executor = ToolExecutor({"demo": tool})
+
+    execution = await executor.execute(_call(), context=_context())
+    pgid = await process_group
+    await asyncio.sleep(0.4)
+
+    assert execution.result.error_code == "timeout_cancelled"
+    assert execution.record is not None
+    assert execution.record.status is ExecutionStatus.FAILED
+    assert sentinel.exists() is False
+    with pytest.raises(ProcessLookupError):
+        os.killpg(pgid, 0)
+    _assert_one_trace(executor, "call_1", "timeout_cancelled")
+
+
+@pytest.mark.anyio
+async def test_cancel_interrupt_cancels_runner_and_traces_once() -> None:
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    async def runner(_arguments: Mapping[str, Any]) -> object:
+        started.set()
+        try:
+            await asyncio.sleep(5)
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+        return {"value": "late"}
+
+    executor = ToolExecutor({"demo": _tool(run=runner)})
+    task = asyncio.create_task(executor.execute(_call(), context=_context()))
+    await started.wait()
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert cancelled.is_set()
+    _assert_one_trace(executor, "call_1", "cancelled")
+
+
+@pytest.mark.anyio
+async def test_finish_current_interrupt_preserves_atomic_result_and_one_trace() -> None:
+    started = asyncio.Event()
+    finished = asyncio.Event()
+
+    async def runner(_arguments: Mapping[str, Any]) -> object:
+        started.set()
+        await asyncio.sleep(0.03)
+        finished.set()
+        return {"value": "finished"}
+
+    tool = _tool(
+        run=runner,
+        interrupt_behavior=InterruptBehavior.FINISH_CURRENT,
+    )
+    executor = ToolExecutor({"demo": tool})
+    task = asyncio.create_task(executor.execute(_call(), context=_context()))
+    await started.wait()
+
+    task.cancel()
+    execution = await task
+
+    assert finished.is_set()
+    assert execution.result.is_error is False
+    assert execution.result.structured_content == {"value": "finished"}
+    _assert_one_trace(executor, "call_1", None)
+
+
+@pytest.mark.anyio
+async def test_remote_best_effort_timeout_records_unknown_without_cancelling() -> None:
+    completed = asyncio.Event()
+
+    async def remote_runner(_arguments: Mapping[str, Any]) -> object:
+        await asyncio.sleep(0.15)
+        completed.set()
+        return {"value": "remote-finished"}
+
+    tool = _tool(
+        run=remote_runner,
+        cancellation_mode=CancellationMode.REMOTE_BEST_EFFORT,
+        timeout_seconds=0.02,
+        idempotent=False,
+    )
+    executor = ToolExecutor({"demo": tool})
+    started = time.monotonic()
+
+    execution = await executor.execute(_call(), context=_context())
+
+    assert time.monotonic() - started < 0.12
+    assert execution.result.error_code == "timeout_outcome_unknown"
+    assert execution.record is not None
+    assert execution.record.status is ExecutionStatus.UNKNOWN
+    assert execution.record.requires_reconciliation is True
+    await asyncio.wait_for(completed.wait(), timeout=0.4)
+    _assert_one_trace(executor, "call_1", "timeout_outcome_unknown")
+
+
+@pytest.mark.anyio
+async def test_remote_interrupt_records_unknown_without_cancelling_remote_work() -> None:
+    started = asyncio.Event()
+    completed = asyncio.Event()
+
+    async def remote_runner(_arguments: Mapping[str, Any]) -> object:
+        started.set()
+        await asyncio.sleep(0.05)
+        completed.set()
+        return {"value": "remote-finished"}
+
+    tool = _tool(
+        run=remote_runner,
+        cancellation_mode=CancellationMode.REMOTE_BEST_EFFORT,
+        timeout_seconds=1.0,
+        idempotent=False,
+    )
+    executor = ToolExecutor({"demo": tool})
+    task = asyncio.create_task(executor.execute(_call(), context=_context()))
+    await started.wait()
+
+    task.cancel()
+    execution = await task
+
+    assert execution.result.error_code == "cancelled_outcome_unknown"
+    assert execution.result.retryable is False
+    assert execution.record is not None
+    assert execution.record.status is ExecutionStatus.UNKNOWN
+    assert execution.record.requires_reconciliation is True
+    await asyncio.wait_for(completed.wait(), timeout=0.3)
+    _assert_one_trace(executor, "call_1", "cancelled_outcome_unknown")
+
+
+@pytest.mark.anyio
+async def test_non_idempotent_unknown_outcome_requires_reconciliation_before_retry() -> None:
+    runner_calls = 0
+
+    async def remote_runner(_arguments: Mapping[str, Any]) -> object:
+        nonlocal runner_calls
+        runner_calls += 1
+        await asyncio.sleep(0.1)
+        return {"value": "late"}
+
+    tool = _tool(
+        run=remote_runner,
+        cancellation_mode=CancellationMode.REMOTE_BEST_EFFORT,
+        timeout_seconds=0.01,
+        idempotent=False,
+    )
+    executor = ToolExecutor({"demo": tool})
+    call = _call()
+
+    first = await executor.execute(call, context=_context())
+    assert first.record is not None
+    second = await executor.execute(
+        call,
+        context=_context(),
+        record=first.record,
+    )
+
+    assert runner_calls == 1
+    assert second.result.error_code == "tool_reconciliation_required"
+    assert second.record == first.record
+    traces = [trace for trace in executor.traces if trace.tool_call_id == "call_1"]
+    assert len(traces) == 2
+    assert [trace.error_code for trace in traces] == [
+        "timeout_outcome_unknown",
+        "tool_reconciliation_required",
+    ]
+
+
+@pytest.mark.anyio
+async def test_non_idempotent_running_record_is_reconciled_before_retry() -> None:
+    runner_calls = 0
+
+    async def runner(_arguments: Mapping[str, Any]) -> object:
+        nonlocal runner_calls
+        runner_calls += 1
+        return {"value": "wrong"}
+
+    tool = _tool(run=runner, idempotent=False)
+    call = _call()
+    record = replace(
+        ToolExecutionRecord.prepare(call, tool),
+        status=ExecutionStatus.RUNNING,
+        attempt_count=1,
+    )
+    executor = ToolExecutor({"demo": tool})
+
+    execution = await executor.execute(call, context=_context(), record=record)
+
+    assert execution.result.error_code == "tool_reconciliation_required"
+    assert execution.record is not None
+    assert execution.record.status is ExecutionStatus.UNKNOWN
+    assert execution.record.error_code == "interrupted_outcome_unknown"
+    assert execution.record.requires_reconciliation is True
+    assert runner_calls == 0
+    _assert_one_trace(executor, "call_1", "tool_reconciliation_required")
+
+
+def _concurrency_tools(
+    *,
+    same_target: bool,
+    second_safe: bool,
+    events: list[str],
+    active: list[int],
+    maximum: list[int],
+) -> tuple[Tool, Tool]:
+    def build(name: str, target: str, safe: bool) -> Tool:
+        async def runner(_arguments: Mapping[str, Any]) -> object:
+            events.append(f"start:{name}")
+            active[0] += 1
+            maximum[0] = max(maximum[0], active[0])
+            await asyncio.sleep(0.03)
+            active[0] -= 1
+            events.append(f"end:{name}")
+            return {"value": name}
+
+        return _tool(
+            name,
+            run=runner,
+            resolve_use=lambda _arguments: ResolvedToolUse(
+                effects=frozenset({ToolEffect.WRITE_WORKSPACE}),
+                targets=(ToolTarget(kind="workspace_path", value=target),),
+            ),
+            static_effects=frozenset({ToolEffect.WRITE_WORKSPACE}),
+            concurrency_safe=safe,
+        )
+
+    return (
+        build("one", "/workspace/one.txt", True),
+        build(
+            "two",
+            "/workspace/one.txt" if same_target else "/workspace/two.txt",
+            second_safe,
+        ),
+    )
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("same_target", "second_safe", "expected_parallelism"),
+    [
+        pytest.param(False, True, 2, id="safe-distinct-targets"),
+        pytest.param(True, True, 1, id="conflicting-targets"),
+        pytest.param(False, False, 1, id="unsafe-tool"),
+    ],
+)
+async def test_batch_parallelism_requires_safe_non_conflicting_tools(
+    same_target: bool,
+    second_safe: bool,
+    expected_parallelism: int,
+) -> None:
+    events: list[str] = []
+    active = [0]
+    maximum = [0]
+    one, two = _concurrency_tools(
+        same_target=same_target,
+        second_safe=second_safe,
+        events=events,
+        active=active,
+        maximum=maximum,
+    )
+    executor = ToolExecutor({"one": one, "two": two})
+    calls = (
+        _call("one", call_id="call_1"),
+        _call("two", call_id="call_2"),
+    )
+
+    executions = await executor.execute_batch(
+        calls,
+        context=_context(
+            workspace_root=Path("/workspace"),
+            allow_write=True,
+        ),
+    )
+
+    assert maximum[0] == expected_parallelism
+    assert tuple(item.result.tool_call_id for item in executions) == (
+        "call_1",
+        "call_2",
+    )
+    if expected_parallelism == 1:
+        assert events == ["start:one", "end:one", "start:two", "end:two"]
+    assert len(executor.traces) == 2
+
+
+@pytest.mark.anyio
+async def test_batch_serializes_unknown_read_target_against_a_write() -> None:
+    events: list[str] = []
+    active = 0
+    maximum = 0
+
+    def build(
+        name: str,
+        effects: frozenset[ToolEffect],
+        targets: tuple[ToolTarget, ...],
+    ) -> Tool:
+        async def runner(_arguments: Mapping[str, Any]) -> object:
+            nonlocal active, maximum
+            events.append(f"start:{name}")
+            active += 1
+            maximum = max(maximum, active)
+            await asyncio.sleep(0.02)
+            active -= 1
+            events.append(f"end:{name}")
+            return {"value": name}
+
+        return _tool(
+            name,
+            run=runner,
+            static_effects=effects,
+            resolve_use=lambda _arguments: ResolvedToolUse(
+                effects=effects,
+                targets=targets,
+            ),
+            concurrency_safe=True,
+        )
+
+    executor = ToolExecutor(
+        {
+            "read": build("read", frozenset({ToolEffect.READ_WORKSPACE}), ()),
+            "write": build(
+                "write",
+                frozenset({ToolEffect.WRITE_WORKSPACE}),
+                (ToolTarget(kind="workspace_path", value="/workspace/out.txt"),),
+            ),
+        }
+    )
+
+    await executor.execute_batch(
+        (
+            _call("read", call_id="read_call"),
+            _call("write", call_id="write_call"),
+        ),
+        context=_context(workspace_root=Path("/workspace"), allow_write=True),
+    )
+
+    assert maximum == 1
+    assert events == ["start:read", "end:read", "start:write", "end:write"]
+
+
+def test_task3_modules_do_not_import_legacy_execution_paths() -> None:
+    root = Path(__file__).parents[2]
+    forbidden = (
+        "rag.agent.tooling",
+        "ToolExecutionService",
+        "ApprovalPolicy",
+        "rag.agent.tools.registry",
+    )
+
+    for relative in (
+        "rag/agent/tools/permissions.py",
+        "rag/agent/tools/executor.py",
+    ):
+        source = (root / relative).read_text(encoding="utf-8")
+        assert not any(name in source for name in forbidden)
