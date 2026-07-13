@@ -1,35 +1,21 @@
-"""Model turn provider resolution for AgentService."""
+"""Resolve the one model-turn provider used by the canonical AgentLoop."""
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any
 
-from rag.agent.capabilities.catalog import ToolCatalog
-from rag.agent.capabilities.context import deferred_store_var
 from rag.agent.core.definition import AgentRuntimePolicy
 from rag.agent.core.llm_providers import create_loop_model_turn_provider
 from rag.agent.core.llm_registry import ModelResolver
 from rag.agent.core.runtime_diagnostics import RuntimeDiagnostic
 from rag.agent.loop.runtime import ModelTurnProvider
-from rag.agent.loop.state import (
-    LoopState,
-    ModelTurnDraft,
-    append_loop_diagnostic,
-)
-from rag.agent.tooling import (
-    ToolDiscoveryState,
-    ToolSurfaceRequest,
-)
-from rag.agent.tooling import (
-    ToolRegistry as NewToolRegistry,
-)
-from rag.agent.tools.registry import ToolRegistry
+from rag.agent.loop.state import LoopState, ModelTurnDraft
+from rag.agent.tools.tool import Tool
 
 
 class ResultDrivenModelTurnProvider:
-    """Minimal fallback provider for explicit compatibility paths."""
+    """Fail-closed fallback used only when strict model setup is disabled."""
 
     async def next_turn(
         self,
@@ -43,25 +29,26 @@ class ResultDrivenModelTurnProvider:
             return ModelTurnDraft(
                 action="pause",
                 pause_reason=(
-                    "No model turn provider is available to address "
-                    "stop-hook feedback."
+                    "No model provider is available to address stop-hook "
+                    "feedback."
                 ),
             )
         if state["tool_results"]:
             latest = state["tool_results"][-1]
-            if latest.error is not None:
-                return ModelTurnDraft(action="finish")
-            if latest.output is not None:
-                text = getattr(latest.output, "text", None) or getattr(
-                    latest.output,
-                    "result",
-                    None,
+            if latest.is_error:
+                return ModelTurnDraft(
+                    action="finish",
+                    final_answer=latest.error_message or "Tool execution failed.",
                 )
-                if text:
-                    return ModelTurnDraft(
-                        action="finish",
-                        final_answer=str(text),
-                    )
+            payload = latest.structured_content
+            if isinstance(payload, Mapping):
+                for key in ("text", "result", "output_text", "conclusion"):
+                    value = payload.get(key)
+                    if isinstance(value, str) and value:
+                        return ModelTurnDraft(
+                            action="finish",
+                            final_answer=value,
+                        )
             return ModelTurnDraft(
                 action="pause",
                 pause_reason="Tool execution produced no extractable answer.",
@@ -74,67 +61,44 @@ class ResultDrivenModelTurnProvider:
 
 @dataclass
 class ModelProviderResolver:
-    """Build the per-loop model provider from service-scoped dependencies."""
-
     model_turn_provider: ModelTurnProvider | None
     model_registry: ModelResolver | None
     policy: AgentRuntimePolicy
-    base_tool_registry: ToolRegistry
-    catalog: ToolCatalog
+    registry_snapshot: Mapping[str, Tool]
     strict_model_provider: bool = True
-    stream_sink: Any = None
-    skill_context_provider: Callable[[LoopState], str] | None = None
+    stream_sink: object | None = None
 
-    def resolve(
-        self,
-        state: LoopState | None,
-        *,
-        tool_registry: ToolRegistry | None = None,
-        tooling_registry: NewToolRegistry | None = None,
-        tool_surface_request: ToolSurfaceRequest | None = None,
-        tool_discovery_state: ToolDiscoveryState | None = None,
-    ) -> ModelTurnProvider:
+    def resolve(self, state: LoopState | None) -> ModelTurnProvider:
         if self.model_turn_provider is not None:
             return self.model_turn_provider
         if self.model_registry is not None:
             try:
-                store = deferred_store_var.get(None)
-                if store is None:
-                    raise RuntimeError(
-                        "DeferredToolStore is not bound — AgentLoop must set "
-                        "deferred_store_var before creating provider"
+                resident = ()
+                disabled = ()
+                if state is not None:
+                    resident = (
+                        *state.get("resident_tool_names", ()),
+                        *state.get("explicit_tool_names", ()),
                     )
-                effective_registry = tool_registry or self.base_tool_registry
-                formatter_resolver = (
-                    (lambda name: tool_registry.get_formatter(name))
-                    if tool_registry is not None
-                    else None
-                )
+                    disabled = tuple(state.get("disabled_tool_names", ()))
                 return create_loop_model_turn_provider(
                     self.model_registry,
                     self.policy.model_selection,
-                    tool_registry=effective_registry,
-                    definition=self.policy,
-                    catalog=self.catalog,
-                    deferred_store=store,
+                    registry_snapshot=self.registry_snapshot,
+                    resident_tool_names=resident,
+                    disabled_tool_names=disabled,
                     stream_sink=self.stream_sink,
-                    formatter_resolver=formatter_resolver,
-                    skill_context_provider=self.skill_context_provider,
-                    tooling_registry=tooling_registry,
-                    tool_surface_request=tool_surface_request,
-                    tool_discovery_state=tool_discovery_state,
                 )
             except Exception as exc:
                 if self.strict_model_provider:
                     raise
                 if state is not None:
-                    append_loop_diagnostic(
-                        state,
+                    state["runtime_diagnostics"].append(
                         RuntimeDiagnostic.from_exception(
                             code="default_providers_initialization_failed",
                             component="model_providers",
                             error=exc,
-                        ),
+                        )
                     )
         return ResultDrivenModelTurnProvider()
 

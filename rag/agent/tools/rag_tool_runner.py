@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from rag.agent.tools.rag_tools import SearchInput, SearchOutput
-from rag.agent.tools.registry import ToolExecutionContext
+from rag.agent.tools.permissions import ToolExecutionContext
 from rag.retrieval.models import QueryOptions
 from rag.schema.runtime import AccessPolicy
 

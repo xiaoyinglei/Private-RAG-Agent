@@ -1,383 +1,159 @@
 from __future__ import annotations
 
-import logging
 from pathlib import Path
-from typing import Any, cast
 
 import pytest
 
-from rag.agent.builtin import create_builtin_agent_registry
-from rag.agent.capabilities.tool_search import ToolSearchInput, ToolSearchOutput
-from rag.agent.cli import (
+from agent_runtime.runtime.builder import (
     CLI_AGENT_CHOICES,
-    _build_agent_service,
-    _build_llm_tool_runners,
-    _build_optional_rag_runtime,
-    _display_result,
-    _looks_like_rag_storage,
-    _resolve_auto_rag_config,
-    _resolve_cli_agent_definition,
+    build_agent_service,
+    build_optional_rag_runtime,
+    resolve_auto_rag_config,
+    resolve_cli_agent_definition,
 )
-from rag.agent.core.context import AgentRunConfig, RunRegistry
-from rag.agent.core.definition import AgentRuntimePolicy
-from rag.agent.core.llm_registry import ModelRegistry
-from rag.agent.core.runtime_diagnostics import AgentLatencyProfile, RuntimeDiagnostic
-from rag.agent.loop.state import LoopState as AgentState
-from rag.agent.planning import AgentPlan
-from rag.agent.planning import PlanStep as PlanningStep
-from rag.agent.service import AgentRunRequest, AgentRunResult
-from rag.agent.tools.llm_tools import LLMCompareInput, LLMGenerateInput
-from rag.agent.tools.registry import ToolExecutionContext
-from rag.models.config import GenerationConfig
-from rag.schema.runtime import AccessPolicy, RuntimeMode
+from rag.agent.builtin import create_builtin_agent_registry
+from rag.agent.cli import _build_agent_service
+from rag.agent.service import AgentRunRequest
+from rag.agent.tools.builtins import RESIDENT_CODING_TOOL_NAMES
+from rag.agent.tools.integrations.knowledge import KnowledgeSearchOutput
+from rag.agent.tools.integrations.mcp import (
+    MCPToolDescriptor,
+    create_mcp_tools,
+)
 
 
-class _ChatBinding:
-    def __init__(self) -> None:
-        self.prompts: list[str] = []
+class _ModelRegistry:
+    default_model = "fake"
 
-    def chat(self, prompt: str, **_: object) -> str:
-        self.prompts.append(prompt)
-        return f"response:{prompt}"
-
-
-class _Runtime:
-    retrieval_service: object | None = None
-    chat_context_window_tokens = 32_768
-    llm_stage_budgets = None
-    token_accounting = type(
-        "WordTokens",
-        (),
-        {"count": lambda self, text: len(text.split())},
-    )()
-
-    def __init__(self) -> None:
-        self.capability_bundle = type(
-            "CapabilityBundle",
-            (),
-            {"chat_bindings": [_ChatBinding()]},
-        )()
+    def resolve_for_node(self, **kwargs: object) -> object:
+        del kwargs
+        raise AssertionError("model resolution is not needed for assembly")
 
 
-class _RuntimeWithAssetStores(_Runtime):
-    def __init__(self) -> None:
-        super().__init__()
-        self.stores = type(
-            "Stores",
-            (),
-            {
-                "metadata_repo": object(),
-                "object_store": object(),
-            },
-        )()
-
-
-class _FailingModelRegistry:
-    default_model = "qwen3_14b_4bit"
-    fallback_model = None
-    generation_config = GenerationConfig()
-
-    def resolve(self, alias: str) -> object:
-        raise RuntimeError(f"endpoint conflict for {alias!r}")
-
-    def resolve_or_fallback(self, alias: str) -> object:
-        return self.resolve(alias)
-
-    def resolve_for_node(self, *, node_model: str | None, node_name: str) -> object:
-        del node_name
-        return self.resolve(node_model or self.default_model)
-
-
-class _RetrievalService:
-    def __init__(self) -> None:
-        self.access_policies: list[AccessPolicy] = []
-
-    async def aretrieve_payload(
-        self,
-        query: str,
-        *,
-        access_policy: AccessPolicy,
-        query_options: object,
-    ) -> object:
-        del query, query_options
-        self.access_policies.append(access_policy)
-        evidence = type(
-            "Evidence",
-            (),
-            {"internal": [], "external": [], "graph": []},
-        )()
-        return type("Payload", (), {"evidence": evidence})()
-
-
-class _RuntimeWithRetrieval(_Runtime):
-    def __init__(self) -> None:
-        super().__init__()
-        self.retrieval_service = _RetrievalService()
-
-
-def _trusted_llm_execution_context(
-    config: AgentRunConfig,
-    *,
-    tool_name: str,
-) -> ToolExecutionContext:
-    state = cast(
-        AgentState,
-        {
-            "task": "CLI model tool test",
-            "run_config": config,
-        },
-    )
-    definition = AgentRuntimePolicy.test_factory(
-        agent_type="test",
-        description="CLI model tool test",
-        system_prompt="Use only trusted supplied context.",
-        allowed_tools=[tool_name],
-    )
-    return ToolExecutionContext(
-        run_config=config,
-        state=state,
-        definition=definition,
-    )
-
-
-@pytest.mark.anyio
-async def test_cli_llm_runner_wiring_includes_compare_runner() -> None:
-    chat = _ChatBinding()
-    runners = _build_llm_tool_runners(chat)
-    config = AgentRunConfig(
-        run_id="cli-compare",
-        thread_id="cli-compare",
-        llm_budget_total=10_000,
-        max_depth=1,
-        access_policy=AccessPolicy.default(),
-    )
-    RunRegistry.remove(config.run_id)
-    RunRegistry.get_or_create(config)
-
-    assert {"llm_generate", "llm_summarize", "llm_compare"} <= set(runners)
-    result = await cast(Any, runners["llm_compare"])(
-        LLMCompareInput(
-            question="Compare A and B",
-            left_context_sections=["A evidence"],
-            right_context_sections=["B evidence"],
-        ),
-        _trusted_llm_execution_context(config, tool_name="llm_compare"),
-    )
-
-    assert result.text.startswith("response:")
-    assert "[system]\nUse only trusted supplied context." in result.text
-    assert "[task]\nCompare A and B" in result.text
-    assert "Left context:\nA evidence" in result.text
-    assert "Right context:\nB evidence" in result.text
-    RunRegistry.remove(config.run_id)
-
-
-@pytest.mark.anyio
-async def test_cli_generate_runner_preserves_supplied_grounding_ids() -> None:
-    runners = _build_llm_tool_runners(_ChatBinding())
-    config = AgentRunConfig(
-        run_id="cli-generate",
-        thread_id="cli-generate",
-        llm_budget_total=10_000,
-        max_depth=1,
-        access_policy=AccessPolicy.default(),
-    )
-    RunRegistry.remove(config.run_id)
-    RunRegistry.get_or_create(config)
-
-    result = await cast(Any, runners["llm_generate"])(
-        LLMGenerateInput(
-            prompt="Write grounded answer",
-            evidence_ids=["ev1"],
-            citation_ids=["cit1"],
-        ),
-        _trusted_llm_execution_context(config, tool_name="llm_generate"),
-    )
-
-    assert result.text.startswith("response:")
-    assert "[system]\nUse only trusted supplied context." in result.text
-    assert "[task]\nWrite grounded answer" in result.text
-    assert result.evidence_ids == ["ev1"]
-    assert result.citation_ids == ["cit1"]
-    RunRegistry.remove(config.run_id)
-
-
-def test_cli_agent_choices_expose_top_level_agents_only() -> None:
-    assert CLI_AGENT_CHOICES == ("generic",)
-
-
-def test_resolve_cli_agent_definition_rejects_internal_synthesize() -> None:
+def test_cli_supports_only_the_product_generic_agent() -> None:
     registry = create_builtin_agent_registry()
 
-    with pytest.raises(ValueError, match="not a supported CLI agent"):
-        _resolve_cli_agent_definition(registry, "synthesize")
-
-
-def test_build_agent_service_registers_all_asset_tool_runners() -> None:
-    service = _build_agent_service(_RuntimeWithAssetStores(), agent_type="generic")
-
-    assert service._base_tool_registry.has_runner("asset_list")
-    assert service._base_tool_registry.has_runner("asset_inspect")
-    assert service._base_tool_registry.has_runner("asset_read_slice")
-    assert service._base_tool_registry.has_runner("asset_analyze")
-
-
-def test_build_agent_service_without_rag_runtime_hides_rag_tools() -> None:
-    service = _build_agent_service(None, agent_type="generic")
-    run_config = AgentRunConfig(
-        run_id="pure-agent-cli",
-        thread_id="pure-agent-cli",
-        max_depth=1,
-        access_policy=AccessPolicy.default(),
+    assert CLI_AGENT_CHOICES == ("generic",)
+    assert resolve_cli_agent_definition(registry, "generic").agent_type == (
+        "generic"
     )
-    runtime_registry = service._runtime_tool_registry(run_config)
-
-    assert "search_knowledge" not in service._policy.allowed_tools
-    assert "search_assets" not in service._policy.allowed_tools
-    assert service._catalog.get("search_knowledge") is None
-    assert service._catalog.get("search_assets") is None
-    assert "structured_probe" in service._policy.allowed_tools
-    assert "llm_generate" in service._policy.allowed_tools
-    assert runtime_registry.has_runner("llm_generate")
+    with pytest.raises(ValueError, match="supported CLI agent"):
+        resolve_cli_agent_definition(registry, "research")
 
 
-def test_build_agent_service_preserves_startup_latency() -> None:
-    service = _build_agent_service(
+def test_builder_assembles_default_six_tools_in_product_order() -> None:
+    service = build_agent_service(
         None,
-        agent_type="generic",
-        startup_ms=12.5,
-    )
-    state = service.initial_state(
-        AgentRunRequest(
-            task="Explain policy",
-            run_id="cli-startup-latency",
-            thread_id="cli-startup-latency",
-        )
+        model_control_plane=_ModelRegistry(),  # type: ignore[arg-type]
     )
 
-    assert state["latency_profile"].startup_ms == 12.5
-    assert state["latency_profile"].build_service_ms > 0
-    RunRegistry.remove("cli-startup-latency")
+    assert tuple(service._tool_snapshot) == RESIDENT_CODING_TOOL_NAMES
+    assert service._tool_executor._tools is service._tool_snapshot
+    state = service.initial_state(AgentRunRequest(task="Inspect repository."))
+    assert tuple(state["resident_tool_names"]) == RESIDENT_CODING_TOOL_NAMES
 
 
 @pytest.mark.anyio
-async def test_update_plan_runner_normalizes_existing_planning_steps() -> None:
-    service = _build_agent_service(None, agent_type="generic")
-    state = service.initial_state(
-        AgentRunRequest(
-            task="Explain policy",
-            run_id="cli-update-plan-existing",
-            thread_id="cli-update-plan-existing",
+async def test_configured_knowledge_is_a_resident_extension() -> None:
+    async def search(_payload: object, **_kwargs: object) -> object:
+        return KnowledgeSearchOutput(
+            answer_text="configured knowledge",
+            total_found=0,
         )
-    )
-    state["plan_state"].agent_plan = AgentPlan(
-        objective="Explain policy",
-        steps=[
-            PlanningStep(
-                step_id="step_existing",
-                title="Inspect existing context",
-                status="in_progress",
-            )
-        ],
-    )
-    runtime_registry = service._runtime_tool_registry(state["run_config"])
 
-    output = await runtime_registry.run(
-        "update_plan",
-        {
-            "action": "add",
-            "steps": [
-                {
-                    "id": "step_new",
-                    "description": "Summarize result",
-                    "status": "pending",
-                }
-            ],
-            "summary": "Plan updated",
-        },
-        execution_context=ToolExecutionContext(
-            run_config=state["run_config"],
-            state=state,
+    service = build_agent_service(
+        None,
+        model_control_plane=_ModelRegistry(),  # type: ignore[arg-type]
+        knowledge_runner=search,  # type: ignore[arg-type]
+    )
+    state = service.initial_state(AgentRunRequest(task="Search docs."))
+
+    assert tuple(service._tool_snapshot) == (
+        *RESIDENT_CODING_TOOL_NAMES,
+        "search_knowledge",
+    )
+    assert state["resident_tool_names"] == [
+        *RESIDENT_CODING_TOOL_NAMES,
+        "search_knowledge",
+    ]
+
+
+def test_cli_wrapper_uses_the_same_builder_snapshot() -> None:
+    service = _build_agent_service(
+        None,
+        model_control_plane=_ModelRegistry(),  # type: ignore[arg-type]
+    )
+
+    assert tuple(service._tool_snapshot) == RESIDENT_CODING_TOOL_NAMES
+
+
+def test_builder_installs_hidden_factory_outputs_with_find_tools() -> None:
+    mcp_tools = create_mcp_tools(
+        (
+            MCPToolDescriptor(
+                server_name="docs",
+                tool_name="search",
+                description="Search external documentation.",
+                input_schema={
+                    "type": "object",
+                    "properties": {"query": {"type": "string"}},
+                    "required": ["query"],
+                    "additionalProperties": False,
+                },
+                read_only_hint=True,
+            ),
         ),
+        lambda _server, _tool, _arguments: {"text": "found"},
     )
 
-    assert [step.id for step in output.steps] == ["step_existing", "step_new"]
-    assert output.steps[0].description == "Inspect existing context"
-    assert output.steps[0].status == "in_progress"
-    assert output.summary == "Plan updated"
-    RunRegistry.remove("cli-update-plan-existing")
+    service = build_agent_service(
+        None,
+        model_control_plane=_ModelRegistry(),  # type: ignore[arg-type]
+        mcp_tools=mcp_tools,
+    )
 
-
-def test_tool_search_description_discourages_simple_direct_answer_tasks() -> None:
-    service = _build_agent_service(None, agent_type="generic")
-    state = service.initial_state(
+    assert tuple(service._tool_snapshot) == (
+        *RESIDENT_CODING_TOOL_NAMES,
+        "mcp__docs__search",
+        "find_tools",
+    )
+    default_state = service.initial_state(AgentRunRequest(task="Inspect docs."))
+    discovery_state = service.initial_state(
         AgentRunRequest(
-            task="Reply exactly: direct smoke ok",
-            run_id="cli-tool-search-description",
-            thread_id="cli-tool-search-description",
+            task="Inspect docs.",
+            allow_discovery_tools=True,
         )
     )
-    runtime_registry = service._runtime_tool_registry(state["run_config"])
-
-    description = runtime_registry.get("tool_search").description
-
-    assert "Do not use for simple questions, greetings, or literal reply requests" in description
-    RunRegistry.remove("cli-tool-search-description")
-
-
-def test_build_agent_service_with_retrieval_runtime_exposes_rag_tool() -> None:
-    service = _build_agent_service(_RuntimeWithRetrieval(), agent_type="generic")
-
-    assert "search_knowledge" in service._policy.allowed_tools
-    assert service._catalog.get("search_knowledge") is not None
-    assert service._base_tool_registry.has_runner("search_knowledge")
+    assert tuple(default_state["resident_tool_names"]) == (
+        RESIDENT_CODING_TOOL_NAMES
+    )
+    assert tuple(discovery_state["resident_tool_names"]) == (
+        *RESIDENT_CODING_TOOL_NAMES,
+        "find_tools",
+    )
+    assert discovery_state["active_tool_names"] == []
 
 
-def test_resolve_auto_rag_config_uses_existing_environment(
+def test_auto_rag_config_prefers_explicit_arguments(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("STORAGE_ROOT", "/tmp/agent-rag-store")
-    monkeypatch.setenv("VECTOR_DSN", "http://127.0.0.1:19530")
-    monkeypatch.setenv("VECTOR_PREFIX", "private_docs_v1")
-
-    config = _resolve_auto_rag_config(
-        storage_root=Path(".rag"),
+    monkeypatch.setenv("AGENT_VECTOR_BACKEND", "sqlite")
+    resolved = resolve_auto_rag_config(
+        storage_root=Path("custom-rag"),
         vector_backend="milvus",
-        vector_dsn=None,
-        vector_namespace=None,
-        vector_collection_prefix=None,
+        vector_dsn="explicit-dsn",
+        vector_namespace="explicit-ns",
+        vector_collection_prefix="explicit-prefix",
     )
 
-    assert config.storage_root == Path("/tmp/agent-rag-store")
-    assert config.vector_dsn == "http://127.0.0.1:19530"
-    assert config.vector_collection_prefix == "private_docs_v1"
-    assert config.explicit is True
+    assert resolved.storage_root == Path("custom-rag")
+    assert resolved.vector_backend == "sqlite"
+    assert resolved.vector_dsn == "explicit-dsn"
+    assert resolved.explicit is True
 
 
-def test_default_checkpoint_dir_does_not_auto_attach_rag(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    for name in (
-        "AGENT_RAG_STORAGE_ROOT",
-        "RAG_STORAGE_ROOT",
-        "STORAGE_ROOT",
-        "AGENT_VECTOR_BACKEND",
-        "VECTOR_BACKEND",
-        "AGENT_VECTOR_DSN",
-        "VECTOR_DSN",
-        "AGENT_VECTOR_NAMESPACE",
-        "VECTOR_NAMESPACE",
-        "AGENT_VECTOR_PREFIX",
-        "VECTOR_PREFIX",
-    ):
-        monkeypatch.delenv(name, raising=False)
-    monkeypatch.chdir(tmp_path)
-    storage_root = tmp_path / ".rag"
-    storage_root.mkdir()
-    (storage_root / "agent_checkpoints.sqlite").touch()
-
-    runtime, diagnostics = _build_optional_rag_runtime(
+def test_optional_rag_runtime_is_lazy_when_not_explicit() -> None:
+    runtime, diagnostics = build_optional_rag_runtime(
         storage_root=Path(".rag"),
         model_alias=None,
         embedding_model_alias=None,
@@ -386,382 +162,8 @@ def test_default_checkpoint_dir_does_not_auto_attach_rag(
         vector_dsn=None,
         vector_namespace=None,
         vector_collection_prefix=None,
-    )
-
-    assert not _looks_like_rag_storage(storage_root)
-    assert runtime is None
-    assert diagnostics == ()
-
-
-def test_existing_rag_storage_does_not_auto_attach_without_explicit_knowledge(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    for name in (
-        "AGENT_RAG_STORAGE_ROOT",
-        "RAG_STORAGE_ROOT",
-        "STORAGE_ROOT",
-        "AGENT_VECTOR_BACKEND",
-        "VECTOR_BACKEND",
-        "AGENT_VECTOR_DSN",
-        "VECTOR_DSN",
-        "AGENT_VECTOR_NAMESPACE",
-        "VECTOR_NAMESPACE",
-        "AGENT_VECTOR_PREFIX",
-        "VECTOR_PREFIX",
-    ):
-        monkeypatch.delenv(name, raising=False)
-    storage_root = tmp_path / ".rag"
-    storage_root.mkdir()
-    (storage_root / "metadata.sqlite3").touch()
-
-    runtime, diagnostics = _build_optional_rag_runtime(
-        storage_root=storage_root,
-        model_alias=None,
-        embedding_model_alias=None,
-        reranker_model_alias=None,
-        vector_backend="milvus",
-        vector_dsn=None,
-        vector_namespace=None,
-        vector_collection_prefix=None,
+        explicit=False,
     )
 
     assert runtime is None
     assert diagnostics == ()
-
-
-def test_build_agent_service_honors_cli_model_alias_for_agent_decisions() -> None:
-    service = _build_agent_service(
-        _Runtime(),
-        agent_type="generic",
-        model_alias="qwen3_8b_mlx_4bit",
-    )
-
-    assert service._model_registry is not None
-    assert service._model_registry.default_model == "qwen3_8b_mlx_4bit"
-
-
-def test_build_agent_service_rejects_explicit_model_registry_failure(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    def fail_from_env(*args: object, **kwargs: object) -> ModelRegistry:
-        del args, kwargs
-        raise KeyError("unknown explicit alias")
-
-    monkeypatch.setattr(ModelRegistry, "from_env", fail_from_env)
-
-    with pytest.raises(KeyError, match="unknown explicit alias"):
-        _build_agent_service(
-            _Runtime(),
-            agent_type="generic",
-            model_alias="missing",
-        )
-
-
-def test_build_agent_service_records_automatic_model_registry_failure(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    def fail_from_env(*args: object, **kwargs: object) -> ModelRegistry:
-        del args, kwargs
-        raise FileNotFoundError("models config missing")
-
-    monkeypatch.setattr(ModelRegistry, "from_env", fail_from_env)
-
-    service = _build_agent_service(
-        _Runtime(),
-        agent_type="generic",
-        strict_model_provider=False,
-    )
-    state = service.initial_state(
-        AgentRunRequest(
-            task="Explain policy",
-            run_id="cli-registry-failure",
-            thread_id="cli-registry-failure",
-        )
-    )
-
-    assert state["runtime_diagnostics"][0].code == "model_registry_initialization_failed"
-
-
-def test_build_agent_service_rejects_default_model_registry_failure(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    def fail_from_env(*args: object, **kwargs: object) -> ModelRegistry:
-        del args, kwargs
-        raise FileNotFoundError("models config missing")
-
-    monkeypatch.setattr(ModelRegistry, "from_env", fail_from_env)
-
-    with pytest.raises(FileNotFoundError, match="models config missing"):
-        _build_agent_service(_Runtime(), agent_type="generic")
-
-
-@pytest.mark.anyio
-async def test_explicit_model_provider_failure_is_not_degraded() -> None:
-    service = _build_agent_service(
-        None,
-        agent_type="generic",
-        model_alias="qwen3_14b_4bit",
-        model_control_plane=cast(Any, _FailingModelRegistry()),
-    )
-
-    try:
-        with pytest.raises(RuntimeError, match="endpoint conflict for 'qwen3_14b_4bit'"):
-            await service.run(
-                AgentRunRequest(
-                    task="Explain policy",
-                    run_id="cli-explicit-model-provider-failure",
-                    thread_id="cli-explicit-model-provider-failure",
-                )
-            )
-    finally:
-        RunRegistry.remove("cli-explicit-model-provider-failure")
-
-
-@pytest.mark.anyio
-async def test_default_model_provider_failure_is_not_degraded() -> None:
-    service = _build_agent_service(
-        None,
-        agent_type="generic",
-        model_control_plane=cast(Any, _FailingModelRegistry()),
-    )
-
-    try:
-        with pytest.raises(RuntimeError, match="endpoint conflict for 'qwen3_14b_4bit'"):
-            await service.run(
-                AgentRunRequest(
-                    task="Explain policy",
-                    run_id="cli-default-model-provider-failure",
-                    thread_id="cli-default-model-provider-failure",
-                )
-            )
-    finally:
-        RunRegistry.remove("cli-default-model-provider-failure")
-
-
-def test_build_agent_service_records_skill_catalog_load_failure(
-    monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    from rag.agent.skills import loader
-
-    def fail_scan(*args: object, **kwargs: object) -> object:
-        del args, kwargs
-        raise PermissionError("skills directory unreadable")
-
-    monkeypatch.setattr(loader, "scan_and_load_skills", fail_scan)
-
-    with caplog.at_level(logging.WARNING, logger="rag.agent.cli"):
-        service = _build_agent_service(_Runtime(), agent_type="generic")
-
-    state = service.initial_state(
-        AgentRunRequest(
-            task="Explain policy",
-            run_id="cli-skill-catalog-failure",
-            thread_id="cli-skill-catalog-failure",
-        )
-    )
-
-    assert "Skill catalog loading failed" in caplog.text
-    assert any(
-        diagnostic.code == "skill_catalog_load_failed"
-        for diagnostic in state["runtime_diagnostics"]
-    )
-
-
-@pytest.mark.parametrize("verbose", [False, True])
-def test_display_result_surfaces_runtime_degradation(
-    capsys: pytest.CaptureFixture[str],
-    *,
-    verbose: bool,
-) -> None:
-    result = AgentRunResult(
-        run_id="display-diagnostics",
-        thread_id="display-diagnostics",
-        status="paused",
-        runtime_diagnostics=[
-            RuntimeDiagnostic(
-                code="default_providers_initialization_failed",
-                component="model_providers",
-                message="decision model unavailable",
-                error_type="RuntimeError",
-            )
-        ],
-    )
-
-    _display_result(result, verbose=verbose)
-
-    output = capsys.readouterr().out
-    assert "降级模式" in output
-    if verbose:
-        assert "model_providers" in output
-        assert "decision model unavailable" in output
-
-
-def test_display_result_surfaces_model_failure_without_verbose(
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    result = AgentRunResult(
-        run_id="display-model-failure",
-        thread_id="display-model-failure",
-        status="failed",
-        stop_reason="model_provider_failed",
-        runtime_diagnostics=[
-            RuntimeDiagnostic(
-                code="model_provider_failed",
-                component="agent_loop",
-                message="Error code: 502, InternalServerError",
-                severity="error",
-            )
-        ],
-    )
-
-    _display_result(result, verbose=False)
-
-    output = capsys.readouterr().out
-    assert "模型调用失败" in output
-    assert "model_provider_failed" in output
-    assert "Error code: 502" in output
-    assert "降级模式" not in output
-
-
-@pytest.mark.parametrize("verbose", [False, True])
-def test_display_result_does_not_warn_for_non_degraded_diagnostics(
-    capsys: pytest.CaptureFixture[str],
-    *,
-    verbose: bool,
-) -> None:
-    result = AgentRunResult(
-        run_id="display-nondegraded-diagnostics",
-        thread_id="display-nondegraded-diagnostics",
-        status="done",
-        runtime_diagnostics=[
-            RuntimeDiagnostic(
-                code="tool_call_metrics",
-                component="AgentLoop",
-                message="native=1/0err deferred=0 mcp=0/0err lat=0/0ms",
-                degraded=False,
-            )
-        ],
-    )
-
-    _display_result(result, verbose=verbose)
-
-    output = capsys.readouterr().out
-    assert "降级模式" not in output
-    if verbose:
-        assert "tool_call_metrics" in output
-    else:
-        assert "tool_call_metrics" not in output
-
-
-def test_display_result_surfaces_latency_profile_when_verbose(
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    result = AgentRunResult(
-        run_id="display-latency",
-        thread_id="display-latency",
-        status="done",
-        final_answer="ok",
-        latency_profile=AgentLatencyProfile(
-            startup_ms=1.0,
-            build_service_ms=2.0,
-            model_ready_ms=3.0,
-            model_latency_ms=11.0,
-            tool_latency_ms=5.0,
-            finalize_latency_ms=7.0,
-            total_ms=30.0,
-            prompt_bytes=13,
-            tool_schema_bytes=17,
-        ),
-    )
-
-    _display_result(result, verbose=True)
-
-    output = capsys.readouterr().out
-    assert "耗时:" in output
-    assert "total=30ms" in output
-    assert "startup=1ms" in output
-    assert "model=11ms" in output
-    assert "tool=5ms" in output
-    assert "prompt_bytes=13" in output
-    assert "tool_schema_bytes=17" in output
-
-
-@pytest.mark.anyio
-async def test_build_agent_service_registers_rag_runner_with_execution_context() -> None:
-    runtime = _RuntimeWithRetrieval()
-    service = _build_agent_service(runtime, agent_type="generic")
-    access_policy = AccessPolicy(
-        allowed_runtimes=frozenset({RuntimeMode.FAST})
-    )
-    run_config = AgentRunConfig(
-        run_id="cli-rag-context",
-        thread_id="cli-rag-context",
-        llm_budget_total=100,
-        max_depth=1,
-        access_policy=access_policy,
-    )
-
-    await service._base_tool_registry.run(
-        "vector_search",
-        {"query": "test"},
-        execution_context=ToolExecutionContext(run_config=run_config),
-    )
-
-    retrieval_service = cast(_RetrievalService, runtime.retrieval_service)
-    assert retrieval_service.access_policies == [access_policy]
-
-
-def test_build_agent_service_rejects_unknown_agent() -> None:
-    with pytest.raises(ValueError, match="not a supported CLI agent"):
-        _build_agent_service(_Runtime(), agent_type="unknown")
-
-
-def test_validate_workspace_core_runners_detects_missing_runner() -> None:
-    """search_text/apply_patch/run_command must have runners after workspace setup."""
-    from rag.agent.service import AgentService
-    from rag.agent.tools.registry import ToolRegistry
-    from rag.agent.tools.spec import ExecutionCategory, ToolPermissions
-
-    # Registry without any runners — should fail
-    registry = ToolRegistry()
-    # Register a bare spec without runner (simulating a bug where workspace tool creation skips search_text)
-    from rag.agent.tools.spec import ToolSpec
-    registry.register(ToolSpec(
-        name="search_text",
-        description="Search files",
-        input_model=ToolSearchInput,
-        output_model=ToolSearchOutput,
-        error_model=ToolSearchOutput,
-        permissions=ToolPermissions(),
-        execution_category=ExecutionCategory.READ,
-        timeout_seconds=5,
-    ))
-
-    with pytest.raises(RuntimeError, match="search_text"):
-        AgentService._validate_workspace_core_runners(registry)
-
-
-def test_validate_workspace_core_runners_passes_when_runners_present() -> None:
-    """No error when all workspace core tools have runners."""
-    from rag.agent.service import AgentService
-    from rag.agent.tools.registry import ToolRegistry
-    from rag.agent.tools.spec import ExecutionCategory, ToolPermissions, ToolSpec
-
-    registry = ToolRegistry()
-    for name in ("search_text", "apply_patch", "run_command", "list_files", "read_file", "write_file", "run_python"):
-        registry.register(ToolSpec(
-            name=name,
-            description=f"Tool: {name}",
-            input_model=ToolSearchInput,
-            output_model=ToolSearchOutput,
-            error_model=ToolSearchOutput,
-            permissions=ToolPermissions(),
-            execution_category=ExecutionCategory.READ,
-            timeout_seconds=5,
-        ))
-        registry.register_runner(name, cast(Any, lambda **kw: None))
-
-    # Should not raise
-    AgentService._validate_workspace_core_runners(registry)

@@ -50,7 +50,7 @@ class RuntimeDiagnostic(BaseModel):
 
 
 class ToolCallMetrics(BaseModel):
-    """Lightweight counters for the three calling modes.
+    """Lightweight counters for canonical tool execution.
 
     Populated by AgentLoop during tool execution and attached to the loop
     state. A compact RuntimeDiagnostic summary is emitted for inline display.
@@ -58,21 +58,16 @@ class ToolCallMetrics(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    # Mode 1: Native direct calls
+    # Resident/native direct calls
     native_calls: int = 0
     native_errors: int = 0
     native_latency_ms_total: float = 0.0
 
-    # Mode 2: Deferred tool calls
-    tool_search_calls: int = 0
-    tool_search_hits: int = 0      # searches that returned ≥1 candidate
-    activate_tools_calls: int = 0
+    # Discoverable extension calls
+    find_tools_calls: int = 0
+    find_tools_hits: int = 0
     deferred_activations: int = 0
-    deferred_calls: int = 0         # calls to activated deferred tools
-
-    # Mode 3: Programmatic / batch
-    tool_repl_calls: int = 0
-    batch_declarations: int = 0    # total tools.declare() calls
+    deferred_calls: int = 0
 
     # MCP
     mcp_calls: int = 0
@@ -90,16 +85,16 @@ class ToolCallMetrics(BaseModel):
 
     @property
     def token_savings_pct(self) -> float:
-        """Estimated token savings from deferred + programmatic modes."""
+        """Estimated tool-context token savings during the run."""
         if self.context_tokens_start == 0:
             return 0.0
         return (1.0 - self.context_tokens_end / self.context_tokens_start) * 100
 
     @property
-    def tool_search_hit_rate(self) -> float:
-        if self.tool_search_calls == 0:
+    def find_tools_hit_rate(self) -> float:
+        if self.find_tools_calls == 0:
             return 0.0
-        return self.tool_search_hits / self.tool_search_calls * 100
+        return self.find_tools_hits / self.find_tools_calls * 100
 
     @property
     def mcp_avg_latency_ms(self) -> float:

@@ -5,6 +5,7 @@ from pathlib import Path
 from types import TracebackType
 from typing import Any, Self
 
+from rag.agent.tools.permissions import ToolExecutionContext
 from rag.agent.tools.rag_answer_tools import RAGSearchAnswerInput, RAGSearchAnswerRunner
 from rag.agent.tools.rag_semantic_tools import (
     AssetResult,
@@ -14,7 +15,6 @@ from rag.agent.tools.rag_semantic_tools import (
     KnowledgeSearchInput,
     KnowledgeSearchOutput,
 )
-from rag.agent.tools.registry import ToolExecutionContext
 from rag.storage.runtime_config import DEFAULT_VECTOR_BACKEND
 
 

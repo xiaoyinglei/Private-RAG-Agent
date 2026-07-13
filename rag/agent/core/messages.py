@@ -51,6 +51,18 @@ class ToolCall:
     def create(cls, name: str, input: dict[str, Any]) -> ToolCall:
         return cls(id=f"tc_{uuid4().hex[:12]}", name=name, input=input)
 
+    def __deepcopy__(self, memo: dict[int, object]) -> ToolCall:
+        frozen_input = json_schema_output(None, self.input)
+        if not isinstance(frozen_input, Mapping):
+            raise TypeError("model tool-call input must be an object")
+        copied = ToolCall(
+            id=self.id,
+            name=self.name,
+            input=cast(dict[str, Any], frozen_input),
+        )
+        memo[id(self)] = copied
+        return copied
+
 
 # ── Model message ──
 

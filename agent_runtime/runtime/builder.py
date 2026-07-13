@@ -3,9 +3,10 @@ from __future__ import annotations
 import logging
 import os
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, cast
 
 from agent_runtime.models import ModelControlPlane
@@ -15,13 +16,12 @@ if TYPE_CHECKING:
     from rag.agent.core.registry import AgentRegistry
     from rag.agent.core.runtime_diagnostics import RuntimeDiagnostic
     from rag.agent.service import AgentService
-    from rag.agent.tools.registry import ContextualToolRunner
+    from rag.agent.tools.tool import Tool
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_VECTOR_BACKEND = "milvus"
 CLI_AGENT_CHOICES = ("generic",)
-_SEMANTIC_RAG_TOOLS = frozenset({"search_knowledge", "search_assets"})
 
 
 @dataclass(frozen=True)
@@ -94,62 +94,6 @@ def build_model_control_plane(
     )
 
 
-def build_llm_tool_runners(
-    primary_chat: Any,
-    *,
-    token_accounting: object | None = None,
-    model_context_tokens: int = 32_768,
-    stage_budgets: object | None = None,
-) -> dict[str, ContextualToolRunner]:
-    from rag.agent.core.llm_registry import ResolvedModel
-    from rag.agent.core.llm_tool_runners import create_model_llm_tool_runners
-    from rag.assembly.tokenizer import TokenAccountingService, TokenizerContract
-    from rag.providers.llm_gateway import LLMGateway
-    from rag.schema.llm import DEFAULT_LLM_STAGE_BUDGETS
-
-    if primary_chat is None:
-        return {}
-
-    accounting = token_accounting or TokenAccountingService(
-        TokenizerContract(
-            embedding_model_name="cli-chat",
-            tokenizer_model_name="cli-chat",
-            chunking_tokenizer_model_name="cli-chat",
-            tokenizer_backend="simple",
-            max_context_tokens=model_context_tokens,
-            prompt_reserved_tokens=512,
-            local_files_only=True,
-        )
-    )
-    gateway = LLMGateway(
-        generator=primary_chat,
-        token_accounting=cast(Any, accounting),
-        model_context_tokens=model_context_tokens,
-        stage_budgets=cast(
-            Any,
-            stage_budgets or DEFAULT_LLM_STAGE_BUDGETS,
-        ),
-    )
-
-    class _Registry:
-        def resolve_for_node(
-            self,
-            *,
-            node_model: str | None,
-            node_name: str,
-        ) -> ResolvedModel:
-            del node_model, node_name
-            return ResolvedModel(
-                generator=primary_chat,
-                kwargs={},
-                context_window_tokens=model_context_tokens,
-                gateway=gateway,
-                token_accounting=cast(Any, accounting),
-            )
-
-    return create_model_llm_tool_runners(cast(Any, _Registry()))
-
-
 def resolve_cli_agent_definition(
     agent_registry: AgentRegistry,
     agent_type: str,
@@ -160,23 +104,6 @@ def resolve_cli_agent_definition(
     return agent_registry.get(agent_type)
 
 
-def _without_unavailable_deferred_tools(
-    definition: AgentRuntimePolicy,
-    unavailable_tools: set[str],
-) -> AgentRuntimePolicy:
-    if not unavailable_tools:
-        return definition
-    filt = definition.tool_catalog_filter
-    return replace(
-        definition,
-        deferred_tool_names=tuple(
-            name for name in definition.deferred_tool_names
-            if name not in unavailable_tools
-        ),
-        tool_catalog_filter=replace(filt, deny=filt.deny | frozenset(unavailable_tools)),
-    )
-
-
 def build_agent_service(
     runtime: Any | None,
     *,
@@ -185,159 +112,126 @@ def build_agent_service(
     model_alias: str | None = None,
     model_control_plane: ModelControlPlane | None = None,
     runtime_diagnostics: Sequence[RuntimeDiagnostic] = (),
-    knowledge_runner: ContextualToolRunner | None = None,
-    knowledge_asset_runner: ContextualToolRunner | None = None,
+    knowledge_runner: Callable[..., object] | None = None,
+    knowledge_asset_runner: Callable[..., object] | None = None,
+    mcp_tools: Sequence[Tool] = (),
+    skill_tools: Sequence[Tool] = (),
+    subagent_tools: Sequence[Tool] = (),
     strict_model_provider: bool = True,
     startup_ms: float = 0.0,
 ) -> AgentService:
-    """Build the product Agent service.
-
-    RAG is an optional attached tool provider. Pure Agent runs should not
-    require RAG storage/vector configuration, and unavailable RAG tools should
-    not be visible to the model.
-    """
+    """Build one CLI/SDK runtime from ordinary canonical Tool values."""
     from rag.agent.builtin import create_builtin_agent_registry
-    from rag.agent.builtin_registry import create_builtin_tool_registry
-    from rag.agent.core.agent_service_factory import AgentServiceFactory
     from rag.agent.core.checkpointing import create_agent_checkpointer
-    from rag.agent.core.runtime_diagnostics import AgentLatencyProfile, RuntimeDiagnostic
-    from rag.agent.core.subagent_runner import BuiltinSubAgentRunner
-    from rag.agent.tools.registry import ToolRunner
+    from rag.agent.core.runtime_diagnostics import (
+        AgentLatencyProfile,
+        RuntimeDiagnostic,
+    )
+    from rag.agent.service import AgentService
+    from rag.agent.tools.builtins import create_resident_coding_tools
+    from rag.agent.tools.integrations.knowledge import (
+        KnowledgeSearchInput,
+        create_knowledge_tools,
+    )
+    from rag.agent.tools.permissions import ToolExecutionContext
+    from rag.agent.tools.registry import build_tool_registry
+    from rag.agent.tools.selection import (
+        create_find_tools_tool,
+        find_tools,
+    )
+    from rag.agent.workspace import create_temp_workspace
 
     build_started_at = time.perf_counter()
     model_ready_ms = 0.0
     agent_registry = create_builtin_agent_registry()
     definition = resolve_cli_agent_definition(agent_registry, agent_type)
+    workspace = create_temp_workspace()
+    plan_revision = 0
 
-    runners: dict[str, ToolRunner] = {}
-    contextual_runners: dict[str, ContextualToolRunner] = {}
+    def update_plan(arguments: Mapping[str, object]) -> dict[str, object]:
+        nonlocal plan_revision
+        del arguments
+        plan_revision += 1
+        return {
+            "accepted": True,
+            "revision": plan_revision,
+            "message": "Plan updated.",
+        }
 
-    if runtime is not None:
-        bundle = getattr(runtime, "capability_bundle", None)
-        chat_bindings = list(getattr(bundle, "chat_bindings", ()) or ())
-        primary_chat = chat_bindings[0] if chat_bindings else None
+    resident_tools = create_resident_coding_tools(
+        workspace,
+        plan_updater=cast(Any, update_plan),
+    )
 
+    effective_knowledge_runner = knowledge_runner
+    if effective_knowledge_runner is None and runtime is not None:
         retrieval_service = getattr(runtime, "retrieval_service", None)
         if retrieval_service is not None:
             from rag.agent.tools.rag_answer_tools import RAGSearchAnswerRunner
-            from rag.agent.tools.rag_tool_runner import AsyncRAGToolRunner
 
-            rag_runner = AsyncRAGToolRunner(
-                runtime=runtime,
-                retrieval_service=retrieval_service,
-                max_context_tokens=4096,
-            )
-            for name in ("vector_search", "keyword_search", "grounding", "rerank", "graph_expand"):
-                contextual_runners[name] = cast(
-                    Any,
-                    rag_runner.retrieve_evidence,
-                )
-            rag_answer_runner = RAGSearchAnswerRunner(runtime=runtime)
-            contextual_runners["rag_search_answer"] = cast(
+            effective_knowledge_runner = cast(
                 Any,
-                rag_answer_runner.answer,
-            )
-            contextual_runners["search_knowledge"] = cast(
-                Any,
-                rag_answer_runner.answer,
+                RAGSearchAnswerRunner(runtime=runtime).answer,
             )
 
-        from rag.agent.tools.asset_tools import AssetToolRunner
+    async def search_knowledge(arguments: Mapping[str, object]) -> object:
+        if effective_knowledge_runner is None:
+            raise RuntimeError("knowledge search is not configured")
+        payload = KnowledgeSearchInput.model_validate(arguments)
+        result = effective_knowledge_runner(
+            payload,
+            execution_context=ToolExecutionContext(),
+        )
+        if hasattr(result, "__await__"):
+            return await result
+        return result
 
-        stores = getattr(runtime, "stores", None)
-        metadata_repo = getattr(stores, "metadata_repo", None)
-        object_store = getattr(stores, "object_store", None)
-        if metadata_repo is not None and object_store is not None:
-            from rag.agent.tools.asset_tools import AssetInspectInput, AssetListInput
-
-            asset_runner = AssetToolRunner(
-                metadata_repo=metadata_repo,
-                object_store=object_store,
-            )
-            runners["asset_list"] = cast(ToolRunner, asset_runner.list_assets)
-            runners["asset_inspect"] = cast(ToolRunner, asset_runner.inspect_asset)
-            runners["asset_read_slice"] = cast(ToolRunner, asset_runner.read_slice)
-            runners["asset_analyze"] = cast(ToolRunner, asset_runner.analyze_asset)
-
-            async def _search_assets_runner(payload: Any) -> Any:
-                from rag.agent.tools.rag_semantic_tools import (
-                    AssetResult,
-                    AssetSearchInput,
-                    AssetSearchOutput,
-                )
-
-                if isinstance(payload, dict):
-                    inp = AssetSearchInput(**payload)
-                else:
-                    inp = payload
-                list_out = asset_runner.list_assets(
-                    AssetListInput(
-                        doc_id=inp.doc_id,
-                        asset_type=inp.asset_type,
-                        limit=inp.max_results,
-                    )
-                )
-                results: list[AssetResult] = []
-                for a in list_out.assets[:inp.max_results]:
-                    ar = AssetResult(
-                        asset_id=a.asset_id,
-                        doc_id=a.doc_id,
-                        asset_type=a.asset_type,
-                        sheet_name=a.sheet_name,
-                        caption=a.caption,
-                        columns=list(a.columns or []),
-                        row_count=a.row_count,
-                        column_count=a.column_count,
-                    )
-                    if inp.include_preview and a.asset_id:
-                        try:
-                            insp = asset_runner.inspect_asset(
-                                AssetInspectInput(asset_id=a.asset_id, head_rows=3)
-                            )
-                            if insp.head_rows:
-                                ar.preview_rows = insp.head_rows[:3]
-                            ar.analysis_capabilities = list(insp.analysis_capabilities or [])
-                        except Exception:
-                            pass
-                    results.append(ar)
-                return AssetSearchOutput(assets=results, total_found=len(list_out.assets))
-
-            contextual_runners["search_assets"] = cast(Any, _search_assets_runner)
-
-        contextual_runners.update(
-            build_llm_tool_runners(
-                primary_chat,
-                token_accounting=getattr(runtime, "token_accounting", None),
-                model_context_tokens=getattr(
-                    runtime,
-                    "chat_context_window_tokens",
-                    32_768,
-                ),
-                stage_budgets=getattr(
-                    runtime,
-                    "llm_stage_budgets",
-                    None,
-                ),
-            )
+    knowledge_tools = create_knowledge_tools(
+        search_knowledge if effective_knowledge_runner is not None else None
+    )
+    del knowledge_asset_runner
+    tool_registry = build_tool_registry(
+        resident_tools,
+        knowledge_tools,
+        mcp_tools,
+        skill_tools,
+        subagent_tools,
+    )
+    configured_resident_names = tuple(
+        tool.definition.name for tool in knowledge_tools
+    )
+    hidden_tool_names = tuple(
+        tool.definition.name
+        for source in (mcp_tools, skill_tools, subagent_tools)
+        for tool in source
+    )
+    if hidden_tool_names:
+        discovery_snapshot = MappingProxyType(
+            {
+                tool.definition.name: tool
+                for tool in tool_registry.list_all()
+            }
         )
 
-    if knowledge_runner is not None:
-        contextual_runners["search_knowledge"] = knowledge_runner
-    if knowledge_asset_runner is not None:
-        contextual_runners["search_assets"] = knowledge_asset_runner
+        def search_hidden_tools(query: str, limit: int) -> object:
+            return find_tools(
+                discovery_snapshot,
+                query=query,
+                discoverable_names=hidden_tool_names,
+                limit=limit,
+                max_active_tools=definition.max_active_deferred_tools,
+            )
 
-    unavailable_rag_tools = {
-        name for name in _SEMANTIC_RAG_TOOLS
-        if name not in contextual_runners
-    }
-    definition = _without_unavailable_deferred_tools(
+        tool_registry.register(create_find_tools_tool(search_hidden_tools))
+    definition = replace(
         definition,
-        unavailable_rag_tools,
-    )
-
-    tool_registry = create_builtin_tool_registry(
-        runners=runners,
-        contextual_runners=contextual_runners,
+        core_tool_names=tuple(
+            tool.definition.name for tool in resident_tools
+        ),
+        deferred_tool_names=(
+            *configured_resident_names,
+            *hidden_tool_names,
+        ),
     )
     diagnostics: tuple[RuntimeDiagnostic, ...] = tuple(runtime_diagnostics)
     try:
@@ -359,47 +253,21 @@ def build_agent_service(
             ),
         )
 
-    skill_catalog = None
-    try:
-        from rag.agent.skills.catalog import SkillCatalog
-        from rag.agent.skills.loader import scan_and_load_skills
-
-        manifests = scan_and_load_skills(Path.cwd())
-        if manifests:
-            skill_catalog = SkillCatalog(manifests)
-    except Exception as exc:
-        logger.warning(
-            "Skill catalog loading failed; continuing without skills",
-            exc_info=True,
-        )
-        diagnostics = (
-            *diagnostics,
-            RuntimeDiagnostic.from_exception(
-                code="skill_catalog_load_failed",
-                component="skill_catalog",
-                error=exc,
-            ),
-        )
-
-    service_factory = AgentServiceFactory(
+    return AgentService(
+        definition=definition,
         tool_registry=tool_registry,
         model_registry=model_registry,
         checkpointer=create_agent_checkpointer(checkpoint_db),
         runtime_diagnostics=diagnostics,
-        skill_catalog=skill_catalog,
         strict_model_provider=strict_model_provider,
         latency_profile=AgentLatencyProfile(
             startup_ms=startup_ms,
             build_service_ms=(time.perf_counter() - build_started_at) * 1000,
             model_ready_ms=model_ready_ms,
         ),
+        workspace=workspace,
+        configured_resident_tool_names=configured_resident_names,
     )
-    subagent_runner = BuiltinSubAgentRunner(
-        agent_registry=agent_registry,
-        service_factory=service_factory,
-    )
-    service_factory.bind_subagent_runner(subagent_runner)
-    return service_factory.create(definition)
 
 
 def build_optional_rag_runtime(

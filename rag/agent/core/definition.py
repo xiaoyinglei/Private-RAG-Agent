@@ -5,7 +5,6 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from rag.agent.capabilities.catalog import ToolCatalogFilter
 from rag.schema.runtime import AccessPolicy
 
 
@@ -47,9 +46,6 @@ class AgentRuntimePolicy:
     max_iterations: int
     max_depth: int
     max_active_deferred_tools: int = 10
-    tool_catalog_filter: ToolCatalogFilter = field(
-        default_factory=ToolCatalogFilter,
-    )
     access_policy_ceiling: AccessPolicy | None = None
     model_selection: ModelSelectionPolicy = field(
         default_factory=ModelSelectionPolicy,

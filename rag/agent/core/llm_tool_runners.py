@@ -50,7 +50,6 @@ def create_model_llm_tool_runners(
             stage_budgets={
                 effective_stage: gateway.effective_stage_budget(effective_stage),
             },
-            formatter_resolver=None,
         ).assemble_generate(
             definition=definition,
             state=state,
@@ -86,7 +85,6 @@ def create_model_llm_tool_runners(
             stage_budgets={
                 LLMCallStage.LLM_SUMMARIZE: gateway.effective_stage_budget(LLMCallStage.LLM_SUMMARIZE),
             },
-            formatter_resolver=None,
         ).assemble_summarize(
             definition=definition,
             state=state,
@@ -121,7 +119,6 @@ def create_model_llm_tool_runners(
             stage_budgets={
                 LLMCallStage.LLM_COMPARE: gateway.effective_stage_budget(LLMCallStage.LLM_COMPARE),
             },
-            formatter_resolver=None,
         ).assemble_compare(
             definition=definition,
             state=state,

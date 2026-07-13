@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from rag.agent.core.goal_contract import GoalContractEvaluator, GoalSpec
 from rag.agent.core.definition import AgentRuntimePolicy
+from rag.agent.core.goal_contract import GoalContractEvaluator, GoalSpec
 from rag.agent.core.observations import ComputationResult, ContextBinding, EvidenceRef
 from rag.agent.core.output_finalizer import (
     OutputValidationExhaustedError,
@@ -20,8 +21,7 @@ from rag.agent.loop.state import (
     append_stop_hook_feedback,
     append_stop_hook_warning,
 )
-from rag.agent.loop.substate import FinishState
-from rag.agent.tools.spec import ToolResult
+from rag.agent.tools.tool import ToolResult
 
 
 class StopVerdict(BaseModel):
@@ -220,15 +220,9 @@ class GoalContractStopHook:
     ) -> list[EvidenceRef]:
         """Derive evidence_refs from tool_results instead of deprecated state field."""
         refs: list[EvidenceRef] = []
-        for r in tool_results:
-            if r.status == "ok" and r.output is not None:
-                er = getattr(r.output, "evidence_refs", None)
-                if isinstance(er, list):
-                    for item in er:
-                        if isinstance(item, EvidenceRef):
-                            refs.append(item)
-                        elif isinstance(item, dict):
-                            refs.append(EvidenceRef.model_validate(item))
+        for result in tool_results:
+            values = _structured_items(result, "evidence_refs")
+            refs.extend(EvidenceRef.model_validate(item) for item in values)
         return refs
 
     @staticmethod
@@ -237,15 +231,11 @@ class GoalContractStopHook:
     ) -> list[ComputationResult]:
         """Derive computation_results from tool_results instead of deprecated state field."""
         results: list[ComputationResult] = []
-        for r in tool_results:
-            if r.status == "ok" and r.output is not None:
-                cr = getattr(r.output, "computation_results", None)
-                if isinstance(cr, list):
-                    for item in cr:
-                        if isinstance(item, ComputationResult):
-                            results.append(item)
-                        elif isinstance(item, dict):
-                            results.append(ComputationResult.model_validate(item))
+        for result in tool_results:
+            values = _structured_items(result, "computation_results")
+            results.extend(
+                ComputationResult.model_validate(item) for item in values
+            )
         return results
 
     @staticmethod
@@ -254,15 +244,9 @@ class GoalContractStopHook:
     ) -> list[ContextBinding]:
         """Derive context_bindings from tool_results instead of deprecated state field."""
         bindings: list[ContextBinding] = []
-        for r in tool_results:
-            if r.status == "ok" and r.output is not None:
-                cb = getattr(r.output, "context_bindings", None)
-                if isinstance(cb, list):
-                    for item in cb:
-                        if isinstance(item, ContextBinding):
-                            bindings.append(item)
-                        elif isinstance(item, dict):
-                            bindings.append(ContextBinding.model_validate(item))
+        for result in tool_results:
+            values = _structured_items(result, "context_bindings")
+            bindings.extend(ContextBinding.model_validate(item) for item in values)
         return bindings
 
     async def evaluate(
@@ -332,6 +316,18 @@ async def _await_output(value: object) -> BaseModel:
     if not isinstance(value, BaseModel):
         raise TypeError("structured output finalizer returned a non-model value")
     return value
+
+
+def _structured_items(
+    result: ToolResult,
+    key: str,
+) -> tuple[Mapping[str, object], ...]:
+    if result.is_error or not isinstance(result.structured_content, Mapping):
+        return ()
+    raw = result.structured_content.get(key)
+    if not isinstance(raw, Sequence) or isinstance(raw, (str, bytes)):
+        return ()
+    return tuple(item for item in raw if isinstance(item, Mapping))
 
 
 __all__ = [

@@ -13,7 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from rag.agent.skills.models import SkillState
 from rag.agent.tools.base import BaseTool
 from rag.agent.tools.card import ToolCard
-from rag.agent.tools.registry import ToolExecutionContext
+from rag.agent.tools.permissions import ToolExecutionContext
 from rag.agent.tools.spec import ExecutionCategory, InterruptBehavior, RiskLevel, ToolPermissions
 from rag.agent.workspace import WorkspaceRuntime
 

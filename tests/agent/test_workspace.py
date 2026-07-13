@@ -170,6 +170,15 @@ class TestRelativeToRoot:
 
 
 class TestCreateTempWorkspace:
+    def test_root_is_canonical(self) -> None:
+        ws = create_temp_workspace()
+        try:
+            assert ws.root == ws.root.resolve()
+        finally:
+            import shutil
+
+            shutil.rmtree(ws.root, ignore_errors=True)
+
     def test_creates_temp_workspace_with_subdirs(self) -> None:
         ws = create_temp_workspace()
         try:

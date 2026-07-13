@@ -45,11 +45,6 @@ from rag.agent.core.model_request import (
     model_call_record_payload,
 )
 from rag.agent.core.runtime_diagnostics import RuntimeDiagnostic
-from rag.agent.core.tool_execution import (
-    ExecutionRecordWriter,
-    ToolExecutionRecord,
-    apply_tool_reconciliation,
-)
 from rag.agent.core.turn_contracts import (
     ToolManifest,
     ToolManifestDriftDecision,
@@ -70,9 +65,13 @@ from rag.agent.loop.substate import (
     PersistentMemorySnapshot,
     PlanState,
 )
+from rag.agent.tools.executor import ExecutionStatus, ToolExecutionRecord
 from rag.agent.tools.tool import (
+    ArtifactReference,
     JsonValue,
     ToolCallOrigin,
+    ToolContentBlock,
+    ToolResult,
 )
 from rag.agent.tools.tool import (
     ToolCall as CanonicalToolCall,
@@ -170,11 +169,14 @@ AGENT_CHECKPOINT_MSGPACK_ALLOWLIST: tuple[tuple[str, ...], ...] = (
     ("rag.agent.core.runtime_diagnostics", "RuntimeDiagnostic"),
     ("rag.agent.core.runtime_diagnostics", "ToolCallMetrics"),
     ("rag.agent.core.runtime_diagnostics", "AgentLatencyProfile"),
+    ("rag.agent.core.model_request", "ModelCallRecord"),
     ("rag.agent.core.tool_execution", "ToolBatchRequest"),
     ("rag.agent.core.tool_execution", "ToolBatchResult"),
     ("rag.agent.core.tool_execution", "ToolExecutionRecord"),
     ("rag.agent.core.tool_execution", "ToolExecutionSummary"),
     ("rag.agent.core.turn_contracts", "ToolCallPlan"),
+    ("rag.agent.core.turn_contracts", "ToolManifest"),
+    ("rag.agent.core.turn_contracts", "ToolManifestEntry"),
     ("rag.agent.core.goal_contract", "GoalConstraint"),
     ("rag.agent.core.goal_contract", "GoalCompatibilityConfig"),
     ("rag.agent.core.goal_contract", "GoalContractEvaluation"),
@@ -235,6 +237,14 @@ AGENT_CHECKPOINT_MSGPACK_ALLOWLIST: tuple[tuple[str, ...], ...] = (
     ("rag.agent.skills.models", "SkillState"),
     ("rag.agent.tools.spec", "ToolError"),
     ("rag.agent.tools.spec", "ToolResult"),
+    ("rag.agent.tools.executor", "ExecutionStatus"),
+    ("rag.agent.tools.executor", "ToolExecutionRecord"),
+    ("rag.agent.tools.tool", "ArtifactReference"),
+    ("rag.agent.tools.tool", "ToolCall"),
+    ("rag.agent.tools.tool", "ToolCallOrigin"),
+    ("rag.agent.tools.tool", "ToolContentBlock"),
+    ("rag.agent.tools.tool", "ToolResult"),
+    ("rag.schema.llm", "LLMUsage"),
     ("rag.schema.query", "AnswerCitation"),
     ("rag.schema.query", "EvidenceItem"),
     ("rag.schema.query", "RetrievalSignals"),
@@ -398,7 +408,7 @@ class CheckpointPersistenceError(RuntimeError):
     """A loop transition could not be durably persisted."""
 
 
-class CheckpointStore(ExecutionRecordWriter, Protocol):
+class CheckpointStore(Protocol):
     async def load_latest(self) -> LoopState | None: ...
 
     async def load_for_resume(self) -> LoopState | None: ...
@@ -468,13 +478,18 @@ class LangGraphCheckpointStore:
         ambiguous = [
             record
             for record in state["tool_execution_records"].values()
-            if not record.idempotent and record.status in {"started", "unknown"}
+            if not record.idempotent
+            and record.status in {ExecutionStatus.RUNNING, ExecutionStatus.UNKNOWN}
         ]
         if not ambiguous:
             return state
 
         for record in ambiguous:
-            state["tool_execution_records"][record.tool_call_id] = record.model_copy(update={"status": "unknown"})
+            state["tool_execution_records"][record.tool_call_id] = replace(
+                record,
+                status=ExecutionStatus.UNKNOWN,
+                requires_reconciliation=True,
+            )
         request = self.reconciliation_request(ambiguous[0])
         state["status"] = "paused"
         state["approval_request"] = request
@@ -549,7 +564,10 @@ class LangGraphCheckpointStore:
                 record = state["tool_execution_records"].get(tool_call_id)
                 if record is None:
                     raise CheckpointPersistenceError(f"execution record not found for {tool_call_id}")
-                state["tool_execution_records"][tool_call_id] = apply_tool_reconciliation(record, response)
+                state["tool_execution_records"][tool_call_id] = _apply_tool_reconciliation(
+                    record,
+                    response,
+                )
             elif request.kind == "tool_approval":
                 state["approved_tool_call_ids"] = list(
                     dict.fromkeys(
@@ -620,7 +638,7 @@ class LangGraphCheckpointStore:
         *,
         reason: str,
     ) -> None:
-        snapshot = deepcopy(state)
+        snapshot = _encode_canonical_state(deepcopy(state))
         try:
             previous = await self._checkpointer.aget_tuple(self._base_config())
             current_version = cast(
@@ -692,7 +710,8 @@ class LangGraphCheckpointStore:
         if not isinstance(raw_state, dict):
             raise CheckpointPersistenceError("loop checkpoint is missing the loop_state channel")
         self._compatibility_config = _normalize_compatibility_config(channel_values.get(LOOP_COMPATIBILITY_CHANNEL))
-        return _normalize_loaded_state(cast(LoopState, deepcopy(raw_state)))
+        state = _normalize_loaded_state(cast(LoopState, deepcopy(raw_state)))
+        return _decode_canonical_state(state)
 
     def _base_config(self) -> RunnableConfig:
         return cast(
@@ -704,6 +723,330 @@ class LangGraphCheckpointStore:
                 }
             },
         )
+
+
+def _encode_canonical_state(state: LoopState) -> LoopState:
+    manifest = state.get("tool_manifest")
+    if manifest is None:
+        return state
+    calls = tuple(state.get("canonical_tool_calls", {}).values())
+    calls_by_id = {call.tool_call_id: call for call in calls}
+    dependent = tuple(
+        calls_by_id[item.tool_call_id]
+        for item in state.get("pending_tool_calls", ())
+        if item.tool_call_id in calls_by_id
+    )
+    paused = dependent if state.get("status") == "paused" else ()
+    pending = () if paused else dependent
+    checkpoint = CanonicalToolCheckpoint(
+        context_revision=state.get("context_revision", "context_pending"),
+        prompt_revision=state.get("prompt_revision", "prompt_pending"),
+        transcript=tuple(state.get("canonical_transcript", ())),
+        manifest=manifest,
+        tool_calls=calls,
+        pending_tool_calls=pending,
+        paused_tool_calls=paused,
+        model_call_records=tuple(state.get("model_call_records", ())),
+    )
+    state["tool_checkpoint"] = encode_tool_checkpoint(checkpoint)
+    state["tool_results"] = [
+        cast(Any, _encode_runtime_tool_result(result))
+        for result in state.get("tool_results", ())
+    ]
+    state["tool_execution_records"] = cast(
+        Any,
+        {
+            call_id: _encode_execution_record(record)
+            for call_id, record in state.get(
+                "tool_execution_records",
+                {},
+            ).items()
+        },
+    )
+    state["canonical_transcript"] = []
+    state["canonical_tool_calls"] = {}
+    state["model_call_records"] = []
+    state["tool_manifest"] = None
+    state["pending_tool_calls"] = [
+        item.model_copy(
+            update={"plan": item.plan.model_copy(update={"origin": None})}
+        )
+        for item in state.get("pending_tool_calls", ())
+    ]
+    state["tool_call_ledger"] = state["tool_call_ledger"].model_copy(
+        update={
+            "entries": [
+                entry.model_copy(
+                    update={
+                        "plan": entry.plan.model_copy(update={"origin": None})
+                    }
+                )
+                for entry in state["tool_call_ledger"].entries
+            ]
+        }
+    )
+    if state.get("last_model_turn") is not None:
+        turn = state["last_model_turn"]
+        state["last_model_turn"] = turn.model_copy(
+            update={
+                "tool_calls": tuple(
+                    plan.model_copy(update={"origin": None})
+                    for plan in turn.tool_calls
+                )
+            }
+        )
+    return state
+
+
+def _decode_canonical_state(state: LoopState) -> LoopState:
+    state["tool_results"] = [
+        _decode_runtime_tool_result(result)
+        if isinstance(result, Mapping)
+        else result
+        for result in state.get("tool_results", ())
+    ]
+    state["tool_execution_records"] = {
+        call_id: (
+            _decode_execution_record(record)
+            if isinstance(record, Mapping)
+            else record
+        )
+        for call_id, record in state.get(
+            "tool_execution_records",
+            {},
+        ).items()
+    }
+    raw = state.get("tool_checkpoint")
+    if raw is None:
+        return state
+    checkpoint = decode_tool_checkpoint(raw)
+    state["context_revision"] = checkpoint.context_revision
+    state["prompt_revision"] = checkpoint.prompt_revision
+    state["canonical_transcript"] = list(checkpoint.transcript)
+    state["tool_manifest"] = checkpoint.manifest
+    state["provider_serializer_revision"] = (
+        checkpoint.manifest.provider_serializer_revision
+    )
+    state["resident_tool_names"] = list(
+        checkpoint.manifest.resident_tool_names
+    )
+    state["explicit_tool_names"] = list(
+        checkpoint.manifest.explicit_tool_names
+    )
+    state["active_tool_names"] = list(
+        checkpoint.manifest.active_tool_names
+    )
+    state["canonical_tool_calls"] = {
+        call.tool_call_id: call
+        for call in checkpoint.tool_calls
+    }
+    state["model_call_records"] = list(checkpoint.model_call_records)
+    origins = {
+        call.tool_call_id: call.origin
+        for call in (*checkpoint.pending_tool_calls, *checkpoint.paused_tool_calls)
+    }
+    state["pending_tool_calls"] = [
+        item.model_copy(
+            update={
+                "plan": item.plan.model_copy(
+                    update={"origin": origins[item.tool_call_id]}
+                )
+            }
+        )
+        if item.tool_call_id in origins
+        else item
+        for item in state.get("pending_tool_calls", ())
+    ]
+    state["tool_call_ledger"] = state["tool_call_ledger"].model_copy(
+        update={
+            "entries": [
+                entry.model_copy(
+                    update={
+                        "plan": entry.plan.model_copy(
+                            update={
+                                "origin": (
+                                    state["canonical_tool_calls"][
+                                        entry.plan.tool_call_id
+                                    ].origin
+                                    if entry.plan.tool_call_id
+                                    in state["canonical_tool_calls"]
+                                    else None
+                                )
+                            }
+                        )
+                    }
+                )
+                for entry in state["tool_call_ledger"].entries
+            ]
+        }
+    )
+    return state
+
+
+def _encode_runtime_tool_result(result: ToolResult) -> dict[str, object]:
+    return {
+        "tool_call_id": result.tool_call_id,
+        "tool_name": result.tool_name,
+        "content": [
+            {
+                "type": block.type,
+                "data": _plain_checkpoint_json(block.data),
+            }
+            for block in result.content
+        ],
+        "structured_content": _plain_checkpoint_json(
+            result.structured_content
+        ),
+        "is_error": result.is_error,
+        "error_code": result.error_code,
+        "error_message": result.error_message,
+        "retryable": result.retryable,
+        "truncated": result.truncated,
+        "metadata": _plain_checkpoint_json(result.metadata),
+        "attachments": [
+            {
+                "artifact_id": item.artifact_id,
+                "media_type": item.media_type,
+                "name": item.name,
+            }
+            for item in result.attachments
+        ],
+    }
+
+
+def _decode_runtime_tool_result(raw: Mapping[str, object]) -> ToolResult:
+    return ToolResult(
+        tool_call_id=_checkpoint_string(
+            raw.get("tool_call_id"),
+            field_name="tool_result.tool_call_id",
+        ),
+        tool_name=_checkpoint_string(
+            raw.get("tool_name"),
+            field_name="tool_result.tool_name",
+        ),
+        content=tuple(
+            ToolContentBlock(
+                type=cast(Any, _checkpoint_string(
+                    item.get("type"),
+                    field_name="tool_result.content.type",
+                )),
+                data=cast(
+                    Mapping[str, JsonValue],
+                    _checkpoint_mapping(
+                        item.get("data", {}),
+                        field_name="tool_result.content.data",
+                    ),
+                ),
+            )
+            for item in (
+                _checkpoint_mapping(value, field_name="tool_result.content")
+                for value in _checkpoint_sequence(
+                    raw.get("content", ()),
+                    field_name="tool_result.content",
+                )
+            )
+        ),
+        structured_content=cast(
+            JsonValue | None,
+            raw.get("structured_content"),
+        ),
+        is_error=_checkpoint_bool(
+            raw.get("is_error", False),
+            field_name="tool_result.is_error",
+        ),
+        error_code=cast(str | None, raw.get("error_code")),
+        error_message=cast(str | None, raw.get("error_message")),
+        retryable=_checkpoint_bool(
+            raw.get("retryable", False),
+            field_name="tool_result.retryable",
+        ),
+        truncated=_checkpoint_bool(
+            raw.get("truncated", False),
+            field_name="tool_result.truncated",
+        ),
+        metadata=cast(
+            Mapping[str, JsonValue],
+            _checkpoint_mapping(
+                raw.get("metadata", {}),
+                field_name="tool_result.metadata",
+            ),
+        ),
+        attachments=tuple(
+            ArtifactReference(
+                artifact_id=_checkpoint_string(
+                    item.get("artifact_id"),
+                    field_name="tool_result.attachment.artifact_id",
+                ),
+                media_type=cast(str | None, item.get("media_type")),
+                name=cast(str | None, item.get("name")),
+            )
+            for item in (
+                _checkpoint_mapping(
+                    value,
+                    field_name="tool_result.attachment",
+                )
+                for value in _checkpoint_sequence(
+                    raw.get("attachments", ()),
+                    field_name="tool_result.attachments",
+                )
+            )
+        ),
+    )
+
+
+def _encode_execution_record(
+    record: ToolExecutionRecord,
+) -> dict[str, object]:
+    return {
+        "tool_call_id": record.tool_call_id,
+        "tool_name": record.tool_name,
+        "operation_id": record.operation_id,
+        "arguments_digest": record.arguments_digest,
+        "idempotent": record.idempotent,
+        "status": record.status.value,
+        "attempt_count": record.attempt_count,
+        "error_code": record.error_code,
+        "requires_reconciliation": record.requires_reconciliation,
+    }
+
+
+def _decode_execution_record(
+    raw: Mapping[str, object],
+) -> ToolExecutionRecord:
+    return ToolExecutionRecord(
+        tool_call_id=_checkpoint_string(
+            raw.get("tool_call_id"),
+            field_name="execution_record.tool_call_id",
+        ),
+        tool_name=_checkpoint_string(
+            raw.get("tool_name"),
+            field_name="execution_record.tool_name",
+        ),
+        operation_id=_checkpoint_string(
+            raw.get("operation_id"),
+            field_name="execution_record.operation_id",
+        ),
+        arguments_digest=_checkpoint_string(
+            raw.get("arguments_digest"),
+            field_name="execution_record.arguments_digest",
+        ),
+        idempotent=_checkpoint_bool(
+            raw.get("idempotent"),
+            field_name="execution_record.idempotent",
+        ),
+        status=ExecutionStatus(
+            _checkpoint_string(
+                raw.get("status"),
+                field_name="execution_record.status",
+            )
+        ),
+        attempt_count=int(raw.get("attempt_count", 0)),
+        error_code=cast(str | None, raw.get("error_code")),
+        requires_reconciliation=_checkpoint_bool(
+            raw.get("requires_reconciliation", False),
+            field_name="execution_record.requires_reconciliation",
+        ),
+    )
 
 
 def encode_tool_checkpoint(
@@ -1430,6 +1773,39 @@ def _uuid_suffix() -> str:
     return uuid4().hex[:12]
 
 
+def _apply_tool_reconciliation(
+    record: ToolExecutionRecord,
+    response: HumanInputResponse,
+) -> ToolExecutionRecord:
+    if response.decision == "mark_completed":
+        return replace(
+            record,
+            status=ExecutionStatus.COMPLETED,
+            error_code=None,
+            requires_reconciliation=False,
+        )
+    if response.decision == "mark_failed":
+        return replace(
+            record,
+            status=ExecutionStatus.FAILED,
+            requires_reconciliation=False,
+        )
+    if response.decision == "retry_new_operation":
+        from uuid import uuid4
+
+        return replace(
+            record,
+            operation_id=f"op_{uuid4().hex}",
+            status=ExecutionStatus.PREPARED,
+            attempt_count=0,
+            error_code=None,
+            requires_reconciliation=False,
+        )
+    raise ValueError(
+        f"unsupported tool reconciliation decision: {response.decision}"
+    )
+
+
 def _normalize_loaded_state(state: LoopState) -> LoopState:
     run_config = state["run_config"]
     if not isinstance(run_config.source_scope, tuple):
@@ -1441,6 +1817,21 @@ def _normalize_loaded_state(state: LoopState) -> LoopState:
     from rag.agent.loop.substate import DeferredToolState
 
     state.setdefault("deferred_tool_state", DeferredToolState())
+    state.setdefault("canonical_transcript", [])
+    state.setdefault("canonical_tool_calls", {})
+    state.setdefault("model_call_records", [])
+    state.setdefault("tool_manifest", None)
+    state.setdefault("tool_checkpoint", None)
+    state.setdefault("context_revision", "context_pending")
+    state.setdefault("prompt_revision", "prompt_pending")
+    state.setdefault("provider_serializer_revision", "provider-wire-v1")
+    state.setdefault("resident_tool_names", [])
+    state.setdefault("explicit_tool_names", [])
+    state.setdefault("active_tool_names", [])
+    state.setdefault("disabled_tool_names", [])
+    state.setdefault("allow_write_tools", False)
+    state.setdefault("allow_execute_tools", False)
+    state.setdefault("allow_discovery_tools", False)
     # ── PR1: migrate legacy flat fields into typed sub-states ──
     state = _migrate_legacy_state(cast(dict[str, Any], state))
     return state

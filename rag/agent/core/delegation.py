@@ -7,7 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from typing_extensions import TypedDict
 
 from rag.agent.core.context import AgentRunConfig
-from rag.agent.tools.spec import ToolResult
+from rag.agent.tools.tool import ToolResult
 from rag.schema.query import AnswerCitation, EvidenceItem
 
 

@@ -97,10 +97,14 @@ def test_agent_facade_run_maps_public_request_to_internal_service(
     assert request.thread_id == "sdk-run"
     assert request.llm_budget_total == 1234
     assert request.input_files == ["README.md"]
-    assert request.tool_surface_request is None
+    assert request.tools is None
+    assert request.disabled_tools == ()
+    assert request.allow_write_tools is False
+    assert request.allow_execute_tools is False
+    assert request.allow_discovery_tools is False
 
 
-def test_agent_facade_run_passes_explicit_tool_surface_config(
+def test_agent_facade_run_passes_explicit_single_runtime_options(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     requests: list[Any] = []
@@ -126,13 +130,12 @@ def test_agent_facade_run_passes_explicit_tool_surface_config(
     )
 
     assert len(requests) == 1
-    surface = requests[0].tool_surface_request
-    assert surface is not None
-    assert surface.requested_tool_names == ["search_text", "read_file", "run_command"]
-    assert surface.disabled_tool_names == ["read_file"]
-    assert surface.allow_write_tools is False
-    assert surface.allow_execute_tools is True
-    assert surface.allow_discovery_tools is False
+    request = requests[0]
+    assert request.tools == ("search_text", "read_file", "run_command")
+    assert request.disabled_tools == ("read_file",)
+    assert request.allow_write_tools is False
+    assert request.allow_execute_tools is True
+    assert request.allow_discovery_tools is False
 
 
 def test_agent_facade_registers_knowledge_runner_lazily(monkeypatch: pytest.MonkeyPatch) -> None:

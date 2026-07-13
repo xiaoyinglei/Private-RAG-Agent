@@ -1,38 +1,52 @@
 from __future__ import annotations
 
 from pathlib import Path
+from collections.abc import Mapping
 
 import pytest
 from langgraph.checkpoint.memory import MemorySaver
-from pydantic import BaseModel
-
 from rag.agent.core.agent_service_factory import AgentServiceFactory
 from rag.agent.core.checkpointing import (
+    CanonicalToolCheckpoint,
     LangGraphCheckpointStore,
     agent_checkpoint_serde,
+    encode_tool_checkpoint,
 )
 from rag.agent.core.context import AgentRunConfig, RunRegistry
 from rag.agent.core.definition import AgentRuntimePolicy
 from rag.agent.core.goal_contract import GoalDeliverable, GoalSpec
 from rag.agent.core.human_input import HumanInputResponse
-from rag.agent.core.tool_execution import (
-    ToolExecutionRecord,
-    tool_arguments_digest,
-)
+from rag.agent.core.messages import ModelMessage
+from rag.agent.core.model_request import build_tool_manifest
+from rag.agent.tools.executor import ExecutionStatus, ToolExecutionRecord
 from rag.agent.core.turn_contracts import ToolCallPlan
 from rag.agent.loop.state import LoopState, ModelTurnDraft, create_loop_state
 from rag.agent.service import AgentRunRequest, AgentService
 from rag.agent.tools.registry import ToolRegistry
-from rag.agent.tools.spec import ToolError, ToolPermissions, ToolSpec
+from rag.agent.tools.tool import (
+    CancellationMode,
+    InterruptBehavior,
+    JsonValue,
+    NormalizedToolOutput,
+    ResolvedToolUse,
+    Tool,
+    ToolCall,
+    ToolCallOrigin,
+    ToolContentBlock,
+    ToolDefinition,
+    ToolEffect,
+    ToolTarget,
+    json_schema_input,
+)
 from rag.schema.runtime import AccessPolicy
 
 
-class _Input(BaseModel):
-    value: str
-
-
-class _Output(BaseModel):
-    text: str
+_INPUT_SCHEMA: Mapping[str, JsonValue] = {
+    "type": "object",
+    "properties": {"value": {"type": "string"}},
+    "required": ["value"],
+    "additionalProperties": False,
+}
 
 
 class _FinishFromResultsProvider:
@@ -44,14 +58,13 @@ class _FinishFromResultsProvider:
         budget_remaining: int,
     ) -> ModelTurnDraft:
         del definition, budget_remaining
-        # PR2: answer_candidates no longer written to LoopState; use tool output directly
         if state["tool_results"]:
             latest = state["tool_results"][-1]
-            if latest.error is not None:
+            if latest.is_error:
                 return ModelTurnDraft(action="finish")
-            if latest.output is not None:
-                text = getattr(latest.output, "text", None) or getattr(latest.output, "output_text", None)
-                if text:
+            if isinstance(latest.structured_content, Mapping):
+                text = latest.structured_content.get("text")
+                if isinstance(text, str) and text:
                     return ModelTurnDraft(action="finish", final_answer=text)
         return ModelTurnDraft(
             action="finish",
@@ -94,26 +107,60 @@ def _registry(
     calls: list[str],
     *,
     requires_confirmation: bool = False,
+    execution_revision: str = "write-tool-v1",
 ) -> ToolRegistry:
     registry = ToolRegistry()
 
-    def runner(payload: _Input) -> _Output:
-        calls.append(payload.value)
-        return _Output(text=f"wrote:{payload.value}")
+    def runner(payload: Mapping[str, JsonValue]) -> Mapping[str, JsonValue]:
+        value = str(payload["value"])
+        calls.append(value)
+        return {"text": f"wrote:{value}"}
+
+    def normalize(raw: object) -> NormalizedToolOutput:
+        assert isinstance(raw, Mapping)
+        text = str(raw["text"])
+        return NormalizedToolOutput(
+            content=(ToolContentBlock(type="text", data={"text": text}),),
+            structured_content={"text": text},
+        )
 
     registry.register(
-        ToolSpec(
-            name="write_tool",
-            description="Write once.",
-            input_model=_Input,
-            output_model=_Output,
-            error_model=ToolError,
-            permissions=ToolPermissions(write_db=requires_confirmation),
+        Tool(
+            definition=ToolDefinition(
+                name="write_tool",
+                description="Write once.",
+                input_schema=_INPUT_SCHEMA,
+            ),
+            validate_input=json_schema_input(_INPUT_SCHEMA),
+            run=runner,
+            normalize_output=normalize,
+            output_schema={
+                "type": "object",
+                "properties": {"text": {"type": "string"}},
+                "required": ["text"],
+                "additionalProperties": False,
+            },
+            static_effects=frozenset(
+                {ToolEffect.WRITE_WORKSPACE} if requires_confirmation else ()
+            ),
+            resolve_use=lambda _arguments: ResolvedToolUse(
+                effects=frozenset(
+                    {ToolEffect.WRITE_WORKSPACE} if requires_confirmation else ()
+                ),
+                targets=(
+                    (ToolTarget(kind="workspace_path", value="."),)
+                    if requires_confirmation
+                    else ()
+                ),
+            ),
+            execution_revision=execution_revision,
+            idempotent=not requires_confirmation,
+            concurrency_safe=True,
+            cancellation_mode=CancellationMode.COOPERATIVE,
+            interrupt_behavior=InterruptBehavior.CANCEL,
             timeout_seconds=1.0,
-            idempotent=False,
-            requires_confirmation=requires_confirmation,
+            max_model_output_bytes=4096,
         ),
-        runner=runner,
     )
     return registry
 
@@ -245,10 +292,12 @@ async def test_service_exposes_non_idempotent_unknown_as_reconciliation() -> Non
         tool_call_id=call.tool_call_id,
         tool_name=call.tool_name,
         operation_id="op-ambiguous",
-        arguments_digest=tool_arguments_digest(call.arguments),
+        arguments_digest="legacy-digest-replaced-during-resume",
         idempotent=False,
-        status="started",
+        status=ExecutionStatus.UNKNOWN,
         attempt_count=1,
+        error_code="interrupted_outcome_unknown",
+        requires_reconciliation=True,
     )
     await store.save_snapshot(state, reason="crash_after_started")
     service = AgentService(
@@ -262,6 +311,73 @@ async def test_service_exposes_non_idempotent_unknown_as_reconciliation() -> Non
 
     assert request.kind == "tool_reconciliation"
     assert request.context["operation_id"] == "op-ambiguous"
+    RunRegistry.remove(run_id)
+
+
+@pytest.mark.anyio
+async def test_resume_reconciles_pending_call_before_changed_tool_executes() -> None:
+    run_id = "service-loop-manifest-drift"
+    config = _config(run_id)
+    checkpointer = MemorySaver(serde=agent_checkpoint_serde())
+    persisted_registry = _registry([], execution_revision="write-tool-v1")
+    persisted_tool = persisted_registry.get("write_tool")
+    persisted_manifest = build_tool_manifest(
+        tools=(persisted_tool,),
+        resident_tool_names=("write_tool",),
+        provider_serializer_revision="provider-wire-v1",
+    )
+    call = ToolCall(
+        tool_call_id="call-drift",
+        tool_name="write_tool",
+        arguments={"value": "do not replay"},
+        origin=ToolCallOrigin(
+            request_id="request-before-drift",
+            toolset_revision=persisted_manifest.toolset_revision,
+            exposed_tool_names=("write_tool",),
+        ),
+    )
+    state = create_loop_state(
+        task="Resume safely.",
+        run_config=config,
+        pending_tool_calls=(
+            ToolCallPlan(
+                tool_call_id=call.tool_call_id,
+                tool_name=call.tool_name,
+                arguments=dict(call.arguments),
+            ),
+        ),
+    )
+    state["tool_checkpoint"] = encode_tool_checkpoint(  # type: ignore[typeddict-unknown-key]
+        CanonicalToolCheckpoint(
+            context_revision="context-before-drift",
+            prompt_revision="prompt-before-drift",
+            transcript=(ModelMessage(role="user", content="Resume safely."),),
+            manifest=persisted_manifest,
+            tool_calls=(call,),
+            pending_tool_calls=(call,),
+        )
+    )
+    await LangGraphCheckpointStore(
+        checkpointer,
+        run_config=config,
+    ).save_snapshot(state, reason="before-drift")
+    calls: list[str] = []
+    service = AgentService(
+        definition=_definition(),
+        tool_registry=_registry(
+            calls,
+            execution_revision="write-tool-v2",
+        ),
+        model_turn_provider=_FinishFromResultsProvider(),
+        checkpointer=checkpointer,
+    )
+
+    request = await service.apending_human_input_request(run_id=run_id)
+
+    assert request.kind == "tool_reconciliation"
+    assert request.context["error_code"] == "tool_definition_changed"
+    assert request.context["tool_call_id"] == call.tool_call_id
+    assert calls == []
     RunRegistry.remove(run_id)
 
 
@@ -331,6 +447,62 @@ def test_runtime_modules_use_loop_state_instead_of_compatibility_state() -> None
     ]
 
     assert offenders == []
+
+
+@pytest.mark.anyio
+async def test_service_freezes_one_snapshot_and_reuses_one_executor() -> None:
+    service = AgentService(
+        definition=_definition(),
+        tool_registry=_registry([]),
+        model_turn_provider=_FinishFromResultsProvider(),
+    )
+
+    snapshot = service._tool_snapshot
+    executor = service._tool_executor
+    result = await service.run(
+        AgentRunRequest(
+            task="Answer directly.",
+            run_id="single-runtime-identity",
+            thread_id="single-runtime-identity",
+        )
+    )
+
+    assert result.status == "done"
+    assert service._tool_snapshot is snapshot
+    assert service._tool_executor is executor
+    assert executor._tools is snapshot
+
+
+def test_public_runtime_files_do_not_reach_legacy_tool_paths() -> None:
+    root = Path(__file__).resolve().parents[2]
+    runtime_files = (
+        "agent_runtime/agent.py",
+        "agent_runtime/runtime/builder.py",
+        "rag/agent/cli.py",
+        "rag/agent/service.py",
+        "rag/agent/loop/runtime.py",
+        "rag/agent/core/model_provider_runtime.py",
+        "rag/agent/core/llm_providers.py",
+        "rag/providers/llm_gateway.py",
+    )
+    forbidden = (
+        "rag.agent.tooling",
+        "ToolExecutionService",
+        "RuntimeToolRegistryBuilder",
+        "ToolSurfaceRequest",
+        "ToolSurfacePolicy",
+        "DeferredToolStore",
+        "resolve_visible_tools",
+        "ModelRequestBuilder",
+    )
+
+    offenders = {
+        relative: tuple(symbol for symbol in forbidden if symbol in (root / relative).read_text())
+        for relative in runtime_files
+        if any(symbol in (root / relative).read_text() for symbol in forbidden)
+    }
+
+    assert offenders == {}
 
 
 def test_default_runtime_has_no_goal_gap_planning_fields() -> None:

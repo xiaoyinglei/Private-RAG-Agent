@@ -176,7 +176,7 @@ class ToolExecutor:
             if name != tool.definition.name:
                 raise ValueError("tool mapping key must match Tool definition name")
             copied[name] = tool
-        self._tools = MappingProxyType(copied)
+        self._tools = tools if isinstance(tools, MappingProxyType) else MappingProxyType(copied)
         self._hard_guard = hard_guard
         self._boundary_resolver = boundary_resolver or resolve_execution_boundary
         self._permission_decider = permission_decider

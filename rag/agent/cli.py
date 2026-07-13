@@ -4,9 +4,9 @@ import asyncio
 import logging
 import os
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from contextlib import nullcontext
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
 
@@ -26,7 +26,6 @@ if TYPE_CHECKING:
     from rag.agent.core.registry import AgentRegistry
     from rag.agent.core.runtime_diagnostics import RuntimeDiagnostic
     from rag.agent.service import AgentRunResult, AgentService
-    from rag.agent.tools.registry import ContextualToolRunner
 
 agent_app = typer.Typer(add_completion=False, no_args_is_help=True)
 model_app = typer.Typer(add_completion=False, no_args_is_help=True)
@@ -34,7 +33,6 @@ agent_app.add_typer(model_app, name="model", help="查看和切换当前模型�
 logger = logging.getLogger(__name__)
 
 CLI_AGENT_CHOICES = ("generic",)
-_SEMANTIC_RAG_TOOLS = frozenset({"search_knowledge", "search_assets"})
 DEFAULT_MODEL_SESSION_PATH = Path(".rag/agent_model_session.json")
 DEFAULT_VECTOR_BACKEND = "milvus"
 
@@ -98,62 +96,6 @@ def _looks_like_rag_storage(storage_root: Path) -> bool:
     )
 
 
-def _build_llm_tool_runners(
-    primary_chat: Any,
-    *,
-    token_accounting: object | None = None,
-    model_context_tokens: int = 32_768,
-    stage_budgets: object | None = None,
-) -> dict[str, ContextualToolRunner]:
-    from rag.agent.core.llm_registry import ResolvedModel
-    from rag.agent.core.llm_tool_runners import create_model_llm_tool_runners
-    from rag.assembly.tokenizer import TokenAccountingService, TokenizerContract
-    from rag.providers.llm_gateway import LLMGateway
-    from rag.schema.llm import DEFAULT_LLM_STAGE_BUDGETS
-
-    if primary_chat is None:
-        return {}
-
-    accounting = token_accounting or TokenAccountingService(
-        TokenizerContract(
-            embedding_model_name="cli-chat",
-            tokenizer_model_name="cli-chat",
-            chunking_tokenizer_model_name="cli-chat",
-            tokenizer_backend="simple",
-            max_context_tokens=model_context_tokens,
-            prompt_reserved_tokens=512,
-            local_files_only=True,
-        )
-    )
-    gateway = LLMGateway(
-        generator=primary_chat,
-        token_accounting=cast(Any, accounting),
-        model_context_tokens=model_context_tokens,
-        stage_budgets=cast(
-            Any,
-            stage_budgets or DEFAULT_LLM_STAGE_BUDGETS,
-        ),
-    )
-
-    class _Registry:
-        def resolve_for_node(
-            self,
-            *,
-            node_model: str | None,
-            node_name: str,
-        ) -> ResolvedModel:
-            del node_model, node_name
-            return ResolvedModel(
-                generator=primary_chat,
-                kwargs={},
-                context_window_tokens=model_context_tokens,
-                gateway=gateway,
-                token_accounting=cast(Any, accounting),
-            )
-
-    return create_model_llm_tool_runners(cast(Any, _Registry()))
-
-
 def _resolve_cli_agent_definition(
     agent_registry: AgentRegistry,
     agent_type: str,
@@ -162,23 +104,6 @@ def _resolve_cli_agent_definition(
         allowed = ", ".join(CLI_AGENT_CHOICES)
         raise ValueError(f"{agent_type!r} is not a supported CLI agent. Allowed: {allowed}")
     return agent_registry.get(agent_type)
-
-
-def _without_unavailable_deferred_tools(
-    definition: AgentRuntimePolicy,
-    unavailable_tools: set[str],
-) -> AgentRuntimePolicy:
-    if not unavailable_tools:
-        return definition
-    filt = definition.tool_catalog_filter
-    return replace(
-        definition,
-        deferred_tool_names=tuple(
-            name for name in definition.deferred_tool_names
-            if name not in unavailable_tools
-        ),
-        tool_catalog_filter=replace(filt, deny=filt.deny | frozenset(unavailable_tools)),
-    )
 
 
 def _service_model_alias(service: AgentService, requested_model: str | None) -> str:
@@ -212,8 +137,8 @@ def _build_agent_service(
     model_alias: str | None = None,
     model_control_plane: ModelControlPlane | None = None,
     runtime_diagnostics: Sequence[RuntimeDiagnostic] = (),
-    knowledge_runner: ContextualToolRunner | None = None,
-    knowledge_asset_runner: ContextualToolRunner | None = None,
+    knowledge_runner: Callable[..., object] | None = None,
+    knowledge_asset_runner: Callable[..., object] | None = None,
     strict_model_provider: bool = True,
     startup_ms: float = 0.0,
 ) -> AgentService:
@@ -265,10 +190,13 @@ def _format_tool_summary(result: AgentRunResult) -> str:
         return ""
     lines = ["", "─" * 40, "工具执行:"]
     for tr in result.tool_results:
-        status_icon = "✓" if tr.status == "ok" else "✗"
+        status_icon = "✗" if tr.is_error else "✓"
         tool_info = f"  {status_icon} {tr.tool_name}"
-        if tr.status == "error" and tr.error:
-            tool_info += f" ({tr.error.code}: {tr.error.message[:60]})"
+        if tr.is_error:
+            tool_info += (
+                f" ({tr.error_code or 'tool_error'}: "
+                f"{(tr.error_message or 'unknown tool error')[:60]})"
+            )
         lines.append(tool_info)
     return "\n".join(lines)
 
@@ -357,8 +285,8 @@ def _display_result(result: AgentRunResult, *, verbose: bool) -> None:
         if verbose:
             print(_format_tool_summary(result))
         else:
-            ok = sum(1 for tr in result.tool_results if tr.status == "ok")
-            err = sum(1 for tr in result.tool_results if tr.status == "error")
+            ok = sum(1 for tr in result.tool_results if not tr.is_error)
+            err = sum(1 for tr in result.tool_results if tr.is_error)
             summary_parts = [f"{ok} 成功"] if ok else []
             if err:
                 summary_parts.append(f"{err} 失败")

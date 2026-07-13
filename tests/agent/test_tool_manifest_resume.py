@@ -7,15 +7,19 @@ from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
+from langgraph.checkpoint.memory import MemorySaver
 
 from rag.agent.core import checkpointing as checkpointing_module
 from rag.agent.core.checkpointing import (
     CanonicalToolCheckpoint,
+    LangGraphCheckpointStore,
+    agent_checkpoint_serde,
     decode_legacy_tool_state_v1,
     decode_tool_checkpoint,
     encode_tool_checkpoint,
     reconcile_tool_manifest,
 )
+from rag.agent.core.context import AgentRunConfig
 from rag.agent.core.messages import ModelMessage
 from rag.agent.core.model_request import (
     ModelSettings,
@@ -26,6 +30,8 @@ from rag.agent.core.model_request import (
     model_call_record_payload,
 )
 from rag.agent.core.turn_contracts import ToolManifestDriftStatus
+from rag.agent.core.turn_contracts import ToolCallPlan
+from rag.agent.loop.state import create_loop_state
 from rag.agent.tools.tool import (
     CancellationMode,
     InterruptBehavior,
@@ -39,6 +45,7 @@ from rag.agent.tools.tool import (
     json_schema_input,
 )
 from rag.schema.llm import normalize_llm_usage
+from rag.schema.runtime import AccessPolicy
 
 _FIXTURE = Path(__file__).parent / "fixtures/checkpoints/legacy_tool_state_v1.json"
 
@@ -445,3 +452,83 @@ def test_legacy_fixture_rebuilds_canonical_transcript_once_without_active_wiring
     assert legacy_source is not None
     assert "formatter" not in legacy_source
     assert "_migrate_legacy_state" not in legacy_source
+
+
+@pytest.mark.anyio
+async def test_real_checkpoint_store_uses_v2_codec_and_preserves_call_origin() -> None:
+    run_id = "real-canonical-checkpoint"
+    tool_a = _tool("read_file")
+    tool_b = _tool("list_files")
+    context = build_stable_context(
+        instructions=("Be precise.",),
+        initial_user_task="Read the file.",
+    )
+    request_a = build_model_request(
+        request_id="request-a",
+        context=context,
+        selected_tools=(tool_a,),
+        settings=ModelSettings(model="test-model"),
+    )
+    request_b = build_model_request(
+        request_id="request-b",
+        context=context,
+        selected_tools=(tool_b,),
+        settings=ModelSettings(model="test-model"),
+    )
+    call = _origin_call(
+        request_id=request_a.request_id,
+        toolset_revision=request_a.toolset_revision,
+        exposed_tool_names=request_a.exposed_tool_names,
+        tool_name="read_file",
+        tool_call_id="call-a",
+    )
+    record = bind_model_call_record(
+        request=request_a,
+        provider_wire_hash="wire-request-a",
+        usage=normalize_llm_usage(
+            input_tokens=20,
+            output_tokens=3,
+            cache_read_input_tokens=5,
+            cache_write_input_tokens=0,
+            input_tokens_include_cache=True,
+            usage_source="provider",
+            raw_provider_usage={"prompt_tokens": 20},
+        ),
+    )
+    config = AgentRunConfig(
+        run_id=run_id,
+        thread_id=run_id,
+        max_depth=1,
+        access_policy=AccessPolicy.default(),
+    )
+    state = create_loop_state(
+        task="Read the file.",
+        run_config=config,
+        pending_tool_calls=(
+            ToolCallPlan(
+                tool_call_id=call.tool_call_id,
+                tool_name=call.tool_name,
+                arguments={"value": "x"},
+            ),
+        ),
+    )
+    state["canonical_transcript"] = [ModelMessage(role="user", content="Read the file.")]  # type: ignore[typeddict-unknown-key]
+    state["context_revision"] = context.context_revision  # type: ignore[typeddict-unknown-key]
+    state["prompt_revision"] = request_b.prompt_revision  # type: ignore[typeddict-unknown-key]
+    state["tool_manifest"] = _manifest((tool_b,), resident=("list_files",))  # type: ignore[typeddict-unknown-key]
+    state["canonical_tool_calls"] = {call.tool_call_id: call}  # type: ignore[typeddict-unknown-key]
+    state["model_call_records"] = [record]  # type: ignore[typeddict-unknown-key]
+    checkpointer = MemorySaver(serde=agent_checkpoint_serde())
+    store = LangGraphCheckpointStore(checkpointer, run_config=config)
+
+    await store.save_snapshot(state, reason="canonical-origin")
+    loaded = await store.load_latest()
+
+    assert loaded is not None
+    restored = decode_tool_checkpoint(loaded["tool_checkpoint"])  # type: ignore[typeddict-item]
+    assert restored.prompt_revision == request_b.prompt_revision
+    assert restored.pending_tool_calls == (call,)
+    assert restored.pending_tool_calls[0].origin.request_id == "request-a"
+    assert restored.pending_tool_calls[0].origin.toolset_revision == request_a.toolset_revision
+    assert restored.pending_tool_calls[0].origin.exposed_tool_names == ("read_file",)
+    assert restored.model_call_records == (record,)

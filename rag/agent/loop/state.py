@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
-from typing import TYPE_CHECKING, Any, Literal, Self
+from typing import TYPE_CHECKING, Literal, Self
 
 from langchain_core.messages import BaseMessage
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -9,15 +9,17 @@ from typing_extensions import TypedDict
 
 from rag.agent.core.context import AgentRunConfig
 from rag.agent.core.human_input import HumanInputRequest, HumanInputResponse
+from rag.agent.core.messages import ModelMessage
+from rag.agent.core.model_request import ModelCallRecord
 from rag.agent.core.output_models import ValidatedFinalOutput
 from rag.agent.core.runtime_diagnostics import (
     AgentLatencyProfile,
     RuntimeDiagnostic,
     merge_runtime_diagnostics,
 )
-from rag.agent.core.tool_execution import ToolExecutionRecord
-from rag.agent.core.turn_contracts import ToolCallPlan
-from rag.agent.tools.spec import ToolResult
+from rag.agent.core.turn_contracts import ToolCallPlan, ToolManifest
+from rag.agent.tools.executor import ToolExecutionRecord
+from rag.agent.tools.tool import ToolCall, ToolResult
 
 if TYPE_CHECKING:
     from rag.agent.file_manifest import FileManifest
@@ -191,8 +193,21 @@ class LoopState(TypedDict):
     approved_tool_call_ids: list[str]
     denied_tool_call_ids: list[str]
     tool_results: list[ToolResult]
-    tooling_sent_schema_names: list[str]
-    tooling_model_request_trace: dict[str, Any] | None
+    canonical_transcript: list[ModelMessage]
+    canonical_tool_calls: dict[str, ToolCall]
+    model_call_records: list[ModelCallRecord]
+    tool_manifest: ToolManifest | None
+    tool_checkpoint: dict[str, object] | None
+    context_revision: str
+    prompt_revision: str
+    provider_serializer_revision: str
+    resident_tool_names: list[str]
+    explicit_tool_names: list[str]
+    active_tool_names: list[str]
+    disabled_tool_names: list[str]
+    allow_write_tools: bool
+    allow_execute_tools: bool
+    allow_discovery_tools: bool
     runtime_diagnostics: list[RuntimeDiagnostic]
     latency_profile: AgentLatencyProfile
     last_model_turn: ModelTurn | None
@@ -250,8 +265,21 @@ def create_loop_state(
         "approved_tool_call_ids": [],
         "denied_tool_call_ids": [],
         "tool_results": [],
-        "tooling_sent_schema_names": [],
-        "tooling_model_request_trace": None,
+        "canonical_transcript": [],
+        "canonical_tool_calls": {},
+        "model_call_records": [],
+        "tool_manifest": None,
+        "tool_checkpoint": None,
+        "context_revision": "context_pending",
+        "prompt_revision": "prompt_pending",
+        "provider_serializer_revision": "provider-wire-v1",
+        "resident_tool_names": [],
+        "explicit_tool_names": [],
+        "active_tool_names": [],
+        "disabled_tool_names": [],
+        "allow_write_tools": False,
+        "allow_execute_tools": False,
+        "allow_discovery_tools": False,
         "runtime_diagnostics": merge_runtime_diagnostics([], runtime_diagnostics),
         "latency_profile": AgentLatencyProfile(),
         "last_model_turn": None,

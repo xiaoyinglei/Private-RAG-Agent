@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Mapping
 from types import SimpleNamespace
 from typing import Any
 
@@ -8,6 +9,21 @@ import pytest
 from pydantic import BaseModel
 
 from rag.agent.core.context import LLMBudgetLedger
+from rag.agent.core.model_request import (
+    ModelSettings,
+    build_model_request,
+    build_stable_context,
+)
+from rag.agent.tools.tool import (
+    CancellationMode,
+    InterruptBehavior,
+    JsonValue,
+    NormalizedToolOutput,
+    ResolvedToolUse,
+    Tool,
+    ToolDefinition,
+    json_schema_input,
+)
 from rag.assembly.support import _OpenAICompatibleChatGenerator
 from rag.providers.llm_gateway import LLMContextOverflowError, LLMGateway, StreamChunk
 from rag.schema.llm import (
@@ -90,6 +106,136 @@ class _StreamingGenerator:
             StreamChunk(type="text_delta", content="one two"),
             StreamChunk(type="message_stop", stop_reason="end_turn"),
         ]
+
+
+class _CanonicalNativeGenerator:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    def generate_with_tools(
+        self,
+        *,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        **kwargs: Any,
+    ) -> LLMProviderResult[dict[str, object]]:
+        self.calls.append({"messages": messages, "tools": tools, **kwargs})
+        return LLMProviderResult(
+            value={
+                "choices": [
+                    {
+                        "finish_reason": "stop",
+                        "message": {"role": "assistant", "content": "native answer"},
+                    }
+                ]
+            },
+            usage=LLMUsage(
+                input_tokens=13,
+                output_tokens=2,
+                cached_input_tokens=5,
+                source="provider",
+                logical_input_tokens=13,
+                uncached_input_tokens=8,
+                cache_read_input_tokens=5,
+                cache_write_input_tokens=0,
+                usage_source="provider",
+                raw_provider_usage={"prompt_tokens": 13, "cached_tokens": 5},
+            ),
+        )
+
+
+class _CanonicalLocalGenerator(_UsageAwareGenerator):
+    def __init__(self) -> None:
+        super().__init__(
+            output='{"text":"local answer","tool_calls":[]}',
+            usage=LLMUsage(
+                input_tokens=17,
+                output_tokens=3,
+                source="provider",
+                logical_input_tokens=17,
+                uncached_input_tokens=17,
+                usage_source="provider",
+                raw_provider_usage={"input_tokens": 17},
+            ),
+        )
+
+
+class _CanonicalStreamingGenerator:
+    def stream_with_tools(
+        self,
+        *,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        **kwargs: Any,
+    ) -> list[StreamChunk]:
+        del messages, tools, kwargs
+        return [
+            StreamChunk(type="text_delta", content="stream answer"),
+            StreamChunk(
+                type="message_stop",
+                stop_reason="end_turn",
+                usage=LLMUsage(
+                    input_tokens=21,
+                    output_tokens=2,
+                    cached_input_tokens=9,
+                    source="provider",
+                    logical_input_tokens=21,
+                    uncached_input_tokens=12,
+                    cache_read_input_tokens=9,
+                    cache_write_input_tokens=0,
+                    usage_source="provider",
+                    raw_provider_usage={"prompt_tokens": 21, "cached_tokens": 9},
+                ),
+            ),
+        ]
+
+
+def _canonical_tool(name: str) -> Tool:
+    schema: Mapping[str, JsonValue] = {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": False,
+    }
+    return Tool(
+        definition=ToolDefinition(
+            name=name,
+            description=f"Use {name}.",
+            input_schema=schema,
+        ),
+        validate_input=json_schema_input(schema),
+        run=lambda _arguments: {},
+        normalize_output=lambda _raw: NormalizedToolOutput(),
+        output_schema=None,
+        static_effects=frozenset(),
+        resolve_use=lambda _arguments: ResolvedToolUse(effects=frozenset(), targets=()),
+        execution_revision=f"{name}-v1",
+        idempotent=True,
+        concurrency_safe=True,
+        cancellation_mode=CancellationMode.COOPERATIVE,
+        interrupt_behavior=InterruptBehavior.CANCEL,
+        timeout_seconds=1.0,
+        max_model_output_bytes=4096,
+    )
+
+
+def _canonical_request():
+    return build_model_request(
+        request_id="request-parity",
+        context=build_stable_context(
+            instructions=("Use the selected tools when needed.",),
+            initial_user_task="Inspect README.md.",
+        ),
+        selected_tools=(
+            _canonical_tool("list_files"),
+            _canonical_tool("read_file"),
+        ),
+        settings=ModelSettings(
+            model="test-model",
+            max_output_tokens=128,
+            temperature=0.0,
+            parallel_tool_calls=True,
+        ),
+    )
 
 
 def _gateway(
@@ -346,3 +492,84 @@ def test_openai_compatible_generator_preserves_response_usage() -> None:
         reasoning_tokens=3,
         source="provider",
     )
+
+
+@pytest.mark.anyio
+async def test_gateway_adapts_one_canonical_request_to_openai_wire() -> None:
+    generator = _CanonicalNativeGenerator()
+    request = _canonical_request()
+
+    result = await _gateway(
+        generator,
+        max_input_tokens=2_000,
+        model_context_tokens=4_000,
+    ).agenerate_model_request(
+        stage=LLMCallStage.TOOL_DECISION,
+        request=request,
+        provider="openai-compatible",
+        supports_native_tools=True,
+    )
+
+    assert result.turn.text == "native answer"
+    assert result.usage.cache_read_input_tokens == 5
+    assert result.usage.usage_source == "provider"
+    assert result.provider_wire_hash.startswith("wire_")
+    assert result.serializer_revision == "openai-compatible-chat-v1"
+    assert result.wire_kind == "openai"
+    assert [item["function"]["name"] for item in generator.calls[0]["tools"]] == [
+        "list_files",
+        "read_file",
+    ]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("provider", ["mlx", "ollama"])
+async def test_gateway_adapts_one_canonical_request_to_local_envelope(provider: str) -> None:
+    generator = _CanonicalLocalGenerator()
+    request = _canonical_request()
+
+    result = await _gateway(
+        generator,
+        max_input_tokens=2_000,
+        model_context_tokens=4_000,
+    ).agenerate_model_request(
+        stage=LLMCallStage.TOOL_DECISION,
+        request=request,
+        provider=provider,
+        supports_native_tools=False,
+    )
+
+    assert result.turn.text == "local answer"
+    assert result.usage.usage_source == "provider"
+    assert result.provider_wire_hash.startswith("wire_")
+    assert result.serializer_revision == "local-agent-flat-json-v1"
+    assert result.wire_kind == provider
+    prompt, kwargs = generator.calls[0]
+    assert "[Selected Tools]" in prompt
+    assert "list_files" in prompt
+    assert "read_file" in prompt
+    assert kwargs["model"] == "test-model"
+
+
+@pytest.mark.anyio
+async def test_streaming_canonical_request_uses_final_provider_usage() -> None:
+    request = _canonical_request()
+    deltas: list[str] = []
+
+    result = await _gateway(
+        _CanonicalStreamingGenerator(),
+        max_input_tokens=2_000,
+        model_context_tokens=4_000,
+    ).agenerate_model_request(
+        stage=LLMCallStage.TOOL_DECISION,
+        request=request,
+        provider="openai-compatible",
+        supports_native_tools=True,
+        stream=True,
+        text_delta_sink=deltas.append,
+    )
+
+    assert result.turn.text == "stream answer"
+    assert result.usage.cache_read_input_tokens == 9
+    assert result.usage.usage_source == "provider"
+    assert deltas == ["stream answer"]

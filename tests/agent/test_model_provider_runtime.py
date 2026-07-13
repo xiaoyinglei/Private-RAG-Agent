@@ -1,103 +1,132 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 import pytest
 
-from rag.agent.builtin.generic import GENERIC_AGENT
-from rag.agent.builtin_registry import create_builtin_tool_registry
-from rag.agent.capabilities.catalog import DeferredToolStore, ToolCatalog
-from rag.agent.capabilities.context import deferred_store_var
 from rag.agent.core.context import AgentRunConfig
+from rag.agent.core.definition import AgentRuntimePolicy
 from rag.agent.core.model_provider_runtime import (
     ModelProviderResolver,
     ResultDrivenModelTurnProvider,
 )
-from rag.agent.loop.state import create_loop_state
+from rag.agent.loop.state import ModelTurnDraft, create_loop_state
+from rag.agent.tools.tool import (
+    CancellationMode,
+    InterruptBehavior,
+    JsonValue,
+    NormalizedToolOutput,
+    ResolvedToolUse,
+    Tool,
+    ToolDefinition,
+    json_schema_input,
+)
 from rag.schema.runtime import AccessPolicy
 
 
-class _FailingModelRegistry:
-    default_model = "broken"
-    fallback_model = None
+def _tool() -> Tool:
+    schema: Mapping[str, JsonValue] = {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": False,
+    }
+    return Tool(
+        definition=ToolDefinition(
+            name="read_file",
+            description="Read one file.",
+            input_schema=schema,
+        ),
+        validate_input=json_schema_input(schema),
+        run=lambda _arguments: {},
+        normalize_output=lambda _raw: NormalizedToolOutput(),
+        output_schema=None,
+        static_effects=frozenset(),
+        resolve_use=lambda _arguments: ResolvedToolUse(
+            effects=frozenset(),
+            targets=(),
+        ),
+        execution_revision="read-v1",
+        idempotent=True,
+        concurrency_safe=True,
+        cancellation_mode=CancellationMode.COOPERATIVE,
+        interrupt_behavior=InterruptBehavior.CANCEL,
+        timeout_seconds=1.0,
+        max_model_output_bytes=4096,
+    )
 
-    def resolve_for_node(self, *, node_model: str | None, node_name: str) -> object:
-        del node_model, node_name
-        raise RuntimeError("provider unavailable")
+
+def _policy() -> AgentRuntimePolicy:
+    return AgentRuntimePolicy.test_factory(
+        system_prompt="Answer.",
+        allowed_tools=["read_file"],
+    )
 
 
 def _state():
-    return create_loop_state(
-        task="Explain policy",
+    state = create_loop_state(
+        task="Answer.",
         run_config=AgentRunConfig(
-            run_id="model-provider-runtime",
-            thread_id="model-provider-runtime",
+            run_id="provider-runtime",
+            thread_id="provider-runtime",
             max_depth=1,
             access_policy=AccessPolicy.default(),
         ),
     )
+    state["resident_tool_names"] = ["read_file"]
+    return state
 
 
-@pytest.mark.anyio
-async def test_model_provider_resolver_records_diagnostic_when_non_strict() -> None:
-    state = _state()
-    token = deferred_store_var.set(
-        DeferredToolStore(max_active=GENERIC_AGENT.max_active_deferred_tools),
+class _Provider:
+    async def next_turn(self, *args: object, **kwargs: object) -> ModelTurnDraft:
+        del args, kwargs
+        return ModelTurnDraft(action="finish", final_answer="direct")
+
+
+def test_resolver_reuses_injected_provider() -> None:
+    provider = _Provider()
+    resolver = ModelProviderResolver(
+        model_turn_provider=provider,
+        model_registry=None,
+        policy=_policy(),
+        registry_snapshot={"read_file": _tool()},
     )
-    try:
-        provider = ModelProviderResolver(
-            model_turn_provider=None,
-            model_registry=_FailingModelRegistry(),
-            policy=GENERIC_AGENT,
-            base_tool_registry=create_builtin_tool_registry(),
-            catalog=ToolCatalog(),
-            strict_model_provider=False,
-        ).resolve(
-            state,
-            tool_registry=create_builtin_tool_registry(),
-        )
-    finally:
-        deferred_store_var.reset(token)
+
+    assert resolver.resolve(_state()) is provider
+
+
+def test_strict_registry_failure_is_not_hidden() -> None:
+    class _BrokenRegistry:
+        def resolve_for_node(self, **kwargs: object) -> object:
+            del kwargs
+            raise RuntimeError("model provider broken")
+
+    resolver = ModelProviderResolver(
+        model_turn_provider=None,
+        model_registry=_BrokenRegistry(),  # type: ignore[arg-type]
+        policy=_policy(),
+        registry_snapshot={"read_file": _tool()},
+    )
+
+    with pytest.raises(RuntimeError, match="model provider broken"):
+        resolver.resolve(_state())
+
+
+def test_non_strict_failure_records_diagnostic_and_falls_back() -> None:
+    class _BrokenRegistry:
+        def resolve_for_node(self, **kwargs: object) -> object:
+            del kwargs
+            raise RuntimeError("model provider broken")
+
+    state = _state()
+    provider = ModelProviderResolver(
+        model_turn_provider=None,
+        model_registry=_BrokenRegistry(),  # type: ignore[arg-type]
+        policy=_policy(),
+        registry_snapshot={"read_file": _tool()},
+        strict_model_provider=False,
+    ).resolve(state)
 
     assert isinstance(provider, ResultDrivenModelTurnProvider)
-    assert state["runtime_diagnostics"][0].code == "default_providers_initialization_failed"
-
-
-@pytest.mark.anyio
-async def test_model_provider_resolver_raises_when_strict() -> None:
-    state = _state()
-    token = deferred_store_var.set(
-        DeferredToolStore(max_active=GENERIC_AGENT.max_active_deferred_tools),
+    assert state["runtime_diagnostics"][-1].code == (
+        "default_providers_initialization_failed"
     )
-    try:
-        resolver = ModelProviderResolver(
-            model_turn_provider=None,
-            model_registry=_FailingModelRegistry(),
-            policy=GENERIC_AGENT,
-            base_tool_registry=create_builtin_tool_registry(),
-            catalog=ToolCatalog(),
-            strict_model_provider=True,
-        )
-        with pytest.raises(RuntimeError, match="provider unavailable"):
-            resolver.resolve(
-                state,
-                tool_registry=create_builtin_tool_registry(),
-            )
-    finally:
-        deferred_store_var.reset(token)
-
-
-def test_model_provider_resolver_prefers_explicit_provider() -> None:
-    provider = ResultDrivenModelTurnProvider()
-
-    resolved = ModelProviderResolver(
-        model_turn_provider=provider,
-        model_registry=object(),
-        policy=GENERIC_AGENT,
-        base_tool_registry=create_builtin_tool_registry(),
-        catalog=ToolCatalog(),
-        strict_model_provider=True,
-    ).resolve(
-        None,
-        tool_registry=create_builtin_tool_registry(),
-    )
-
-    assert resolved is provider

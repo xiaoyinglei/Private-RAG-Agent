@@ -4,26 +4,22 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol
 
-from pydantic import BaseModel
-
 from rag.agent.core.definition import AgentRuntimePolicy
+from rag.agent.core.messages import tool_result_message
 from rag.agent.memory.models import (
     ContextBudgetSnapshot,
     ContextSection,
     ContextSectionName,
-    ExternalizedToolOutput,
     InjectedContext,
     MemoryRef,
 )
+from rag.agent.tools.tool import ToolResult
 from rag.assembly.tokenizer import TokenAccountingService, TokenizerContract
 
 if TYPE_CHECKING:
     from langchain_core.messages import BaseMessage
 
     from rag.agent.loop.state import LoopState
-    from rag.agent.tools.formatter import ToolOutputFormatterResolver
-    from rag.agent.tools.spec import ToolResult
-
     type ContextState = LoopState
 
 
@@ -80,7 +76,6 @@ class ContextBuilder:
         max_context_tokens: int,
         max_section_chars: int = 4000,
         token_accounting: ContextTokenAccounting | None = None,
-        formatter_resolver: ToolOutputFormatterResolver | None = None,
     ) -> None:
         if max_context_tokens < 0:
             raise ValueError("max_context_tokens must be non-negative")
@@ -88,7 +83,6 @@ class ContextBuilder:
             raise ValueError("max_section_chars must be positive")
         self._max_context_tokens = max_context_tokens
         self._max_section_chars = max_section_chars
-        self._formatter_resolver = formatter_resolver
         self._token_accounting = token_accounting or TokenAccountingService(
             TokenizerContract(
                 embedding_model_name="agent-context",
@@ -143,6 +137,11 @@ class ContextBuilder:
             self._format_plan(self._plan_from_state(state)),
             required=True,
         )
+        add(
+            "tool_results",
+            self._format_tool_context(state),
+            required=True,
+        )
         ms = state.get("memory_state")
         add(
             "memory",
@@ -166,12 +165,6 @@ class ContextBuilder:
             "message_tail",
             self._format_message_tail(state.get("messages", [])),
         )
-        add(
-            "tool_results",
-            self._format_tool_context(state),
-            required=True,
-        )
-
         selection = self._select_sections(candidates)
         return InjectedContext(
             sections=selection.sections,
@@ -531,57 +524,15 @@ class ContextBuilder:
             return ""
         lines = ["Tool results:"]
         for result in tool_results:
-            prefix = (
+            message = tool_result_message(result)
+            lines.append(
                 f"- tool_call_id={result.tool_call_id} "
-                f"tool_name={result.tool_name} status={result.status} "
-                f"latency_ms={result.latency_ms:.3g}"
+                f"tool_name={result.tool_name} content={message.content}"
             )
-            if result.status == "ok":
-                output = result.output
-                if isinstance(output, ExternalizedToolOutput):
-                    lines.append(
-                        f"{prefix} externalized_ref={output.ref.ref_id} "
-                        f"status={output.status} summary={self._one_line(output.summary)}"
-                    )
-                else:
-                    output_text = self._stringify_output(output)
-                    lines.append(f"{prefix} output={self._one_line(output_text)}")
-            else:
-                error = result.error
-                if error is None:
-                    lines.append(f"{prefix} error=<missing error payload>")
-                else:
-                    lines.append(
-                        f"{prefix} error_code={error.code} retryable={error.retryable} "
-                        f"message={self._one_line(error.message)}"
-                    )
         return "\n".join(lines)
 
     def _format_tool_context(self, state: ContextState) -> str:
-        tool_results = state.get("tool_results", [])
-        if not tool_results:
-            return ""
-        resolver = self._formatter_resolver
-        sections: list[str] = []
-        for result in tool_results:
-            formatter = resolver(result.tool_name) if resolver else None
-            if formatter is not None:
-                # Check for externalized output first
-                from rag.agent.memory.models import ExternalizedToolOutput
-
-                if isinstance(result.output, ExternalizedToolOutput):
-                    section = formatter.format_externalized(result.output)
-                else:
-                    section = formatter.format_result(result)
-            else:
-                from rag.agent.tools.formatter import format_tool_result_fallback
-
-                section = format_tool_result_fallback(result)
-            if section is not None and section.content.strip():
-                sections.append(section.content)
-        if not sections:
-            return ""
-        return "Tool results:\n" + "\n".join(sections)
+        return self._format_tool_results(state.get("tool_results", []))
 
     def _format_loop_open_decisions(self, state: LoopState) -> str:
         lines: list[str] = []
@@ -651,14 +602,9 @@ class ContextBuilder:
         return str(content)
 
     @staticmethod
-    def _stringify_output(output: BaseModel | None) -> str:
-        if output is None:
-            return "<missing output payload>"
-        return str(output.model_dump(mode="json"))
-
-    @staticmethod
     def _externalized_tool_output_count(tool_results: Sequence[ToolResult]) -> int:
-        return sum(1 for result in tool_results if isinstance(getattr(result, "output", None), ExternalizedToolOutput))
+        del tool_results
+        return 0
 
     @staticmethod
     def _one_line(text: str) -> str:

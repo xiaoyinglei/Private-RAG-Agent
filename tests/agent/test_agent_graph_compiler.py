@@ -4,7 +4,6 @@ from typing import NotRequired
 
 import pytest
 from langgraph.graph import END, START, StateGraph
-from pydantic import BaseModel
 from typing_extensions import TypedDict
 
 from rag.agent.core.compiler import GraphCompiler
@@ -12,15 +11,16 @@ from rag.agent.core.definition import AgentRuntimePolicy
 from rag.agent.loop.state import LoopState, ModelTurnDraft
 from rag.agent.service import AgentRunRequest, AgentRunResult
 from rag.agent.tools.registry import ToolRegistry
-from rag.agent.tools.spec import ToolError, ToolPermissions, ToolSpec
-
-
-class SearchInput(BaseModel):
-    query: str
-
-
-class SearchOutput(BaseModel):
-    items: list[str]
+from rag.agent.tools.tool import (
+    CancellationMode,
+    InterruptBehavior,
+    NormalizedToolOutput,
+    ResolvedToolUse,
+    Tool,
+    ToolContentBlock,
+    ToolDefinition,
+    json_schema_input,
+)
 
 
 class _OuterWorkflowState(TypedDict):
@@ -73,16 +73,41 @@ class _FailingProvider:
 
 
 def _registry() -> ToolRegistry:
+    schema = {
+        "type": "object",
+        "properties": {"query": {"type": "string"}},
+        "required": ["query"],
+        "additionalProperties": False,
+    }
     registry = ToolRegistry()
     registry.register(
-        ToolSpec(
-            name="vector_search",
-            description="Vector search",
-            input_model=SearchInput,
-            output_model=SearchOutput,
-            error_model=ToolError,
-            permissions=ToolPermissions(read_db=True, embed=True),
+        Tool(
+            definition=ToolDefinition(
+                name="vector_search",
+                description="Vector search",
+                input_schema=schema,
+            ),
+            validate_input=json_schema_input(schema),
+            run=lambda arguments: {"items": [arguments["query"]]},
+            normalize_output=lambda raw: NormalizedToolOutput(
+                content=(
+                    ToolContentBlock(type="text", data={"text": str(raw)}),
+                ),
+                structured_content=raw,  # type: ignore[arg-type]
+            ),
+            output_schema=None,
+            static_effects=frozenset(),
+            resolve_use=lambda _arguments: ResolvedToolUse(
+                effects=frozenset(),
+                targets=(),
+            ),
+            execution_revision="vector-search-v1",
+            idempotent=True,
+            concurrency_safe=True,
+            cancellation_mode=CancellationMode.COOPERATIVE,
+            interrupt_behavior=InterruptBehavior.CANCEL,
             timeout_seconds=5.0,
+            max_model_output_bytes=4096,
         )
     )
     return registry

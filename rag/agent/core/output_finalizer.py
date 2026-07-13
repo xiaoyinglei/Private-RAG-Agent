@@ -62,7 +62,6 @@ class ModelStructuredOutputFinalizer:
                     kwargs=self._kwargs,
                 )
             },
-            formatter_resolver=None,
         )
 
     @property

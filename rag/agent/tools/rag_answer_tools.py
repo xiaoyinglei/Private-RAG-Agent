@@ -7,7 +7,7 @@ from typing import Any, cast
 from pydantic import BaseModel, ConfigDict, Field
 
 from rag.agent.core.context import RunRegistry
-from rag.agent.tools.registry import ToolExecutionContext
+from rag.agent.tools.permissions import ToolExecutionContext
 from rag.agent.tools.spec import ExecutionCategory, ToolError, ToolPermissions, ToolSpec
 from rag.providers.llm_gateway import llm_budget_scope
 from rag.schema.query import AnswerCitation, EvidenceItem, RetrievalSignals

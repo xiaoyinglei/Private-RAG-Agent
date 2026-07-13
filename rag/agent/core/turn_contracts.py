@@ -12,24 +12,30 @@ from pydantic import (
     model_validator,
 )
 
-from rag.agent.tools.tool import JsonValue, ToolCall
+from rag.agent.tools.tool import JsonValue, ToolCall, ToolCallOrigin
 
 
 class ToolCallPlan(BaseModel):
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
     tool_call_id: str
     tool_name: str
     arguments: dict[str, object]
+    origin: ToolCallOrigin | None = None
 
     @classmethod
     def create(
         cls,
         tool_name: str,
         arguments: dict[str, object],
+        *,
+        origin: ToolCallOrigin | None = None,
     ) -> ToolCallPlan:
         return cls(
             tool_call_id=f"tc_{uuid4().hex[:12]}",
             tool_name=tool_name,
             arguments=arguments,
+            origin=origin,
         )
 
 

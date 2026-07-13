@@ -342,6 +342,10 @@ class ToolCall:
             _freeze_mapping(self.arguments, path="arguments"),
         )
 
+    def __deepcopy__(self, memo: dict[int, object]) -> ToolCall:
+        del memo
+        return self
+
 
 @dataclass(frozen=True, slots=True)
 class ToolContentBlock:
@@ -476,6 +480,10 @@ class ToolResult:
             "metadata",
             _freeze_mapping(self.metadata, path="metadata"),
         )
+
+    def __deepcopy__(self, memo: dict[int, object]) -> ToolResult:
+        del memo
+        return self
 
 
 type ValidateInput = Callable[[Mapping[str, JsonValue]], Mapping[str, JsonValue]]

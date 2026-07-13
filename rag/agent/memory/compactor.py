@@ -1,8 +1,7 @@
 from __future__ import annotations
 
-import json
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from hashlib import sha256
 from typing import TYPE_CHECKING, Any, Protocol, cast
@@ -10,21 +9,20 @@ from typing import TYPE_CHECKING, Any, Protocol, cast
 from langchain_core.messages import BaseMessage, HumanMessage
 from pydantic import BaseModel
 
+from rag.agent.core.messages import tool_result_message
 from rag.agent.memory.models import (
     ContextBudgetSnapshot,
     EvictedStateItem,
-    ExternalizedToolOutput,
     ExtractedFact,
     MemoryBudgetSnapshot,
     MemoryPolicy,
     MemoryRef,
     MessageBatchPayload,
     StateChannelReplacement,
-    ToolErrorDetailPayload,
     WorkingMemoryDraft,
     WorkingSummary,
 )
-from rag.agent.tools.spec import ToolResult
+from rag.agent.tools.tool import ToolResult
 from rag.utils.text import text_unit_count
 
 if TYPE_CHECKING:
@@ -41,14 +39,6 @@ class ToolOutputMemoryStore(Protocol):
         source_tool_name: str | None = None,
         warnings: list[str] | None = None,
     ) -> MemoryRef: ...
-
-
-@dataclass
-class _ExternalizationMetadata:
-    externalized_count: int = 0
-    unavailable_count: int = 0
-    memory_refs: list[MemoryRef] = field(default_factory=list)
-    warnings: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -411,33 +401,13 @@ class MemoryCompactor:
     ) -> dict[str, Any]:
         compacted = dict(update)
         warnings: list[str] = []
-        externalized_count = 0
-        unavailable_count = 0
         new_memory_refs: list[MemoryRef] = []
-        raw_refs_by_tool_call_id: dict[str, MemoryRef] = {}
         evicted_items: list[EvictedStateItem] = []
         used_channel_counts: dict[str, int] = {}
         pinned_item_count = 0
 
         tool_results = self._combined_items(state, compacted, "tool_results")
-        compacted_tool_results: list[ToolResult] = []
-        tool_results_changed = False
-        for result in tool_results:
-            if not isinstance(result, ToolResult):
-                compacted_tool_results.append(result)
-                continue
-            replacement, metadata = self._maybe_externalize_result(result)
-            if replacement is result:
-                compacted_tool_results.append(result)
-                continue
-            tool_results_changed = True
-            compacted_tool_results.append(replacement)
-            externalized_count += metadata.externalized_count
-            unavailable_count += metadata.unavailable_count
-            new_memory_refs.extend(metadata.memory_refs)
-            warnings.extend(metadata.warnings)
-            if ref := self._result_memory_ref(replacement):
-                raw_refs_by_tool_call_id[replacement.tool_call_id] = ref
+        compacted_tool_results = list(tool_results)
 
         dropped: dict[str, int] = {}
         pin_context = (
@@ -458,7 +428,6 @@ class MemoryCompactor:
             combined: list[Any]
             if channel == "tool_results":
                 combined = compacted_tool_results
-                channel_changed = tool_results_changed
             elif channel == "memory_refs" and new_memory_refs:
                 combined = [
                     *[ref for ref in state["memory_state"].memory_refs if isinstance(ref, MemoryRef)],
@@ -496,10 +465,10 @@ class MemoryCompactor:
 
         compacted["memory_budget"] = MemoryBudgetSnapshot(
             max_tool_output_chars=self._policy.max_tool_output_chars,
-            externalized_record_count=externalized_count,
-            unavailable_record_count=unavailable_count,
+            externalized_record_count=0,
+            unavailable_record_count=0,
             memory_ref_count=len(self._combined_items(state, compacted, "memory_refs")),
-            compacted_tool_result_count=externalized_count + unavailable_count,
+            compacted_tool_result_count=0,
             dropped_state_items=dropped,
             evicted_items=evicted_items,
             used_channel_counts=used_channel_counts,
@@ -511,281 +480,10 @@ class MemoryCompactor:
         return compacted
 
     def summarize_tool_result(self, result: ToolResult) -> str:
-        if result.status == "error":
-            error = result.error
-            if error is None:
-                return f"{result.tool_name} error=<missing>"
-            return (
-                f"{result.tool_name} error_code={error.code} retryable={error.retryable} "
-                f"message={self._one_line(error.message)}"
-            )
-        output = result.output
-        if output is None:
-            return f"{result.tool_name} output=<missing>"
-        if result.tool_name == "run_python":
-            return self._summarize_run_python(output)
-        if result.tool_name == "structured_probe":
-            return self._summarize_structured_probe(output)
-        if result.tool_name == "list_files":
-            return self._summarize_list_files(output)
-        if result.tool_name == "read_file":
-            return self._summarize_read_file(output)
-        if result.tool_name == "asset_analyze":
-            return self._summarize_asset_analyze(output)
-        return self._summarize_unknown(output, tool_name=result.tool_name)
+        """Summarize without changing the model-visible result representation."""
 
-    def _maybe_externalize_result(self, result: ToolResult) -> tuple[ToolResult, _ExternalizationMetadata]:
-        if result.status == "error":
-            return self._maybe_externalize_error_detail(result)
-        if result.output is None:
-            return result, _ExternalizationMetadata()
-        if isinstance(result.output, ExternalizedToolOutput):
-            return result, _ExternalizationMetadata()
-        output_json = result.output.model_dump_json()
-        if len(output_json) <= self._policy.max_tool_output_chars:
-            return result, _ExternalizationMetadata()
-
-        summary = self._truncate_summary(self.summarize_tool_result(result))
-        original_output_model = _model_path(result.output)
-        warnings: list[str] = []
-        if self._store is None:
-            warnings.append("memory_unavailable")
-            ref = MemoryRef(
-                ref_id=f"unavailable_{result.tool_call_id}",
-                path=f".agent_memory/records/unavailable_{result.tool_call_id}.json",
-                summary=summary,
-                source_tool_call_id=result.tool_call_id,
-                source_tool_name=result.tool_name,
-                status="unavailable",
-                warnings=warnings,
-            )
-            replacement = result.model_copy(
-                update={
-                    "output": ExternalizedToolOutput(
-                        original_output_model=original_output_model,
-                        summary=summary,
-                        ref=ref,
-                        status="unavailable",
-                        warnings=warnings,
-                    )
-                }
-            )
-            return replacement, _ExternalizationMetadata(
-                unavailable_count=1,
-                memory_refs=[ref],
-                warnings=warnings,
-            )
-
-        try:
-            ref = self._store.write_tool_output(
-                result.output,
-                summary=summary,
-                source_tool_call_id=result.tool_call_id,
-                source_tool_name=result.tool_name,
-            )
-            replacement = result.model_copy(
-                update={
-                    "output": ExternalizedToolOutput(
-                        original_output_model=original_output_model,
-                        summary=summary,
-                        ref=ref,
-                        status="available",
-                    )
-                }
-            )
-            return replacement, _ExternalizationMetadata(
-                externalized_count=1,
-                memory_refs=[ref],
-            )
-        except Exception as exc:
-            warnings.append("memory_compaction_failed")
-            ref = MemoryRef(
-                ref_id=f"unavailable_{result.tool_call_id}",
-                path=f".agent_memory/records/unavailable_{result.tool_call_id}.json",
-                summary=summary,
-                source_tool_call_id=result.tool_call_id,
-                source_tool_name=result.tool_name,
-                status="unavailable",
-                warnings=warnings,
-            )
-            result_warnings = [*warnings, self._one_line(str(exc))]
-            replacement = result.model_copy(
-                update={
-                    "output": ExternalizedToolOutput(
-                        original_output_model=original_output_model,
-                        summary=summary,
-                        ref=ref,
-                        status="unavailable",
-                        warnings=result_warnings,
-                    )
-                }
-            )
-            return replacement, _ExternalizationMetadata(
-                unavailable_count=1,
-                memory_refs=[ref],
-                warnings=result_warnings,
-            )
-
-    def _maybe_externalize_error_detail(
-        self,
-        result: ToolResult,
-    ) -> tuple[ToolResult, _ExternalizationMetadata]:
-        error = result.error
-        if error is None or not error.detail:
-            return result, _ExternalizationMetadata()
-        if isinstance(error.detail.get("externalized_ref"), str):
-            return result, _ExternalizationMetadata()
-        detail_json = json.dumps(error.detail, ensure_ascii=False, default=str)
-        if len(detail_json) <= self._policy.max_tool_output_chars:
-            return result, _ExternalizationMetadata()
-
-        summary = self._truncate_summary(
-            self._metadata_summary(
-                "tool_error_detail",
-                tool_name=result.tool_name,
-                error_code=error.code,
-                retryable=error.retryable,
-                detail_chars=len(detail_json),
-                detail_keys=self._list_preview(list(error.detail.keys())),
-            )
-        )
-        payload = ToolErrorDetailPayload(
-            tool_call_id=result.tool_call_id,
-            tool_name=result.tool_name,
-            detail=error.detail,
-        )
-        warnings: list[str] = []
-        if self._store is None:
-            warnings.append("memory_unavailable")
-            ref = self._unavailable_ref(
-                result,
-                summary=summary,
-                suffix="error_detail",
-                warnings=warnings,
-            )
-            replacement = result.model_copy(
-                update={
-                    "error": error.model_copy(
-                        update={
-                            "detail": self._externalized_error_detail(
-                                ref=ref,
-                                summary=summary,
-                                status="unavailable",
-                            )
-                        }
-                    )
-                }
-            )
-            return replacement, _ExternalizationMetadata(
-                unavailable_count=1,
-                memory_refs=[ref],
-                warnings=warnings,
-            )
-
-        try:
-            ref = self._store.write_tool_output(
-                payload,
-                summary=summary,
-                source_tool_call_id=result.tool_call_id,
-                source_tool_name=result.tool_name,
-            )
-            replacement = result.model_copy(
-                update={
-                    "error": error.model_copy(
-                        update={
-                            "detail": self._externalized_error_detail(
-                                ref=ref,
-                                summary=summary,
-                                status="available",
-                            )
-                        }
-                    )
-                }
-            )
-            return replacement, _ExternalizationMetadata(
-                externalized_count=1,
-                memory_refs=[ref],
-            )
-        except Exception as exc:
-            warnings.append("memory_compaction_failed")
-            ref = self._unavailable_ref(
-                result,
-                summary=summary,
-                suffix="error_detail",
-                warnings=warnings,
-            )
-            result_warnings = [*warnings, self._one_line(str(exc))]
-            replacement = result.model_copy(
-                update={
-                    "error": error.model_copy(
-                        update={
-                            "detail": {
-                                **self._externalized_error_detail(
-                                    ref=ref,
-                                    summary=summary,
-                                    status="unavailable",
-                                ),
-                                "warnings": result_warnings,
-                            }
-                        }
-                    )
-                }
-            )
-            return replacement, _ExternalizationMetadata(
-                unavailable_count=1,
-                memory_refs=[ref],
-                warnings=result_warnings,
-            )
-
-    @staticmethod
-    def _result_memory_ref(result: ToolResult) -> MemoryRef | None:
-        output = result.output
-        if isinstance(output, ExternalizedToolOutput):
-            return output.ref
-        error = result.error
-        detail = None if error is None else error.detail
-        if isinstance(detail, dict) and isinstance(detail.get("externalized_ref"), str):
-            ref_id = str(detail["externalized_ref"])
-            return MemoryRef(
-                ref_id=ref_id,
-                path=f".agent_memory/records/{ref_id}.json",
-                summary=str(detail.get("summary", "")),
-                source_tool_call_id=result.tool_call_id,
-                source_tool_name=result.tool_name,
-                status=cast(Any, detail.get("status", "available")),
-            )
-        return None
-
-    @staticmethod
-    def _externalized_error_detail(
-        *,
-        ref: MemoryRef,
-        summary: str,
-        status: str,
-    ) -> dict[str, object]:
-        return {
-            "externalized_ref": ref.ref_id,
-            "summary": summary,
-            "status": status,
-        }
-
-    @staticmethod
-    def _unavailable_ref(
-        result: ToolResult,
-        *,
-        summary: str,
-        suffix: str,
-        warnings: list[str],
-    ) -> MemoryRef:
-        ref_id = f"unavailable_{result.tool_call_id}_{suffix}"
-        return MemoryRef(
-            ref_id=ref_id,
-            path=f".agent_memory/records/{ref_id}.json",
-            summary=summary,
-            source_tool_call_id=result.tool_call_id,
-            source_tool_name=result.tool_name,
-            status="unavailable",
-            warnings=warnings,
+        return self._one_line(
+            f"{result.tool_name} {tool_result_message(result).content}"
         )
 
     def _bounded_with_audit(
@@ -941,16 +639,8 @@ class MemoryCompactor:
         update: dict[str, Any],
         new_memory_refs: list[MemoryRef],
     ) -> set[str]:
-        ref_ids = {ref.ref_id for ref in new_memory_refs}
-        for result in self._combined_items(state, update, "tool_results"):
-            output = getattr(result, "output", None)
-            if isinstance(output, ExternalizedToolOutput):
-                ref_ids.add(output.ref.ref_id)
-            error = getattr(result, "error", None)
-            detail = getattr(error, "detail", None)
-            if isinstance(detail, dict) and isinstance(detail.get("externalized_ref"), str):
-                ref_ids.add(str(detail["externalized_ref"]))
-        return ref_ids
+        del self, state, update
+        return {ref.ref_id for ref in new_memory_refs}
 
     def _bounded(self, channel: str, items: list[Any]) -> list[Any]:
         limit = int(getattr(self._policy, self._CAPPED_CHANNELS[channel]))
@@ -969,117 +659,6 @@ class MemoryCompactor:
         if len(incoming) == 1 and isinstance(incoming[0], StateChannelReplacement):
             return list(incoming[0].items)
         return [*current, *incoming]
-
-    def _summarize_run_python(self, output: BaseModel) -> str:
-        values = output.model_dump(mode="json")
-        generated_files = values.get("generated_files") or []
-        return self._metadata_summary(
-            "run_python",
-            ok=values.get("ok"),
-            exit_code=values.get("exit_code"),
-            duration_ms=values.get("duration_ms"),
-            stdout_chars=len(str(values.get("stdout") or "")),
-            stderr_chars=len(str(values.get("stderr") or "")),
-            stdout_truncated=values.get("stdout_truncated"),
-            stderr_truncated=values.get("stderr_truncated"),
-            generated_files=self._list_preview(generated_files),
-        )
-
-    def _summarize_structured_probe(self, output: BaseModel) -> str:
-        values = output.model_dump(mode="json")
-        parts = [
-            self._metadata_summary(
-                "structured_probe",
-                path=values.get("path"),
-                file_kind=values.get("file_kind"),
-                mime_type=values.get("mime_type"),
-                tables=len(values.get("tables") or []),
-                truncated=values.get("truncated"),
-            )
-        ]
-        for table in (values.get("tables") or [])[:5]:
-            if not isinstance(table, dict):
-                continue
-            header = None
-            candidates = table.get("candidate_header_rows") or []
-            if candidates and isinstance(candidates[0], dict):
-                header = candidates[0].get("row_index")
-            parts.append(
-                self._metadata_summary(
-                    "table",
-                    name=table.get("name"),
-                    used_range=table.get("used_range"),
-                    row_count=table.get("row_count"),
-                    column_count=table.get("column_count"),
-                    header_row=header,
-                    data_start_row=table.get("data_start_row"),
-                )
-            )
-        return " | ".join(parts)
-
-    def _summarize_list_files(self, output: BaseModel) -> str:
-        values = output.model_dump(mode="json")
-        files = values.get("files") or []
-        previews: list[str] = []
-        for file_info in files[:8]:
-            if not isinstance(file_info, dict):
-                continue
-            previews.append(
-                self._metadata_summary(
-                    "file",
-                    path=file_info.get("path"),
-                    kind=file_info.get("file_kind"),
-                    binary=file_info.get("is_binary"),
-                    capabilities=self._list_preview(file_info.get("capabilities") or []),
-                )
-            )
-        return " | ".join(
-            [
-                self._metadata_summary(
-                    "list_files",
-                    files=len(files),
-                    truncated=values.get("truncated"),
-                ),
-                *previews,
-            ]
-        )
-
-    def _summarize_read_file(self, output: BaseModel) -> str:
-        values = output.model_dump(mode="json")
-        return self._metadata_summary(
-            "read_file",
-            path=values.get("path"),
-            size_bytes=values.get("size_bytes"),
-            truncated=values.get("truncated"),
-            is_binary=values.get("is_binary"),
-            encoding=values.get("encoding"),
-            content_chars=len(str(values.get("content") or "")),
-        )
-
-    def _summarize_asset_analyze(self, output: BaseModel) -> str:
-        values = output.model_dump(mode="json")
-        rows = values.get("rows") or []
-        columns = values.get("columns") or []
-        return self._metadata_summary(
-            "asset_analyze",
-            asset_id=values.get("asset_id"),
-            operation=values.get("operation"),
-            rows=len(rows),
-            raw_row_count=values.get("raw_row_count"),
-            truncated=values.get("truncated"),
-            columns=self._list_preview(columns),
-            query_chars=len(str(values.get("query") or "")),
-        )
-
-    def _summarize_unknown(self, output: BaseModel, *, tool_name: str) -> str:
-        values = output.model_dump(mode="json")
-        fields = list(values.keys()) if isinstance(values, dict) else []
-        return self._metadata_summary(
-            tool_name,
-            original_output_model=_model_path(output),
-            output_chars=len(output.model_dump_json()),
-            fields=self._list_preview(fields),
-        )
 
     def _eviction_summary(self, item: Any) -> str | None:
         if isinstance(item, ToolResult):
@@ -1358,147 +937,8 @@ class LoopContextCompactor:
         keep_recent: int | None = None,
         force: bool = False,
     ) -> _LayerResult:
-        tool_results = list(state.get("tool_results", []))
-        if not tool_results:
-            return _LayerResult()
-
-        helper = MemoryCompactor(
-            policy=policy,
-            store=self._store,
-            loop_mode=True,
-        )
-        pinned_keys = helper._pin_loop_context(  # noqa: SLF001 - same module.
-            state,
-            {},
-            new_memory_refs=[],
-        ).get("tool_results", set())
-        keep_recent_count = policy.micro_compact_keep_recent if keep_recent is None else keep_recent
-        recent_start = (
-            len(tool_results)
-            if keep_recent_count <= 0
-            else max(
-                0,
-                len(tool_results) - keep_recent_count,
-            )
-        )
-
-        compacted: list[Any] = []
-        new_refs: list[MemoryRef] = []
-        warnings: list[str] = []
-        changed = False
-        for index, result in enumerate(tool_results):
-            if not isinstance(result, ToolResult):
-                compacted.append(result)
-                continue
-            if not force and index >= recent_start:
-                compacted.append(result)
-                continue
-            if _item_key(result) in pinned_keys:
-                compacted.append(result)
-                continue
-            replacement, ref, result_warnings = self._micro_compact_result(
-                result,
-                policy=policy,
-                helper=helper,
-                force=force,
-            )
-            compacted.append(replacement)
-            if replacement is result:
-                continue
-            changed = True
-            if ref is not None:
-                new_refs.append(ref)
-            warnings.extend(result_warnings)
-
-        if not changed:
-            return _LayerResult()
-
-        state["tool_results"] = compacted
-        channels = ["tool_results"]
-        if new_refs:
-            self._append_memory_refs(state, new_refs)
-            channels.append("memory_refs")
-        if warnings:
-            self._append_memory_warnings(state, warnings)
-            channels.append("memory_warnings")
-        return _LayerResult(
-            changed=True,
-            channels=tuple(dict.fromkeys(channels)),
-            warnings=tuple(dict.fromkeys(warnings)),
-        )
-
-    def _micro_compact_result(
-        self,
-        result: ToolResult,
-        *,
-        policy: MemoryPolicy,
-        helper: MemoryCompactor,
-        force: bool,
-    ) -> tuple[ToolResult, MemoryRef | None, list[str]]:
-        if result.status == "error" or result.output is None:
-            return result, None, []
-        if isinstance(result.output, ExternalizedToolOutput):
-            return result, result.output.ref, []
-        output_json = result.output.model_dump_json()
-        if not force and len(output_json) > policy.max_tool_output_chars:
-            return result, None, []
-
-        summary = self._truncate_text(
-            helper.summarize_tool_result(result),
-            limit=policy.micro_compact_max_chars,
-        )
-        original_output_model = _model_path(result.output)
-        warnings: list[str] = []
-        if self._store is not None:
-            try:
-                ref = self._store.write_tool_output(
-                    result.output,
-                    summary=summary,
-                    source_tool_call_id=result.tool_call_id,
-                    source_tool_name=result.tool_name,
-                )
-                replacement = result.model_copy(
-                    update={
-                        "output": ExternalizedToolOutput(
-                            original_output_model=original_output_model,
-                            summary=summary,
-                            ref=ref,
-                            status=ref.status,
-                        )
-                    }
-                )
-                return replacement, ref, warnings
-            except Exception as exc:
-                warnings.extend(
-                    [
-                        "memory_compaction_failed",
-                        MemoryCompactor._one_line(str(exc)),
-                    ]
-                )
-        else:
-            warnings.append("memory_unavailable")
-
-        ref = MemoryRef(
-            ref_id=f"compacted_{result.tool_call_id}",
-            path=f".agent_memory/records/compacted_{result.tool_call_id}.json",
-            summary=summary,
-            source_tool_call_id=result.tool_call_id,
-            source_tool_name=result.tool_name,
-            status="compacted",
-            warnings=list(dict.fromkeys(warnings)),
-        )
-        replacement = result.model_copy(
-            update={
-                "output": ExternalizedToolOutput(
-                    original_output_model=original_output_model,
-                    summary=summary,
-                    ref=ref,
-                    status="compacted",
-                    warnings=list(dict.fromkeys(warnings)),
-                )
-            }
-        )
-        return replacement, ref, warnings
+        del self, state, policy, keep_recent, force
+        return _LayerResult()
 
     @staticmethod
     def _append_memory_refs(state: dict[str, Any], refs: list[MemoryRef]) -> None:
@@ -1604,17 +1044,8 @@ def _source_tool_call_id(item: Any) -> str | None:
 def _memory_ref_id(item: Any) -> str | None:
     if isinstance(item, MemoryRef):
         return item.ref_id
-    output = getattr(item, "output", None)
-    if isinstance(output, ExternalizedToolOutput):
-        return output.ref.ref_id
     ref = getattr(item, "raw_memory_ref", None)
-    if isinstance(ref, MemoryRef):
-        return ref.ref_id
-    error = getattr(item, "error", None)
-    detail = getattr(error, "detail", None)
-    if isinstance(detail, dict) and isinstance(detail.get("externalized_ref"), str):
-        return str(detail["externalized_ref"])
-    return None
+    return ref.ref_id if isinstance(ref, MemoryRef) else None
 
 
 def _active_plan_step(plan: Any) -> Any | None:
@@ -1628,10 +1059,6 @@ def _active_plan_step(plan: Any) -> Any | None:
         if getattr(step, "status", None) in {"in_progress", "pending"}:
             return step
     return None
-
-
-def _model_path(model: BaseModel) -> str:
-    return f"{model.__class__.__module__}.{model.__class__.__name__}"
 
 
 __all__ = [

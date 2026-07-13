@@ -3,96 +3,73 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import AsyncGenerator, Mapping, Sequence
-from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
 from uuid import uuid4
 
 from langchain_core.messages import BaseMessage
 from langgraph.checkpoint.base import BaseCheckpointSaver
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from rag.agent.capabilities.catalog import (
-    DeferredToolStore,
-    SearchCandidate,
-    ToolCatalog,
-)
-from rag.agent.capabilities.context import deferred_store_var, iteration_var
-from rag.agent.capabilities.tool_search import (
-    ActivateToolsInput,
-    ActivateToolsOutput,
-    ToolSearchInput,
-    ToolSearchOutput,
-    execute_activate_tools,
-    execute_tool_search,
-)
 from rag.agent.core.checkpointing import (
     LangGraphCheckpointStore,
     aclose_agent_checkpointer,
     create_agent_checkpointer,
+    reconcile_tool_manifest,
 )
-from rag.agent.core.context import AgentRunConfig, RunRegistry, derive_child_config
+from rag.agent.core.context import AgentRunConfig, RunRegistry
 from rag.agent.core.definition import AgentRuntimePolicy
-from rag.agent.core.delegation import AgentDelegationRequest, DelegatedAgentRunner, ParentAgentContext
 from rag.agent.core.finalization import FinishCandidateBuilder
 from rag.agent.core.goal_contract import GoalCompatibilityConfig, GoalSpec
-from rag.agent.core.human_input import HumanInputRequest, HumanInputResponse
+from rag.agent.core.human_input import (
+    HumanInputRequest,
+    HumanInputResponse,
+)
 from rag.agent.core.llm_registry import ModelResolver
 from rag.agent.core.model_provider_runtime import ModelProviderResolver
+from rag.agent.core.model_request import (
+    ModelCallRecord,
+    build_stable_context,
+    build_tool_manifest,
+)
 from rag.agent.core.output_finalizer import (
     StructuredOutputFinalizer,
     create_model_structured_output_finalizer,
 )
-from rag.agent.core.output_models import (
-    ValidatedFinalOutput,
-    output_model_path,
-)
+from rag.agent.core.output_models import ValidatedFinalOutput, output_model_path
 from rag.agent.core.runtime_diagnostics import (
     AgentLatencyProfile,
     RuntimeDiagnostic,
     merge_runtime_diagnostics,
 )
-from rag.agent.core.runtime_ports import RetrievalHintProvider
-from rag.agent.core.tool_execution import ToolExecutionService
-from rag.agent.core.turn_contracts import ToolCallPlan
+from rag.agent.core.turn_contracts import (
+    ToolCallPlan,
+    ToolManifestDriftStatus,
+)
 from rag.agent.loop.runtime import AgentLoop, ModelTurnProvider
 from rag.agent.loop.state import (
+    LoopPause,
     LoopState,
-    append_loop_diagnostic,
+    LoopTransition,
     create_loop_state,
 )
 from rag.agent.loop.stop_hooks import StopHookRunner, build_stop_hooks
-from rag.agent.memory.compactor import (
-    LoopContextCompactor,
-    MessageCompactor,
-)
+from rag.agent.memory.compactor import LoopContextCompactor, MessageCompactor
 from rag.agent.memory.models import MemoryPolicy
-from rag.agent.memory.persistent import PersistentMemoryStore
-from rag.agent.memory.persistent.runtime import PersistentMemoryRuntime
 from rag.agent.memory.store import WorkspaceMemoryStore
-from rag.agent.tooling import (
-    ToolDiscoveryState,
-    ToolExecutorLoopAdapter,
-    ToolSurfaceRequest,
-    install_minimal_workspace_tools,
+from rag.agent.tools.builtins import RESIDENT_CODING_TOOL_NAMES
+from rag.agent.tools.executor import ToolExecutor
+from rag.agent.tools.permissions import ToolExecutionContext
+from rag.agent.tools.registry import ToolRegistry
+from rag.agent.tools.selection import resolve_tool_options, select_tools
+from rag.agent.tools.tool import ToolCall, ToolCallOrigin, ToolResult
+from rag.agent.workspace import (
+    WorkspaceRuntime,
+    create_temp_workspace,
+    import_files,
+    open_workspace,
 )
-from rag.agent.tooling import (
-    ToolExecutor as NewToolExecutor,
-)
-from rag.agent.tooling import (
-    ToolRegistry as NewToolRegistry,
-)
-from rag.agent.tools.catalog_assembly import build_tool_catalog
-from rag.agent.tools.mcp_adapter import MCPToolRegistry
-from rag.agent.tools.registry import ToolRegistry, ToolRunner
-from rag.agent.tools.runtime_registry_builder import RuntimeToolRegistryBuilder
-from rag.agent.tools.spec import ExecutionCategory, ToolPermissions, ToolResult, ToolSpec
-from rag.agent.tools.workspace_tools import create_workspace_tools
 from rag.schema.query import AnswerCitation, EvidenceItem
 from rag.schema.runtime import AccessPolicy
-
-if TYPE_CHECKING:
-    from rag.agent.file_manifest import FileManifest
 
 logger = logging.getLogger(__name__)
 
@@ -115,8 +92,20 @@ class AgentRunRequest(BaseModel):
     workspace_path: str | None = None
     memory_policy: MemoryPolicy | None = None
     goal_spec: GoalSpec | None = None
-    tool_surface_request: ToolSurfaceRequest | None = None
-    tool_discovery_state: ToolDiscoveryState | None = None
+    tools: tuple[str, ...] | None = None
+    disabled_tools: tuple[str, ...] = ()
+    allow_write_tools: bool = False
+    allow_execute_tools: bool = False
+    allow_discovery_tools: bool = False
+
+    @field_validator("tools", "disabled_tools", mode="before")
+    @classmethod
+    def _tuple_names(cls, value: object) -> object:
+        if value is None:
+            return None
+        if isinstance(value, (str, bytes)):
+            raise TypeError("tool options must be sequences of names")
+        return tuple(value)  # type: ignore[arg-type]
 
     def to_run_config(self, definition: AgentRuntimePolicy) -> AgentRunConfig:
         run_id = self.run_id or f"run_{uuid4().hex[:12]}"
@@ -127,8 +116,14 @@ class AgentRunRequest(BaseModel):
             agent_type=definition.agent_type,
             max_context_tokens=self.max_context_tokens,
             llm_budget_total=self.llm_budget_total,
-            max_depth=definition.max_depth if self.max_depth is None else self.max_depth,
-            access_policy=definition.access_policy_ceiling or AccessPolicy.default(),
+            max_depth=(
+                definition.max_depth
+                if self.max_depth is None
+                else self.max_depth
+            ),
+            access_policy=(
+                definition.access_policy_ceiling or AccessPolicy.default()
+            ),
             tool_policy=definition.tool_policy,
             memory_policy=self.memory_policy or MemoryPolicy(),
         )
@@ -142,9 +137,12 @@ class AgentRunResult(BaseModel):
     status: str
     final_answer: str | None = None
     final_output: BaseModel | None = None
-    output_validation_errors: list[dict[str, object]] = Field(default_factory=list)
+    output_validation_errors: list[dict[str, object]] = Field(
+        default_factory=list
+    )
     stop_reason: str | None = None
     tool_results: list[ToolResult] = Field(default_factory=list)
+    model_call_records: list[ModelCallRecord] = Field(default_factory=list)
     evidence: list[EvidenceItem] = Field(default_factory=list)
     citations: list[AnswerCitation] = Field(default_factory=list)
     iteration: int = 0
@@ -152,10 +150,12 @@ class AgentRunResult(BaseModel):
     insufficient_evidence_flag: bool = False
     needs_user_input: str | None = None
     human_input_request: object | None = None
-    pending_tool_calls_summary: list[dict[str, object]] = Field(default_factory=list)
+    pending_tool_calls_summary: list[dict[str, object]] = Field(
+        default_factory=list
+    )
     workspace_path: str | None = None
     runtime_diagnostics: list[RuntimeDiagnostic] = Field(default_factory=list)
-    tool_call_metrics: object | None = None  # ToolCallMetrics | None
+    tool_call_metrics: object | None = None
     latency_profile: AgentLatencyProfile | None = None
 
     @classmethod
@@ -181,56 +181,53 @@ class AgentRunResult(BaseModel):
         workspace_path: str | None = None,
     ) -> AgentRunResult:
         run_config = state["run_config"]
-        is_terminal = state["status"] in {"completed", "failed"}
         terminal = state["terminal"]
         pause = state["pause"]
-        pending = state["pending_tool_calls"]
-
-        # PR2: derive evidence/citations from tool_results, not deprecated state fields
-        evidence: list[EvidenceItem] = []
-        citations: list[AnswerCitation] = []
-        for result in state.get("tool_results", []):
-            if result.status == "ok" and result.output is not None:
-                ev = getattr(result.output, "evidence", None)
-                if isinstance(ev, list):
-                    for item in ev:
-                        if isinstance(item, EvidenceItem):
-                            evidence.append(item)
-                        else:
-                            evidence.append(EvidenceItem.model_validate(item))
-                ct = getattr(result.output, "citations", None)
-                if isinstance(ct, list):
-                    for item in ct:
-                        if isinstance(item, AnswerCitation):
-                            citations.append(item)
-                        else:
-                            citations.append(AnswerCitation.model_validate(item))
-
+        evidence, citations = _result_provenance(state["tool_results"])
+        is_terminal = state["status"] in {"completed", "failed"}
         return cls(
             run_id=run_config.run_id,
             thread_id=run_config.thread_id,
-            status=("done" if state["status"] == "completed" else state["status"]),
+            status=(
+                "done" if state["status"] == "completed" else state["status"]
+            ),
             final_answer=state["finish_state"].final_answer,
             final_output=_restore_final_output(
                 state["finish_state"].final_output,
                 definition=definition,
             ),
-            output_validation_errors=list(state["finish_state"].output_validation_errors),
-            stop_reason=(None if terminal is None else terminal.stop_reason),
+            output_validation_errors=list(
+                state["finish_state"].output_validation_errors
+            ),
+            stop_reason=None if terminal is None else terminal.stop_reason,
             tool_results=list(state["tool_results"]),
+            model_call_records=list(state.get("model_call_records", ())),
             evidence=evidence,
             citations=citations,
             iteration=state["iteration"],
-            groundedness_flag=_derive_groundedness(list(state["tool_results"])),
-            insufficient_evidence_flag=_derive_insufficient_evidence(list(state["tool_results"])),
-            needs_user_input=(None if is_terminal or pause is None else pause.reason),
-            human_input_request=(None if is_terminal else state["approval_request"]),
+            groundedness_flag=_result_flag(
+                state["tool_results"],
+                "groundedness_flag",
+            ),
+            insufficient_evidence_flag=(
+                _result_flag(state["tool_results"], "insufficient_evidence")
+                or _result_flag(
+                    state["tool_results"],
+                    "insufficient_evidence_flag",
+                )
+            ),
+            needs_user_input=(
+                None if is_terminal or pause is None else pause.reason
+            ),
+            human_input_request=(
+                None if is_terminal else state["approval_request"]
+            ),
             pending_tool_calls_summary=[
                 {
                     "tool_call_id": call.tool_call_id,
                     "tool_name": call.tool_name,
                 }
-                for call in pending
+                for call in state["pending_tool_calls"]
             ],
             workspace_path=workspace_path,
             runtime_diagnostics=list(state["runtime_diagnostics"]),
@@ -239,134 +236,9 @@ class AgentRunResult(BaseModel):
         )
 
 
-@dataclass
-class _RunContext:
-    """Prepared per-run context — the single source of truth for a run's setup.
-
-    Extracted from the duplicated setup logic in run_with_config / run_streaming.
-    Following Claude Code's "thin wrapper" philosophy: one path, clean assembly.
-    """
-
-    task: str
-    workspace: Any
-    manifest: Any  # FileManifest | None
-    workspace_tools: list[Any]  # list[BaseTool]
-    file_tools_to_activate: set[str]
-    runtime_registry: ToolRegistry
-    tooling_registry: NewToolRegistry
-    memory_store: WorkspaceMemoryStore
-    persistent_store: PersistentMemoryStore
-
-
-def _elapsed_ms(started_at: float) -> float:
-    return (time.perf_counter() - started_at) * 1000
-
-
-def _profile_with_run_timings(
-    profile: AgentLatencyProfile,
-    *,
-    prepare_latency_ms: float,
-    tool_latency_ms: float,
-    finalize_latency_ms: float,
-    total_ms: float,
-) -> AgentLatencyProfile:
-    return profile.model_copy(
-        update={
-            "prepare_latency_ms": profile.prepare_latency_ms + prepare_latency_ms,
-            "tool_latency_ms": tool_latency_ms,
-            "finalize_latency_ms": profile.finalize_latency_ms + finalize_latency_ms,
-            "total_ms": total_ms,
-        }
-    )
-
-
-def _default_tool_surface_request() -> ToolSurfaceRequest:
-    """Default service surface: no model-visible tools without explicit config."""
-    return ToolSurfaceRequest(force_empty=True)
-
-
-class _TaskChildRunner:
-    """Service-layer runner for the generic task tool.
-
-    Tools may request delegation, but service owns child-loop construction.
-    """
-
-    def __init__(
-        self,
-        *,
-        policy: AgentRuntimePolicy,
-        tool_registry: ToolRegistry,
-        model_turn_provider: ModelTurnProvider | None,
-        retrieval_hint_provider: RetrievalHintProvider | None,
-    ) -> None:
-        self._policy = policy
-        self._tool_registry = tool_registry
-        self._model_turn_provider = model_turn_provider
-        self._retrieval_hint_provider = retrieval_hint_provider
-
-    async def run_delegated_task(
-        self,
-        *,
-        request: AgentDelegationRequest,
-        parent_state: ParentAgentContext,
-    ) -> AgentRunResult:
-        child_policy = self._child_policy()
-        child_config = self._derive_child_config(
-            parent_state["run_config"],
-            child_policy,
-            request,
-        )
-        child_service = AgentService(
-            policy=child_policy,
-            tool_registry=self._tool_registry,
-            model_turn_provider=self._model_turn_provider,
-            retrieval_hint_provider=self._retrieval_hint_provider,
-        )
-        return await child_service.run_with_config(
-            task=request.prompt,
-            run_config=child_config,
-        )
-
-    def _child_policy(self) -> AgentRuntimePolicy:
-        return replace(
-            self._policy,
-            max_depth=max(self._policy.max_depth - 1, 0),
-            core_tool_names=tuple(tool for tool in self._policy.core_tool_names if tool != "task"),
-            deferred_tool_names=tuple(tool for tool in self._policy.deferred_tool_names if tool != "task"),
-        )
-
-    def _derive_child_config(
-        self,
-        parent_config: AgentRunConfig,
-        child_policy: AgentRuntimePolicy,
-        request: AgentDelegationRequest,
-    ) -> AgentRunConfig:
-        child_definition = AgentRuntimePolicy(
-            agent_type="task_child",
-            description="Generic task child",
-            system_instructions=child_policy.system_instructions,
-            core_tool_names=child_policy.core_tool_names,
-            deferred_tool_names=child_policy.deferred_tool_names,
-            max_iterations=child_policy.max_iterations,
-            max_depth=child_policy.max_depth,
-            model_selection=child_policy.model_selection,
-            tool_policy=child_policy.tool_policy,
-        )
-        child_config = derive_child_config(parent_config, child_definition)
-        if request.llm_budget_total is not None:
-            child_config = replace(
-                child_config,
-                llm_budget_total=request.llm_budget_total,
-            )
-        if request.max_turns is not None:
-            child_config = replace(
-                child_config,
-                max_turns=request.max_turns,
-            )
-        return child_config
-
-
 class AgentService:
+    """Assemble one frozen Tool snapshot and reuse one executor everywhere."""
+
     def __init__(
         self,
         *,
@@ -374,66 +246,59 @@ class AgentService:
         policy: AgentRuntimePolicy | None = None,
         tool_registry: ToolRegistry,
         model_turn_provider: ModelTurnProvider | None = None,
-        retrieval_hint_provider: RetrievalHintProvider | None = None,
-        subagent_runner: DelegatedAgentRunner | None = None,
+        retrieval_hint_provider: object | None = None,
+        subagent_runner: object | None = None,
         output_finalizer: StructuredOutputFinalizer | None = None,
         model_registry: ModelResolver | None = None,
         checkpointer: BaseCheckpointSaver[str] | None = None,
         runtime_diagnostics: Sequence[RuntimeDiagnostic] = (),
-        catalog: ToolCatalog | None = None,
-        stream_sink: Any = None,  # StreamEventSink | None
-        mcp_registry: MCPToolRegistry | None = None,
-        skill_catalog: Any = None,  # SkillCatalog | None
+        catalog: object | None = None,
+        stream_sink: object | None = None,
+        mcp_registry: object | None = None,
+        skill_catalog: object | None = None,
         strict_model_provider: bool = True,
         latency_profile: AgentLatencyProfile | None = None,
+        workspace: WorkspaceRuntime | None = None,
+        configured_resident_tool_names: Sequence[str] = (),
     ) -> None:
+        del (
+            retrieval_hint_provider,
+            subagent_runner,
+            catalog,
+            mcp_registry,
+            skill_catalog,
+        )
         if definition is not None and policy is not None:
             raise ValueError("Provide either 'definition' or 'policy', not both")
-        if definition is not None:
-            self._policy = definition
-        elif policy is not None:
-            self._policy = policy
-        else:
+        self._policy = definition or policy
+        if self._policy is None:
             raise ValueError("Provide either 'definition' or 'policy'")
-        self._base_tool_registry = tool_registry
-        self._catalog = catalog or build_tool_catalog(tool_registry, self._policy)
-        self._skill_catalog = skill_catalog  # SkillCatalog | None
-        self._skill_runtime = None
-        if skill_catalog is not None:
-            from rag.agent.skills.runtime import SkillRuntime
-
-            self._skill_runtime = SkillRuntime(skill_catalog)
-            self._register_skill_tool()
+        self._tool_registry = tool_registry
+        self._tool_snapshot = tool_registry.freeze()
+        self._tool_executor = ToolExecutor(self._tool_snapshot)
+        self._configured_resident_tool_names = tuple(
+            configured_resident_tool_names
+        )
         self._model_turn_provider = model_turn_provider
-        self._retrieval_hint_provider = retrieval_hint_provider
-        self._subagent_runner = subagent_runner
-        self._output_finalizer = output_finalizer
         self._model_registry = model_registry
         self._strict_model_provider = strict_model_provider
-        self._runtime_diagnostics = tuple(merge_runtime_diagnostics([], runtime_diagnostics))
+        self._output_finalizer = output_finalizer
         self._checkpointer = checkpointer or create_agent_checkpointer(None)
-        self._stream_sink = stream_sink
-        self._mcp_registry = mcp_registry
-        self._latency_profile = latency_profile or AgentLatencyProfile()
-        self._persistent_memory_runtime = PersistentMemoryRuntime(
-            model_registry=model_registry,
+        self._runtime_diagnostics = tuple(
+            merge_runtime_diagnostics([], runtime_diagnostics)
         )
-        # Register core tools: tool_search, activate_tools, task
-        self._register_discovery_tools()
-        self._register_task_tool()
+        self._stream_sink = stream_sink
+        self._latency_profile = latency_profile or AgentLatencyProfile()
+        self._workspace = workspace
+        self._workspace_by_run: dict[str, WorkspaceRuntime] = {}
 
     async def aclose(self) -> None:
         await aclose_agent_checkpointer(self._checkpointer)
 
     def initial_state(self, request: AgentRunRequest) -> LoopState:
-        run_config = request.to_run_config(self._policy)
-        return self.initial_state_from_config(
-            task=request.task,
-            run_config=run_config,
-            pending_tool_calls=request.pending_tool_calls,
-            approved_tool_call_ids=request.approved_tool_call_ids,
-            denied_tool_call_ids=request.denied_tool_call_ids,
-            messages=request.messages,
+        return self._initial_state(
+            request,
+            run_config=request.to_run_config(self._policy),
         )
 
     def initial_state_from_config(
@@ -447,102 +312,23 @@ class AgentService:
         messages: list[BaseMessage] | None = None,
         memory_store: WorkspaceMemoryStore | None = None,
     ) -> LoopState:
-        RunRegistry.remove(run_config.run_id)
-        handles = RunRegistry.get_or_create(run_config)
-        if memory_store is not None:
-            handles.memory_store = memory_store
-        state = create_loop_state(
+        request = AgentRunRequest(
             task=task,
+            run_id=run_config.run_id,
+            thread_id=run_config.thread_id,
+            pending_tool_calls=pending_tool_calls or [],
+            approved_tool_call_ids=approved_tool_call_ids or [],
+            denied_tool_call_ids=denied_tool_call_ids or [],
+            messages=messages or [],
+        )
+        return self._initial_state(
+            request,
             run_config=run_config,
-            pending_tool_calls=pending_tool_calls or (),
-            messages=messages or (),
-            runtime_diagnostics=self._runtime_diagnostics,
+            memory_store=memory_store,
         )
-        state["approved_tool_call_ids"] = list(approved_tool_call_ids or ())
-        state["denied_tool_call_ids"] = list(denied_tool_call_ids or ())
-        compacted = cast(
-            LoopState,
-            MessageCompactor(
-                policy=run_config.memory_policy,
-                store=memory_store,
-            ).compact_initial_state(dict(state)),
-        )
-        compacted["latency_profile"] = self._latency_profile
-        return compacted
 
     async def run(self, request: AgentRunRequest) -> AgentRunResult:
-        run_config = request.to_run_config(self._policy)
-        return await self.run_with_config(
-            task=request.task,
-            run_config=run_config,
-            pending_tool_calls=request.pending_tool_calls,
-            approved_tool_call_ids=request.approved_tool_call_ids,
-            denied_tool_call_ids=request.denied_tool_call_ids,
-            messages=request.messages,
-            goal_spec=request.goal_spec,
-            input_files=request.input_files,
-            workspace_path=request.workspace_path,
-            tool_surface_request=request.tool_surface_request,
-            tool_discovery_state=request.tool_discovery_state,
-        )
-
-    def _prepare_run(
-        self,
-        *,
-        task: str,
-        run_config: AgentRunConfig,
-        input_files: list[str] | None = None,
-        workspace_path: str | None = None,
-    ) -> _RunContext:
-        """Single entry point for per-run setup.  One path, no duplication."""
-        from rag.agent.file_manifest import build_file_manifest
-        from rag.agent.workspace import create_temp_workspace, import_files, open_workspace
-
-        if workspace_path:
-            workspace = open_workspace(workspace_path, create=True)
-        else:
-            workspace = create_temp_workspace()
-
-        if input_files:
-            import_files(workspace, [Path(f) for f in input_files])
-
-        manifest = build_file_manifest(workspace)
-        workspace_tools = create_workspace_tools(workspace)
-        tooling_registry = NewToolRegistry()
-        install_minimal_workspace_tools(
-            tooling_registry,
-            workspace,
-            allowed_commands={"echo"},
-        )
-        memory_store = WorkspaceMemoryStore(
-            workspace=workspace,
-            policy=run_config.memory_policy,
-        )
-
-        file_tools_to_activate: set[str] = {"structured_probe"} if manifest.has_probeable_files else set()
-        runtime_registry = self._runtime_tool_registry(
-            run_config,
-            tools=workspace_tools,
-        )
-        self._validate_allowed_tools(runtime_registry)
-        self._validate_workspace_core_runners(
-            runtime_registry,
-            allowed_tool_names=self._policy.allowed_tools,
-        )
-
-        enriched_task = self._inject_manifest_into_task(task, manifest)
-
-        return _RunContext(
-            task=enriched_task,
-            workspace=workspace,
-            manifest=manifest,
-            workspace_tools=workspace_tools,
-            file_tools_to_activate=file_tools_to_activate,
-            runtime_registry=runtime_registry,
-            tooling_registry=tooling_registry,
-            memory_store=memory_store,
-            persistent_store=PersistentMemoryStore(workspace),
-        )
+        return await self._run_request(request, streaming=False)
 
     async def run_with_config(
         self,
@@ -556,290 +342,234 @@ class AgentService:
         goal_spec: GoalSpec | None = None,
         input_files: list[str] | None = None,
         workspace_path: str | None = None,
-        tool_surface_request: ToolSurfaceRequest | None = None,
-        tool_discovery_state: ToolDiscoveryState | None = None,
+        tools: Sequence[str] | None = None,
+        disabled_tools: Sequence[str] = (),
+        allow_write_tools: bool = False,
+        allow_execute_tools: bool = False,
+        allow_discovery_tools: bool = False,
     ) -> AgentRunResult:
-        run_started_at = time.perf_counter()
-        prepare_started_at = run_started_at
-        ctx = self._prepare_run(
+        request = AgentRunRequest(
             task=task,
-            run_config=run_config,
-            input_files=input_files,
+            run_id=run_config.run_id,
+            thread_id=run_config.thread_id,
+            pending_tool_calls=pending_tool_calls or [],
+            approved_tool_call_ids=approved_tool_call_ids or [],
+            denied_tool_call_ids=denied_tool_call_ids or [],
+            messages=messages or [],
+            goal_spec=goal_spec,
+            input_files=input_files or [],
             workspace_path=workspace_path,
+            tools=None if tools is None else tuple(tools),
+            disabled_tools=tuple(disabled_tools),
+            allow_write_tools=allow_write_tools,
+            allow_execute_tools=allow_execute_tools,
+            allow_discovery_tools=allow_discovery_tools,
         )
-        prepare_latency_ms = _elapsed_ms(prepare_started_at)
-
-        state = self._initial_loop_state_from_config(
-            task=ctx.task,
+        return await self._run_request(
+            request,
+            streaming=False,
             run_config=run_config,
-            pending_tool_calls=pending_tool_calls,
-            approved_tool_call_ids=approved_tool_call_ids,
-            denied_tool_call_ids=denied_tool_call_ids,
-            messages=messages,
-            memory_store=ctx.memory_store,
-            file_manifest=ctx.manifest,
-        )
-        await self._persistent_memory_runtime.load(
-            state,
-            ctx.persistent_store,
-            task=ctx.task,
-        )
-        has_pending_tool_calls = bool(pending_tool_calls)
-        uses_service_model_provider = self._model_turn_provider is None
-        effective_tool_surface_request = (
-            tool_surface_request if uses_service_model_provider else None
-        )
-        effective_tool_discovery_state = (
-            tool_discovery_state if uses_service_model_provider else None
-        )
-        if (
-            effective_tool_surface_request is None
-            and uses_service_model_provider
-            and not has_pending_tool_calls
-        ):
-            effective_tool_surface_request = _default_tool_surface_request()
-
-        checkpoint_store = LangGraphCheckpointStore(
-            self._checkpointer,
-            run_config=run_config,
-            compatibility_config=GoalCompatibilityConfig(goal_spec=goal_spec),
-        )
-        try:
-            loop = self._build_loop(
-                runtime_registry=ctx.runtime_registry,
-                checkpoint_store=checkpoint_store,
-                memory_store=ctx.memory_store,
-                goal_spec=goal_spec,
-                state=state,
-                auto_activate_tools=ctx.file_tools_to_activate,
-                scratch_dir=ctx.workspace.root / "scratch",
-                tooling_registry=ctx.tooling_registry,
-                tool_surface_request=effective_tool_surface_request,
-                tool_discovery_state=effective_tool_discovery_state,
-            )
-            result_state = await loop.run(state)
-        except Exception:
-            RunRegistry.remove(run_config.run_id)
-            raise
-        if result_state["status"] in {"completed", "failed"}:
-            RunRegistry.remove(run_config.run_id)
-
-        finalize_started_at = time.perf_counter()
-        if result_state["status"] == "completed":
-            try:
-                await self._persistent_memory_runtime.extract(
-                    result_state,
-                    ctx.persistent_store,
-                )
-            except Exception:
-                logger.warning("Persistent memory extraction failed", exc_info=True)
-        finalize_latency_ms = _elapsed_ms(finalize_started_at)
-        self._record_result_latency_profile(
-            result_state,
-            run_started_at=run_started_at,
-            prepare_latency_ms=prepare_latency_ms,
-            finalize_latency_ms=finalize_latency_ms,
         )
 
-        return AgentRunResult.from_loop_result(
-            result_state,
-            definition=self._policy,
-            workspace_path=str(ctx.workspace.root),
-        )
-
-    def _record_result_latency_profile(
+    async def run_streaming(
         self,
-        result_state: LoopState,
-        *,
-        run_started_at: float,
-        prepare_latency_ms: float,
-        finalize_latency_ms: float,
-    ) -> None:
-        result_state["latency_profile"] = _profile_with_run_timings(
-            result_state["latency_profile"],
-            prepare_latency_ms=prepare_latency_ms,
-            tool_latency_ms=sum(result.latency_ms for result in result_state["tool_results"]),
-            finalize_latency_ms=finalize_latency_ms,
-            total_ms=self._latency_profile.startup_ms
-            + self._latency_profile.build_service_ms
-            + _elapsed_ms(run_started_at),
-        )
-
-    async def run_streaming(self, request: AgentRunRequest) -> AsyncGenerator[Any, None]:
-        """流式运行 Agent，yield 每一个 StreamEvent。
-
-        用法：
-            async for event in service.run_streaming(request):
-                handle(event)
-        """
-
+        request: AgentRunRequest,
+    ) -> AsyncGenerator[object, None]:
         run_config = request.to_run_config(self._policy)
-        ctx = self._prepare_run(
-            task=request.task,
+        state, loop, workspace, started_at = self._prepare_execution(
+            request,
             run_config=run_config,
-            input_files=request.input_files,
-            workspace_path=request.workspace_path,
         )
-
-        state = self._initial_loop_state_from_config(
-            task=ctx.task,
-            run_config=run_config,
-            pending_tool_calls=request.pending_tool_calls,
-            approved_tool_call_ids=request.approved_tool_call_ids,
-            denied_tool_call_ids=request.denied_tool_call_ids,
-            messages=request.messages,
-            memory_store=ctx.memory_store,
-            file_manifest=ctx.manifest,
-        )
-        await self._persistent_memory_runtime.load(
-            state,
-            ctx.persistent_store,
-            task=ctx.task,
-        )
-        uses_service_model_provider = self._model_turn_provider is None
-        effective_tool_surface_request = (
-            request.tool_surface_request if uses_service_model_provider else None
-        )
-        effective_tool_discovery_state = (
-            request.tool_discovery_state if uses_service_model_provider else None
-        )
-        if (
-            effective_tool_surface_request is None
-            and uses_service_model_provider
-            and not request.pending_tool_calls
-        ):
-            effective_tool_surface_request = _default_tool_surface_request()
-
-        checkpoint_store = LangGraphCheckpointStore(
-            self._checkpointer,
-            run_config=run_config,
-            compatibility_config=GoalCompatibilityConfig(goal_spec=request.goal_spec),
-        )
-        loop = self._build_loop(
-            runtime_registry=ctx.runtime_registry,
-            checkpoint_store=checkpoint_store,
-            memory_store=ctx.memory_store,
-            goal_spec=request.goal_spec,
-            state=state,
-            auto_activate_tools=ctx.file_tools_to_activate,
-            scratch_dir=ctx.workspace.root / "scratch",
-            tooling_registry=ctx.tooling_registry,
-            tool_surface_request=effective_tool_surface_request,
-            tool_discovery_state=effective_tool_discovery_state,
-        )
-
         try:
             async for event in loop.run_streaming(state):
                 yield event
         finally:
+            self._finalize_state(state, started_at=started_at)
             if state["status"] in {"completed", "failed"}:
                 RunRegistry.remove(run_config.run_id)
-            if state["status"] == "completed":
-                try:
-                    await self._persistent_memory_runtime.extract(
-                        state,
-                        ctx.persistent_store,
-                    )
-                except Exception:
-                    logger.warning("Persistent memory extraction failed", exc_info=True)
+            self._workspace_by_run[run_config.run_id] = workspace
 
-    def _initial_loop_state_from_config(
+    async def _run_request(
         self,
+        request: AgentRunRequest,
         *,
-        task: str,
+        streaming: bool,
+        run_config: AgentRunConfig | None = None,
+    ) -> AgentRunResult:
+        del streaming
+        effective_config = run_config or request.to_run_config(self._policy)
+        state, loop, workspace, started_at = self._prepare_execution(
+            request,
+            run_config=effective_config,
+        )
+        try:
+            result_state = await loop.run(state)
+        except Exception:
+            RunRegistry.remove(effective_config.run_id)
+            raise
+        self._finalize_state(result_state, started_at=started_at)
+        if result_state["status"] in {"completed", "failed"}:
+            RunRegistry.remove(effective_config.run_id)
+        self._workspace_by_run[effective_config.run_id] = workspace
+        return AgentRunResult.from_loop_result(
+            result_state,
+            definition=self._policy,
+            workspace_path=str(workspace.root),
+        )
+
+    def _prepare_execution(
+        self,
+        request: AgentRunRequest,
+        *,
         run_config: AgentRunConfig,
-        pending_tool_calls: list[ToolCallPlan] | None = None,
-        approved_tool_call_ids: list[str] | None = None,
-        denied_tool_call_ids: list[str] | None = None,
-        messages: list[BaseMessage] | None = None,
+    ) -> tuple[LoopState, AgentLoop, WorkspaceRuntime, float]:
+        started_at = time.perf_counter()
+        workspace = self._workspace_for_request(request)
+        if request.input_files:
+            import_files(workspace, [Path(item) for item in request.input_files])
+        memory_store = WorkspaceMemoryStore(
+            workspace=workspace,
+            policy=run_config.memory_policy,
+        )
+        state = self._initial_state(
+            request,
+            run_config=run_config,
+            memory_store=memory_store,
+        )
+        checkpoint_store = LangGraphCheckpointStore(
+            self._checkpointer,
+            run_config=run_config,
+            compatibility_config=GoalCompatibilityConfig(
+                goal_spec=request.goal_spec
+            ),
+        )
+        loop = self._build_loop(
+            state=state,
+            checkpoint_store=checkpoint_store,
+            memory_store=memory_store,
+            goal_spec=request.goal_spec,
+            workspace=workspace,
+        )
+        return state, loop, workspace, started_at
+
+    def _initial_state(
+        self,
+        request: AgentRunRequest,
+        *,
+        run_config: AgentRunConfig,
         memory_store: WorkspaceMemoryStore | None = None,
-        file_manifest: FileManifest | None = None,
     ) -> LoopState:
         RunRegistry.remove(run_config.run_id)
         handles = RunRegistry.get_or_create(run_config)
         if memory_store is not None:
             handles.memory_store = memory_store
         state = create_loop_state(
-            task=task,
+            task=request.task,
             run_config=run_config,
-            pending_tool_calls=pending_tool_calls or (),
-            messages=messages or (),
+            pending_tool_calls=request.pending_tool_calls,
+            messages=request.messages,
             runtime_diagnostics=self._runtime_diagnostics,
-            file_manifest=file_manifest,
         )
-        state["latency_profile"] = self._latency_profile
-        state["approved_tool_call_ids"] = list(approved_tool_call_ids or ())
-        state["denied_tool_call_ids"] = list(denied_tool_call_ids or ())
-        return state
+        options = resolve_tool_options(
+            self._tool_snapshot,
+            default_resident_names=self._default_resident_names(),
+            configured_resident_names=self._configured_resident_tool_names,
+            tools=request.tools,
+            disabled_tools=request.disabled_tools,
+            allow_discovery_tools=request.allow_discovery_tools,
+        )
+        if options.uses_default_tools:
+            state["resident_tool_names"] = list(options.resident_names)
+            state["explicit_tool_names"] = []
+        else:
+            state["resident_tool_names"] = []
+            state["explicit_tool_names"] = list(options.resident_names)
+        state["disabled_tool_names"] = list(options.disabled_names)
+        state["allow_write_tools"] = request.allow_write_tools
+        state["allow_execute_tools"] = request.allow_execute_tools
+        state["allow_discovery_tools"] = request.allow_discovery_tools
+        state["approved_tool_call_ids"] = list(
+            request.approved_tool_call_ids
+        )
+        state["denied_tool_call_ids"] = list(request.denied_tool_call_ids)
+        selected_names = (
+            *state["resident_tool_names"],
+            *state["explicit_tool_names"],
+        )
+        selected = select_tools(
+            self._tool_snapshot,
+            resident_names=selected_names,
+            disabled_names=state["disabled_tool_names"],
+        )
+        state["tool_manifest"] = build_tool_manifest(
+            tools=selected,
+            resident_tool_names=state["resident_tool_names"],
+            explicit_tool_names=state["explicit_tool_names"],
+            provider_serializer_revision=state[
+                "provider_serializer_revision"
+            ],
+        )
+        context = build_stable_context(
+            instructions=(
+                self._policy.system_instructions or "You are a helpful agent.",
+            ),
+            initial_user_task=request.task,
+        )
+        state["context_revision"] = context.context_revision
+        exposed_names = tuple(tool.definition.name for tool in selected)
+        origin = ToolCallOrigin(
+            request_id=f"{run_config.run_id}:initial",
+            toolset_revision=state["tool_manifest"].toolset_revision,
+            exposed_tool_names=exposed_names,
+        )
+        for pending in state["pending_tool_calls"]:
+            effective_origin = pending.plan.origin or origin
+            pending.plan.origin = effective_origin
+            state["canonical_tool_calls"][pending.tool_call_id] = ToolCall(
+                tool_call_id=pending.tool_call_id,
+                tool_name=pending.tool_name,
+                arguments=pending.plan.arguments,
+                origin=effective_origin,
+            )
+        compacted = MessageCompactor(
+            policy=run_config.memory_policy,
+            store=memory_store,
+        ).compact_initial_state(dict(state))
+        result = state.__class__(compacted)
+        result["latency_profile"] = self._latency_profile
+        return result
 
     def _build_loop(
         self,
         *,
-        runtime_registry: ToolRegistry,
+        state: LoopState,
         checkpoint_store: LangGraphCheckpointStore,
         memory_store: WorkspaceMemoryStore | None,
         goal_spec: GoalSpec | None,
-        state: LoopState | None = None,
-        auto_activate_tools: set[str] | None = None,
-        scratch_dir: Path | None = None,
-        tooling_registry: NewToolRegistry | None = None,
-        tool_surface_request: ToolSurfaceRequest | None = None,
-        tool_discovery_state: ToolDiscoveryState | None = None,
+        workspace: WorkspaceRuntime,
     ) -> AgentLoop:
-        # Create and bind DeferredToolStore BEFORE resolving provider
-        # (provider needs store for tool filtering)
-        store = DeferredToolStore(
-            max_active=self._policy.max_active_deferred_tools,
-        )
-        deferred_store_var.set(store)
-        if state is not None:
-            store.sync_from_state(cast(dict[Any, Any], state))
-
-        # Auto-activate file-related tools (skip tool_search + activate_tools)
-        if auto_activate_tools:
-            for tool_name in auto_activate_tools:
-                try:
-                    store.set_pending_candidates(
-                        query="__file_manifest_auto__",
-                        candidates=[
-                            SearchCandidate(
-                                name=tool_name,
-                                description="Auto-activated for file processing",
-                                reason="structured input files detected",
-                            )
-                        ],
-                    )
-                    store.activate(tool_name, iteration=0, source_query="__file_manifest_auto__")
-                except (KeyError, RuntimeError):
-                    pass  # Already active or not in allowed_tools
-        provider = self._resolve_model_turn_provider(
-            state,
-            tool_registry=runtime_registry,
-            tooling_registry=tooling_registry,
-            tool_surface_request=tool_surface_request,
-            tool_discovery_state=tool_discovery_state,
-        )
+        provider = ModelProviderResolver(
+            model_turn_provider=self._model_turn_provider,
+            model_registry=self._model_registry,
+            policy=self._policy,
+            registry_snapshot=self._tool_snapshot,
+            strict_model_provider=self._strict_model_provider,
+            stream_sink=self._stream_sink,
+        ).resolve(state)
         output_finalizer = self._resolve_output_finalizer(state)
-        tool_runner = (
-            ToolExecutorLoopAdapter(
-                NewToolExecutor(
-                    tooling_registry,
-                    allow_write_tools=tool_surface_request.allow_write_tools,
-                    allow_execute_tools=tool_surface_request.allow_execute_tools,
-                )
-            )
-            if tooling_registry is not None and tool_surface_request is not None
-            else ToolExecutionService(
-                tool_registry=runtime_registry,
-                record_writer=checkpoint_store,
-                stream_sink=self._stream_sink,
-            )
+        execution_context = ToolExecutionContext(
+            workspace_root=workspace.root,
+            cwd=workspace.root,
+            allow_write_tools=state["allow_write_tools"],
+            allow_execute_tools=state["allow_execute_tools"],
         )
         return AgentLoop(
             definition=self._policy,
             model_provider=provider,
             context_manager=LoopContextCompactor(store=memory_store),
-            tool_runner=tool_runner,
+            tool_executor=self._tool_executor,
+            registry_snapshot=self._tool_snapshot,
+            execution_context=execution_context,
             checkpoint_store=checkpoint_store,
             stop_hook_runner=StopHookRunner(
                 hooks=build_stop_hooks(
@@ -850,283 +580,70 @@ class AgentService:
                 max_blocks=self._policy.max_stop_hook_blocks,
             ),
             finish_candidate_builder=FinishCandidateBuilder(),
-            catalog=self._catalog,
-            deferred_store=store,
             stream_sink=self._stream_sink,
-            scratch_dir=scratch_dir,
         )
 
-    def _resolve_model_turn_provider(
-        self,
-        state: LoopState | None,
-        *,
-        tool_registry: ToolRegistry | None = None,
-        tooling_registry: NewToolRegistry | None = None,
-        tool_surface_request: ToolSurfaceRequest | None = None,
-        tool_discovery_state: ToolDiscoveryState | None = None,
-    ) -> ModelTurnProvider:
-        return ModelProviderResolver(
-            model_turn_provider=self._model_turn_provider,
-            model_registry=self._model_registry,
-            policy=self._policy,
-            base_tool_registry=self._base_tool_registry,
-            catalog=self._catalog,
-            strict_model_provider=self._strict_model_provider,
-            stream_sink=self._stream_sink,
-            skill_context_provider=(
-                self._skill_runtime.render_prompt_context
-                if self._skill_runtime is not None
-                else None
-            ),
-        ).resolve(
-            state,
-            tool_registry=tool_registry,
-            tooling_registry=tooling_registry,
-            tool_surface_request=tool_surface_request,
-            tool_discovery_state=tool_discovery_state,
+    def _default_resident_names(self) -> tuple[str, ...]:
+        installed = tuple(self._tool_snapshot)
+        baseline = tuple(
+            name for name in RESIDENT_CODING_TOOL_NAMES if name in installed
         )
+        if baseline:
+            return baseline
+        return tuple(
+            name for name in self._policy.allowed_tools if name in installed
+        )
+
+    def _workspace_for_request(
+        self,
+        request: AgentRunRequest,
+    ) -> WorkspaceRuntime:
+        if request.workspace_path is not None:
+            return open_workspace(request.workspace_path, create=True)
+        if self._workspace is not None:
+            return self._workspace
+        return create_temp_workspace()
 
     def _resolve_output_finalizer(
         self,
-        state: LoopState | None,
+        state: LoopState,
     ) -> StructuredOutputFinalizer | None:
         if self._output_finalizer is not None:
             return self._output_finalizer
         if self._policy.output_model is None or self._model_registry is None:
             return None
         try:
-            return create_model_structured_output_finalizer(self._model_registry)
+            return create_model_structured_output_finalizer(
+                self._model_registry
+            )
         except Exception as exc:
-            if state is not None:
-                append_loop_diagnostic(
-                    state,
-                    RuntimeDiagnostic.from_exception(
-                        code=("structured_output_finalizer_initialization_failed"),
-                        component="structured_output_finalizer",
-                        error=exc,
-                    ),
+            state["runtime_diagnostics"].append(
+                RuntimeDiagnostic.from_exception(
+                    code="structured_output_finalizer_initialization_failed",
+                    component="structured_output_finalizer",
+                    error=exc,
                 )
+            )
             return None
 
-    def _validate_allowed_tools(self, registry: ToolRegistry) -> None:
-        registered = {tool.name for tool in registry.list_all()}
-        missing = [name for name in self._policy.allowed_tools if name not in registered]
-        if missing:
-            raise ValueError(f"unregistered tools: {', '.join(dict.fromkeys(missing))}")
-
-    @staticmethod
-    def _validate_workspace_core_runners(
-        registry: ToolRegistry,
-        *,
-        allowed_tool_names: Sequence[str] | None = None,
-    ) -> None:
-        """Verify workspace-dependent core tools have runners registered.
-
-        These tools (search_text, apply_patch, run_command, etc.) depend on
-        create_workspace_tools() for their runners.  If someone changes the
-        workspace tool creation, this assertion catches the regression before
-        a model call fails silently at runtime.
-        """
-        workspace_core_tools = frozenset({
-            "list_files", "read_file", "write_file", "run_python",
-            "search_text", "apply_patch", "run_command",
-        })
-        required_tools = workspace_core_tools
-        if allowed_tool_names is not None:
-            required_tools = workspace_core_tools & frozenset(allowed_tool_names)
-        missing_runners = sorted(
-            name for name in required_tools
-            if not registry.has_runner(name)
-        )
-        if missing_runners:
-            raise RuntimeError(
-                f"Workspace core tools missing runners: {', '.join(missing_runners)}. "
-                f"Ensure create_workspace_tools() includes all workspace-dependent core tools."
-            )
-
-    @staticmethod
-    def _inject_manifest_into_task(task: str, manifest: FileManifest) -> str:
-        """Inject file manifest + processing instructions before the user task.
-
-        Only activates when input files are present.  Injects both the manifest
-        and file processing instructions so the model knows: probes already ran,
-        go straight to run_python, cite everything.
-        """
-        if not manifest.files:
-            return task
-
-        block = manifest.to_context_block()
-        if not block:
-            return task
-
-        instructions = """\
-Input files detected — you are in file processing mode:
-
-- File manifest and structured_probe results are shown above.
-  Do NOT call list_files or structured_probe again for these files.
-- Use run_python with pandas for computation. Never guess column
-  names, sheet names, or data values.
-- Cite: file path, sheet/table name, columns, row count, method.
-- For numerical answers, cross-validate (e.g. groupby-sum vs raw-sum).
-- If the manifest shows ambiguity, report it before computing.
-- For charts, use matplotlib; plt.savefig() to scratch/."""
-
-        return f"{block}\n\n{instructions}\n\n── User Task ──\n{task}"
-
-    def _runtime_tool_registry(
+    def _finalize_state(
         self,
-        run_config: AgentRunConfig,
+        state: LoopState,
         *,
-        runners: Mapping[str, ToolRunner] | None = None,
-        tools: list[Any] | None = None,  # list[BaseTool] instances
-    ) -> ToolRegistry:
-        """Clone base registry and inject per-request tool instances.
-
-        Agent-as-tool adapters are request-scoped — each run_config gets fresh adapters
-        to prevent concurrent request pollution of depth/budget/access_policy.
-        """
-        return RuntimeToolRegistryBuilder(
-            base_tool_registry=self._base_tool_registry,
-            policy=self._policy,
-            catalog=self._catalog,
-            model_registry=self._model_registry,
-            model_turn_provider=self._model_turn_provider,
-            retrieval_hint_provider=self._retrieval_hint_provider,
-            task_delegated_runner_factory=(
-                lambda runtime: _TaskChildRunner(
-                    policy=self._policy,
-                    tool_registry=runtime,
-                    model_turn_provider=self._model_turn_provider,
-                    retrieval_hint_provider=self._retrieval_hint_provider,
-                )
-            ),
-            subagent_runner=self._subagent_runner,
-            mcp_registry=self._mcp_registry,
-        ).build(
-            run_config,
-            runners=runners,
-            tools=tools,
+        started_at: float,
+    ) -> None:
+        tool_latency = sum(
+            trace.duration_ms for trace in self._tool_executor.traces
         )
-
-    def _register_discovery_tools(self) -> None:
-        """Register tool_search and activate_tools as core tools.
-
-        Runners read the per-run DeferredToolStore from a ContextVar,
-        ensuring concurrent runs each get their own store.
-        """
-        if self._base_tool_registry.has_runner("tool_search"):
-            return
-
-        catalog = self._catalog
-        definition = self._policy
-
-        # ── tool_search ──
-        search_spec = ToolSpec(
-            name="tool_search",
-            description=(
-                "Discover available tools by natural language query. "
-                "Returns candidate tools. Call activate_tools to load them. "
-                "Do not use for simple questions, greetings, or literal reply "
-                "requests; answer those directly."
-            ),
-            input_model=ToolSearchInput,
-            output_model=ToolSearchOutput,
-            error_model=ToolSearchOutput,
-            permissions=ToolPermissions(),
-            execution_category=ExecutionCategory.READ,
-            timeout_seconds=5,
-            idempotent=True,
-            concurrency_safe=True,
+        profile = state.get("latency_profile") or AgentLatencyProfile()
+        state["latency_profile"] = profile.model_copy(
+            update={
+                "tool_latency_ms": tool_latency,
+                "total_ms": self._latency_profile.startup_ms
+                + self._latency_profile.build_service_ms
+                + (time.perf_counter() - started_at) * 1000,
+            }
         )
-
-        def _search_runner(input_data: ToolSearchInput) -> ToolSearchOutput:
-            store = deferred_store_var.get(None)
-            if store is None:
-                raise RuntimeError(
-                    "DeferredToolStore is not bound — AgentLoop must set deferred_store_var before tool execution"
-                )
-            return execute_tool_search(
-                query=input_data.query,
-                catalog=catalog,
-                store=store,
-                max_results=input_data.max_results,
-            )
-
-        self._base_tool_registry.register(
-            search_spec,
-            runner=cast(ToolRunner, _search_runner),
-        )
-
-        # ── activate_tools ──
-        activate_spec = ToolSpec(
-            name="activate_tools",
-            description=(
-                "Activate tools found by tool_search. "
-                "Only tools from the most recent tool_search can be activated. "
-                "Activated tools become available on the next model turn."
-            ),
-            input_model=ActivateToolsInput,
-            output_model=ActivateToolsOutput,
-            error_model=ActivateToolsOutput,
-            permissions=ToolPermissions(),
-            execution_category=ExecutionCategory.TRANSFORM,
-            timeout_seconds=5,
-            idempotent=True,
-            concurrency_safe=True,
-        )
-
-        def _activate_runner(input_data: ActivateToolsInput) -> ActivateToolsOutput:
-            store = deferred_store_var.get(None)
-            if store is None:
-                raise RuntimeError(
-                    "DeferredToolStore is not bound — AgentLoop must set deferred_store_var before tool execution"
-                )
-            return execute_activate_tools(
-                names=input_data.names,
-                catalog=catalog,
-                store=store,
-                allowed_tools=definition.allowed_tools,  # mutable list, extended by _inject_mcp_tools
-                deny_tools=definition.tool_policy.deny_tools,
-                iteration=iteration_var.get(0),
-                group=input_data.group,
-            )
-
-        self._base_tool_registry.register(
-            activate_spec,
-            runner=cast(ToolRunner, _activate_runner),
-        )
-
-    def _register_task_tool(self) -> None:
-        """Register the 'task' tool spec (runner injected per-request in _runtime_tool_registry)."""
-        if self._base_tool_registry.has_runner("task"):
-            return
-
-        from rag.agent.tools.task_tool import task_tool_spec
-
-        # Register spec only — runner is request-scoped (needs parent run_config)
-        self._base_tool_registry.register(task_tool_spec)
-
-    def _register_skill_tool(self) -> None:
-        """Register the 'invoke_skill' tool spec with a catalog-bound runner."""
-        from rag.agent.skills.invocation import INVOKE_SKILL_SPEC, make_invoke_skill_runner
-
-        # Register spec and a permanent runner (skill catalog is service-scoped)
-        _skill_runner = make_invoke_skill_runner(self._skill_catalog)
-        self._base_tool_registry.register(INVOKE_SKILL_SPEC)
-        self._base_tool_registry.register_contextual_runner("invoke_skill", _skill_runner)
-
-        # Dynamically add skill tools to the policy's core tools so they
-        # appears in the model's tool list ONLY when skills are available.
-        skill_core_tools = ("invoke_skill", "materialize_skill_asset")
-        missing = tuple(
-            name for name in skill_core_tools
-            if name not in self._policy.core_tool_names
-        )
-        if missing:
-            self._policy = replace(
-                self._policy,
-                core_tool_names=self._policy.core_tool_names + missing,
-            )
 
     async def resume(
         self,
@@ -1135,15 +652,7 @@ Input files detected — you are in file processing mode:
         response: HumanInputResponse,
         workspace_path: str | None = None,
     ) -> AgentRunResult:
-        """从中断点恢复。response 对应 HumanInputRequest 的用户响应。
-
-        如果原始 run 使用了 PrimitiveOps（write_file / run_python 等），
-        调用方必须传入 workspace_path 以恢复 request-scoped runners。
-        """
-        from rag.agent.workspace import open_workspace
-
-        resume_started_at = time.perf_counter()
-        prepare_started_at = resume_started_at
+        started_at = time.perf_counter()
         lookup_config = self._checkpoint_lookup_config(run_id)
         checkpoint_store = LangGraphCheckpointStore(
             self._checkpointer,
@@ -1152,92 +661,173 @@ Input files detected — you are in file processing mode:
         restored = await checkpoint_store.load_for_resume()
         if restored is None:
             raise KeyError(f"No checkpoint found for run_id={run_id}")
+        drift_result = await self._reconcile_manifest(
+            restored,
+            checkpoint_store=checkpoint_store,
+        )
+        if drift_result is not None:
+            return drift_result
         state = await checkpoint_store.apply_human_response(response)
         run_config = state["run_config"]
-        await self._restore_runtime_handles_from_checkpoint(run_config)
-
-        workspace_tools: list[Any] | None = None
-        memory_store: WorkspaceMemoryStore | None = None
-        if workspace_path:
-            workspace = open_workspace(workspace_path)
-            workspace_tools = create_workspace_tools(workspace)
-            memory_store = WorkspaceMemoryStore(
-                workspace=workspace,
-                policy=run_config.memory_policy,
-            )
-            RunRegistry.get(run_config.run_id).memory_store = memory_store
-
-        runtime_registry = self._runtime_tool_registry(
-            run_config,
-            tools=workspace_tools,
+        RunRegistry.get_or_create(run_config)
+        workspace = (
+            open_workspace(workspace_path)
+            if workspace_path is not None
+            else self._workspace_by_run.get(run_id)
+            or self._workspace
+            or create_temp_workspace()
         )
-        self._validate_allowed_tools(runtime_registry)
-        self._validate_workspace_core_runners(
-            runtime_registry,
-            allowed_tool_names=self._policy.allowed_tools,
+        memory_store = WorkspaceMemoryStore(
+            workspace=workspace,
+            policy=run_config.memory_policy,
         )
+        RunRegistry.get(run_id).memory_store = memory_store
         loop = self._build_loop(
-            runtime_registry=runtime_registry,
+            state=state,
             checkpoint_store=checkpoint_store,
             memory_store=memory_store,
             goal_spec=checkpoint_store.compatibility_config.goal_spec,
-            state=state,
+            workspace=workspace,
         )
-        prepare_latency_ms = _elapsed_ms(prepare_started_at)
         result_state = await loop.run(state)
+        self._finalize_state(result_state, started_at=started_at)
         if result_state["status"] in {"completed", "failed"}:
-            RunRegistry.remove(run_config.run_id)
-        self._record_result_latency_profile(
-            result_state,
-            run_started_at=resume_started_at,
-            prepare_latency_ms=prepare_latency_ms,
-            finalize_latency_ms=0.0,
-        )
+            RunRegistry.remove(run_id)
         return AgentRunResult.from_loop_result(
             result_state,
             definition=self._policy,
-            workspace_path=workspace_path,
+            workspace_path=str(workspace.root),
         )
 
-    def pending_human_input_request(self, *, run_id: str) -> HumanInputRequest:
+    async def _reconcile_manifest(
+        self,
+        state: LoopState,
+        *,
+        checkpoint_store: LangGraphCheckpointStore,
+    ) -> AgentRunResult | None:
+        persisted = state.get("tool_manifest")
+        if persisted is None:
+            return None
+        resident = tuple(
+            name
+            for name in state.get("resident_tool_names", ())
+            if name in self._tool_snapshot
+        )
+        explicit = tuple(
+            name
+            for name in state.get("explicit_tool_names", ())
+            if name in self._tool_snapshot
+        )
+        active = tuple(
+            name
+            for name in state.get("active_tool_names", ())
+            if name in self._tool_snapshot
+        )
+        tools = tuple(
+            self._tool_snapshot[name]
+            for name in (*resident, *explicit, *active)
+        )
+        rebuilt = build_tool_manifest(
+            tools=tools,
+            resident_tool_names=resident,
+            explicit_tool_names=explicit,
+            active_tool_names=active,
+            provider_serializer_revision=state[
+                "provider_serializer_revision"
+            ],
+        )
+        calls = state.get("canonical_tool_calls", {})
+        dependent = tuple(
+            calls[item.tool_call_id]
+            for item in state["pending_tool_calls"]
+            if item.tool_call_id in calls
+        )
+        decision = reconcile_tool_manifest(
+            persisted=persisted,
+            rebuilt=rebuilt,
+            pending_tool_calls=dependent,
+            paused_tool_calls=(),
+        )
+        if decision.status is ToolManifestDriftStatus.MATCH:
+            return None
+        if decision.status is ToolManifestDriftStatus.NEW_REVISION_REQUIRED:
+            state["resident_tool_names"] = list(resident)
+            state["explicit_tool_names"] = list(explicit)
+            state["active_tool_names"] = list(decision.active_tool_names)
+            state["tool_manifest"] = rebuilt
+            await checkpoint_store.save_snapshot(
+                state,
+                reason="tool_manifest_revision",
+            )
+            return None
+        request = HumanInputRequest(
+            request_id=f"hir_{uuid4().hex[:12]}",
+            kind="tool_reconciliation",
+            question=(
+                "A pending tool definition changed; reconcile it before "
+                "execution."
+            ),
+            context={
+                "reason": decision.reason,
+                "error_code": "tool_definition_changed",
+                "tool_call_id": (
+                    decision.dependent_tool_calls[0].tool_call_id
+                    if decision.dependent_tool_calls
+                    else ""
+                ),
+                "tool_call_ids": [
+                    call.tool_call_id for call in decision.dependent_tool_calls
+                ],
+            },
+            options=["mark_failed", "retry_new_operation"],
+        )
+        state["status"] = "paused"
+        state["approval_request"] = request
+        state["pause"] = LoopPause(
+            reason="tool_definition_changed",
+            request=request,
+        )
+        state["latest_transition"] = LoopTransition(
+            reason="approval_required",
+            iteration=state["iteration"],
+            detail={"reason": "tool_definition_changed"},
+        )
+        await checkpoint_store.save_snapshot(
+            state,
+            reason="tool_definition_changed",
+        )
+        return AgentRunResult.from_loop_result(
+            state,
+            definition=self._policy,
+        )
+
+    def pending_human_input_request(
+        self,
+        *,
+        run_id: str,
+    ) -> HumanInputRequest:
         state = LangGraphCheckpointStore(
             self._checkpointer,
             run_config=self._checkpoint_lookup_config(run_id),
         ).load_latest_sync()
-        if state is None:
-            raise KeyError(f"No checkpoint found for run_id={run_id}")
-        request = state["approval_request"]
-        if request is None and state["pause"] is not None:
-            request = state["pause"].request
-        if request is None:
-            raise KeyError(f"No pending human input request for run_id={run_id}")
-        return request
+        return _pending_request(state, run_id=run_id)
 
-    async def apending_human_input_request(self, *, run_id: str) -> HumanInputRequest:
-        state = await LangGraphCheckpointStore(
+    async def apending_human_input_request(
+        self,
+        *,
+        run_id: str,
+    ) -> HumanInputRequest:
+        checkpoint_store = LangGraphCheckpointStore(
             self._checkpointer,
             run_config=self._checkpoint_lookup_config(run_id),
-        ).load_for_resume()
-        if state is None:
-            raise KeyError(f"No checkpoint found for run_id={run_id}")
-        request = state["approval_request"]
-        if request is None and state["pause"] is not None:
-            request = state["pause"].request
-        if request is None:
-            raise KeyError(f"No pending human input request for run_id={run_id}")
-        return request
-
-    async def _restore_runtime_handles_from_checkpoint(
-        self,
-        run_config: AgentRunConfig,
-    ) -> AgentRunConfig:
-        try:
-            RunRegistry.get(run_config.run_id)
-            return run_config
-        except KeyError:
-            RunRegistry.get_or_create(run_config)
-
-        return run_config
+        )
+        state = await checkpoint_store.load_for_resume()
+        if state is not None:
+            await self._reconcile_manifest(
+                state,
+                checkpoint_store=checkpoint_store,
+            )
+        return _pending_request(state, run_id=run_id)
 
     def _checkpoint_lookup_config(self, run_id: str) -> AgentRunConfig:
         return AgentRunConfig(
@@ -1245,28 +835,56 @@ Input files detected — you are in file processing mode:
             thread_id=run_id,
             agent_type=self._policy.agent_type,
             max_depth=self._policy.max_depth,
-            access_policy=(self._policy.access_policy_ceiling or AccessPolicy.default()),
+            access_policy=(
+                self._policy.access_policy_ceiling or AccessPolicy.default()
+            ),
             tool_policy=self._policy.tool_policy,
         )
 
 
-def _derive_groundedness(tool_results: list[ToolResult]) -> bool:
-    """Derive groundedness_flag from the last RAG generation ToolResult.output."""
-    for result in reversed(tool_results):
-        if result.status == "ok" and result.output is not None:
-            if bool(getattr(result.output, "groundedness_flag", False)):
-                return True
-    return False
+def _pending_request(
+    state: LoopState | None,
+    *,
+    run_id: str,
+) -> HumanInputRequest:
+    if state is None:
+        raise KeyError(f"No checkpoint found for run_id={run_id}")
+    request = state["approval_request"]
+    if request is None and state["pause"] is not None:
+        request = state["pause"].request
+    if request is None:
+        raise KeyError(f"No pending human input request for run_id={run_id}")
+    return request
 
 
-def _derive_insufficient_evidence(tool_results: list[ToolResult]) -> bool:
-    """Derive insufficient_evidence_flag from the last RAG generation ToolResult.output."""
-    for result in reversed(tool_results):
-        if result.status == "ok" and result.output is not None:
-            if bool(getattr(result.output, "insufficient_evidence", False)) or bool(
-                getattr(result.output, "insufficient_evidence_flag", False)
-            ):
-                return True
+def _result_mapping(result: ToolResult) -> Mapping[str, object] | None:
+    value = result.structured_content
+    return value if isinstance(value, Mapping) else None
+
+
+def _result_provenance(
+    results: Sequence[ToolResult],
+) -> tuple[list[EvidenceItem], list[AnswerCitation]]:
+    evidence: list[EvidenceItem] = []
+    citations: list[AnswerCitation] = []
+    for result in results:
+        if result.is_error:
+            continue
+        payload = _result_mapping(result)
+        if payload is None:
+            continue
+        for item in payload.get("evidence", ()) or ():
+            evidence.append(EvidenceItem.model_validate(item))
+        for item in payload.get("citations", ()) or ():
+            citations.append(AnswerCitation.model_validate(item))
+    return evidence, citations
+
+
+def _result_flag(results: Sequence[ToolResult], name: str) -> bool:
+    for result in reversed(results):
+        payload = _result_mapping(result)
+        if payload is not None and bool(payload.get(name, False)):
+            return True
     return False
 
 
@@ -1275,17 +893,19 @@ def _restore_final_output(
     *,
     definition: AgentRuntimePolicy | None,
 ) -> BaseModel | None:
-    if raw_output is None or definition is None or definition.output_model is None:
+    if (
+        raw_output is None
+        or definition is None
+        or definition.output_model is None
+    ):
         return None
     envelope = ValidatedFinalOutput.model_validate(raw_output)
     expected_path = output_model_path(definition.output_model)
     if envelope.model_path != expected_path:
-        raise ValueError("Checkpoint final output model does not match AgentRuntimePolicy.output_model")
+        raise ValueError(
+            "Checkpoint final output model does not match configured output model"
+        )
     return definition.output_model.model_validate(envelope.data)
 
 
-__all__ = [
-    "AgentRunRequest",
-    "AgentRunResult",
-    "AgentService",
-]
+__all__ = ["AgentRunRequest", "AgentRunResult", "AgentService"]
