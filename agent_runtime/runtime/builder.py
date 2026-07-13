@@ -113,7 +113,6 @@ def build_agent_service(
     model_control_plane: ModelControlPlane | None = None,
     runtime_diagnostics: Sequence[RuntimeDiagnostic] = (),
     knowledge_runner: Callable[..., object] | None = None,
-    knowledge_asset_runner: Callable[..., object] | None = None,
     mcp_tools: Sequence[Tool] = (),
     skill_tools: Sequence[Tool] = (),
     subagent_tools: Sequence[Tool] = (),
@@ -163,22 +162,13 @@ def build_agent_service(
         plan_updater=cast(Any, update_plan),
     )
 
-    effective_knowledge_runner = knowledge_runner
-    if effective_knowledge_runner is None and runtime is not None:
-        retrieval_service = getattr(runtime, "retrieval_service", None)
-        if retrieval_service is not None:
-            from rag.agent.tools.rag_answer_tools import RAGSearchAnswerRunner
-
-            effective_knowledge_runner = cast(
-                Any,
-                RAGSearchAnswerRunner(runtime=runtime).answer,
-            )
+    del runtime
 
     async def search_knowledge(arguments: Mapping[str, object]) -> object:
-        if effective_knowledge_runner is None:
+        if knowledge_runner is None:
             raise RuntimeError("knowledge search is not configured")
         payload = KnowledgeSearchInput.model_validate(arguments)
-        result = effective_knowledge_runner(
+        result = knowledge_runner(
             payload,
             execution_context=ToolExecutionContext(),
         )
@@ -187,9 +177,8 @@ def build_agent_service(
         return result
 
     knowledge_tools = create_knowledge_tools(
-        search_knowledge if effective_knowledge_runner is not None else None
+        search_knowledge if knowledge_runner is not None else None
     )
-    del knowledge_asset_runner
     tool_registry = build_tool_registry(
         resident_tools,
         knowledge_tools,

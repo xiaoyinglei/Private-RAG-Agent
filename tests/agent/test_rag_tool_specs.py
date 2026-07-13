@@ -1,24 +1,30 @@
 from __future__ import annotations
 
-from rag.agent.tools.rag_tools import ALL_RAG_TOOLS
+from rag.agent.tools.integrations.knowledge import (
+    KnowledgeSearchOutput,
+    create_knowledge_tools,
+)
+from rag.agent.tools.tool import Tool
 
 
-def test_all_rag_tools_contains_expected_specs() -> None:
-    by_name = {tool.name: tool for tool in ALL_RAG_TOOLS}
-    assert set(by_name) == {
+def test_configured_knowledge_exposes_one_final_tool() -> None:
+    tools = create_knowledge_tools(
+        lambda _arguments: KnowledgeSearchOutput()
+    )
+
+    assert len(tools) == 1
+    assert isinstance(tools[0], Tool)
+    assert tuple(tool.definition.name for tool in tools) == (
+        "search_knowledge",
+    )
+    assert {
         "vector_search",
         "keyword_search",
         "grounding",
         "rerank",
         "graph_expand",
-    }
+    }.isdisjoint(tool.definition.name for tool in tools)
 
 
-def test_rag_tool_permissions_match_contract() -> None:
-    by_name = {tool.name: tool for tool in ALL_RAG_TOOLS}
-    assert by_name["vector_search"].permissions.read_db is True
-    assert by_name["vector_search"].permissions.embed is True
-    assert by_name["keyword_search"].permissions.read_db is True
-    assert by_name["grounding"].permissions.read_object_store is True
-    assert by_name["rerank"].permissions.generate is True
-    assert by_name["graph_expand"].permissions.read_db is True
+def test_unconfigured_knowledge_adds_no_tool() -> None:
+    assert create_knowledge_tools(None) == ()

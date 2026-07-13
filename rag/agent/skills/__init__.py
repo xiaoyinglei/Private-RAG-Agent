@@ -9,6 +9,6 @@ Architecture (phase 1 — inline local skills):
   loader.py    — scan skill roots, parse SKILL.md frontmatter
   catalog.py   — searchable/budgeted skill index
   context.py   — skill listing and loaded-skill context rendering
-  invocation.py — invoke_skill core tool
+  tools/integrations/skills.py — canonical skill tools
   policy.py    — source allowlist, path trust, enabled/disabled config
 """

@@ -1,20 +1,18 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from pathlib import Path
 from types import TracebackType
 from typing import Any, Self
 
-from rag.agent.tools.permissions import ToolExecutionContext
-from rag.agent.tools.rag_answer_tools import RAGSearchAnswerInput, RAGSearchAnswerRunner
-from rag.agent.tools.rag_semantic_tools import (
-    AssetResult,
-    AssetSearchInput,
-    AssetSearchOutput,
+from rag.agent.tools.integrations.knowledge import (
     KnowledgeResult,
     KnowledgeSearchInput,
     KnowledgeSearchOutput,
 )
+from rag.agent.tools.permissions import ToolExecutionContext
+from rag.retrieval import QueryOptions
 from rag.storage.runtime_config import DEFAULT_VECTOR_BACKEND
 
 
@@ -43,89 +41,37 @@ class LazyRAGKnowledgeProvider:
         payload: KnowledgeSearchInput,
         execution_context: ToolExecutionContext,
     ) -> KnowledgeSearchOutput:
+        del execution_context
         runtime = self._ensure_runtime()
-        answer = await RAGSearchAnswerRunner(runtime=runtime).answer(
-            RAGSearchAnswerInput(query=payload.query, top_k=payload.top_k),
-            execution_context,
+        query_result = await asyncio.to_thread(
+            runtime.query,
+            payload.query,
+            options=QueryOptions(top_k=payload.top_k),
         )
+        answer = query_result.answer
+        evidence_items = query_result.retrieval.evidence.all[: payload.top_k]
         results = [
             KnowledgeResult(
                 evidence_id=evidence.evidence_id,
-                doc_id=str(evidence.doc_id),
+                doc_id=evidence.doc_id,
                 citation_anchor=evidence.citation_anchor,
                 text=evidence.text,
                 score=evidence.score,
                 source_type=evidence.source_type or "",
                 file_name=evidence.file_name or "",
             )
-            for evidence in answer.evidence
+            for evidence in evidence_items
         ]
         return KnowledgeSearchOutput(
             results=results,
-            answer_text=answer.text,
+            answer_text=answer.answer_text,
             citations=[
                 citation.citation_anchor or citation.citation_id
                 for citation in answer.citations
             ],
             groundedness_flag=answer.groundedness_flag,
-            insufficient_evidence=answer.insufficient_evidence,
+            insufficient_evidence=answer.insufficient_evidence_flag,
             total_found=len(results),
-        )
-
-    async def search_assets(
-        self,
-        payload: AssetSearchInput,
-        execution_context: ToolExecutionContext,
-    ) -> AssetSearchOutput:
-        del execution_context
-        runtime = self._ensure_runtime()
-        stores = getattr(runtime, "stores", None)
-        metadata_repo = getattr(stores, "metadata_repo", None)
-        object_store = getattr(stores, "object_store", None)
-        if metadata_repo is None or object_store is None:
-            raise RuntimeError("Knowledge asset search requires RAG metadata and object stores.")
-
-        from rag.agent.tools.asset_tools import AssetInspectInput, AssetListInput, AssetToolRunner
-
-        asset_runner = AssetToolRunner(
-            metadata_repo=metadata_repo,
-            object_store=object_store,
-        )
-        list_out = asset_runner.list_assets(
-            AssetListInput(
-                doc_id=payload.doc_id,
-                asset_type=payload.asset_type,
-                limit=payload.max_results,
-            )
-        )
-        results: list[AssetResult] = []
-        for asset in list_out.assets[:payload.max_results]:
-            result = AssetResult(
-                asset_id=asset.asset_id,
-                doc_id=asset.doc_id,
-                asset_type=asset.asset_type,
-                sheet_name=asset.sheet_name,
-                caption=asset.caption,
-                columns=list(asset.columns or []),
-                row_count=asset.row_count,
-                column_count=asset.column_count,
-            )
-            if payload.include_preview and asset.asset_id:
-                try:
-                    preview = asset_runner.inspect_asset(
-                        AssetInspectInput(asset_id=asset.asset_id, head_rows=3)
-                    )
-                except Exception:
-                    preview = None
-                if preview is not None:
-                    if preview.head_rows:
-                        result.preview_rows = preview.head_rows[:3]
-                    result.analysis_capabilities = list(preview.analysis_capabilities or [])
-            results.append(result)
-        return AssetSearchOutput(
-            assets=results,
-            total_found=len(list_out.assets),
-            truncated=len(list_out.assets) > len(results),
         )
 
     def close(self) -> None:

@@ -182,7 +182,6 @@ class Agent:
             model_control_plane = None
         provider: LazyRAGKnowledgeProvider | None = None
         knowledge_runner = None
-        knowledge_asset_runner = None
         if self.knowledge:
             from agent_runtime.knowledge_providers.rag import LazyRAGKnowledgeProvider
 
@@ -197,7 +196,6 @@ class Agent:
                 vector_collection_prefix=self.vector_collection_prefix,
             )
             knowledge_runner = provider.search_knowledge
-            knowledge_asset_runner = provider.search_assets
 
         service = build_agent_service(
             None,
@@ -207,7 +205,6 @@ class Agent:
             model_control_plane=model_control_plane,
             runtime_diagnostics=(),
             knowledge_runner=knowledge_runner,
-            knowledge_asset_runner=knowledge_asset_runner,
             startup_ms=(time.perf_counter() - startup_started_at) * 1000,
         )
         return service, provider

@@ -6,9 +6,7 @@ from rag.agent.core.agent_tool_contract import (
     AgentAsToolAdapter,
     AgentToolInput,
     AgentToolOutput,
-    AgentToolSpec,
     DelegatedEvidenceRef,
-    build_agent_tool_spec,
 )
 from rag.agent.core.context import derive_child_config
 from rag.agent.core.delegation import (
@@ -75,7 +73,5 @@ __all__ = [
     "AgentAsToolRunner",
     "AgentToolInput",
     "AgentToolOutput",
-    "AgentToolSpec",
     "DelegatedEvidenceRef",
-    "build_agent_tool_spec",
 ]

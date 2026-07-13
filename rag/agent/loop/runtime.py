@@ -47,7 +47,6 @@ from rag.agent.planning import MAX_PLAN_EVENTS, PlanEvent, PlanTracker
 from rag.agent.streaming.events import StreamEvent
 from rag.agent.streaming.sink import StreamEventSink
 from rag.agent.tools.executor import ToolExecutionRecord, ToolExecutor
-from rag.agent.tools.observation import ToolExecutionObservation
 from rag.agent.tools.permissions import ToolExecutionContext
 from rag.agent.tools.selection import FIND_TOOLS_NAME, reduce_tool_activation
 from rag.agent.tools.tool import Tool, ToolCall, ToolCallOrigin, ToolResult
@@ -1015,19 +1014,9 @@ class AgentLoop:
         state: LoopState,
         batch: ObservationBatch,
     ) -> None:
-        typed_observations = [
-            ToolExecutionObservation(
-                tool_call_id=obs.tool_call_id,
-                tool_name=obs.tool_name,
-                status=obs.status,
-                related_step_ids=list(getattr(obs, "related_step_ids", []) or []),
-                metadata=dict(getattr(obs, "metadata", {}) or {}),
-            )
-            for obs in batch.structured_observations
-        ]
         plan, events = self._plan_tracker.record_observation_progress(
             plan=state["plan_state"].agent_plan,
-            observations=typed_observations,
+            observations=batch.structured_observations,
         )
         if plan is not None:
             state["plan_state"].agent_plan = plan

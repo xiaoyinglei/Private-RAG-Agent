@@ -12,7 +12,6 @@ _EXPORTS: dict[str, tuple[str, str]] = {
     "AgentServiceFactory": ("rag.agent.core.agent_service_factory", "AgentServiceFactory"),
     "AgentAsToolRunner": ("rag.agent.core.agent_as_tool", "AgentAsToolRunner"),
     "AgentDelegationRequest": ("rag.agent.core.delegation", "AgentDelegationRequest"),
-    "AgentToolSpec": ("rag.agent.core.agent_as_tool", "AgentToolSpec"),
     "BuiltinSubAgentRunner": ("rag.agent.core.subagent_runner", "BuiltinSubAgentRunner"),
     "aclose_agent_checkpointer": ("rag.agent.core.checkpointing", "aclose_agent_checkpointer"),
     "create_agent_checkpointer": ("rag.agent.core.checkpointing", "create_agent_checkpointer"),

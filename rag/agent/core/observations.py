@@ -318,6 +318,9 @@ def _answer_text(tool_name: str, output: BaseModel | None) -> str | None:
     text = getattr(output, "text", None)
     if isinstance(text, str) and text.strip():
         return text.strip()
+    answer_text = getattr(output, "answer_text", None)
+    if isinstance(answer_text, str) and answer_text.strip():
+        return answer_text.strip()
     markdown = getattr(output, "markdown", None)
     if isinstance(markdown, str) and markdown.strip():
         return markdown.strip()
@@ -343,6 +346,8 @@ def _evidence_refs_from_output(output: BaseModel | None) -> list[EvidenceRef]:
             )
         )
     for citation in getattr(output, "citations", []) or []:
+        if not isinstance(citation, (Mapping, AnswerCitation)):
+            continue
         citation_item = AnswerCitation.model_validate(citation)
         refs.append(
             EvidenceRef(
@@ -1146,6 +1151,7 @@ def _citations_from_outputs(
         for result in tool_results
         if result.tool_call_id in observed_ids and result.structured_content is not None
         for item in getattr(_result_output(result), "citations", []) or []
+        if isinstance(item, (Mapping, AnswerCitation))
     ]
 
 

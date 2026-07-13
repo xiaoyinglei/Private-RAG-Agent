@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
@@ -15,8 +16,7 @@ from rag.agent import cli as agent_cli
 from rag.agent.cli import agent_app
 from rag.agent.core.runtime_diagnostics import AgentLatencyProfile
 from rag.agent.service import AgentRunResult
-from rag.agent.tools.rag_semantic_tools import AssetSearchInput
-from rag.schema.core import AssetRecord
+from rag.agent.tools.integrations.knowledge import KnowledgeSearchInput
 
 _ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 
@@ -86,7 +86,6 @@ def test_agent_facade_run_maps_public_request_to_internal_service(
             "model_control_plane": built[0]["model_control_plane"],
             "runtime_diagnostics": (),
             "knowledge_runner": None,
-            "knowledge_asset_runner": None,
             "startup_ms": built[0]["startup_ms"],
         }
     ]
@@ -168,7 +167,7 @@ def test_agent_facade_registers_knowledge_runner_lazily(monkeypatch: pytest.Monk
     assert result.answer == "knowledge runner registered"
     assert built[0]["runtime"] is None
     assert built[0]["knowledge_runner"] is not None
-    assert built[0]["knowledge_asset_runner"] is not None
+    assert "knowledge_asset_runner" not in built[0]
 
 
 def test_agent_facade_closes_service_after_run(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -212,50 +211,44 @@ def test_agent_result_usage_uses_latency_profile_total() -> None:
 
 
 @pytest.mark.anyio
-async def test_lazy_knowledge_provider_search_assets_uses_typed_asset_inputs(
+async def test_lazy_knowledge_provider_search_uses_typed_final_contract(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    class _MetadataRepo:
-        def list_assets(
-            self,
-            *,
-            doc_id: int | None = None,
-            source_id: int | None = None,
-            section_id: int | None = None,
-        ) -> list[AssetRecord]:
-            del doc_id, source_id, section_id
-            return [
-                AssetRecord(
-                    asset_id=7,
-                    doc_id=11,
-                    source_id=13,
-                    asset_type="chart",
-                    page_no=1,
-                    caption="Revenue chart",
-                    content_hash="hash",
-                    storage_key="chart.png",
-                )
-            ]
+    seen: list[tuple[str, object]] = []
 
-        def get_asset(self, asset_id: int) -> AssetRecord | None:
-            assert asset_id == 7
-            return self.list_assets()[0]
+    class _Runtime:
+        def query(self, query: str, *, options: object) -> object:
+            seen.append((query, options))
+            return SimpleNamespace(
+                answer=SimpleNamespace(
+                    answer_text="Revenue increased.",
+                    citations=[
+                        SimpleNamespace(
+                            citation_anchor="report#revenue",
+                            citation_id="citation-1",
+                        )
+                    ],
+                    groundedness_flag=True,
+                    insufficient_evidence_flag=False,
+                ),
+                retrieval=SimpleNamespace(
+                    evidence=SimpleNamespace(
+                        all=[
+                            SimpleNamespace(
+                                evidence_id="evidence-1",
+                                doc_id=11,
+                                citation_anchor="report#revenue",
+                                text="Revenue increased by 12%.",
+                                score=0.94,
+                                source_type="section",
+                                file_name="report.pdf",
+                            )
+                        ]
+                    )
+                ),
+            )
 
-    metadata_repo = _MetadataRepo()
-    runtime = type(
-        "Runtime",
-        (),
-        {
-            "stores": type(
-                "Stores",
-                (),
-                {
-                    "metadata_repo": metadata_repo,
-                    "object_store": object(),
-                },
-            )()
-        },
-    )()
+    runtime = _Runtime()
 
     def build_runtime(**_: object) -> tuple[object, tuple[object, ...]]:
         return runtime, ()
@@ -263,14 +256,17 @@ async def test_lazy_knowledge_provider_search_assets_uses_typed_asset_inputs(
     monkeypatch.setattr(runtime_builder, "build_optional_rag_runtime", build_runtime)
 
     provider = LazyRAGKnowledgeProvider()
-    result = await provider.search_assets(
-        AssetSearchInput(query="revenue chart", asset_type="chart", max_results=1),
+    result = await provider.search_knowledge(
+        KnowledgeSearchInput(query="revenue", top_k=1),
         execution_context=cast(Any, object()),
     )
 
     assert result.total_found == 1
-    assert result.assets[0].asset_id == 7
-    assert result.assets[0].caption == "Revenue chart"
+    assert result.answer_text == "Revenue increased."
+    assert result.results[0].evidence_id == "evidence-1"
+    assert result.citations == ["report#revenue"]
+    assert seen[0][0] == "revenue"
+    assert seen[0][1].top_k == 1
 
 
 def test_agent_run_cli_delegates_to_agent_facade(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -876,6 +876,8 @@ def _result_provenance(
         for item in payload.get("evidence", ()) or ():
             evidence.append(EvidenceItem.model_validate(item))
         for item in payload.get("citations", ()) or ():
+            if not isinstance(item, (Mapping, AnswerCitation)):
+                continue
             citations.append(AnswerCitation.model_validate(item))
     return evidence, citations
 

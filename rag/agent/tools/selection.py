@@ -613,7 +613,7 @@ def _rank_tool_matches(
     documents: list[tuple[str, Counter[str], int]] = []
     document_frequency: Counter[str] = Counter()
     for name in candidate_names:
-        tokens = _tool_search_tokens(registry_snapshot[name])
+        tokens = _search_tokens(registry_snapshot[name])
         counts = Counter(tokens)
         documents.append((name, counts, len(tokens)))
         for term in set(query_tokens) & counts.keys():
@@ -657,7 +657,7 @@ def _rank_tool_matches(
     return tuple(item[2] for item in scored[:limit])
 
 
-def _tool_search_tokens(tool: Tool) -> tuple[str, ...]:
+def _search_tokens(tool: Tool) -> tuple[str, ...]:
     canonical_name = tool.definition.name
     name = canonical_name[:_MAX_METADATA_FIELD_CHARS]
     source_namespace = " ".join(name.split("__")[:-1])[:_MAX_METADATA_FIELD_CHARS]

@@ -13,9 +13,9 @@ def test_agent_package_exports_new_contract_surface_only() -> None:
     assert hasattr(agent, "AgentService")
     assert hasattr(agent, "AgentState")
     assert hasattr(agent, "AgentAsToolRunner")
-    assert hasattr(agent, "AgentToolSpec")
+    assert hasattr(agent, "Tool")
     assert hasattr(agent, "ToolRegistry")
-    assert hasattr(agent, "ToolSpec")
+    assert hasattr(agent, "ToolResult")
     assert hasattr(agent, "RunRegistry")
     assert hasattr(agent, "derive_child_config")
     assert not hasattr(agent, "AgentGraphCompiler")
@@ -24,17 +24,20 @@ def test_agent_package_exports_new_contract_surface_only() -> None:
     assert not hasattr(agent, "TaskDAG")
     assert not hasattr(agent, "AnalysisAgentService")
     assert not hasattr(agent, "AgentRunState")
+    assert not hasattr(agent, "AgentToolSpec")
+    assert not hasattr(agent, "ToolSpec")
 
 
 def test_root_package_exports_new_agent_contract_surface() -> None:
     from rag import (
-        AgentRuntimePolicy,
         AgentRunConfig,
         AgentRunRequest,
+        AgentRuntimePolicy,
         AgentService,
         AgentState,
+        Tool,
         ToolRegistry,
-        ToolSpec,
+        ToolResult,
     )
 
     assert AgentRuntimePolicy is not None
@@ -42,8 +45,9 @@ def test_root_package_exports_new_agent_contract_surface() -> None:
     assert AgentRunRequest is not None
     assert AgentService is not None
     assert AgentState is not None
+    assert Tool is not None
     assert ToolRegistry is not None
-    assert ToolSpec is not None
+    assert ToolResult is not None
 
 
 def test_legacy_agent_service_module_no_longer_exports_old_service() -> None:

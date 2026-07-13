@@ -1,14 +1,12 @@
 from __future__ import annotations
 
 import inspect
-from dataclasses import dataclass
 from typing import Literal, Self
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from rag.agent.core.context import AgentRunConfig
-from rag.agent.core.definition import AgentRuntimePolicy
 from rag.agent.core.delegation import (
     AgentAsToolExecutionError,
     AgentDelegationRequest,
@@ -16,15 +14,7 @@ from rag.agent.core.delegation import (
     DelegatedAgentRunner,
     ParentAgentContext,
 )
-from rag.agent.tools.spec import ExecutionCategory, ToolError, ToolPermissions, ToolSpec
 from rag.schema.query import AnswerCitation
-
-
-@dataclass(frozen=True)
-class AgentToolSpec:
-    tool_spec: ToolSpec
-    agent_definition: AgentRuntimePolicy
-    inherits_context: bool = True
 
 
 class AgentToolInput(BaseModel):
@@ -227,76 +217,9 @@ def _build_delegation_prompt(payload: AgentToolInput) -> str:
     return "\n\n".join(parts)
 
 
-_AGENT_TOOL_WHITELIST: frozenset[str] = frozenset(
-    {
-        "research",
-        "compare",
-        "factcheck",
-        "synthesize",
-    }
-)
-
-_AGENT_TOOL_BLOCKLIST: frozenset[str] = frozenset(
-    {
-        "orchestrator",
-    }
-)
-
-
-def build_agent_tool_spec(agent_definition: AgentRuntimePolicy) -> AgentToolSpec:
-    """Wrap an AgentRuntimePolicy as an agent_* ToolSpec."""
-
-    agent_type = agent_definition.agent_type
-
-    if agent_type in _AGENT_TOOL_BLOCKLIST:
-        raise ValueError(f"Agent type {agent_type!r} is blocklisted from agent-as-tool registration.")
-
-    if agent_type not in _AGENT_TOOL_WHITELIST:
-        raise ValueError(
-            f"Agent type {agent_type!r} is not in the agent-as-tool whitelist. "
-            f"Allowed: {', '.join(sorted(_AGENT_TOOL_WHITELIST))}"
-        )
-
-    tool_name = f"agent_{agent_type}"
-    tool_description = _make_tool_description(agent_definition)
-
-    tool_spec = ToolSpec(
-        name=tool_name,
-        description=tool_description,
-        input_model=AgentToolInput,
-        output_model=AgentToolOutput,
-        error_model=ToolError,
-        permissions=ToolPermissions(
-            read_db=True,
-            embed=True,
-            generate=True,
-        ),
-        execution_category=ExecutionCategory.READ,
-        timeout_seconds=120.0,
-        max_retries=0,
-        work_budget_cost=2_000,
-    )
-
-    return AgentToolSpec(
-        tool_spec=tool_spec,
-        agent_definition=agent_definition,
-        inherits_context=True,
-    )
-
-
-def _make_tool_description(definition: AgentRuntimePolicy) -> str:
-    return (
-        f"Delegate bounded work to the {definition.agent_type} agent. "
-        f"{definition.description} "
-        f"Use this when the task requires specialized {definition.agent_type} capabilities."
-    )
-
-
 __all__ = [
     "AgentAsToolAdapter",
     "AgentToolInput",
     "AgentToolOutput",
-    "AgentToolSpec",
     "DelegatedEvidenceRef",
-    "build_agent_tool_spec",
 ]

@@ -1,258 +1,260 @@
-"""B2a: MCP end-to-end integration — real MCP server via stdio.
-
-Spawns a minimal MCP server in a subprocess, connects via MCPToolAdapter,
-and verifies the full flow: connect → list_tools → build ToolSpec → call_tool.
-"""
-
 from __future__ import annotations
 
-import asyncio
-import json
-import os
 import sys
-import tempfile
 import textwrap
+from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
+from mcp.client.session import ClientSession
+from mcp.client.stdio import StdioServerParameters, stdio_client
 
-from rag.agent.tools.mcp_adapter import (
-    MCPToolConfig,
-    MCPToolAdapter,
-    MCPToolOutput,
+from rag.agent.tools.executor import ToolExecutor
+from rag.agent.tools.integrations.mcp import (
+    MCPToolDescriptor,
+    create_mcp_tools,
+)
+from rag.agent.tools.permissions import ToolExecutionContext
+from rag.agent.tools.tool import JsonValue, ToolCall, ToolCallOrigin
+
+_MCP_SERVER_SCRIPT = textwrap.dedent(
+    """\
+    import asyncio
+
+    from mcp.server import Server
+    from mcp.server.stdio import stdio_server
+    from mcp.types import TextContent, Tool
+
+
+    server = Server("test-mcp-server")
+
+
+    @server.list_tools()
+    async def list_tools():
+        return [
+            Tool(
+                name="echo",
+                description="Echo the supplied message.",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "message": {
+                            "type": "string",
+                            "description": "Message to echo.",
+                        }
+                    },
+                    "required": ["message"],
+                    "additionalProperties": False,
+                },
+            ),
+            Tool(
+                name="add",
+                description="Add two integers.",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "a": {"type": "integer", "description": "Left value."},
+                        "b": {"type": "integer", "description": "Right value."},
+                    },
+                    "required": ["a", "b"],
+                    "additionalProperties": False,
+                },
+            ),
+            Tool(
+                name="read_only_info",
+                description="Read server information.",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "field": {
+                            "type": "string",
+                            "enum": ["version", "status"],
+                            "description": "Information field.",
+                        }
+                    },
+                    "additionalProperties": False,
+                },
+                annotations={"readOnlyHint": True},
+            ),
+        ]
+
+
+    @server.call_tool()
+    async def call_tool(name, arguments):
+        if name == "echo":
+            return [
+                TextContent(
+                    type="text",
+                    text=f"echo: {arguments.get('message', '')}",
+                )
+            ]
+        if name == "add":
+            return [
+                TextContent(
+                    type="text",
+                    text=str(arguments.get("a", 0) + arguments.get("b", 0)),
+                )
+            ]
+        if name == "read_only_info":
+            field = arguments.get("field", "version")
+            return [TextContent(type="text", text=f"{field}: 1.0.0")]
+        raise ValueError(f"unknown tool: {name}")
+
+
+    async def main():
+        async with stdio_server() as (read, write):
+            await server.run(
+                read,
+                write,
+                server.create_initialization_options(),
+            )
+
+
+    if __name__ == "__main__":
+        asyncio.run(main())
+    """
 )
 
 
-# Minimal MCP server script (stdio transport).
-# Runs in a subprocess; client connects via stdio_client.
-_MCP_SERVER_SCRIPT = textwrap.dedent("""\
-import asyncio
-import json
-import sys
-
-from mcp.server import Server
-from mcp.server.stdio import stdio_server
-from mcp.types import Tool, TextContent
-
-
-server = Server("test-mcp-server")
-
-
-@server.list_tools()
-async def list_tools() -> list[Tool]:
-    return [
-        Tool(
-            name="echo",
-            description="Echo back the input message",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "message": {
-                        "type": "string",
-                        "description": "The message to echo",
-                    },
-                },
-                "required": ["message"],
-            },
-        ),
-        Tool(
-            name="add",
-            description="Add two numbers",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "a": {"type": "integer", "description": "First number"},
-                    "b": {"type": "integer", "description": "Second number"},
-                },
-                "required": ["a", "b"],
-            },
-        ),
-        Tool(
-            name="read_only_info",
-            description="Get read-only system info",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "field": {
-                        "type": "string",
-                        "enum": ["version", "status"],
-                        "description": "Which info field",
-                    },
-                },
-            },
-            annotations={"readOnlyHint": True},
-        ),
-    ]
-
-
-@server.call_tool()
-async def call_tool(name: str, arguments: dict) -> list[TextContent]:
-    if name == "echo":
-        msg = arguments.get("message", "")
-        return [TextContent(type="text", text=f"echo: {msg}")]
-    elif name == "add":
-        a = arguments.get("a", 0)
-        b = arguments.get("b", 0)
-        return [TextContent(type="text", text=str(a + b))]
-    elif name == "read_only_info":
-        field = arguments.get("field", "version")
-        return [TextContent(type="text", text=f"{field}: 1.0.0")]
-    return [TextContent(type="text", text=f"unknown tool: {name}")]
-
-
-async def main():
-    async with stdio_server() as (read, write):
-        await server.run(read, write, server.create_initialization_options())
-
-if __name__ == "__main__":
-    asyncio.run(main())
-""")
-
-
 @pytest.fixture
-def server_script_path() -> str:
-    """Write the MCP server script to a temp file, return its path."""
-    with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".py", delete=False, encoding="utf-8",
-    ) as f:
-        f.write(_MCP_SERVER_SCRIPT)
-    path = f.name
-    yield path
-    try:
-        os.unlink(path)
-    except OSError:
-        pass
+def server_script_path(tmp_path: Path) -> Path:
+    path = tmp_path / "mcp_server.py"
+    path.write_text(_MCP_SERVER_SCRIPT, encoding="utf-8")
+    return path
+
+
+def _call(name: str, arguments: Mapping[str, JsonValue]) -> ToolCall:
+    return ToolCall(
+        tool_call_id=f"call_{name}",
+        tool_name=f"mcp__test_server__{name}",
+        arguments=arguments,
+        origin=ToolCallOrigin(
+            request_id="request_mcp",
+            toolset_revision="mcp-e2e-v1",
+            exposed_tool_names=(f"mcp__test_server__{name}",),
+        ),
+    )
 
 
 @pytest.mark.anyio
-async def test_mcp_e2e_connect_list_call(server_script_path: str) -> None:
-    """Full MCP lifecycle: connect → list_tools → build spec → call_tool."""
-    config = MCPToolConfig(
-        name="test_server",
-        transport="stdio",
+async def test_external_transport_projects_real_mcp_tools(
+    server_script_path: Path,
+) -> None:
+    params = StdioServerParameters(
         command=sys.executable,
-        args=[server_script_path],
-        tools_allowlist=["echo", "add", "read_only_info"],
-        enabled=True,
+        args=[str(server_script_path)],
     )
+    async with stdio_client(params) as (read_stream, write_stream):
+        async with ClientSession(read_stream, write_stream) as session:
+            await session.initialize()
+            listed = await session.list_tools()
+            descriptors = tuple(
+                MCPToolDescriptor(
+                    server_name="test_server",
+                    tool_name=item.name,
+                    description=item.description or "Configured MCP tool.",
+                    input_schema=item.inputSchema,
+                    read_only_hint=bool(
+                        getattr(item.annotations, "readOnlyHint", False)
+                    ),
+                    execution_revision="e2e-v1",
+                )
+                for item in listed.tools
+            )
 
-    adapter = MCPToolAdapter(config=config)
-    await adapter.connect()
-    assert adapter.is_connected
+            async def call_tool(
+                server_name: str,
+                tool_name: str,
+                arguments: Mapping[str, JsonValue],
+            ) -> object:
+                assert server_name == "test_server"
+                return await session.call_tool(
+                    tool_name,
+                    arguments=dict(arguments),
+                )
 
-    # List tools
-    tool_results = await adapter.list_tools()
-    assert len(tool_results) >= 3
-    names = {tr.spec.name for tr in tool_results}
-    assert "mcp__test_server__echo" in names
-    assert "mcp__test_server__add" in names
-    assert "mcp__test_server__read_only_info" in names
+            tools = create_mcp_tools(descriptors, call_tool)
+            snapshot = {tool.definition.name: tool for tool in tools}
+            executor = ToolExecutor(snapshot)
+            context = ToolExecutionContext(
+                approved_tool_call_ids=frozenset(
+                    {"call_echo", "call_add", "call_read_only_info"}
+                )
+            )
 
-    # Verify ToolSpecs pass __post_init__ validation
-    for tr in tool_results:
-        spec = tr.spec
-        assert spec.timeout_seconds > 0
-        assert spec.execution_category is not None
-        # read_only_info should be NETWORK + MEDIUM (not LOW — P1-1 fix)
-        if "read_only_info" in spec.name:
-            assert spec.idempotent is True
-            assert spec.concurrency_safe is True
-            # risk_level should be MEDIUM (NETWORK floor)
-            from rag.agent.tools.spec import RiskLevel
-            assert spec.risk_level == RiskLevel.MEDIUM
+            echo = await executor.execute(
+                _call("echo", {"message": "hello"}),
+                context=context,
+            )
+            added = await executor.execute(
+                _call("add", {"a": 3, "b": 4}),
+                context=context,
+            )
+            info = await executor.execute(
+                _call("read_only_info", {"field": "version"}),
+                context=context,
+            )
 
-    # Verify ToolCards
-    for tr in tool_results:
-        spec = tr.spec
-        assert spec.aci is not None
-        assert spec.aci.activation_group == "mcp"
-
-    # Call echo tool
-    echo_spec_name = "mcp__test_server__echo"
-    runner = adapter.get_runner(echo_spec_name)
-    # Build input using the spec's input_model
-    echo_spec = next(tr.spec for tr in tool_results if tr.spec.name == echo_spec_name)
-    input_instance = echo_spec.input_model(message="hello world")
-    result = await runner(input_instance, None)
-    assert isinstance(result, MCPToolOutput)
-    assert result.ok is True
-    assert "echo: hello world" in result.text
-
-    # Call add tool
-    add_spec_name = "mcp__test_server__add"
-    add_runner = adapter.get_runner(add_spec_name)
-    add_spec = next(tr.spec for tr in tool_results if tr.spec.name == add_spec_name)
-    add_input = add_spec.input_model(a=3, b=4)
-    add_result = await add_runner(add_input, None)
-    assert add_result.ok is True
-    assert "7" in add_result.text
-
-    # Call read_only_info
-    info_name = "mcp__test_server__read_only_info"
-    info_runner = adapter.get_runner(info_name)
-    info_spec = next(tr.spec for tr in tool_results if tr.spec.name == info_name)
-    info_input = info_spec.input_model(field="version")
-    info_result = await info_runner(info_input, None)
-    assert info_result.ok is True
-
-    await adapter.disconnect()
-    assert not adapter.is_connected
+    assert tuple(snapshot) == (
+        "mcp__test_server__echo",
+        "mcp__test_server__add",
+        "mcp__test_server__read_only_info",
+    )
+    assert echo.result.content[0].data["text"] == "echo: hello"
+    assert added.result.content[0].data["text"] == "7"
+    assert info.result.content[0].data["text"] == "version: 1.0.0"
+    assert all(
+        execution.result.is_error is False
+        for execution in (echo, added, info)
+    )
 
 
 @pytest.mark.anyio
-async def test_mcp_e2e_error_propagation(server_script_path: str) -> None:
-    """MCP tool call with invalid name → ok=False."""
-    config = MCPToolConfig(
-        name="test_server",
-        transport="stdio",
+async def test_mcp_schema_failure_is_normalized_before_transport_call(
+    server_script_path: Path,
+) -> None:
+    params = StdioServerParameters(
         command=sys.executable,
-        args=[server_script_path],
-        tools_allowlist=["echo"],
-        enabled=True,
+        args=[str(server_script_path)],
     )
+    async with stdio_client(params) as (read_stream, write_stream):
+        async with ClientSession(read_stream, write_stream) as session:
+            await session.initialize()
+            listed = await session.list_tools()
+            echo_descriptor = next(
+                MCPToolDescriptor(
+                    server_name="test_server",
+                    tool_name=item.name,
+                    description=item.description or "Configured MCP tool.",
+                    input_schema=item.inputSchema,
+                )
+                for item in listed.tools
+                if item.name == "echo"
+            )
+            calls = 0
 
-    adapter = MCPToolAdapter(config=config)
-    await adapter.connect()
-    await adapter.list_tools()
+            async def call_tool(
+                _server_name: str,
+                tool_name: str,
+                arguments: Mapping[str, JsonValue],
+            ) -> object:
+                nonlocal calls
+                calls += 1
+                return await session.call_tool(
+                    tool_name,
+                    arguments=dict(arguments),
+                )
 
-    # Call echo tool with the echo runner but original_name pointing to nonexistent
-    # The runner will fail gracefully — let's test disconnected state instead
-    await adapter.disconnect()
+            [tool] = create_mcp_tools((echo_descriptor,), call_tool)
+            execution = await ToolExecutor(
+                {tool.definition.name: tool}
+            ).execute(
+                _call("echo", {}),
+                context=ToolExecutionContext(
+                    approved_tool_call_ids=frozenset({"call_echo"})
+                ),
+            )
 
-    # After disconnect, runner returns ok=False
-    runner = adapter.get_runner("mcp__test_server__echo")
-    echo_spec = adapter.tools.get("mcp__test_server__echo")
-    if echo_spec:
-        input_instance = echo_spec.spec.input_model(message="test")
-        result = await runner(input_instance, None)
-        assert result.ok is False  # disconnected → error
-        assert result.is_error is True
-
-
-@pytest.mark.anyio
-async def test_mcp_tool_spec_passes_validation(server_script_path: str) -> None:
-    """Every MCP tool's ToolSpec survives __post_init__ without ValueError."""
-    config = MCPToolConfig(
-        name="test_server",
-        transport="stdio",
-        command=sys.executable,
-        args=[server_script_path],
-        tools_allowlist=["echo", "add", "read_only_info"],
-        enabled=True,
-    )
-
-    adapter = MCPToolAdapter(config=config)
-    await adapter.connect()
-    tool_results = await adapter.list_tools()
-
-    for tr in tool_results:
-        spec = tr.spec
-        # If spec was built correctly, these should be set
-        assert spec.name.startswith("mcp__test_server__")
-        assert spec.description != ""
-        assert spec.aci is not None
-        assert spec.aci.when_to_use != ""
-        # Verify no __post_init__ ValueError was raised during construction
-        # (the fact that we have a ToolSpec instance means it passed)
-
-    await adapter.disconnect()
+    assert execution.result.is_error is True
+    assert execution.result.error_code == "invalid_arguments"
+    assert calls == 0

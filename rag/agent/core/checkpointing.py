@@ -82,6 +82,9 @@ LOOP_CHECKPOINT_NAMESPACE = "agent_loop"
 LOOP_COMPATIBILITY_CHANNEL = "loop_compatibility"
 LOOP_STATE_CHANNEL = "loop_state"
 TOOL_CHECKPOINT_FORMAT_VERSION = 2
+_SERDE_TYPE_KEY = "__agent_checkpoint_type__"
+_SERDE_VALUE_KEY = "value"
+_SERDE_TOOL_RESULT = "canonical_tool_result_v1"
 
 
 @dataclass(frozen=True, slots=True)
@@ -276,10 +279,64 @@ __all__ = [
 ]
 
 
+class _AgentCheckpointSerializer:
+    """Make immutable canonical tool values explicit at the serde boundary."""
+
+    def __init__(self, inner: SerializerProtocol) -> None:
+        self._inner = inner
+
+    def dumps_typed(self, obj: Any) -> tuple[str, bytes]:
+        return self._inner.dumps_typed(_encode_serde_value(obj))
+
+    def loads_typed(self, data: tuple[str, bytes]) -> Any:
+        return _decode_serde_value(self._inner.loads_typed(data))
+
+
 def agent_checkpoint_serde() -> SerializerProtocol:
-    return JsonPlusSerializer(
-        allowed_msgpack_modules=AGENT_CHECKPOINT_MSGPACK_ALLOWLIST,
+    return _AgentCheckpointSerializer(
+        JsonPlusSerializer(
+            allowed_msgpack_modules=AGENT_CHECKPOINT_MSGPACK_ALLOWLIST,
+        )
     )
+
+
+def _encode_serde_value(value: object) -> object:
+    if isinstance(value, ToolResult):
+        return {
+            _SERDE_TYPE_KEY: _SERDE_TOOL_RESULT,
+            _SERDE_VALUE_KEY: _encode_runtime_tool_result(value),
+        }
+    if isinstance(value, Mapping):
+        return {
+            key: _encode_serde_value(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, tuple):
+        return tuple(_encode_serde_value(item) for item in value)
+    if isinstance(value, list):
+        return [_encode_serde_value(item) for item in value]
+    return value
+
+
+def _decode_serde_value(value: object) -> object:
+    if isinstance(value, Mapping):
+        if (
+            len(value) == 2
+            and value.get(_SERDE_TYPE_KEY) == _SERDE_TOOL_RESULT
+            and isinstance(value.get(_SERDE_VALUE_KEY), Mapping)
+        ):
+            return _decode_runtime_tool_result(
+                cast(Mapping[str, object], value[_SERDE_VALUE_KEY])
+            )
+        return {
+            key: _decode_serde_value(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, tuple):
+        return tuple(_decode_serde_value(item) for item in value)
+    if isinstance(value, list):
+        return [_decode_serde_value(item) for item in value]
+    return value
 
 
 class LazyAsyncSqliteSaver(BaseCheckpointSaver[str]):

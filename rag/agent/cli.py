@@ -138,7 +138,6 @@ def _build_agent_service(
     model_control_plane: ModelControlPlane | None = None,
     runtime_diagnostics: Sequence[RuntimeDiagnostic] = (),
     knowledge_runner: Callable[..., object] | None = None,
-    knowledge_asset_runner: Callable[..., object] | None = None,
     strict_model_provider: bool = True,
     startup_ms: float = 0.0,
 ) -> AgentService:
@@ -152,7 +151,6 @@ def _build_agent_service(
         model_control_plane=model_control_plane,
         runtime_diagnostics=runtime_diagnostics,
         knowledge_runner=knowledge_runner,
-        knowledge_asset_runner=knowledge_asset_runner,
         strict_model_provider=strict_model_provider,
         startup_ms=startup_ms,
     )

@@ -15,9 +15,7 @@ def build_loop_turn_prompt(
 ) -> str:
     """Build the model contract for the ordinary Python loop kernel.
 
-    ``allowed_tools`` should already be the resolved visible tool list
-    (caller uses VisibleToolResolver / resolve_visible_tools before
-    calling this function).
+    ``allowed_tools`` is the already-selected model-facing tool-name list.
     """
 
     task = state.get("task", "")

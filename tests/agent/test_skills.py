@@ -14,14 +14,7 @@ from typing import Any
 import pytest
 
 from rag.agent.core.context import AgentRunConfig
-from rag.agent.core.tool_schema import AgentMessageAssembler
 from rag.agent.loop.state import create_loop_state
-from rag.agent.service import AgentService
-from rag.agent.skills.assets import (
-    MaterializeSkillAssetInput,
-    MaterializeSkillAssetOutput,
-    MaterializeSkillAssetTool,
-)
 from rag.agent.skills.catalog import SkillCatalog
 from rag.agent.skills.context import (
     SKILL_PROMPT_GUIDANCE,
@@ -29,12 +22,6 @@ from rag.agent.skills.context import (
     render_active_loaded_skills,
     render_loaded_skill,
     render_skill_listing,
-)
-from rag.agent.skills.invocation import (
-    INVOKE_SKILL_SPEC,
-    InvokeSkillInput,
-    InvokeSkillOutput,
-    make_invoke_skill_runner,
 )
 from rag.agent.skills.loader import (
     SkillLoadError,
@@ -57,7 +44,6 @@ from rag.agent.tools.integrations.skills import (
     create_materialize_skill_asset_tool,
 )
 from rag.agent.tools.permissions import ToolExecutionContext as FinalToolExecutionContext
-from rag.agent.tools.registry import ToolExecutionContext
 from rag.agent.tools.tool import Tool, ToolCall, ToolCallOrigin
 from rag.agent.workspace import open_workspace
 from rag.schema.runtime import AccessPolicy
@@ -459,22 +445,6 @@ class TestContext:
             assert 'code="skill_content_changed_on_resume"' in rendered
             assert "Changed body." in rendered
 
-    def test_agent_message_assembler_injects_skill_context(self):
-        state = create_loop_state(task="test", run_config=_run_config())
-
-        def skill_context_provider(_state):
-            return "<loaded_skills>loaded</loaded_skills>"
-
-        from rag.agent.builtin.generic import GENERIC_AGENT
-
-        msg = AgentMessageAssembler(
-            skill_context_provider=skill_context_provider,
-        ).build_system_message(
-            definition=GENERIC_AGENT,
-            state=state,
-            visible_tool_names=["invoke_skill"],
-        )
-        assert "<loaded_skills>loaded</loaded_skills>" in msg.content
 
 
 # ── Policy tests ─────────────────────────────────────────────────────
@@ -501,234 +471,6 @@ class TestPolicy:
             _write_skill(Path(d), "auto", "Auto-load")
             manifests = scan_and_load_skills(Path(d), repo_root=Path(d))
             assert policy.can_autoload(manifests[0]) is True
-
-
-# ── Invocation tests ─────────────────────────────────────────────────
-
-
-class TestInvocation:
-    def test_spec_registered(self):
-        assert INVOKE_SKILL_SPEC.name == "invoke_skill"
-        assert INVOKE_SKILL_SPEC.input_model is InvokeSkillInput
-        assert INVOKE_SKILL_SPEC.output_model is InvokeSkillOutput
-
-    @pytest.mark.anyio
-    async def test_runner_returns_loaded_skill(self):
-        with tempfile.TemporaryDirectory() as d:
-            _write_skill(Path(d), "invoke-test", "Invocation test")
-            manifests = scan_and_load_skills(Path(d), repo_root=Path(d))
-            catalog = SkillCatalog(manifests)
-            runner = make_invoke_skill_runner(catalog)
-
-            result = await runner(InvokeSkillInput(name="invoke-test"), None)
-            out = InvokeSkillOutput.model_validate(result)
-            assert out.success is True
-            assert out.name == "invoke-test"
-            assert out.skill_id == "project:invoke-test"
-            assert out.source == "project"
-            assert len(out.fingerprint) == 16
-            assert "Body of invoke-test." in out.loaded_content
-
-    @pytest.mark.anyio
-    async def test_runner_records_active_skill_ref_in_loop_state(self):
-        from rag.agent.tools.registry import ToolExecutionContext
-
-        with tempfile.TemporaryDirectory() as d:
-            _write_skill(Path(d), "state-test", "State test")
-            catalog = SkillCatalog(scan_and_load_skills(Path(d), repo_root=Path(d)))
-            runner = make_invoke_skill_runner(catalog)
-            run_config = _run_config()
-            state = create_loop_state(task="test", run_config=run_config)
-
-            result = await runner(
-                InvokeSkillInput(name="project:state-test", args="input.xlsx"),
-                ToolExecutionContext(run_config=run_config, state=state),
-            )
-            out = InvokeSkillOutput.model_validate(result)
-
-            assert out.success is True
-            assert "project:state-test" in state["skill_state"].active
-            ref = state["skill_state"].active["project:state-test"]
-            assert ref.skill_id == "project:state-test"
-            assert ref.args == "input.xlsx"
-
-    @pytest.mark.anyio
-    async def test_runner_skill_not_found(self):
-        catalog = SkillCatalog()
-        runner = make_invoke_skill_runner(catalog)
-        result = await runner(InvokeSkillInput(name="nope"), None)
-        out = InvokeSkillOutput.model_validate(result)
-        assert out.success is False
-        assert out.error_code == "skill_not_found"
-        assert "not found" in out.loaded_content
-
-    @pytest.mark.anyio
-    async def test_runner_ambiguous_bare_name(self):
-        with tempfile.TemporaryDirectory() as d, tempfile.TemporaryDirectory() as ext:
-            _write_skill(Path(d), "dup", "Project version")
-            ext_skill = Path(ext) / "dup"
-            ext_skill.mkdir()
-            (ext_skill / "SKILL.md").write_text(
-                "---\nname: dup\ndescription: External version\n---\nexternal"
-            )
-            catalog = SkillCatalog(
-                scan_and_load_skills(Path(d), repo_root=Path(d), extra_dirs=[Path(ext)])
-            )
-            runner = make_invoke_skill_runner(catalog)
-
-            result = await runner(InvokeSkillInput(name="dup"), None)
-            out = InvokeSkillOutput.model_validate(result)
-
-            assert out.success is False
-            assert out.error_code == "ambiguous_skill_name"
-            assert "project:dup" in out.loaded_content
-            assert "external:dup" in out.loaded_content
-
-    @pytest.mark.anyio
-    async def test_runner_disabled_skill(self):
-        with tempfile.TemporaryDirectory() as d:
-            _write_skill(Path(d), "disabled", "Disabled skill")
-            manifests = scan_and_load_skills(Path(d), repo_root=Path(d))
-            catalog = SkillCatalog(manifests)
-            policy = SkillPolicy(disabled_skills=frozenset({"disabled"}))
-            runner = make_invoke_skill_runner(catalog, policy)
-
-            result = await runner(InvokeSkillInput(name="disabled"), None)
-            out = InvokeSkillOutput.model_validate(result)
-            assert out.success is False
-            assert "disabled by the current policy" in out.loaded_content
-
-    @pytest.mark.anyio
-    async def test_runner_disable_model_invocation(self):
-        with tempfile.TemporaryDirectory() as d:
-            _write_skill(
-                Path(d), "no-model", "No model invoke",
-                disable_model_invocation=True,
-            )
-            manifests = scan_and_load_skills(Path(d), repo_root=Path(d))
-            catalog = SkillCatalog(manifests)
-            runner = make_invoke_skill_runner(catalog)
-
-            result = await runner(InvokeSkillInput(name="no-model"), None)
-            out = InvokeSkillOutput.model_validate(result)
-            assert out.success is False
-            assert "disable_model_invocation" in out.loaded_content
-
-    @pytest.mark.anyio
-    async def test_runner_returns_structured_error_when_skill_file_becomes_invalid(self):
-        with tempfile.TemporaryDirectory() as d:
-            skill_md = _write_skill(Path(d), "invalid-on-load", "Invalid on load")
-            catalog = SkillCatalog(scan_and_load_skills(Path(d), repo_root=Path(d)))
-            runner = make_invoke_skill_runner(catalog)
-            skill_md.write_text("# frontmatter removed\n")
-
-            result = await runner(InvokeSkillInput(name="project:invalid-on-load"), None)
-            out = InvokeSkillOutput.model_validate(result)
-
-            assert out.success is False
-            assert out.skill_id == "project:invalid-on-load"
-            assert out.error_code == "invalid_skill_manifest"
-            assert "Failed to load skill" in out.loaded_content
-
-    @pytest.mark.anyio
-    async def test_runner_args_substitution(self):
-        with tempfile.TemporaryDirectory() as d:
-            skill_dir = Path(d) / ".agents" / "skills" / "args-invoke"
-            skill_dir.mkdir(parents=True)
-            (skill_dir / "SKILL.md").write_text(
-                "---\nname: args-invoke\ndescription: Test args\n---\n"
-                "Process: $ARGUMENTS"
-            )
-            manifests = scan_and_load_skills(Path(d), repo_root=Path(d))
-            catalog = SkillCatalog(manifests)
-            runner = make_invoke_skill_runner(catalog)
-
-            result = await runner(
-                InvokeSkillInput(name="args-invoke", args="input.csv"), None
-            )
-            out = InvokeSkillOutput.model_validate(result)
-            assert out.success is True
-            assert "input.csv" in out.loaded_content
-            assert "$ARGUMENTS" not in out.loaded_content
-
-
-class TestMaterializeSkillAsset:
-    @pytest.mark.anyio
-    async def test_materializes_active_skill_script_into_scratch(self):
-        with tempfile.TemporaryDirectory() as d, tempfile.TemporaryDirectory() as ws_dir:
-            skill_md = _write_skill(Path(d), "asset-test", "Asset test")
-            script = skill_md.parent / "scripts" / "helper.py"
-            script.parent.mkdir()
-            script.write_text("print('ok')\n")
-            catalog = SkillCatalog(scan_and_load_skills(Path(d), repo_root=Path(d)))
-            loaded = catalog.load("project:asset-test", iteration=2)
-            assert loaded is not None
-
-            run_config = _run_config()
-            state = create_loop_state(task="test", run_config=run_config)
-            state["skill_state"].active["project:asset-test"] = loaded.to_ref()
-            workspace = open_workspace(ws_dir)
-            tool = MaterializeSkillAssetTool(workspace)
-
-            result = await tool.execute(
-                MaterializeSkillAssetInput(
-                    skill_id="project:asset-test",
-                    relative_path="scripts/helper.py",
-                ),
-                ToolExecutionContext(run_config=run_config, state=state),
-            )
-            out = MaterializeSkillAssetOutput.model_validate(result)
-
-            assert out.workspace_path == "scratch/skills/project_asset-test/scripts/helper.py"
-            materialized = workspace.root / out.workspace_path
-            assert materialized.read_text() == "print('ok')\n"
-            assert out.size_bytes == len("print('ok')\n")
-
-    @pytest.mark.anyio
-    async def test_rejects_non_active_or_unsafe_skill_assets(self):
-        with tempfile.TemporaryDirectory() as d, tempfile.TemporaryDirectory() as ws_dir:
-            skill_md = _write_skill(Path(d), "guard-test", "Guard test")
-            ref_file = skill_md.parent / "references" / "notes.md"
-            ref_file.parent.mkdir()
-            ref_file.write_text("notes\n")
-            catalog = SkillCatalog(scan_and_load_skills(Path(d), repo_root=Path(d)))
-            loaded = catalog.load("project:guard-test", iteration=1)
-            assert loaded is not None
-
-            run_config = _run_config()
-            state = create_loop_state(task="test", run_config=run_config)
-            workspace = open_workspace(ws_dir)
-            tool = MaterializeSkillAssetTool(workspace)
-            context = ToolExecutionContext(run_config=run_config, state=state)
-
-            with pytest.raises(ValueError, match="not active"):
-                await tool.execute(
-                    MaterializeSkillAssetInput(
-                        skill_id="project:guard-test",
-                        relative_path="references/notes.md",
-                    ),
-                    context,
-                )
-
-            state["skill_state"].active["project:guard-test"] = loaded.to_ref()
-
-            with pytest.raises(ValueError, match="scripts/ or references/"):
-                await tool.execute(
-                    MaterializeSkillAssetInput(
-                        skill_id="project:guard-test",
-                        relative_path="SKILL.md",
-                    ),
-                    context,
-                )
-
-            with pytest.raises(ValueError, match="must be relative"):
-                await tool.execute(
-                    MaterializeSkillAssetInput(
-                        skill_id="project:guard-test",
-                        relative_path="../SKILL.md",
-                    ),
-                    context,
-                )
 
 
 # ── Models tests ─────────────────────────────────────────────────────
@@ -982,34 +724,6 @@ class TestSkillStateIntegration:
 
             assert isinstance(restored["skill_state"], SkillState)
             assert "project:checkpoint-test" in restored["skill_state"].active
-
-
-class TestServiceSkillIntegration:
-    def test_agent_service_registers_skill_tools_when_catalog_present(self):
-        from rag.agent.builtin.generic import GENERIC_AGENT
-        from rag.agent.builtin_registry import create_builtin_tool_registry
-        from rag.agent.tools.workspace_tools import create_workspace_tools
-
-        with tempfile.TemporaryDirectory() as d, tempfile.TemporaryDirectory() as ws_dir:
-            _write_skill(Path(d), "service-skill", "Service skill")
-            catalog = SkillCatalog(scan_and_load_skills(Path(d), repo_root=Path(d)))
-            service = AgentService(
-                definition=GENERIC_AGENT,
-                tool_registry=create_builtin_tool_registry(),
-                skill_catalog=catalog,
-            )
-            workspace = open_workspace(ws_dir)
-
-            assert "invoke_skill" in service._policy.core_tool_names
-            assert "materialize_skill_asset" in service._policy.core_tool_names
-
-            registry = service._runtime_tool_registry(
-                _run_config(),
-                tools=create_workspace_tools(workspace),
-            )
-
-            assert registry.has_runner("invoke_skill")
-            assert registry.has_runner("materialize_skill_asset")
 
 
 class TestFinalSkillToolFactories:

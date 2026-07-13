@@ -17,47 +17,53 @@ from rag.agent.core.turn_contracts import ToolCallPlan
 from rag.agent.loop.state import PendingToolCall, create_loop_state
 from rag.agent.memory.models import ExternalizedToolOutput, MemoryRef
 from rag.agent.planning import AgentPlan, PlanStep
-from rag.agent.primitive_ops import FileInfo, ListFilesOutput
-from rag.agent.tools.rag_answer_tools import RAGSearchAnswerOutput
-from rag.agent.tools.spec import ToolResult
-from rag.schema.query import AnswerCitation, EvidenceItem
+from rag.agent.tools.tool import ToolContentBlock, ToolResult
 from rag.schema.runtime import AccessPolicy
 
 
-def test_agent_checkpoint_serde_restores_tool_result_without_unregistered_warning(
+def _round_trip_without_warning(
+    value: object,
+    caplog: pytest.LogCaptureFixture,
+) -> object:
+    serde = agent_checkpoint_serde()
+    with caplog.at_level(
+        logging.WARNING,
+        logger="langgraph.checkpoint.serde.jsonplus",
+    ):
+        restored = serde.loads_typed(serde.dumps_typed(value))
+    assert "Deserializing unregistered type" not in caplog.text
+    return restored
+
+
+def test_checkpoint_serde_restores_canonical_tool_result(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     result = ToolResult(
         tool_call_id="tc-list",
         tool_name="list_files",
-        status="ok",
-        output=ListFilesOutput(
-            files=[
-                FileInfo(
-                    name="sales.csv",
-                    path="input_files/sales.csv",
-                    size=26,
-                    is_dir=False,
-                    modified_at=1.0,
-                )
+        content=(ToolContentBlock(type="text", data={"text": "sales.csv"}),),
+        structured_content={
+            "entries": [
+                {
+                    "name": "sales.csv",
+                    "path": "input_files/sales.csv",
+                    "size": 26,
+                    "is_dir": False,
+                }
             ]
-        ),
-        latency_ms=0,
+        },
+        metadata={"latency_ms": 0.5},
     )
-    serde = agent_checkpoint_serde()
 
-    with caplog.at_level(
-        logging.WARNING,
-        logger="langgraph.checkpoint.serde.jsonplus",
-    ):
-        restored = serde.loads_typed(serde.dumps_typed(result))
+    restored = _round_trip_without_warning(result, caplog)
 
     assert isinstance(restored, ToolResult)
-    assert restored.output == result.output
-    assert "Deserializing unregistered type" not in caplog.text
+    assert restored.content == result.content
+    assert restored.structured_content == result.structured_content
+    assert restored.metadata == result.metadata
 
 
-def test_agent_checkpoint_serde_restores_agent_plan_without_unregistered_warning(
+def test_checkpoint_serde_restores_agent_plan(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     plan = AgentPlan(
@@ -71,108 +77,69 @@ def test_agent_checkpoint_serde_restores_agent_plan_without_unregistered_warning
             )
         ],
     )
-    serde = agent_checkpoint_serde()
 
-    with caplog.at_level(
-        logging.WARNING,
-        logger="langgraph.checkpoint.serde.jsonplus",
-    ):
-        restored = serde.loads_typed(serde.dumps_typed(plan))
+    restored = _round_trip_without_warning(plan, caplog)
 
     assert isinstance(restored, AgentPlan)
     assert restored == plan
-    assert "Deserializing unregistered type" not in caplog.text
 
 
-def test_agent_checkpoint_serde_restores_externalized_tool_output_without_unregistered_warning(
+def test_checkpoint_serde_restores_externalized_output_record(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    result = ToolResult(
-        tool_call_id="tc-big",
-        tool_name="run_python",
-        status="ok",
-        output=ExternalizedToolOutput(
-            original_output_model="rag.agent.primitive_ops.RunPythonOutput",
-            summary="run_python ok=True exit_code=0 stdout_preview=large",
-            ref=MemoryRef(
-                ref_id="mem_abc",
-                path=".agent_memory/records/mem_abc.json",
-                summary="run_python ok=True exit_code=0",
-                source_tool_call_id="tc-big",
-                source_tool_name="run_python",
-                size_bytes=1024,
-            ),
-            status="available",
+    output = ExternalizedToolOutput(
+        original_output_model="rag.agent.primitive_ops.RunCommandOutput",
+        summary="run_command ok=True exit_code=0 stdout_preview=large",
+        ref=MemoryRef(
+            ref_id="mem_abc",
+            path=".agent_memory/records/mem_abc.json",
+            summary="run_command ok=True exit_code=0",
+            source_tool_call_id="tc-big",
+            source_tool_name="run_command",
+            size_bytes=1024,
         ),
-        latency_ms=0,
+        status="available",
     )
-    serde = agent_checkpoint_serde()
 
-    with caplog.at_level(
-        logging.WARNING,
-        logger="langgraph.checkpoint.serde.jsonplus",
-    ):
-        restored = serde.loads_typed(serde.dumps_typed(result))
+    restored = _round_trip_without_warning(output, caplog)
 
-    assert isinstance(restored, ToolResult)
-    assert isinstance(restored.output, ExternalizedToolOutput)
-    assert restored.output.ref.ref_id == "mem_abc"
-    assert "Deserializing unregistered type" not in caplog.text
+    assert isinstance(restored, ExternalizedToolOutput)
+    assert restored.ref.ref_id == "mem_abc"
 
 
-def test_agent_checkpoint_serde_restores_tool_call_metrics_without_unregistered_warning(
+@pytest.mark.parametrize(
+    "value",
+    [
+        ToolCallMetrics(native_calls=2, native_latency_ms_total=15.5),
+        AgentLatencyProfile(total_ms=12.5, model_latency_ms=4.0),
+    ],
+)
+def test_checkpoint_serde_restores_runtime_diagnostics(
+    value: object,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    metrics = ToolCallMetrics(native_calls=2, native_latency_ms_total=15.5)
-    serde = agent_checkpoint_serde()
+    restored = _round_trip_without_warning(value, caplog)
 
-    with caplog.at_level(
-        logging.WARNING,
-        logger="langgraph.checkpoint.serde.jsonplus",
-    ):
-        restored = serde.loads_typed(serde.dumps_typed(metrics))
-
-    assert isinstance(restored, ToolCallMetrics)
-    assert restored.native_calls == 2
-    assert restored.native_latency_ms_total == 15.5
-    assert "Deserializing unregistered type" not in caplog.text
+    assert restored == value
 
 
-def test_agent_checkpoint_serde_restores_latency_profile_without_unregistered_warning(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    profile = AgentLatencyProfile(total_ms=12.5, model_latency_ms=4.0)
-    serde = agent_checkpoint_serde()
-
-    with caplog.at_level(
-        logging.WARNING,
-        logger="langgraph.checkpoint.serde.jsonplus",
-    ):
-        restored = serde.loads_typed(serde.dumps_typed(profile))
-
-    assert isinstance(restored, AgentLatencyProfile)
-    assert restored.total_ms == 12.5
-    assert restored.model_latency_ms == 4.0
-    assert "Deserializing unregistered type" not in caplog.text
-
-
-def test_sqlite_checkpointer_can_be_constructed_without_running_event_loop(
+def test_sqlite_checkpointer_constructs_without_running_event_loop(
     tmp_path: Path,
 ) -> None:
-    checkpoint_db = tmp_path / "agent-checkpoints.sqlite"
-
-    checkpointer = create_agent_checkpointer(checkpoint_db)
+    checkpointer = create_agent_checkpointer(
+        tmp_path / "agent-checkpoints.sqlite"
+    )
 
     assert checkpointer is not None
     asyncio.run(aclose_agent_checkpointer(checkpointer))
 
 
-def test_live_loop_state_serde_after_pr3_cleanup() -> None:
-    """Live PR3 LoopState payload must serialize without deprecated state fields."""
+def test_live_loop_state_serde_preserves_final_tool_result() -> None:
     serde = agent_checkpoint_serde()
-
-    plan = ToolCallPlan.create("rag_search_answer", {"query": "What is the capital of France?"})
-
+    plan = ToolCallPlan.create(
+        "search_knowledge",
+        {"query": "What is the capital of France?"},
+    )
     config = AgentRunConfig(
         run_id="test-serde-live",
         thread_id="test-serde-live",
@@ -180,55 +147,50 @@ def test_live_loop_state_serde_after_pr3_cleanup() -> None:
         max_depth=1,
         access_policy=AccessPolicy.default(),
     )
-
     result = ToolResult(
         tool_call_id=plan.tool_call_id,
-        tool_name="rag_search_answer",
-        status="ok",
-        output=RAGSearchAnswerOutput(
-            text="Paris is the capital of France.",
-            evidence=[
-                EvidenceItem(
-                    evidence_id="ev_1",
-                    doc_id=1,
-                    citation_anchor="paris-capital",
-                    text="Paris is the capital of France.",
-                    score=0.95,
-                ),
+        tool_name="search_knowledge",
+        structured_content={
+            "answer_text": "Paris is the capital of France.",
+            "results": [
+                {
+                    "evidence_id": "ev_1",
+                    "doc_id": 1,
+                    "citation_anchor": "paris-capital",
+                    "text": "Paris is the capital of France.",
+                    "score": 0.95,
+                    "source_type": "section",
+                    "file_name": "france.pdf",
+                }
             ],
-            citations=[
-                AnswerCitation(
-                    citation_id="cit_1",
-                    evidence_id="ev_1",
-                    record_type="section",
-                    citation_anchor="paris-capital",
-                    file_name="france_overview.pdf",
-                ),
-            ],
-        ),
-        latency_ms=0,
+            "citations": ["paris-capital"],
+            "groundedness_flag": True,
+            "insufficient_evidence": False,
+            "total_found": 1,
+        },
     )
-
-    state = create_loop_state(task="What is the capital of France?", run_config=config)
+    state = create_loop_state(
+        task="What is the capital of France?",
+        run_config=config,
+    )
     state["pending_tool_calls"] = [
-        PendingToolCall(plan=plan, status="completed", summary="Paris is the capital of France."),
+        PendingToolCall(
+            plan=plan,
+            status="completed",
+            summary="Paris is the capital of France.",
+        )
     ]
     state["tool_call_ledger"].append_plans([plan], turn=1)
     state["tool_results"] = [result]
 
     restored = serde.loads_typed(serde.dumps_typed(state))
 
-    # Deprecated flat fields must not appear
     assert "evidence" not in restored
     assert "citations" not in restored
-
-    # ToolResult output must survive with typed EvidenceItem inside
-    assert restored["tool_results"][0].output.evidence[0].evidence_id == "ev_1"
-    assert restored["tool_results"][0].output.citations[0].citation_id == "cit_1"
-
-    # Ledger entries must survive
+    restored_result = restored["tool_results"][0]
+    assert isinstance(restored_result, ToolResult)
+    assert restored_result.structured_content["results"][0]["evidence_id"] == (
+        "ev_1"
+    )
     assert len(restored["tool_call_ledger"].entries) == 1
-
-    # PendingToolCall must survive
-    assert restored["pending_tool_calls"][0].tool_call_id == plan.tool_call_id
     assert restored["pending_tool_calls"][0].status == "completed"

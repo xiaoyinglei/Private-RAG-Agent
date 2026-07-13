@@ -94,17 +94,12 @@ class AgentRuntimePolicy:
         tool_policy: Any = None,
     ) -> AgentRuntimePolicy:
         """Convenience factory — flat tool list + sensible defaults for tests."""
-        from rag.agent.capabilities.catalog import CORE_TOOLS, DEFERRED_TOOLS
-
         tools = allowed_tools or []
-        core = tuple(t for t in tools if t in CORE_TOOLS)
-        deferred = tuple(t for t in tools if t in DEFERRED_TOOLS)
-        core = core + tuple(t for t in tools if t not in CORE_TOOLS and t not in DEFERRED_TOOLS)
 
         return cls(
             system_instructions=system_prompt,
-            core_tool_names=core,
-            deferred_tool_names=deferred,
+            core_tool_names=tuple(tools),
+            deferred_tool_names=(),
             max_iterations=max_iterations,
             max_depth=max_depth,
             agent_type=agent_type,
