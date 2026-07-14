@@ -16,6 +16,8 @@ if TYPE_CHECKING:
     from rag.agent.core.registry import AgentRegistry
     from rag.agent.core.runtime_diagnostics import RuntimeDiagnostic
     from rag.agent.service import AgentService
+    from rag.agent.skills.runtime import SkillRuntime
+    from rag.agent.streaming.sink import StreamEventSink
     from rag.agent.tools.tool import Tool
 
 logger = logging.getLogger(__name__)
@@ -116,6 +118,9 @@ def build_agent_service(
     mcp_tools: Sequence[Tool] = (),
     skill_tools: Sequence[Tool] = (),
     subagent_tools: Sequence[Tool] = (),
+    discoverable_tools: Sequence[Tool] = (),
+    skill_runtime: SkillRuntime | None = None,
+    stream_sink: StreamEventSink | None = None,
     strict_model_provider: bool = True,
     startup_ms: float = 0.0,
 ) -> AgentService:
@@ -138,13 +143,17 @@ def build_agent_service(
         create_find_tools_tool,
         find_tools,
     )
-    from rag.agent.workspace import create_temp_workspace
+    from rag.agent.workspace import WorkspaceRuntime, create_temp_workspace
 
     build_started_at = time.perf_counter()
     model_ready_ms = 0.0
     agent_registry = create_builtin_agent_registry()
     definition = resolve_cli_agent_definition(agent_registry, agent_type)
-    workspace = create_temp_workspace()
+    workspace = (
+        runtime
+        if isinstance(runtime, WorkspaceRuntime)
+        else create_temp_workspace()
+    )
     plan_revision = 0
 
     def update_plan(arguments: Mapping[str, object]) -> dict[str, object]:
@@ -161,8 +170,6 @@ def build_agent_service(
         workspace,
         plan_updater=cast(Any, update_plan),
     )
-
-    del runtime
 
     async def search_knowledge(arguments: Mapping[str, object]) -> object:
         if knowledge_runner is None:
@@ -185,16 +192,19 @@ def build_agent_service(
         mcp_tools,
         skill_tools,
         subagent_tools,
+        discoverable_tools,
     )
     configured_resident_names = tuple(
-        tool.definition.name for tool in knowledge_tools
-    )
-    hidden_tool_names = tuple(
         tool.definition.name
-        for source in (mcp_tools, skill_tools, subagent_tools)
+        for source in (knowledge_tools, skill_tools)
         for tool in source
     )
-    if hidden_tool_names:
+    discoverable_tool_names = tuple(
+        tool.definition.name
+        for source in (mcp_tools, subagent_tools, discoverable_tools)
+        for tool in source
+    )
+    if discoverable_tool_names:
         discovery_snapshot = MappingProxyType(
             {
                 tool.definition.name: tool
@@ -206,7 +216,7 @@ def build_agent_service(
             return find_tools(
                 discovery_snapshot,
                 query=query,
-                discoverable_names=hidden_tool_names,
+                discoverable_names=discoverable_tool_names,
                 limit=limit,
                 max_active_tools=definition.max_active_deferred_tools,
             )
@@ -219,7 +229,7 @@ def build_agent_service(
         ),
         deferred_tool_names=(
             *configured_resident_names,
-            *hidden_tool_names,
+            *discoverable_tool_names,
         ),
     )
     diagnostics: tuple[RuntimeDiagnostic, ...] = tuple(runtime_diagnostics)
@@ -256,6 +266,9 @@ def build_agent_service(
         ),
         workspace=workspace,
         configured_resident_tool_names=configured_resident_names,
+        discoverable_tool_names=discoverable_tool_names,
+        skill_runtime=skill_runtime,
+        stream_sink=stream_sink,
     )
 
 

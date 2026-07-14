@@ -39,13 +39,18 @@ class ToolExecutionContext:
     allow_execute_tools: bool = False
     approved_tool_call_ids: frozenset[str] = frozenset()
     denied_tool_call_ids: frozenset[str] = frozenset()
+    active_skill_ids: frozenset[str] = frozenset()
     deny_effects: frozenset[ToolEffect] = frozenset()
 
     def __post_init__(self) -> None:
         for name in ("allow_write_tools", "allow_execute_tools"):
             if type(getattr(self, name)) is not bool:
                 raise TypeError(f"{name} must be a bool")
-        for name in ("approved_tool_call_ids", "denied_tool_call_ids"):
+        for name in (
+            "approved_tool_call_ids",
+            "denied_tool_call_ids",
+            "active_skill_ids",
+        ):
             values = frozenset(getattr(self, name))
             if any(not isinstance(value, str) or not value for value in values):
                 raise ValueError(f"{name} must contain non-empty strings")
@@ -171,6 +176,15 @@ def enforce_hard_guards(
             code="cwd_escape",
             label="cwd",
         )
+
+    for target in resolved.targets:
+        if target.kind != "active_skill":
+            continue
+        if target.value not in context.active_skill_ids:
+            raise ToolGuardError(
+                "skill_not_active",
+                "skill asset access requires an active checkpointed skill",
+            )
     if context.workspace_root is not None and context.cwd is not None:
         _enforce_containment(
             str(context.cwd),

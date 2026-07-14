@@ -41,6 +41,7 @@ def test_delivery_cases_cover_the_locked_public_matrix() -> None:
         "ollama_local_envelope",
     } == set(cases)
     assert cases["direct_answer"].expected_tools == ()
+    assert cases["direct_answer"].expected_answer_exact == "4"
     assert cases["direct_answer"].expected_initial_tools == (
         RESIDENT_CODING_TOOL_NAMES
     )
@@ -49,15 +50,43 @@ def test_delivery_cases_cover_the_locked_public_matrix() -> None:
         "read_file",
     )
     assert cases["patch_fixture"].expected_tools == ("apply_patch",)
+    assert cases["patch_fixture"].expected_answer_contains == ()
     assert cases["echo_hello"].expected_tools == ("run_command",)
     assert cases["missing_file_recovery"].expected_tool_errors == (
         "read_file:runner_failed",
     )
     assert cases["hidden_mcp_disabled"].allow_discovery_tools is False
+    assert cases["hidden_mcp_disabled"].expected_answer_exact == (
+        "hidden_disabled"
+    )
     assert cases["hidden_mcp_discovery"].allow_discovery_tools is True
     assert cases["approval_resume"].expect_origin_retained is True
+    assert cases["approval_resume"].expected_answer_contains == ()
+    assert cases["cache_usage"].expected_answer_exact == "cache_visible"
     assert cases["mlx_local_envelope"].provider == "mlx"
     assert cases["ollama_local_envelope"].provider == "ollama"
+
+
+def test_exact_answer_assertion_rejects_substring_false_positive() -> None:
+    module = _load_smoke_module()
+    case = module.SmokeCase(
+        name="strict-answer",
+        task="Answer exactly cache_visible.",
+        expected_answer_exact="cache_visible",
+    )
+    result = module.SmokeResult(
+        name=case.name,
+        passed=False,
+        status="done",
+        answer="I cannot provide cache_visible.",
+        tools=(),
+        visible_tools=(),
+        workspace_path=None,
+    )
+
+    error = module._validate_result(case, result)
+
+    assert "expected exact answer" in error
 
 
 @pytest.mark.anyio

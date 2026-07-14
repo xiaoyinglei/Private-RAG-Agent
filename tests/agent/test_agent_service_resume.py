@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Mapping
 
 import pytest
@@ -47,6 +48,24 @@ class _FinishProvider:
                         final_answer=text,
                     )
         return ModelTurnDraft(action="finish", final_answer="done")
+
+
+class _SlowToolCallingProvider:
+    def __init__(self, call: ToolCallPlan) -> None:
+        self._call = call
+
+    async def next_turn(
+        self,
+        state: LoopState,
+        *,
+        definition: AgentRuntimePolicy,
+        budget_remaining: int,
+    ) -> ModelTurnDraft:
+        del definition, budget_remaining
+        if state["tool_results"]:
+            return ModelTurnDraft(action="finish", final_answer="done")
+        await asyncio.sleep(0.05)
+        return ModelTurnDraft(action="execute", tool_calls=(self._call,))
 
 
 def _tool(
@@ -162,6 +181,46 @@ async def test_default_checkpointer_resumes_on_same_service_without_replay() -> 
     assert resumed.final_answer == "ran:once"
     assert calls == ["once"]
     assert resumed.tool_results[0].is_error is False
+
+
+@pytest.mark.anyio
+async def test_resume_latency_is_cumulative_across_approval_pause() -> None:
+    calls: list[str] = []
+    call = ToolCallPlan.create("remote_write", {"value": "timed"})
+    registry = ToolRegistry()
+    registry.register(_tool(calls))
+    service = AgentService(
+        definition=_definition(),
+        tool_registry=registry,
+        model_turn_provider=_SlowToolCallingProvider(call),
+    )
+
+    paused = await service.run(
+        AgentRunRequest(
+            task="Run one remote write.",
+            run_id="resume-cumulative-latency",
+            thread_id="resume-cumulative-latency",
+        )
+    )
+    assert paused.status == "paused"
+    assert paused.latency_profile is not None
+
+    resumed = await service.resume(
+        run_id="resume-cumulative-latency",
+        response=HumanInputResponse(
+            request_id=paused.human_input_request.request_id,
+            decision="allow_once",
+            approved_tool_call_ids=[call.tool_call_id],
+        ),
+    )
+
+    assert resumed.status == "done"
+    assert resumed.latency_profile is not None
+    assert resumed.latency_profile.total_ms >= paused.latency_profile.total_ms
+    assert resumed.latency_profile.total_ms >= (
+        resumed.latency_profile.model_latency_ms
+        + resumed.latency_profile.tool_latency_ms
+    )
 
 
 @pytest.mark.anyio

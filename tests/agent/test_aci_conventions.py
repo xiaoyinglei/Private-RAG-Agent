@@ -58,6 +58,23 @@ def test_resident_aci_is_small_ordered_and_self_documenting(tmp_path: Path) -> N
         )
 
 
+def test_resident_aci_spells_out_observed_model_argument_pitfalls(
+    tmp_path: Path,
+) -> None:
+    tools = _tools(open_workspace(tmp_path, create=True))
+
+    read_properties = tools["read_file"].definition.input_schema["properties"]
+    assert isinstance(read_properties, Mapping)
+    max_bytes = read_properties["max_bytes"]
+    assert isinstance(max_bytes, Mapping)
+    assert "1,000,000" in str(max_bytes["description"])
+    assert max_bytes["default"] == 16_000
+
+    update = tools["update_plan"].definition
+    assert '"step"' in update.description
+    assert '"status"' in update.description
+
+
 @pytest.mark.anyio
 async def test_invalid_input_becomes_one_canonical_tool_result(
     tmp_path: Path,

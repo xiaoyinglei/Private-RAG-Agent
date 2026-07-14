@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import ast
 import json
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from openai.types.chat import ChatCompletion
 
 from rag.agent.core.messages import ModelMessage, StopReason, ToolUseResult
 from rag.agent.core.model_request import (
@@ -258,6 +259,18 @@ def test_openai_response_parser_accepts_mapping_responses_deterministically() ->
     assert first == second
     assert first.stop_reason is StopReason.END_TURN
     assert first.text == "Done."
+
+
+def test_openai_response_parser_accepts_sdk_null_tool_calls(
+    chat_completion_factory: Callable[..., ChatCompletion],
+) -> None:
+    response = chat_completion_factory(content="Done.", tool_calls=None)
+
+    turn = parse_openai_response(response)
+
+    assert turn.stop_reason is StopReason.END_TURN
+    assert turn.text == "Done."
+    assert turn.tool_calls == []
 
 
 def test_openai_usage_treats_cached_tokens_as_part_of_total_input() -> None:

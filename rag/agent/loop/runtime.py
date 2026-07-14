@@ -6,7 +6,7 @@ import time
 from collections.abc import AsyncGenerator, Awaitable, Mapping, Sequence
 from dataclasses import replace
 from inspect import isawaitable
-from typing import Any, Protocol, cast
+from typing import TYPE_CHECKING, Any, Protocol, cast
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, ValidationError
@@ -20,7 +20,11 @@ from rag.agent.core.finalization import (
 )
 from rag.agent.core.human_input import HumanInputRequest, ToolCallSummary
 from rag.agent.core.llm_context import AgentLLMContextOverflowError
-from rag.agent.core.messages import ModelMessage, tool_result_message
+from rag.agent.core.messages import (
+    ModelMessage,
+    context_event_message,
+    tool_result_message,
+)
 from rag.agent.core.model_request import (
     ModelCallRecord,
     ModelRequest,
@@ -49,10 +53,16 @@ from rag.agent.streaming.sink import StreamEventSink
 from rag.agent.tools.executor import ToolExecutionRecord, ToolExecutor
 from rag.agent.tools.permissions import ToolExecutionContext
 from rag.agent.tools.selection import FIND_TOOLS_NAME, reduce_tool_activation
-from rag.agent.tools.tool import Tool, ToolCall, ToolCallOrigin, ToolResult
-from rag.providers.llm_gateway import LLMContextOverflowError
+from rag.agent.tools.tool import JsonValue, Tool, ToolCall, ToolCallOrigin, ToolResult
+from rag.providers.llm_gateway import (
+    LLMContextOverflowError,
+    LLMToolCallValidationError,
+)
 
 logger = logging.getLogger(__name__)
+
+if TYPE_CHECKING:
+    from rag.agent.skills.runtime import SkillRuntime
 
 # Tool classification used by runtime metrics.
 _NATIVE_TOOL_SET = frozenset({
@@ -135,6 +145,8 @@ class AgentLoop:
         observation_extractor: ObservationExtractor | None = None,
         plan_tracker: PlanTracker | None = None,
         max_model_retries: int = 1,
+        skill_runtime: SkillRuntime | None = None,
+        discoverable_tool_names: Sequence[str] | None = None,
     ) -> None:
         if max_model_retries < 0:
             raise ValueError("max_model_retries must be non-negative")
@@ -154,6 +166,12 @@ class AgentLoop:
         self._observed_tool_call_ids: set[str] = set()
         self._plan_tracker = plan_tracker or PlanTracker()
         self._max_model_retries = max_model_retries
+        self._skill_runtime = skill_runtime
+        self._discoverable_tool_names = (
+            None
+            if discoverable_tool_names is None
+            else tuple(discoverable_tool_names)
+        )
 
     def _set_stream_sink(self, sink: StreamEventSink | None) -> None:
         """Set the active stream sink, propagating to sub-components that support it."""
@@ -426,7 +444,10 @@ class AgentLoop:
             state["canonical_tool_calls"][plan.tool_call_id] = ToolCall(
                 tool_call_id=plan.tool_call_id,
                 tool_name=plan.tool_name,
-                arguments=plan.arguments,
+                arguments=cast(
+                    Mapping[str, JsonValue],
+                    plan.arguments,
+                ),
                 origin=origin,
             )
 
@@ -524,6 +545,23 @@ class AgentLoop:
             return None, retries
 
         retries += 1
+        if isinstance(exc, LLMToolCallValidationError):
+            feedback: dict[str, JsonValue] = {
+                "instruction": (
+                    "Return a corrected tool call whose arguments satisfy the "
+                    "published JSON schema. Do not repeat the rejected call."
+                ),
+                "validation_error": exc.validation_error,
+            }
+            if exc.failed_generation:
+                feedback["failed_generation"] = exc.failed_generation
+            state["canonical_transcript"] = [
+                *state.get("canonical_transcript", []),
+                context_event_message(
+                    "model_tool_call_rejected",
+                    feedback,
+                ),
+            ]
         await self._emit_stream(_stream_recovery(
             strategy="model_retry",
             detail=f"attempt={retries}, error={str(exc)[:200]}",
@@ -546,6 +584,7 @@ class AgentLoop:
                 _stream_tool_use_start(
                     tool_name=call.tool_name,
                     tool_id=call.tool_call_id,
+                    input_preview=_tool_input_preview(call.arguments),
                     run_id=run_id,
                     turn=turn,
                 )
@@ -558,13 +597,17 @@ class AgentLoop:
             denied_tool_call_ids=frozenset(
                 state["denied_tool_call_ids"]
             ),
+            active_skill_ids=(
+                frozenset()
+                if self._skill_runtime is None
+                else self._skill_runtime.validated_active_skill_ids(state)
+            ),
         )
         executions = await self._tool_executor.execute_batch(
             calls,
             context=context,
             records=state["tool_execution_records"],
         )
-        new_results = [execution.result for execution in executions]
         for execution in executions:
             if execution.record is not None:
                 state["tool_execution_records"][
@@ -579,6 +622,11 @@ class AgentLoop:
             ),
             None,
         )
+        new_results = [
+            execution.result
+            for execution in executions
+            if execution is not approval_execution
+        ]
         reconciliation_execution = next(
             (
                 execution
@@ -639,7 +687,16 @@ class AgentLoop:
         self._record_plan_observations(state, batch)
 
         if approval_execution is not None:
-            request = _approval_request(approval_execution.result)
+            approval_call = next(
+                call
+                for call in calls
+                if call.tool_call_id
+                == approval_execution.result.tool_call_id
+            )
+            request = _approval_request(
+                approval_execution.result,
+                approval_call,
+            )
             state["approval_request"] = request
             await self._pause(
                 state,
@@ -707,11 +764,12 @@ class AgentLoop:
                 )
             )
         )
+        manifest = state.get("tool_manifest")
         origin = plan.origin or ToolCallOrigin(
             request_id=f"{state['run_config'].run_id}:initial",
             toolset_revision=(
-                state["tool_manifest"].toolset_revision
-                if state.get("tool_manifest") is not None
+                manifest.toolset_revision
+                if manifest is not None
                 else "tools_initial"
             ),
             exposed_tool_names=exposed,
@@ -719,7 +777,7 @@ class AgentLoop:
         call = ToolCall(
             tool_call_id=plan.tool_call_id,
             tool_name=plan.tool_name,
-            arguments=plan.arguments,
+            arguments=cast(Mapping[str, JsonValue], plan.arguments),
             origin=origin,
         )
         state["canonical_tool_calls"][call.tool_call_id] = call
@@ -731,6 +789,18 @@ class AgentLoop:
         results: Sequence[ToolResult],
     ) -> None:
         for result in results:
+            if (
+                result.tool_name == "invoke_skill"
+                and not result.is_error
+                and self._skill_runtime is not None
+                and isinstance(result.structured_content, Mapping)
+            ):
+                self._skill_runtime.apply_activation_event(
+                    state,
+                    result.structured_content,
+                    iteration=state["iteration"],
+                )
+                continue
             if result.tool_name != FIND_TOOLS_NAME or result.is_error:
                 continue
             proposals = result.metadata.get("proposed_activation_names", ())
@@ -749,6 +819,7 @@ class AgentLoop:
                 active_names=state.get("active_tool_names", ()),
                 disabled_names=state.get("disabled_tool_names", ()),
                 max_active_tools=self._definition.max_active_deferred_tools,
+                discoverable_names=self._discoverable_tool_names,
             )
             state["active_tool_names"] = list(reduction.active_names)
 
@@ -963,6 +1034,14 @@ class AgentLoop:
             },
             checkpoint_reason=checkpoint_reason,
         )
+        if request is not None:
+            await self._emit_stream(
+                _stream_human_input_required(
+                    request=request,
+                    run_id=state["run_config"].run_id,
+                    turn=state["iteration"],
+                )
+            )
         await self._emit_stream(
             _stream_loop_end(
                 run_id=state["run_config"].run_id,
@@ -1105,7 +1184,52 @@ def _tool_result_text(result: ToolResult) -> str:
     )
 
 
-def _approval_request(result: ToolResult) -> HumanInputRequest:
+_SENSITIVE_ARGUMENT_PARTS = (
+    "api_key",
+    "authorization",
+    "cookie",
+    "credential",
+    "password",
+    "secret",
+    "token",
+)
+
+
+def _tool_input_preview(arguments: Mapping[str, object]) -> str:
+    items = [
+        f"{str(key)[:80]}={_preview_value(value, key=str(key), depth=0)}"
+        for key, value in list(arguments.items())[:8]
+    ]
+    return ", ".join(items)[:500]
+
+
+def _preview_value(value: object, *, key: str, depth: int) -> str:
+    lowered = key.lower()
+    if any(part in lowered for part in _SENSITIVE_ARGUMENT_PARTS):
+        return "<redacted>"
+    if depth >= 2:
+        return "<nested>"
+    if isinstance(value, Mapping):
+        rendered = ", ".join(
+            f"{str(child_key)[:40]}: "
+            f"{_preview_value(child, key=str(child_key), depth=depth + 1)}"
+            for child_key, child in list(value.items())[:5]
+        )
+        return "{" + rendered + "}"
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+        rendered = ", ".join(
+            _preview_value(item, key=key, depth=depth + 1)
+            for item in list(value)[:5]
+        )
+        return "[" + rendered + "]"
+    text = str(value).replace("\n", " ")
+    return repr(text[:120]) if isinstance(value, str) else text[:120]
+
+
+def _approval_request(
+    result: ToolResult,
+    call: ToolCall,
+) -> HumanInputRequest:
     reason = result.error_message or "Tool execution requires approval."
     return HumanInputRequest(
         request_id=f"hir_{uuid4().hex[:12]}",
@@ -1115,7 +1239,7 @@ def _approval_request(result: ToolResult) -> HumanInputRequest:
             ToolCallSummary(
                 tool_call_id=result.tool_call_id,
                 tool_name=result.tool_name,
-                args_preview="",
+                args_preview=_tool_input_preview(call.arguments),
                 risk_level="medium",
                 reason=reason,
             )
@@ -1185,7 +1309,14 @@ def _stream_loop_end(*, run_id: str, reason: str, total_turns: int) -> Any:
     )
 
 
-def _stream_tool_use_start(*, tool_name: str, tool_id: str, run_id: str, turn: int) -> Any:
+def _stream_tool_use_start(
+    *,
+    tool_name: str,
+    tool_id: str,
+    input_preview: str,
+    run_id: str,
+    turn: int,
+) -> Any:
     from rag.agent.streaming.events import EventType, StreamEvent, next_seq
 
     return StreamEvent(
@@ -1194,7 +1325,41 @@ def _stream_tool_use_start(*, tool_name: str, tool_id: str, run_id: str, turn: i
         turn=turn,
         seq=next_seq(),
         span_id=f"tool:{tool_id}",
-        data={"tool_name": tool_name, "tool_id": tool_id},
+        data={
+            "tool_name": tool_name,
+            "tool_id": tool_id,
+            "input_preview": input_preview,
+        },
+    )
+
+
+def _stream_human_input_required(
+    *,
+    request: HumanInputRequest,
+    run_id: str,
+    turn: int,
+) -> Any:
+    from rag.agent.streaming.events import EventType, StreamEvent, next_seq
+
+    return StreamEvent(
+        type=EventType.HUMAN_INPUT_REQUIRED,
+        run_id=run_id,
+        turn=turn,
+        seq=next_seq(),
+        data={
+            "request_id": request.request_id,
+            "kind": request.kind,
+            "question": request.question,
+            "tool_calls": [
+                {
+                    "tool_call_id": item.tool_call_id,
+                    "tool_name": item.tool_name,
+                    "input_preview": item.args_preview,
+                    "reason": item.reason,
+                }
+                for item in request.tool_calls
+            ],
+        },
     )
 
 

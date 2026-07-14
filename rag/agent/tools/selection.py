@@ -202,6 +202,7 @@ def resolve_tool_options(
     *,
     default_resident_names: Sequence[str],
     configured_resident_names: Sequence[str] = (),
+    discoverable_names: Sequence[str] | None = None,
     tools: Sequence[str] | None = None,
     disabled_tools: Sequence[str] = (),
     allow_discovery_tools: bool = False,
@@ -223,6 +224,20 @@ def resolve_tool_options(
         source="disabled tool",
     )
     disabled = set(disabled_names)
+    discoverable = (
+        tuple(name for name in installed_names if name != FIND_TOOLS_NAME)
+        if discoverable_names is None
+        else _ordered_unique_names(
+            discoverable_names,
+            field_name="discoverable_names",
+        )
+    )
+    _require_installed(
+        installed_names,
+        discoverable,
+        source="discoverable tool",
+    )
+    discoverable_set = set(discoverable)
 
     requested_names = None if tools is None else _ordered_unique_names(tools, field_name="tools")
     uses_default_tools = requested_names is None or not requested_names
@@ -267,7 +282,10 @@ def resolve_tool_options(
         hidden_names = tuple(
             name
             for name in installed_names
-            if name not in base_name_set and name not in disabled and name != FIND_TOOLS_NAME
+            if name in discoverable_set
+            and name not in base_name_set
+            and name not in disabled
+            and name != FIND_TOOLS_NAME
         )
         if allow_discovery_tools and hidden_names:
             if FIND_TOOLS_NAME not in installed_names:
@@ -331,6 +349,7 @@ def reduce_tool_activation(
     proposed_names: Sequence[str],
     active_names: Sequence[str] = (),
     resident_names: Sequence[str] = (),
+    discoverable_names: Sequence[str] | None = None,
     disabled_names: Sequence[str] = (),
     schema_budget: int | None = None,
     max_active_tools: int | None = None,
@@ -363,6 +382,21 @@ def reduce_tool_activation(
         disabled_ordered,
         source="disabled tool",
     )
+    discoverable = (
+        None
+        if discoverable_names is None
+        else _ordered_unique_names(
+            discoverable_names,
+            field_name="discoverable_names",
+        )
+    )
+    if discoverable is not None:
+        _require_installed(
+            installed_names,
+            discoverable,
+            source="discoverable tool",
+        )
+    discoverable_set = None if discoverable is None else set(discoverable)
     _validate_max_active_tools(max_active_tools)
 
     disabled = set(disabled_ordered)
@@ -383,6 +417,11 @@ def reduce_tool_activation(
             )
         if name in resident_set or name in seen:
             continue
+        if discoverable_set is not None and name not in discoverable_set:
+            raise ToolActivationError(
+                "tool_activation_not_discoverable",
+                f"proposed tool activation is not discoverable: {name[:500]}",
+            )
         seen.add(name)
         next_active.append(name)
         activated.append(name)

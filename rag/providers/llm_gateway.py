@@ -7,7 +7,7 @@ from collections.abc import AsyncGenerator, Awaitable, Callable, Iterator, Mappi
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, replace
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 from uuid import uuid4
 
 from pydantic import BaseModel
@@ -97,6 +97,23 @@ def llm_budget_scope(
 
 class LLMGatewayError(RuntimeError):
     pass
+
+
+class LLMToolCallValidationError(LLMGatewayError):
+    """A provider rejected its own generated tool call against the schema."""
+
+    def __init__(
+        self,
+        *,
+        validation_error: str,
+        failed_generation: str = "",
+    ) -> None:
+        self.validation_error = validation_error[:2_000]
+        self.failed_generation = failed_generation[:4_000]
+        super().__init__(
+            "Provider rejected a generated tool call: "
+            f"{self.validation_error}"
+        )
 
 
 class LLMContextOverflowError(LLMGatewayError):
@@ -205,11 +222,11 @@ class LLMGateway:
             raise TypeError("stream must be a bool")
 
         if provider in {"mlx", "ollama"} and not supports_native_tools:
-            wire = render_local_agent_request(request, provider=provider)
+            local_wire = render_local_agent_request(request, provider=provider)
             budget, stage_kwargs, input_tokens, reservation = self._prepare_call(
                 stage=stage,
-                prompt=wire.prompt,
-                kwargs=wire.generation_options,
+                prompt=local_wire.prompt,
+                kwargs=local_wire.generation_options,
             )
             del budget
             effective_ledger = ledger or current_llm_budget_ledger()
@@ -220,7 +237,7 @@ class LLMGateway:
             try:
                 provider_result = await asyncio.to_thread(
                     self._invoke_text,
-                    wire.prompt,
+                    local_wire.prompt,
                     stage_kwargs,
                 )
             except BaseException:
@@ -241,8 +258,8 @@ class LLMGateway:
             return AgentModelResponse(
                 turn=turn,
                 usage=usage,
-                provider_wire_hash=wire.provider_wire_hash,
-                serializer_revision=wire.serializer_revision,
+                provider_wire_hash=local_wire.provider_wire_hash,
+                serializer_revision=local_wire.serializer_revision,
                 wire_kind=provider,
             )
 
@@ -253,7 +270,7 @@ class LLMGateway:
         provider_kwargs = {
             key: value
             for key, value in payload.items()
-            if key not in {"messages", "tools", "max_completion_tokens"}
+            if key not in {"model", "messages", "tools", "max_completion_tokens"}
         }
         if stream:
             chunks = self.astream_with_tools(
@@ -584,7 +601,12 @@ class LLMGateway:
                     messages, tools, call_kwargs, queue, loop
                 )
             except BaseException as exc:
-                producer_error.append(exc)
+                normalized = (
+                    _tool_call_validation_error(exc)
+                    if isinstance(exc, Exception)
+                    else None
+                )
+                producer_error.append(normalized or exc)
                 # 确保 consumer 能退出
                 loop.call_soon_threadsafe(queue.put_nowait, None)
 
@@ -802,9 +824,15 @@ class LLMGateway:
             self._generator, "generate_with_tools", None
         )
         if callable(generate_with_tools):
-            result = generate_with_tools(
-                messages=messages, tools=tools, **kwargs
-            )
+            try:
+                result = generate_with_tools(
+                    messages=messages, tools=tools, **kwargs
+                )
+            except Exception as exc:
+                normalized = _tool_call_validation_error(exc)
+                if normalized is not None:
+                    raise normalized from exc
+                raise
             if isinstance(result, LLMProviderResult):
                 return result
             raise TypeError("generate_with_tools must return LLMProviderResult")
@@ -847,13 +875,35 @@ class LLMGateway:
             raw = result.value
             text = ""
             tool_calls_list: list[dict[str, Any]] = []
+            stop_reason = "end_turn"
 
-            if isinstance(raw, dict):
+            if (
+                isinstance(raw, Mapping) and "choices" in raw
+            ) or hasattr(raw, "choices"):
+                turn = parse_openai_response(raw)
+                text = turn.text
+                stop_reason = turn.stop_reason.value
+                tool_calls_list = [
+                    {
+                        "id": call.id,
+                        "function": {
+                            "name": call.name,
+                            "arguments": json.dumps(
+                                call.input,
+                                ensure_ascii=False,
+                                sort_keys=True,
+                                separators=(",", ":"),
+                            ),
+                        },
+                    }
+                    for call in turn.tool_calls
+                ]
+            elif isinstance(raw, dict):
                 choices = raw.get("choices", [])
                 if choices:
                     message = choices[0].get("message", {})
                     text = message.get("content", "") or ""
-                    tool_calls_list = message.get("tool_calls", [])
+                    tool_calls_list = message.get("tool_calls", []) or []
             elif hasattr(raw, "content"):
                 text = str(getattr(raw, "content", ""))
                 tool_calls_list = list(getattr(raw, "tool_calls", []))
@@ -888,8 +938,13 @@ class LLMGateway:
                 _put(StreamChunk(type="tool_input_delta", content=tc_args))
                 _put(StreamChunk(type="content_block_stop"))
 
-            stop_reason = "tool_use" if tool_calls_list else "end_turn"
-            _put(StreamChunk(type="message_stop", stop_reason=stop_reason))
+            if tool_calls_list:
+                stop_reason = "tool_use"
+            _put(StreamChunk(
+                type="message_stop",
+                stop_reason=stop_reason,
+                usage=result.usage,
+            ))
 
         # 结束标记
         _put(None)
@@ -976,12 +1031,53 @@ def structured_accounted_prompt(
     return f"{prompt}\n\nJSON schema:\n{schema_json}"
 
 
+def _tool_call_validation_error(
+    exc: Exception,
+) -> LLMToolCallValidationError | None:
+    if isinstance(exc, LLMToolCallValidationError):
+        return exc
+    body = getattr(exc, "body", None)
+    payload: Mapping[str, object] | None = (
+        body if isinstance(body, Mapping) else None
+    )
+    if payload is not None and isinstance(payload.get("error"), Mapping):
+        payload = cast(Mapping[str, object], payload["error"])
+
+    message = ""
+    code = ""
+    failed_generation = ""
+    if payload is not None:
+        raw_message = payload.get("message")
+        raw_code = payload.get("code")
+        raw_generation = payload.get("failed_generation")
+        if isinstance(raw_message, str):
+            message = raw_message
+        if isinstance(raw_code, str):
+            code = raw_code
+        if isinstance(raw_generation, str):
+            failed_generation = raw_generation
+
+    fallback = str(exc)
+    searchable = f"{code} {message} {fallback}".casefold()
+    if (
+        code.casefold() != "tool_use_failed"
+        and "tool call validation failed" not in searchable
+        and "tool_call_validation" not in searchable
+    ):
+        return None
+    return LLMToolCallValidationError(
+        validation_error=message or fallback,
+        failed_generation=failed_generation,
+    )
+
+
 __all__ = [
     "AgentModelResponse",
     "LLMBudgetExceededError",
     "LLMContextOverflowError",
     "LLMGateway",
     "LLMGatewayError",
+    "LLMToolCallValidationError",
     "StreamChunk",
     "current_llm_budget_ledger",
     "llm_budget_scope",

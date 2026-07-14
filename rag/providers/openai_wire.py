@@ -153,6 +153,8 @@ def parse_openai_response(response: object) -> ToolUseResult:
         stop_reason = StopReason.END_TURN
 
     raw_calls = _field(message, "tool_calls", default=())
+    if raw_calls is None:
+        raw_calls = ()
     if not isinstance(raw_calls, Sequence) or isinstance(raw_calls, (str, bytes)):
         raise ValueError("message tool_calls must be a sequence")
     calls: list[ToolCall] = []

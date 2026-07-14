@@ -168,6 +168,76 @@ async def test_filesystem_tools_list_read_patch_and_expose_changes_immediately(
 
 
 @pytest.mark.anyio
+async def test_read_file_default_window_bounds_model_context(
+    tmp_path: Path,
+) -> None:
+    workspace = open_workspace(tmp_path, create=True)
+    (workspace.root / "large.txt").write_text("x" * 20_000, encoding="utf-8")
+
+    execution = await _execute(
+        _tools_by_name(workspace)["read_file"],
+        {"path": "large.txt"},
+        workspace=workspace,
+    )
+
+    assert execution.result.is_error is False
+    assert execution.result.structured_content is not None
+    assert len(execution.result.structured_content["content"]) == 16_000
+    assert execution.result.structured_content["truncated"] is True
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("arguments", "error_code"),
+    [
+        (
+            {
+                "file_path": "missing.txt",
+                "old_string": "before",
+                "new_string": "after",
+            },
+            "file_not_found",
+        ),
+        (
+            {
+                "file_path": "notes.txt",
+                "old_string": "absent",
+                "new_string": "after",
+            },
+            "old_string_not_found",
+        ),
+        (
+            {
+                "file_path": "notes.txt",
+                "old_string": "same",
+                "new_string": "after",
+            },
+            "old_string_not_unique",
+        ),
+    ],
+)
+async def test_apply_patch_non_effect_is_a_canonical_tool_error(
+    tmp_path: Path,
+    arguments: Mapping[str, Any],
+    error_code: str,
+) -> None:
+    workspace = open_workspace(tmp_path, create=True)
+    (workspace.root / "notes.txt").write_text("same same", encoding="utf-8")
+
+    execution = await _execute(
+        _tools_by_name(workspace)["apply_patch"],
+        arguments,
+        workspace=workspace,
+    )
+
+    assert execution.result.is_error is True
+    assert execution.result.error_code == error_code
+    assert execution.result.error_message
+    assert execution.result.structured_content is not None
+    assert execution.result.structured_content["replaced"] is False
+
+
+@pytest.mark.anyio
 async def test_search_text_supports_literal_regex_path_glob_context_and_limits(
     tmp_path: Path,
 ) -> None:

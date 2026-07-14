@@ -29,6 +29,7 @@ class SmokeCase:
     name: str
     task: str
     expected_answer_contains: tuple[str, ...] = ()
+    expected_answer_exact: str | None = None
     expected_tools: tuple[str, ...] = ()
     forbidden_tools: tuple[str, ...] = ()
     expected_initial_tools: tuple[str, ...] = ()
@@ -106,16 +107,17 @@ def build_cases() -> tuple[SmokeCase, ...]:
         SmokeCase(
             name="direct_answer",
             task="What is 2+2? Answer with exactly the number.",
-            expected_answer_contains=("4",),
+            expected_answer_exact="4",
             expected_initial_tools=RESIDENT_TOOL_NAMES,
         ),
         SmokeCase(
             name="find_agent_service",
             task=(
-                "Find class AgentService with search_text, read that file, and "
-                "answer with its path."
+                "Find class AgentService with search_text, then call read_file on "
+                "the matching file. Do not answer until read_file succeeds. Finally "
+                "output exactly its workspace-relative path and no other text."
             ),
-            expected_answer_contains=("input_files/service.py",),
+            expected_answer_exact="input_files/service.py",
             expected_tools=("search_text", "read_file"),
             expected_initial_tools=("search_text", "read_file"),
             tools=("search_text", "read_file"),
@@ -124,7 +126,6 @@ def build_cases() -> tuple[SmokeCase, ...]:
         SmokeCase(
             name="patch_fixture",
             task="Replace before with after in fixture.txt.",
-            expected_answer_contains=("patched",),
             expected_tools=("apply_patch",),
             expected_initial_tools=("apply_patch",),
             tools=("apply_patch",),
@@ -153,8 +154,11 @@ def build_cases() -> tuple[SmokeCase, ...]:
         ),
         SmokeCase(
             name="hidden_mcp_disabled",
-            task="Answer hidden_disabled without calling a tool.",
-            expected_answer_contains=("hidden_disabled",),
+            task=(
+                "Without calling a tool, output exactly hidden_disabled and no "
+                "other text."
+            ),
+            expected_answer_exact="hidden_disabled",
             expected_initial_tools=RESIDENT_TOOL_NAMES,
             forbidden_tools=("find_tools", "mcp__docs__search"),
             install_hidden_mcp=True,
@@ -172,7 +176,6 @@ def build_cases() -> tuple[SmokeCase, ...]:
         SmokeCase(
             name="approval_resume",
             task="Patch approval.txt from before to approved, requesting approval.",
-            expected_answer_contains=("approved",),
             expected_tools=("apply_patch",),
             expected_initial_tools=("apply_patch",),
             tools=("apply_patch",),
@@ -185,8 +188,11 @@ def build_cases() -> tuple[SmokeCase, ...]:
         ),
         SmokeCase(
             name="cache_usage",
-            task="Answer cache_visible without calling a tool.",
-            expected_answer_contains=("cache_visible",),
+            task=(
+                "Without calling a tool, output exactly cache_visible and no "
+                "other text."
+            ),
+            expected_answer_exact="cache_visible",
             expected_initial_tools=RESIDENT_TOOL_NAMES,
         ),
         SmokeCase(
@@ -757,7 +763,16 @@ def _workspace_assertion_error(
 def _validate_result(case: SmokeCase, result: SmokeResult) -> str:
     if result.status != "done":
         return f"expected status done, got {result.status}"
-    answer = (result.answer or "").casefold()
+    raw_answer = result.answer or ""
+    answer = raw_answer.strip().casefold()
+    if (
+        case.expected_answer_exact is not None
+        and answer != case.expected_answer_exact.strip().casefold()
+    ):
+        return (
+            f"expected exact answer {case.expected_answer_exact!r}, "
+            f"got {result.answer!r}"
+        )
     for expected in case.expected_answer_contains:
         if expected.casefold() not in answer:
             return f"answer missing {expected!r}: {result.answer!r}"

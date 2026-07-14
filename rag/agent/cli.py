@@ -3,9 +3,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import time
+import shlex
+import sys
 from collections.abc import Callable, Sequence
-from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
@@ -18,6 +18,7 @@ from agent_runtime.models import (
     format_model_rows,
 )
 from rag.agent.core.llm_registry import UnknownModelAliasError
+from rag.agent.streaming.events import EventType, StreamEvent
 
 if TYPE_CHECKING:
     from agent_runtime import AgentResult
@@ -34,7 +35,30 @@ logger = logging.getLogger(__name__)
 
 CLI_AGENT_CHOICES = ("generic",)
 DEFAULT_MODEL_SESSION_PATH = Path(".rag/agent_model_session.json")
+DEFAULT_CHECKPOINT_PATH = Path(".rag/agent_checkpoints.sqlite")
 DEFAULT_VECTOR_BACKEND = "milvus"
+
+
+class _CLIToolEventDisplay:
+    """Render canonical tool-start events without deriving runtime state."""
+
+    def __init__(self) -> None:
+        self._displayed_tool_ids: set[str] = set()
+
+    async def emit(self, event: StreamEvent) -> None:
+        if event.type is not EventType.TOOL_USE_START:
+            return
+        tool_id = event.data.get("tool_id")
+        if isinstance(tool_id, str) and tool_id:
+            if tool_id in self._displayed_tool_ids:
+                return
+            self._displayed_tool_ids.add(tool_id)
+        tool_name = event.data.get("tool_name")
+        if not isinstance(tool_name, str) or not tool_name:
+            return
+        preview = event.data.get("input_preview")
+        suffix = f": {preview}" if isinstance(preview, str) and preview else ""
+        print(f"\n→ {tool_name}{suffix}")
 
 
 @dataclass(frozen=True)
@@ -280,16 +304,7 @@ def _display_result(result: AgentRunResult, *, verbose: bool) -> None:
         print(f"\n{result.final_answer}")
 
     if result.tool_results:
-        if verbose:
-            print(_format_tool_summary(result))
-        else:
-            ok = sum(1 for tr in result.tool_results if not tr.is_error)
-            err = sum(1 for tr in result.tool_results if tr.is_error)
-            summary_parts = [f"{ok} 成功"] if ok else []
-            if err:
-                summary_parts.append(f"{err} 失败")
-            if summary_parts:
-                print(f"\n工具: {', '.join(summary_parts)}")
+        print(_format_tool_summary(result))
 
     if verbose and result.tool_call_metrics:
         from rag.agent.core.runtime_diagnostics import ToolCallMetrics
@@ -441,6 +456,7 @@ def _create_agent_facade(
     model: str | None = None,
     agent_type: str = "generic",
     checkpoint_db: Path | None = None,
+    workspace_path: Path | str | None = None,
     model_session_path: Path | None = None,
     knowledge: tuple[str, ...] | list[str] | None = None,
     rag_storage_root: Path = Path(".rag"),
@@ -457,6 +473,7 @@ def _create_agent_facade(
         model=model,
         agent_type=agent_type,
         checkpoint_db=checkpoint_db,
+        workspace_path=workspace_path,
         model_session_path=model_session_path,
         knowledge=knowledge,
         rag_storage_root=rag_storage_root,
@@ -469,10 +486,181 @@ def _create_agent_facade(
     )
 
 
+def _is_interactive_terminal() -> bool:
+    if any(
+        _environment_flag(name)
+        for name in ("CI", "GITHUB_ACTIONS")
+    ):
+        return False
+    return _is_tty(sys.stdin) and _is_tty(sys.stdout)
+
+
+def _environment_flag(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() not in {
+        "",
+        "0",
+        "false",
+        "no",
+        "off",
+    }
+
+
+def _is_tty(stream: object) -> bool:
+    isatty = getattr(stream, "isatty", None)
+    return bool(isatty()) if callable(isatty) else False
+
+
+async def _run_facade_command(
+    facade: Any,
+    *,
+    task: str,
+    files: Sequence[str],
+    run_id: str,
+    max_tokens_total: int | None,
+    interactive_approval: bool,
+    tools: Sequence[str] | None = None,
+    disabled_tools: Sequence[str] | None = None,
+    allow_write_tools: bool = False,
+    allow_execute_tools: bool = False,
+    allow_discovery_tools: bool | None = None,
+) -> AgentResult:
+    """Run and optionally approve on one service, event loop, and ToolCall."""
+
+    from agent_runtime.agent import _effective_discovery_option
+    from agent_runtime.result import AgentResult
+    from rag.agent.service import AgentRunRequest
+
+    effective_discovery = _effective_discovery_option(
+        tools=None if tools is None else list(tools),
+        disabled_tools=(
+            None if disabled_tools is None else list(disabled_tools)
+        ),
+        allow_discovery_tools=allow_discovery_tools,
+    )
+    async with facade._open_product_runtime(
+        stream_sink=_CLIToolEventDisplay(),
+    ) as service:
+        raw = await service.run(
+            AgentRunRequest(
+                task=task,
+                run_id=run_id,
+                thread_id=run_id,
+                llm_budget_total=max_tokens_total,
+                input_files=list(files),
+                workspace_path=(
+                    None
+                    if facade.workspace_path is None
+                    else str(facade.workspace_path)
+                ),
+                tools=None if tools is None else tuple(tools),
+                disabled_tools=tuple(disabled_tools or ()),
+                allow_write_tools=allow_write_tools,
+                allow_execute_tools=allow_execute_tools,
+                allow_discovery_tools=effective_discovery,
+            )
+        )
+        while raw.status == "paused" and interactive_approval:
+            response = _handle_pause(raw, run_id)
+            if response is None:
+                break
+            raw = await service.resume(
+                run_id=run_id,
+                response=response,
+            )
+        return AgentResult.from_internal(raw, files=tuple(files))
+
+
+async def _resume_facade_command(
+    facade: Any,
+    *,
+    run_id: str,
+    decision: str,
+) -> AgentRunResult:
+    async with facade._open_product_runtime(
+        stream_sink=_CLIToolEventDisplay(),
+    ) as service:
+        request = await service.apending_human_input_request(run_id=run_id)
+        response = _build_resume_response(request, decision)
+        result: AgentRunResult = await service.resume(
+            run_id=run_id,
+            response=response,
+            workspace_path=(
+                None
+                if facade.workspace_path is None
+                else str(facade.workspace_path)
+            ),
+        )
+        return result
+
+
 def _print_startup_banner(model_alias: str, *, agent_type: str) -> None:
     print(f"Agent 就绪 (agent: {agent_type}, 模型: {model_alias})")
     print("输入查询，或 /exit 退出，/verbose 切换详细输出，/model 查看/切换模型")
     print()
+
+
+async def _chat_facade_session(
+    facade: Any,
+    *,
+    agent_type: str,
+    requested_model: str | None,
+    budget: int | None,
+) -> None:
+    from rag.agent.service import AgentRunRequest
+
+    async with facade._open_product_runtime(
+        stream_sink=_CLIToolEventDisplay(),
+    ) as service:
+        run_id = f"chat_{id(service):x}"
+        verbose = False
+        _print_startup_banner(
+            _service_model_alias(service, requested_model),
+            agent_type=agent_type,
+        )
+        while True:
+            try:
+                query = input("> ").strip()
+            except (EOFError, KeyboardInterrupt):
+                print("\n再见。")
+                return
+            if not query:
+                continue
+            if query == "/exit":
+                return
+            if query == "/verbose":
+                verbose = not verbose
+                print(f"详细输出: {'开' if verbose else '关'}")
+                continue
+            if query == "/model" or query.startswith("/model "):
+                _handle_model_slash_command(
+                    query,
+                    control_plane=_service_model_control_plane(service),
+                )
+                continue
+
+            result = await service.run(
+                AgentRunRequest(
+                    task=query,
+                    run_id=run_id,
+                    thread_id=run_id,
+                    llm_budget_total=budget,
+                    workspace_path=(
+                        None
+                        if facade.workspace_path is None
+                        else str(facade.workspace_path)
+                    ),
+                )
+            )
+            while result.status == "paused":
+                response = _handle_pause(result, run_id)
+                if response is None:
+                    print("已取消。")
+                    break
+                result = await service.resume(
+                    run_id=run_id,
+                    response=response,
+                )
+            _display_result(result, verbose=verbose)
 
 
 def _print_current_model(control_plane: ModelControlPlane) -> None:
@@ -623,98 +811,28 @@ def agent_chat(
     ] = None,
 ) -> None:
     """交互式 Agent 对话。暂停时支持工具审批。"""
-    from rag.agent.service import AgentRunRequest
-    from rag.utils.text import load_env_file
-
-    startup_started_at = time.perf_counter()
-    load_env_file()
-    runtime, diagnostics = _build_optional_rag_runtime(
-        storage_root=storage_root,
-        model_alias=model,
-        embedding_model_alias=embedding_model,
-        reranker_model_alias=reranker_model,
+    facade = _create_agent_facade(
+        model=model,
+        agent_type=agent,
+        checkpoint_db=DEFAULT_CHECKPOINT_PATH,
+        workspace_path=Path.cwd(),
+        model_session_path=DEFAULT_MODEL_SESSION_PATH,
+        rag_storage_root=storage_root,
+        embedding_model=embedding_model,
+        reranker_model=reranker_model,
         vector_backend=vector_backend,
         vector_dsn=vector_dsn,
         vector_namespace=vector_namespace,
         vector_collection_prefix=vector_collection_prefix,
-        explicit=False,
     )
-
-    with runtime if runtime is not None else nullcontext():
-        try:
-            model_control_plane = _build_model_control_plane(
-                model_alias=model,
-                session_path=DEFAULT_MODEL_SESSION_PATH,
-            )
-        except Exception:
-            if model is not None:
-                raise
-            model_control_plane = None
-        service = _build_agent_service(
-            runtime,
+    asyncio.run(
+        _chat_facade_session(
+            facade,
             agent_type=agent,
-            model_alias=model,
-            model_control_plane=model_control_plane,
-            runtime_diagnostics=diagnostics,
-            startup_ms=(time.perf_counter() - startup_started_at) * 1000,
+            requested_model=model,
+            budget=budget,
         )
-        try:
-            run_id = f"chat_{id(service):x}"
-            verbose = False
-
-            _print_startup_banner(_service_model_alias(service, model), agent_type=agent)
-
-            while True:
-                try:
-                    query = input("> ").strip()
-                except (EOFError, KeyboardInterrupt):
-                    print("\n再见。")
-                    break
-
-                if not query:
-                    continue
-                if query == "/exit":
-                    break
-                if query == "/verbose":
-                    verbose = not verbose
-                    print(f"详细输出: {'开' if verbose else '关'}")
-                    continue
-                if query == "/model" or query.startswith("/model "):
-                    _handle_model_slash_command(
-                        query,
-                        control_plane=_service_model_control_plane(service),
-                    )
-                    continue
-
-                result = asyncio.run(
-                    service.run(
-                        AgentRunRequest(
-                            task=query,
-                            run_id=run_id,
-                            thread_id=run_id,
-                            llm_budget_total=budget,
-                        )
-                    )
-                )
-
-                while result.status == "paused":
-                    _display_result(result, verbose=verbose)
-                    response = _handle_pause(result, run_id)
-                    if response is None:
-                        print("已取消。")
-                        break
-                    result = asyncio.run(
-                        service.resume(run_id=run_id, response=response)
-                    )
-
-                if result.status in ("done", "failed"):
-                    _display_result(result, verbose=verbose)
-
-                if result.status == "failed" and result.stop_reason:
-                    if verbose:
-                        print(f"失败: {result.stop_reason}")
-        finally:
-            _close_agent_service(service)
+    )
 
 
 @agent_app.command(name="run")
@@ -740,9 +858,9 @@ def agent_run(
         str | None, typer.Option("--run-id", help="指定 run_id，便于后续 resume")
     ] = None,
     checkpoint_db: Annotated[
-        Path | None,
+        Path,
         typer.Option("--checkpoint-db", help="SQLite checkpoint 文件；启用后可跨进程 resume"),
-    ] = None,
+    ] = DEFAULT_CHECKPOINT_PATH,
     budget: Annotated[
         int | None,
         typer.Option("--max-tokens-total", "--budget", min=1, help="本次 Agent 运行的 LLM/工具预算上限", hidden=True),
@@ -793,32 +911,45 @@ def agent_run(
     ] = None,
     tool_names: Annotated[
         list[str] | None,
-        typer.Option("--tool", help="显式发送给模型的工具 schema，可多次指定"),
+        typer.Option(
+            "--tool",
+            help="兼容用：显式发送给模型的工具 schema",
+            hidden=True,
+        ),
     ] = None,
     disabled_tool_names: Annotated[
         list[str] | None,
-        typer.Option("--disable-tool", help="从本次工具面中禁用的工具，可多次指定"),
+        typer.Option(
+            "--disable-tool",
+            help="兼容用：从本次工具面中禁用工具",
+            hidden=True,
+        ),
     ] = None,
     allow_write_tools: Annotated[
         bool,
-        typer.Option("--allow-write-tools", help="允许本次工具面暴露写入类工具"),
+        typer.Option("--allow-write-tools", help="预授权本次 workspace 写入类调用"),
     ] = False,
     allow_execute_tools: Annotated[
         bool,
-        typer.Option("--allow-execute-tools", help="允许本次工具面暴露执行类工具"),
+        typer.Option("--allow-execute-tools", help="预授权本次进程执行类调用"),
     ] = False,
     allow_discovery_tools: Annotated[
-        bool,
-        typer.Option("--allow-discovery-tools", help="允许本次工具面暴露 discovery 工具"),
-    ] = False,
+        bool | None,
+        typer.Option(
+            "--allow-discovery-tools/--no-discovery-tools",
+            help="兼容用：覆盖自动 discovery 选择",
+            hidden=True,
+        ),
+    ] = None,
 ) -> None:
-    """单次 Agent 运行。传入 --checkpoint-db 后支持跨进程恢复。"""
+    """单次 Agent 运行；交互终端内联审批，其他环境持久化后返回。"""
     from rag.agent.service import AgentRunResult
 
     facade = _create_agent_facade(
         model=model,
         agent_type=agent,
         checkpoint_db=checkpoint_db,
+        workspace_path=Path.cwd(),
         model_session_path=DEFAULT_MODEL_SESSION_PATH,
         knowledge=tuple(knowledge or ()),
         rag_storage_root=storage_root,
@@ -830,52 +961,53 @@ def agent_run(
         vector_collection_prefix=vector_collection_prefix,
     )
     effective_run_id = run_id or f"run_{id(facade):x}"
-    run_kwargs: dict[str, object] = {
-        "files": input_files or [],
-        "run_id": effective_run_id,
-        "max_tokens_total": budget,
-    }
-    if (
-        tool_names
-        or disabled_tool_names
-        or allow_write_tools
-        or allow_execute_tools
-        or allow_discovery_tools
-    ):
-        run_kwargs.update(
-            {
-                "tools": tool_names or [],
-                "disabled_tools": disabled_tool_names or [],
-                "allow_write_tools": allow_write_tools,
-                "allow_execute_tools": allow_execute_tools,
-                "allow_discovery_tools": allow_discovery_tools,
-            }
+    interactive_approval = (
+        not non_interactive and _is_interactive_terminal()
+    )
+    result = asyncio.run(
+        _run_facade_command(
+            facade,
+            task=task,
+            files=input_files or [],
+            run_id=effective_run_id,
+            max_tokens_total=budget,
+            interactive_approval=interactive_approval,
+            tools=tool_names,
+            disabled_tools=disabled_tool_names,
+            allow_write_tools=allow_write_tools,
+            allow_execute_tools=allow_execute_tools,
+            allow_discovery_tools=allow_discovery_tools,
         )
-    result = facade.run(task, **run_kwargs)
+    )
     _display_agent_result(result, verbose=verbose)
 
     raw_result = result.raw if isinstance(result.raw, AgentRunResult) else None
     if result.status == "paused":
         print()
-        if checkpoint_db is None:
-            print("⚠  当前命令使用 MemorySaver，进程结束后暂停状态无法恢复。")
-            print("   请使用 --checkpoint-db 启用 SQLite checkpoint 后重试。")
-        else:
-            print("⏸  已保存 checkpoint，可跨进程恢复:")
-            resume_cmd = (
-                f"   agent resume {effective_run_id} "
-                f"--agent {agent} "
-                f"--checkpoint-db {checkpoint_db}"
+        print("⏸  已保存 checkpoint，可跨进程恢复:")
+        resume_args = [
+            "agent",
+            "resume",
+            effective_run_id,
+            "--agent",
+            agent,
+            "--checkpoint-db",
+            str(checkpoint_db),
+        ]
+        if model is not None:
+            resume_args.extend(("--model", model))
+        for source in knowledge or ():
+            resume_args.extend(("--knowledge", source))
+        if raw_result is not None and raw_result.workspace_path:
+            resume_args.extend(
+                ("--workspace-path", raw_result.workspace_path)
             )
-            if raw_result is not None and raw_result.workspace_path:
-                resume_cmd += f" --workspace-path {raw_result.workspace_path}"
-            print(resume_cmd)
+        print(f"   {shlex.join(resume_args)}")
 
         if raw_result is not None and raw_result.needs_user_input:
             print(f"\n   待处理: {raw_result.needs_user_input}")
 
-        if non_interactive:
-            raise typer.Exit(code=2)
+        raise typer.Exit(code=2)
 
     if result.status == "failed":
         raise typer.Exit(code=1)
@@ -908,6 +1040,10 @@ def agent_resume(
     model: Annotated[
         str | None,
         typer.Option("--model", help="主生成模型别名，对应 configs/models.yaml 中 capability=chat 的条目"),
+    ] = None,
+    knowledge: Annotated[
+        list[str] | None,
+        typer.Option("--knowledge", help="恢复原 run 显式启用的知识库，可多次指定"),
     ] = None,
     embedding_model: Annotated[
         str | None,
@@ -947,46 +1083,28 @@ def agent_resume(
     ] = None,
 ) -> None:
     """从 SQLite checkpoint 恢复暂停的 Agent 运行。"""
-    from rag.utils.text import load_env_file
-
-    startup_started_at = time.perf_counter()
-    load_env_file()
-    runtime, diagnostics = _build_optional_rag_runtime(
-        storage_root=storage_root,
-        model_alias=model,
-        embedding_model_alias=embedding_model,
-        reranker_model_alias=reranker_model,
+    facade = _create_agent_facade(
+        model=model,
+        agent_type=agent,
+        checkpoint_db=checkpoint_db,
+        workspace_path=workspace_path or Path.cwd(),
+        model_session_path=DEFAULT_MODEL_SESSION_PATH,
+        knowledge=tuple(knowledge or ()),
+        rag_storage_root=storage_root,
+        embedding_model=embedding_model,
+        reranker_model=reranker_model,
         vector_backend=vector_backend,
         vector_dsn=vector_dsn,
         vector_namespace=vector_namespace,
         vector_collection_prefix=vector_collection_prefix,
     )
-
-    with runtime if runtime is not None else nullcontext():
-        try:
-            model_control_plane = _build_model_control_plane(
-                model_alias=model,
-                session_path=DEFAULT_MODEL_SESSION_PATH,
-            )
-        except Exception:
-            if model is not None:
-                raise
-            model_control_plane = None
-        service = _build_agent_service(
-            runtime,
-            checkpoint_db=checkpoint_db,
-            agent_type=agent,
-            model_alias=model,
-            model_control_plane=model_control_plane,
-            runtime_diagnostics=diagnostics,
-            startup_ms=(time.perf_counter() - startup_started_at) * 1000,
+    result = asyncio.run(
+        _resume_facade_command(
+            facade,
+            run_id=run_id,
+            decision=decision,
         )
-        try:
-            request = asyncio.run(service.apending_human_input_request(run_id=run_id))
-            response = _build_resume_response(request, decision)
-            result = asyncio.run(service.resume(run_id=run_id, response=response, workspace_path=workspace_path))
-            _display_result(result, verbose=verbose)
-            if result.status == "failed":
-                raise typer.Exit(code=1)
-        finally:
-            _close_agent_service(service)
+    )
+    _display_result(result, verbose=verbose)
+    if result.status == "failed":
+        raise typer.Exit(code=1)

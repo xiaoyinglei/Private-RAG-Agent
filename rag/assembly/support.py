@@ -19,6 +19,7 @@ from rag.providers.huggingface.rerank import FlagEmbeddingReranker
 from rag.providers.mlx.embedder import MLXEmbedder
 from rag.providers.ollama.embedder import OllamaEmbedder
 from rag.providers.ollama.generator import OllamaGenerator
+from rag.providers.openai_wire import parse_openai_usage
 from rag.schema.llm import LLMProviderResult, LLMUsage
 
 T = TypeVar("T")
@@ -305,23 +306,17 @@ def _extract_json_object(text: str) -> str:
 
 
 def _openai_response_usage(response: object) -> LLMUsage | None:
-    usage = getattr(response, "usage", None)
-    if usage is None:
+    normalized = parse_openai_usage(response)
+    if normalized is None:
         return None
-    input_tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
-    output_tokens = int(getattr(usage, "completion_tokens", 0) or 0)
-    prompt_details = getattr(usage, "prompt_tokens_details", None)
+    usage = getattr(response, "usage", None)
     completion_details = getattr(usage, "completion_tokens_details", None)
-    return LLMUsage(
-        input_tokens=input_tokens,
-        output_tokens=output_tokens,
-        cached_input_tokens=int(
-            getattr(prompt_details, "cached_tokens", 0) or 0
-        ),
-        reasoning_tokens=int(
-            getattr(completion_details, "reasoning_tokens", 0) or 0
-        ),
-        source="provider",
+    return normalized.model_copy(
+        update={
+            "reasoning_tokens": int(
+                getattr(completion_details, "reasoning_tokens", 0) or 0
+            )
+        }
     )
 
 
