@@ -9,6 +9,7 @@ import pytest
 from mcp.client.session import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
 
+from agent_runtime.runtime.mcp import open_product_mcp_tools
 from rag.agent.tools.executor import ToolExecutor
 from rag.agent.tools.integrations.mcp import (
     MCPToolDescriptor,
@@ -134,6 +135,109 @@ def _call(name: str, arguments: Mapping[str, JsonValue]) -> ToolCall:
             exposed_tool_names=(f"mcp__test_server__{name}",),
         ),
     )
+
+
+@pytest.mark.anyio
+async def test_product_runtime_opens_enabled_mcp_and_applies_allowlist(
+    server_script_path: Path,
+    tmp_path: Path,
+) -> None:
+    config = tmp_path / "mcp.yaml"
+    config.write_text(
+        "\n".join(
+            (
+                "servers:",
+                "  - name: test_server",
+                "    transport: stdio",
+                f"    command: {sys.executable}",
+                "    args:",
+                f"      - {server_script_path}",
+                "    tools_allowlist:",
+                "      - echo",
+                "    enabled: true",
+            )
+        ),
+        encoding="utf-8",
+    )
+
+    async with open_product_mcp_tools(config) as tools:
+        assert [tool.definition.name for tool in tools] == [
+            "mcp__test_server__echo"
+        ]
+        execution = await ToolExecutor(
+            {tool.definition.name: tool for tool in tools}
+        ).execute(
+            _call("echo", {"message": "assembled"}),
+            context=ToolExecutionContext(
+                approved_tool_call_ids=frozenset({"call_echo"})
+            ),
+        )
+
+    assert execution.result.content[0].data["text"] == "echo: assembled"
+
+
+@pytest.mark.anyio
+async def test_unavailable_enabled_mcp_degrades_without_removing_builtins(
+    tmp_path: Path,
+) -> None:
+    config = tmp_path / "mcp.yaml"
+    config.write_text(
+        "\n".join(
+            (
+                "servers:",
+                "  - name: unavailable",
+                "    transport: stdio",
+                "    command: definitely-not-an-installed-command",
+                "    tools_allowlist: [search]",
+                "    enabled: true",
+            )
+        ),
+        encoding="utf-8",
+    )
+    diagnostics = []
+
+    async with open_product_mcp_tools(
+        config,
+        diagnostics=diagnostics,
+    ) as tools:
+        assert tools == ()
+
+    assert diagnostics[0].code == "mcp_server_unavailable"
+    assert diagnostics[0].component == "mcp:unavailable"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("enabled", "allow_all_tools", "field"),
+    (
+        ("'true'", "true", "enabled"),
+        ("true", "'false'", "allow_all_tools"),
+    ),
+)
+async def test_product_mcp_config_rejects_string_booleans(
+    tmp_path: Path,
+    enabled: str,
+    allow_all_tools: str,
+    field: str,
+) -> None:
+    config = tmp_path / "mcp.yaml"
+    config.write_text(
+        "\n".join(
+            (
+                "servers:",
+                "  - name: unsafe_config",
+                "    transport: stdio",
+                "    command: ignored",
+                f"    enabled: {enabled}",
+                f"    allow_all_tools: {allow_all_tools}",
+            )
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match=f"{field} must be a boolean"):
+        async with open_product_mcp_tools(config):
+            pass
 
 
 @pytest.mark.anyio

@@ -243,6 +243,28 @@ def test_disabled_hidden_tools_do_not_trigger_automatic_discovery() -> None:
     assert resolved.resident_names == DEFAULT_NAMES
 
 
+def test_only_hidden_discoverable_tools_trigger_find_tools() -> None:
+    snapshot = _snapshot(
+        (*DEFAULT_NAMES, "find_tools", "private_tool", "mcp__docs__search")
+    )
+
+    without_candidates = resolve_tool_options(
+        snapshot,
+        default_resident_names=DEFAULT_NAMES,
+        discoverable_names=(),
+        allow_discovery_tools=True,
+    )
+    with_candidate = resolve_tool_options(
+        snapshot,
+        default_resident_names=DEFAULT_NAMES,
+        discoverable_names=("mcp__docs__search",),
+        allow_discovery_tools=True,
+    )
+
+    assert without_candidates.resident_names == DEFAULT_NAMES
+    assert with_candidate.resident_names == (*DEFAULT_NAMES, "find_tools")
+
+
 @pytest.mark.parametrize(
     ("tools", "disabled_tools", "match"),
     [
@@ -430,6 +452,23 @@ def test_activation_reducer_rejects_unknown_names_and_count_overflow() -> None:
             max_active_tools=1,
         )
     assert overflow.value.error_code == "tool_activation_count_exceeded"
+
+
+def test_activation_reducer_rejects_installed_but_non_discoverable_name() -> None:
+    snapshot = _snapshot(("resident", "discoverable", "private_tool"))
+
+    with pytest.raises(
+        ToolActivationError,
+        match="not discoverable.*private_tool",
+    ) as error:
+        reduce_tool_activation(
+            snapshot,
+            resident_names=("resident",),
+            proposed_names=("private_tool",),
+            discoverable_names=("discoverable",),
+        )
+
+    assert error.value.error_code == "tool_activation_not_discoverable"
 
 
 def test_activation_reducer_reuses_selection_schema_budget_check() -> None:

@@ -81,10 +81,14 @@ class ReadFileInput(BaseModel):
     )
     offset: int = Field(default=0, ge=0, description="Byte offset to start reading.")
     max_bytes: int = Field(
-        default=1_000_000,
+        default=16_000,
         ge=1,
         le=1_000_000,
-        description="Maximum bytes returned in one call.",
+        description=(
+            "Optional byte limit from 1 through 1,000,000; omit it to use "
+            "the context-safe 16,000-byte default, then advance offset for "
+            "another chunk."
+        ),
     )
 
 
@@ -138,6 +142,11 @@ _READ_INPUT_SCHEMA, _validate_read_input = pydantic_input(ReadFileInput)
 _READ_OUTPUT_SCHEMA, _unused_read_output_validator = pydantic_input(ReadFileOutput)
 _PATCH_INPUT_SCHEMA, _validate_patch_input = pydantic_input(ApplyPatchInput)
 _PATCH_OUTPUT_SCHEMA, _unused_patch_output_validator = pydantic_input(ApplyPatchOutput)
+_PATCH_ERROR_CODES = {
+    "file not found": "file_not_found",
+    "old_string not found": "old_string_not_found",
+    "old_string is not unique; set replace_all=true": "old_string_not_unique",
+}
 
 
 def create_list_files_tool(workspace: WorkspaceRuntime) -> Tool:
@@ -184,8 +193,9 @@ def create_read_file_tool(workspace: WorkspaceRuntime) -> Tool:
             name="read_file",
             description=(
                 "Read a bounded byte range from one workspace file. Binary files are "
-                "reported without embedding their bytes. Use offset and max_bytes for "
-                "large text files."
+                "reported without embedding their bytes. The 16,000-byte default "
+                "bounds model context; use offset for later chunks, and never set "
+                "max_bytes above 1,000,000."
             ),
             input_schema=_READ_INPUT_SCHEMA,
         ),
@@ -232,11 +242,7 @@ def create_apply_patch_tool(workspace: WorkspaceRuntime) -> Tool:
             workspace,
             ApplyPatchInput.model_validate(arguments),
         ),
-        normalize_output=lambda raw: _normalize_model(
-            raw,
-            model=ApplyPatchOutput,
-            schema=_PATCH_OUTPUT_SCHEMA,
-        ),
+        normalize_output=_normalize_apply_patch,
         output_schema=_PATCH_OUTPUT_SCHEMA,
         static_effects=frozenset({
             ToolEffect.READ_WORKSPACE,
@@ -426,6 +432,26 @@ def _normalize_model(
         validated.model_dump(mode="json"),
     )
     return NormalizedToolOutput(structured_content=structured)
+
+
+def _normalize_apply_patch(raw: object) -> NormalizedToolOutput:
+    validated = ApplyPatchOutput.model_validate(raw)
+    structured = json_schema_output(
+        _PATCH_OUTPUT_SCHEMA,
+        validated.model_dump(mode="json"),
+    )
+    if validated.replaced:
+        return NormalizedToolOutput(structured_content=structured)
+    return NormalizedToolOutput(
+        structured_content=structured,
+        is_error=True,
+        error_code=_PATCH_ERROR_CODES.get(
+            validated.message,
+            "patch_not_applied",
+        ),
+        error_message=validated.message,
+        retryable=True,
+    )
 
 
 __all__ = [

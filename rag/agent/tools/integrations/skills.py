@@ -169,6 +169,10 @@ def create_materialize_skill_asset_tool(
             effects=frozenset({ToolEffect.WRITE_WORKSPACE}),
             targets=(
                 ToolTarget(
+                    kind="active_skill",
+                    value=str(arguments["skill_id"]),
+                ),
+                ToolTarget(
                     kind="workspace_path",
                     value=str(
                         _asset_destination(

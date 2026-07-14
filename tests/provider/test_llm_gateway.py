@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from openai.types.chat import ChatCompletion
 from pydantic import BaseModel
 
 from rag.agent.core.context import LLMBudgetLedger
@@ -25,7 +26,12 @@ from rag.agent.tools.tool import (
     json_schema_input,
 )
 from rag.assembly.support import _OpenAICompatibleChatGenerator
-from rag.providers.llm_gateway import LLMContextOverflowError, LLMGateway, StreamChunk
+from rag.providers.llm_gateway import (
+    LLMContextOverflowError,
+    LLMGateway,
+    LLMToolCallValidationError,
+    StreamChunk,
+)
 from rag.schema.llm import (
     LLMCallStage,
     LLMProviderResult,
@@ -144,6 +150,27 @@ class _CanonicalNativeGenerator:
         )
 
 
+class _RejectedToolCallGenerator:
+    def generate_with_tools(
+        self,
+        *,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        **kwargs: Any,
+    ) -> LLMProviderResult[dict[str, object]]:
+        del messages, tools, kwargs
+        error = RuntimeError("provider rejected generated tool call")
+        error.body = {  # type: ignore[attr-defined]
+            "message": "Tool call validation failed: max_bytes exceeds maximum",
+            "code": "tool_use_failed",
+            "failed_generation": (
+                '<function=read_file>{"path":"README.md",'
+                '"max_bytes":2000000}</function>'
+            ),
+        }
+        raise error
+
+
 class _CanonicalLocalGenerator(_UsageAwareGenerator):
     def __init__(self) -> None:
         super().__init__(
@@ -257,6 +284,20 @@ def _gateway(
             )
         },
     )
+
+
+def _openai_generator_for_response(
+    response: ChatCompletion,
+) -> _OpenAICompatibleChatGenerator:
+    generator = _OpenAICompatibleChatGenerator.__new__(_OpenAICompatibleChatGenerator)
+    generator.chat_model_name = "test-model"
+    generator._base_url = "https://example.test/v1"
+    generator._client = SimpleNamespace(
+        chat=SimpleNamespace(
+            completions=SimpleNamespace(create=lambda **_: response)
+        )
+    )
+    return generator
 
 
 @pytest.mark.anyio
@@ -458,40 +499,98 @@ async def test_streaming_gateway_refunds_when_consumer_closes_early() -> None:
     assert await ledger.remaining() == 20
 
 
-def test_openai_compatible_generator_preserves_response_usage() -> None:
-    generator = _OpenAICompatibleChatGenerator.__new__(_OpenAICompatibleChatGenerator)
-    generator.chat_model_name = "test-model"
-    generator._base_url = "https://example.test/v1"
-    generator._client = SimpleNamespace(
-        chat=SimpleNamespace(
-            completions=SimpleNamespace(
-                create=lambda **_: SimpleNamespace(
-                    choices=[
-                        SimpleNamespace(
-                            message=SimpleNamespace(content="provider answer")
-                        )
-                    ],
-                    usage=SimpleNamespace(
-                        prompt_tokens=11,
-                        completion_tokens=7,
-                        prompt_tokens_details=SimpleNamespace(cached_tokens=5),
-                        completion_tokens_details=SimpleNamespace(reasoning_tokens=3),
-                    ),
-                )
-            )
+@pytest.mark.anyio
+async def test_streaming_fallback_parses_sdk_text_completion(
+    chat_completion_factory: Callable[..., ChatCompletion],
+) -> None:
+    response = chat_completion_factory(content="provider answer", tool_calls=None)
+
+    chunks = [
+        chunk
+        async for chunk in _gateway(
+            _openai_generator_for_response(response)
+        ).astream_with_tools(
+            stage=LLMCallStage.TOOL_DECISION,
+            messages=[{"role": "user", "content": "hello prompt"}],
+            tools=[],
         )
+    ]
+
+    assert [chunk.type for chunk in chunks] == ["text_delta", "message_stop"]
+    assert chunks[0].content == "provider answer"
+    assert chunks[-1].stop_reason == "end_turn"
+    assert chunks[-1].usage is not None
+    assert chunks[-1].usage.usage_source == "provider"
+
+
+@pytest.mark.anyio
+async def test_streaming_fallback_parses_sdk_tool_completion(
+    chat_completion_factory: Callable[..., ChatCompletion],
+) -> None:
+    response = chat_completion_factory(
+        content=None,
+        finish_reason="tool_calls",
+        tool_calls=[
+            {
+                "id": "call_fixture",
+                "type": "function",
+                "function": {
+                    "name": "read_file",
+                    "arguments": '{"path":"README.md"}',
+                },
+            }
+        ],
     )
+
+    chunks = [
+        chunk
+        async for chunk in _gateway(
+            _openai_generator_for_response(response)
+        ).astream_with_tools(
+            stage=LLMCallStage.TOOL_DECISION,
+            messages=[{"role": "user", "content": "read the file"}],
+            tools=[],
+        )
+    ]
+
+    assert [chunk.type for chunk in chunks] == [
+        "tool_use_start",
+        "tool_input_delta",
+        "content_block_stop",
+        "message_stop",
+    ]
+    assert chunks[0].tool_id == "call_fixture"
+    assert chunks[0].tool_name == "read_file"
+    assert chunks[1].content == '{"path":"README.md"}'
+    assert chunks[-1].stop_reason == "tool_use"
+    assert chunks[-1].usage is not None
+    assert chunks[-1].usage.usage_source == "provider"
+
+
+def test_openai_compatible_generator_normalizes_sdk_response_usage(
+    chat_completion_factory: Callable[..., ChatCompletion],
+) -> None:
+    response = chat_completion_factory(
+        content="provider answer",
+        prompt_tokens=11,
+        completion_tokens=7,
+        cached_tokens=5,
+        reasoning_tokens=3,
+    )
+    generator = _openai_generator_for_response(response)
 
     result = generator.generate_text_with_usage(prompt="question", max_tokens=20)
 
     assert result.value == "provider answer"
-    assert result.usage == LLMUsage(
-        input_tokens=11,
-        output_tokens=7,
-        cached_input_tokens=5,
-        reasoning_tokens=3,
-        source="provider",
-    )
+    assert result.usage is not None
+    assert result.usage.input_tokens == 11
+    assert result.usage.output_tokens == 7
+    assert result.usage.reasoning_tokens == 3
+    assert result.usage.logical_input_tokens == 11
+    assert result.usage.uncached_input_tokens == 6
+    assert result.usage.cache_read_input_tokens == 5
+    assert result.usage.usage_source == "provider"
+    assert result.usage.raw_provider_usage is not None
 
 
 @pytest.mark.anyio
@@ -520,6 +619,44 @@ async def test_gateway_adapts_one_canonical_request_to_openai_wire() -> None:
         "list_files",
         "read_file",
     ]
+    assert "model" not in generator.calls[0]
+
+
+@pytest.mark.anyio
+async def test_gateway_normalizes_provider_tool_call_validation_failure() -> None:
+    with pytest.raises(LLMToolCallValidationError) as exc_info:
+        await _gateway(
+            _RejectedToolCallGenerator(),
+            max_input_tokens=2_000,
+            model_context_tokens=4_000,
+        ).agenerate_model_request(
+            stage=LLMCallStage.TOOL_DECISION,
+            request=_canonical_request(),
+            provider="openai-compatible",
+            supports_native_tools=True,
+        )
+
+    assert "max_bytes exceeds maximum" in exc_info.value.validation_error
+    assert '"max_bytes":2000000' in exc_info.value.failed_generation
+
+
+@pytest.mark.anyio
+async def test_streaming_gateway_preserves_rejected_tool_call_feedback() -> None:
+    with pytest.raises(LLMToolCallValidationError) as exc_info:
+        await _gateway(
+            _RejectedToolCallGenerator(),
+            max_input_tokens=2_000,
+            model_context_tokens=4_000,
+        ).agenerate_model_request(
+            stage=LLMCallStage.TOOL_DECISION,
+            request=_canonical_request(),
+            provider="openai-compatible",
+            supports_native_tools=True,
+            stream=True,
+        )
+
+    assert "max_bytes exceeds maximum" in exc_info.value.validation_error
+    assert '"max_bytes":2000000' in exc_info.value.failed_generation
 
 
 @pytest.mark.anyio

@@ -34,6 +34,7 @@ class EventType(Enum):
     TURN_START = "turn_start"  # 一轮开始
     TURN_END = "turn_end"  # 一轮结束
     LOOP_END = "loop_end"  # 循环结束
+    HUMAN_INPUT_REQUIRED = "human_input_required"  # 已持久化的人机交互请求
     RECOVERY = "recovery"  # 恢复尝试
     ABORT = "abort"  # 用户取消
 

@@ -26,6 +26,7 @@ from rag.agent.core.messages import (
     ToolCall as ModelToolCall,
 )
 from rag.agent.core.turn_contracts import ToolCallPlan
+from rag.agent.file_manifest import FileManifest, FileManifestEntry
 from rag.agent.loop.state import (
     LoopState,
     ModelTurnDraft,
@@ -174,6 +175,7 @@ def _provider(
     *,
     names: tuple[str, ...] = ("vector_search", "read_file"),
     supports_native_tools: bool = True,
+    skill_runtime: object | None = None,
 ) -> LLMLoopModelTurnProvider:
     snapshot = {name: _tool(name) for name in names}
     return LLMLoopModelTurnProvider(
@@ -183,6 +185,7 @@ def _provider(
         supports_native_tools=supports_native_tools,
         registry_snapshot=snapshot,
         resident_tool_names=names,
+        skill_runtime=skill_runtime,  # type: ignore[arg-type]
     )
 
 
@@ -255,6 +258,48 @@ async def test_loop_provider_builds_one_canonical_request_and_finish() -> None:
     assert envelope.model_call_record.provider_wire_hash == "wire-loop-context"
     assert envelope.context_revision is not None
     assert envelope.context_revision.startswith("context_")
+    assert state["latency_profile"].prompt_bytes > 0
+    assert state["latency_profile"].tool_schema_bytes > 0
+
+
+@pytest.mark.anyio
+async def test_loop_provider_injects_imported_file_paths_into_canonical_context() -> None:
+    gateway = _RecordingGateway()
+    state = _state("loop-context-input-files")
+    state["resident_tool_names"] = ["read_file"]
+    state["file_manifest"] = FileManifest(
+        files=[
+            FileManifestEntry(
+                path="input_files/fixture.txt",
+                filename="fixture.txt",
+                size_bytes=7,
+                mime_type="text/plain",
+                file_kind="text",
+                hash="abc123",
+                structured=False,
+                probeable=False,
+            )
+        ],
+        total_size_bytes=7,
+        has_structured_files=False,
+        has_probeable_files=False,
+    )
+
+    envelope = await _provider(
+        gateway,
+        names=("read_file",),
+    ).next_turn(
+        state,
+        definition=_definition(),
+        budget_remaining=5_000,
+    )
+
+    assert envelope.request is not None
+    assert any(
+        message.role == "context"
+        and "input_files/fixture.txt" in message.content
+        for message in envelope.request.messages
+    )
 
 
 @pytest.mark.anyio
@@ -304,6 +349,32 @@ async def test_loop_provider_selection_is_state_driven_not_task_classified() -> 
     )
 
     assert envelope.request.exposed_tool_names == ("read_file",)
+
+
+@pytest.mark.anyio
+async def test_loop_provider_injects_skill_runtime_context() -> None:
+    class _SkillContext:
+        def render_prompt_context(self, state: LoopState) -> str:
+            assert state["task"]
+            return "<available_skills>project:review</available_skills>"
+
+    gateway = _RecordingGateway()
+    state = _state("loop-context-skills")
+    state["resident_tool_names"] = ["read_file"]
+
+    envelope = await _provider(
+        gateway,
+        names=("read_file",),
+        skill_runtime=_SkillContext(),
+    ).next_turn(
+        state,
+        definition=_definition(),
+        budget_remaining=5_000,
+    )
+
+    system_prompt = str(envelope.request.messages[0].content)
+    assert "Use tools when they help and preserve citations." in system_prompt
+    assert "<available_skills>project:review</available_skills>" in system_prompt
 
 
 @pytest.mark.anyio

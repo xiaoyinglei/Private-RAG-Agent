@@ -36,6 +36,7 @@ from rag.agent.skills.models import (
     SkillSummary,
 )
 from rag.agent.skills.policy import SkillPolicy
+from rag.agent.skills.runtime import SkillRuntime
 from rag.agent.tools.executor import ToolExecutor
 from rag.agent.tools.integrations import skills as skill_integration_module
 from rag.agent.tools.integrations.skills import (
@@ -726,6 +727,77 @@ class TestSkillStateIntegration:
             assert "project:checkpoint-test" in restored["skill_state"].active
 
 
+class TestSkillRuntime:
+    def test_invoke_and_apply_activation_uses_catalog_authority(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        _write_skill(tmp_path, "runtime-test", "Runtime test")
+        catalog = SkillCatalog(
+            scan_and_load_skills(tmp_path, repo_root=tmp_path)
+        )
+        runtime = SkillRuntime(catalog)
+        state = create_loop_state(task="test", run_config=_run_config())
+
+        event = runtime.invoke_skill(
+            {"name": "project:runtime-test", "args": "input.csv"}
+        )
+        runtime.apply_activation_event(state, event, iteration=3)
+
+        assert event["success"] is True
+        assert event["skill_id"] == "project:runtime-test"
+        assert "Body of runtime-test." in str(event["instructions"])
+        active = state["skill_state"].active["project:runtime-test"]
+        assert active.loaded_at_iteration == 3
+        assert active.args == "input.csv"
+        assert runtime.validated_active_skill_ids(state) == frozenset(
+            {"project:runtime-test"}
+        )
+
+    def test_invoke_rejects_non_invocable_skill(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        _write_skill(
+            tmp_path,
+            "manual-only",
+            "Manual only",
+            disable_model_invocation=True,
+        )
+        runtime = SkillRuntime(
+            SkillCatalog(scan_and_load_skills(tmp_path, repo_root=tmp_path))
+        )
+
+        event = runtime.invoke_skill({"name": "project:manual-only"})
+
+        assert event["success"] is False
+        assert event["error_code"] == "skill_disabled"
+
+    def test_checkpoint_identity_mismatch_is_not_active(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        _write_skill(tmp_path, "identity-test", "Identity test")
+        catalog = SkillCatalog(
+            scan_and_load_skills(tmp_path, repo_root=tmp_path)
+        )
+        runtime = SkillRuntime(catalog)
+        state = create_loop_state(task="test", run_config=_run_config())
+        loaded = catalog.load("project:identity-test", iteration=1)
+        assert loaded is not None
+        ref = loaded.to_ref()
+        state["skill_state"].active[ref.skill_id] = ref.model_copy(
+            update={"root_dir": str(tmp_path / "different-root")}
+        )
+
+        assert runtime.validated_active_skill_ids(state) == frozenset()
+
+        rendered = runtime.render_prompt_context(state)
+
+        assert "different-root" not in rendered
+        assert "<loaded_skill" not in rendered
+
+
 class TestFinalSkillToolFactories:
     @pytest.mark.anyio
     async def test_invoke_skill_returns_a_bounded_activation_event(self) -> None:
@@ -812,6 +884,7 @@ class TestFinalSkillToolFactories:
                 workspace_root=workspace.root,
                 cwd=workspace.root,
                 allow_write_tools=True,
+                active_skill_ids=frozenset({"project:demo"}),
             ),
         )
 
@@ -824,6 +897,47 @@ class TestFinalSkillToolFactories:
         materialized = workspace.root / output["workspace_path"]
         assert materialized.read_text(encoding="utf-8") == "print('ok')\n"
         assert len(output["source_fingerprint"]) == 64
+
+    @pytest.mark.anyio
+    async def test_materialize_skill_asset_hard_denies_inactive_skill(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        skill_root = tmp_path / "skill"
+        script = skill_root / "scripts" / "helper.py"
+        script.parent.mkdir(parents=True)
+        script.write_text("print('ok')\n", encoding="utf-8")
+        workspace = open_workspace(tmp_path / "workspace", create=True)
+        tool = create_materialize_skill_asset_tool(
+            workspace,
+            active_skill_root=lambda _skill_id: skill_root,
+        )
+        call = ToolCall(
+            tool_call_id="call_inactive_skill",
+            tool_name="materialize_skill_asset",
+            arguments={
+                "skill_id": "project:demo",
+                "relative_path": "scripts/helper.py",
+            },
+            origin=ToolCallOrigin(
+                request_id="req_skill_asset",
+                toolset_revision="tools_skill_v1",
+                exposed_tool_names=("materialize_skill_asset",),
+            ),
+        )
+
+        execution = await ToolExecutor({tool.definition.name: tool}).execute(
+            call,
+            context=FinalToolExecutionContext(
+                workspace_root=workspace.root,
+                cwd=workspace.root,
+                allow_write_tools=True,
+            ),
+        )
+
+        assert execution.result.is_error is True
+        assert execution.result.error_code == "skill_not_active"
+        assert not (workspace.scratch / "skills").exists()
 
     def test_skill_integration_does_not_own_catalog_or_loader(self) -> None:
         module_path = Path(skill_integration_module.__file__ or "")

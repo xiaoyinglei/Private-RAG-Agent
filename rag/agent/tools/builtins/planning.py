@@ -31,7 +31,9 @@ class PlanStepInput(BaseModel):
         max_length=180,
         description="A concise, verifiable implementation step.",
     )
-    status: Literal["pending", "in_progress", "completed"]
+    status: Literal["pending", "in_progress", "completed"] = Field(
+        description="Current state of this exact step."
+    )
 
 
 class UpdatePlanInput(BaseModel):
@@ -40,7 +42,10 @@ class UpdatePlanInput(BaseModel):
     plan: list[PlanStepInput] = Field(
         min_length=1,
         max_length=20,
-        description="The complete ordered plan after this update.",
+        description=(
+            'The complete ordered plan; every item requires both "step" and '
+            '"status" fields.'
+        ),
     )
     explanation: str | None = Field(
         default=None,
@@ -72,8 +77,9 @@ def create_update_plan_tool(plan_updater: PlanUpdater) -> Tool:
             description=(
                 "Replace the visible implementation plan with an ordered set of "
                 "pending, in-progress, and completed steps. Use it when the work "
-                "crosses meaningful checkpoints; it reports state but grants no tool "
-                "permission."
+                "crosses meaningful checkpoints. Every plan item must be shaped like "
+                '{"step": "verify tests", "status": "in_progress"}; the tool '
+                "reports state but grants no tool permission."
             ),
             input_schema=_UPDATE_INPUT_SCHEMA,
         ),

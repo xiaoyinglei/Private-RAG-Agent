@@ -4,6 +4,7 @@ import asyncio
 from collections.abc import AsyncIterable, Mapping
 from copy import deepcopy
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import pytest
 
@@ -20,8 +21,12 @@ from rag.agent.loop.state import (
 )
 from rag.agent.loop.stop_hooks import StopHookRunner
 from rag.agent.memory.compactor import LoopCompactionResult
+from rag.agent.skills.catalog import SkillCatalog
+from rag.agent.skills.loader import scan_and_load_skills
+from rag.agent.skills.runtime import SkillRuntime
 from rag.agent.streaming.events import EventType, StreamEvent, text_delta
 from rag.agent.tools.executor import ToolExecutor
+from rag.agent.tools.integrations.skills import create_invoke_skill_tool
 from rag.agent.tools.permissions import ToolExecutionContext
 from rag.agent.tools.selection import (
     FindToolMatch,
@@ -39,8 +44,10 @@ from rag.agent.tools.tool import (
     ToolCallOrigin,
     ToolContentBlock,
     ToolDefinition,
+    ToolEffect,
     json_schema_input,
 )
+from rag.providers.llm_gateway import LLMToolCallValidationError
 from rag.schema.runtime import AccessPolicy
 
 
@@ -150,6 +157,7 @@ def _tool(
     runner: object,
     *,
     schema: Mapping[str, JsonValue] | None = None,
+    effects: frozenset[ToolEffect] = frozenset(),
 ) -> Tool:
     input_schema = schema or {
         "type": "object",
@@ -175,9 +183,9 @@ def _tool(
         run=runner,  # type: ignore[arg-type]
         normalize_output=normalize,
         output_schema=None,
-        static_effects=frozenset(),
+        static_effects=effects,
         resolve_use=lambda _arguments: ResolvedToolUse(
-            effects=frozenset(),
+            effects=effects,
             targets=(),
         ),
         execution_revision=f"{name}-v1",
@@ -198,6 +206,7 @@ def _loop(
     definition: AgentRuntimePolicy | None = None,
     events: _Events | None = None,
     max_model_retries: int = 1,
+    skill_runtime: SkillRuntime | None = None,
 ) -> AgentLoop:
     snapshot = {tool.definition.name: tool for tool in tools}
     return AgentLoop(
@@ -212,6 +221,7 @@ def _loop(
         finish_candidate_builder=FinishCandidateBuilder(),
         event_sink=events or _Events(),
         max_model_retries=max_model_retries,
+        skill_runtime=skill_runtime,
     )
 
 
@@ -243,6 +253,95 @@ async def test_model_tool_result_next_turn_and_finish() -> None:
     assert result["tool_results"][0].structured_content == {"text": "hello"}
     assert result["canonical_transcript"][-1].role == "tool"
     assert any(reason == "tool_results_recorded" for reason, _ in checkpoint.snapshots)
+
+
+@pytest.mark.anyio
+async def test_approval_pause_is_a_checkpointed_human_input_event() -> None:
+    tool = _tool(
+        "remote_lookup",
+        lambda arguments: arguments["value"],
+        effects=frozenset({ToolEffect.NETWORK}),
+    )
+    call = ToolCallPlan.create("remote_lookup", {"value": "public docs"})
+    state = create_loop_state(
+        task="Look this up.",
+        run_config=_config("loop-approval-event"),
+        pending_tool_calls=(call,),
+    )
+    state["resident_tool_names"] = ["remote_lookup"]
+    checkpoint = _Checkpoint()
+
+    events = await _collect(
+        _loop(
+            provider=_SequenceProvider([]),
+            tools=(tool,),
+            checkpoint=checkpoint,
+        ).run_streaming(state)
+    )
+
+    assert state["status"] == "paused"
+    assert state["tool_results"] == []
+    assert any(
+        event.type is EventType.HUMAN_INPUT_REQUIRED for event in events
+    )
+    assert not any(event.type is EventType.TOOL_USE_ERROR for event in events)
+    start = next(event for event in events if event.type is EventType.TOOL_USE_START)
+    assert "public docs" in start.data["input_preview"]
+    approval_snapshots = [
+        snapshot
+        for reason, snapshot in checkpoint.snapshots
+        if reason == "tool_pause"
+    ]
+    assert approval_snapshots[-1]["status"] == "paused"
+
+
+@pytest.mark.anyio
+async def test_skill_activation_is_checkpointed_with_tool_result(
+    tmp_path: Path,
+) -> None:
+    skill_dir = tmp_path / ".agents" / "skills" / "review"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: review\ndescription: Review code\n---\nReview carefully.\n",
+        encoding="utf-8",
+    )
+    runtime = SkillRuntime(
+        SkillCatalog(scan_and_load_skills(tmp_path, repo_root=tmp_path))
+    )
+    invoke_tool = create_invoke_skill_tool(runtime.invoke_skill)
+    call = ToolCallPlan.create(
+        "invoke_skill",
+        {"name": "project:review"},
+    )
+    provider = _SequenceProvider(
+        [
+            ModelTurnDraft(action="execute", tool_calls=(call,)),
+            ModelTurnDraft(action="finish", final_answer="Reviewed."),
+        ]
+    )
+    checkpoint = _Checkpoint()
+    state = create_loop_state(
+        task="Review this.",
+        run_config=_config("loop-skill-activation"),
+    )
+    state["resident_tool_names"] = ["invoke_skill"]
+
+    result = await _loop(
+        provider=provider,
+        tools=(invoke_tool,),
+        checkpoint=checkpoint,
+        skill_runtime=runtime,
+    ).run(state)
+
+    assert "project:review" in result["skill_state"].active
+    recorded = [
+        snapshot
+        for reason, snapshot in checkpoint.snapshots
+        if reason == "tool_results_recorded"
+    ]
+    assert recorded
+    assert "project:review" in recorded[-1]["skill_state"].active
+    assert recorded[-1]["tool_results"][-1].tool_name == "invoke_skill"
 
 
 @pytest.mark.anyio
@@ -307,6 +406,39 @@ async def test_provider_error_retries_then_fails() -> None:
     assert result["status"] == "failed"
     assert result["terminal"] is not None
     assert result["terminal"].stop_reason == "model_provider_failed"
+
+
+@pytest.mark.anyio
+async def test_provider_tool_validation_retry_gives_model_corrective_context() -> None:
+    provider = _SequenceProvider(
+        [
+            LLMToolCallValidationError(
+                validation_error=(
+                    "Tool call validation failed: max_bytes exceeds maximum"
+                ),
+                failed_generation=(
+                    '<function=read_file>{"path":"README.md",'
+                    '"max_bytes":2000000}</function>'
+                ),
+            ),
+            ModelTurnDraft(action="finish", final_answer="recovered"),
+        ]
+    )
+
+    result = await _loop(provider=provider, max_model_retries=1).run(
+        create_loop_state(
+            task="Read README.md.",
+            run_config=_config("loop-provider-tool-validation"),
+        )
+    )
+
+    assert result["status"] == "completed"
+    retry_transcript = provider.seen_states[1]["canonical_transcript"]
+    feedback = retry_transcript[-1]
+    assert feedback.role == "context"
+    assert "model_tool_call_rejected" in feedback.content
+    assert "max_bytes exceeds maximum" in feedback.content
+    assert 'max_bytes\\\":2000000' in feedback.content
 
 
 @pytest.mark.anyio

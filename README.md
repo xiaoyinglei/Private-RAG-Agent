@@ -68,20 +68,18 @@ uv run agent run \
   --verbose
 ```
 
-`agent run` 不会根据任务文本自动暴露工具 schema。需要工具时，由入口显式传入本轮工具面：
+`agent run` 会根据当前 workspace 中已安装、已启用的能力自动装配工具面。用户只需提交任务，不需要记工具名；CLI 会展示实际调用的工具和结果，审批时会展示经过有界脱敏的关键参数：
 
 ```bash
 uv run agent run \
-  "找到 AgentService 的定义文件" \
-  --tool search_text \
-  --tool list_files \
-  --tool read_file
+  "找到 AgentService 的定义文件并说明主要职责" \
+  --verbose
 
 uv run agent run \
-  "运行 echo hello" \
-  --tool run_command \
-  --allow-execute-tools
+  "运行测试并修复失败项"
 ```
+
+在交互式终端里，写入或执行类调用会先保存 pending checkpoint，然后在当前命令、同一 runtime 和同一 `ToolCall` 上询问审批并继续。`--non-interactive` 或非 TTY 环境不会等待输入：命令保存暂停状态、输出 `agent resume` 命令并以退出码 2 结束。
 
 分析本地文件：
 
@@ -95,19 +93,20 @@ uv run agent run \
 Python SDK：
 
 ```python
+from pathlib import Path
+
 from agent_runtime import Agent
 
-agent = Agent(model="qwen3_8b_mlx_4bit")
+agent = Agent(
+    model="qwen3_8b_mlx_4bit",
+    workspace_path=Path.cwd(),
+)
 agent.switch_model("mimo_cloud")  # 切换当前 SDK session，不修改 configs/models.yaml
 result = agent.run("总结一下这个项目")
 print(result.answer)
-
-with_tools = agent.run(
-    "找到 AgentService 的定义文件",
-    tools=["search_text", "list_files", "read_file"],
-)
-print(with_tools.answer)
 ```
+
+`Agent.run()` / `arun()` 每次都是独立的 one-shot runtime；会话连续性由 `run_id` / checkpoint 持有，不依赖 Python 对象里的长连接。SDK 不读取 stdin，遇到审批会返回 paused 状态或规范事件；提前停止消费 `stream()` 时，调用方应显式 `aclose()`。CLI `chat` 则在整个对话期间共用一个 event loop 和 runtime。
 
 只有维护知识库或做底层检索诊断时，才需要启动 embedding 服务并使用 `rag ingest/query`。日常问答仍然只调用 `agent`：
 
@@ -151,15 +150,22 @@ uv run agent run \
 
 默认编码工具面只有六个常驻工具，顺序稳定：`list_files`、`search_text`、`read_file`、`apply_patch`、`run_command`、`update_plan`。本地 workspace 导航遵循 Grep-not-RAG 规则：先用 `list_files` 或 `search_text` 定位当前文件，再用 `read_file` 读取；不会为了搜索源码或已导入文件自动启动 RAG。
 
-工具面选项的优先级是确定的：
+产品装配规则是确定的：
 
-1. 非空 `--tool` / SDK `tools=` 是精确的初始工具面，会取代默认常驻面；未传或传空列表则使用默认面。
-2. `--disable-tool` / `disabled_tools=` 最后过滤工具，无论它来自默认、显式请求还是激活结果，都不会被重新加回。
-3. `--allow-discovery-tools` 只在已安装 hidden tools 时向默认面加入 `find_tools`；它不会自动扩展非空的显式工具面。显式请求 `find_tools` 时也必须同时开启该标志。
+1. 六个编码工具始终常驻。
+2. 显式配置 knowledge 时，`search_knowledge` 常驻。
+3. 启动时扫描 workspace 中的 Skill catalog；只有存在 policy 允许且模型可调用的 Skill 时，`invoke_skill` 和 `materialize_skill_asset` 才常驻。扫描 catalog 不等于创建工具，更不等于所有 Skill 已激活。
+4. 只要冻结 Registry 中存在 hidden 且 discoverable 的工具，`find_tools` 就常驻。当前 MCP 和 subagent 使用这条路径，可见性规则不依赖 capability 的来源类型。
 
-`--knowledge <name>` 是知识库的显式开关：它注册 `search_knowledge`，并在使用默认工具面时将其放入该 run 的可见面；非空 `--tool` 仍按上述优先级取代默认面。实际 RAG 资源在首次调用时延迟初始化。没有 `--knowledge` 时不安装 `search_knowledge`，也不会因任务文本或环境变量暗中启用。
+`tools=`、`disabled_tools=` 和 `allow_discovery_tools=` 仍作为 deprecated keyword-only 兼容入口被 SDK 接受，CLI 也保留对应隐藏选项；它们不是普通用户需要学习的主交互。
 
-`apply_patch` 和 `run_command` 的 schema 可见不等于已授权。默认写 workspace 和执行进程会暂停并要求审批；`--allow-write-tools` 和 `--allow-execute-tools` 分别预授权这两类 effect。网络和破坏性 effect 仍会要求审批。要跨进程恢复，运行时传 `--checkpoint-db` 和稳定的 `--run-id`，然后使用 `agent resume ... --decision allow_once|deny|continue|abort`。
+`--knowledge <name>` 是知识库的显式开关：它注册并常驻 `search_knowledge`，实际 RAG 资源在首次调用时延迟初始化。没有 `--knowledge` 时不安装该工具，也不会因任务文本或环境变量暗中启用。
+
+MCP 从 workspace 的 `configs/mcp_servers.yaml` 装配，也可用 `AGENT_MCP_CONFIG` 覆盖路径。server 必须显式 `enabled` 且配置 `tools_allowlist` 或 `allow_all_tools`；默认示例全部禁用。单个 server 启动失败会产生 runtime diagnostic，不会移除其他已装配能力，而非法配置仍会明确失败。
+
+Skill 资产访问有独立的 hard guard：`invoke_skill` 只能激活 catalog/policy 允许的 Skill，`materialize_skill_asset` 只能访问 checkpoint 中已激活 Skill 的 root；未激活、路径越界或状态不一致都会 hard-deny。
+
+`apply_patch` 和 `run_command` 的 schema 可见不等于已授权。默认写 workspace 和执行进程需要审批；`--allow-write-tools` 和 `--allow-execute-tools` 分别预授权这两类 effect。审批互动只存在于 CLI 层，SDK、`can_use_tool()` 和 `ToolExecutor` 都不读 stdin。拒绝会生成标准 `tool_denied` 结果供模型调整，不会把命令直接弄崩。默认 checkpoint 位于 `.rag/agent_checkpoints.sqlite`；跨进程恢复时使用输出的 `agent resume ... --decision allow_once|deny|continue|abort`。
 
 恢复时会重建工具 manifest。如果漂移没有影响 pending/paused call，运行时创建新 revision，并移除已不存在的 active tool；如果已有 call 依赖变更或缺失的工具，则 fail closed 为 `tool_reconciliation` 暂停。每个 call 始终保留创建它的 `request_id`、`toolset_revision` 和 `exposed_tool_names`，不会被恢复后的当前 turn 覆盖。
 
@@ -177,6 +183,7 @@ uv run python scripts/agent_delivery_smoke.py --model <model-alias> --verbose
 
 ## News
 
+- 2026-07-14：公开 CLI/SDK 接入自动 product capability assembly；workspace、Skill、MCP 和 subagent 由内部 one-shot runtime 按所有权装配与回收，CLI 在 TTY 中完成同 runtime 审批闭环。
 - 2026-07-13：Agent 工具运行时收敛为单一 `Tool` 合同、单一注册表、单一可见性函数和单一执行入口；新增 deterministic fake-model ACI 评估。
 - 2026-07-07：`agent run` 和 `agent_runtime.Agent` 支持显式工具面配置；默认不再因为任务文本关键词暴露工具 schema，工具 schema 由入口结构化配置传入主路径。
 - 2026-07-02：新增 `agent_runtime.Agent` Python SDK facade；`agent run` 改为通过 facade 调用内部 `AgentService`；RAG 从默认自动挂载改为显式 `--knowledge`，并以 lazy knowledge provider 形式在首次工具调用时初始化。
@@ -213,7 +220,7 @@ flowchart TB
 
     subgraph AG["Generic Agent runtime"]
         direction LR
-        a1["用户任务"] --> a2["结构化工具选项"] --> a3["可见 Tool 序列"] --> a4["模型 turn"] --> a5["ToolExecutor"] --> a6["ToolResult 回上下文"] --> a7["最终答案"]
+        a1["用户任务"] --> a2["自动能力装配"] --> a3["可见 Tool 序列"] --> a4["模型 turn"] --> a5["ToolExecutor"] --> a6["ToolResult 回上下文"] --> a7["最终答案"]
         a3 --> a8["find_tools / 原子激活"]
         a5 --> a9["workspace / knowledge / MCP / subagent"]
     end
@@ -361,9 +368,10 @@ AgentRunRequest
 | 类型 | 默认可见 | 说明 |
 | --- | --- | --- |
 | 基础常驻 | 是 | `list_files`、`search_text`、`read_file`、`apply_patch`、`run_command`、`update_plan` |
-| 显式配置 | 按配置 | 例如 `--knowledge` 安装的 `search_knowledge` |
-| Hidden integrations | 否 | MCP、skills、subagent 等只能在允许 discovery 时由 `find_tools` 发现 |
-| 显式 `--tool` | 是 | 非空列表替换默认面，`--disable-tool` 仍有最终否决权 |
+| Knowledge | 配置时可见 | `--knowledge` 安装的 `search_knowledge` |
+| Skill gateways | 有可调用 Skill 时可见 | `invoke_skill`、`materialize_skill_asset`；激活和资产 root 受 hard guard |
+| Hidden discoverable | 否 | 当前为 MCP 和 subagent；由 `find_tools` 发现并原子激活 |
+| 兼容精确工具面 | 显式使用时 | deprecated `tools=` / `--tool`，不在主文档和 CLI help 展示 |
 
 本地文件任务优先走 workspace：
 

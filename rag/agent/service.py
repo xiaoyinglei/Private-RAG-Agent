@@ -4,6 +4,7 @@ import logging
 import time
 from collections.abc import AsyncGenerator, Mapping, Sequence
 from pathlib import Path
+from typing import cast
 from uuid import uuid4
 
 from langchain_core.messages import BaseMessage
@@ -45,6 +46,7 @@ from rag.agent.core.turn_contracts import (
     ToolCallPlan,
     ToolManifestDriftStatus,
 )
+from rag.agent.file_manifest import FileManifest, build_file_manifest
 from rag.agent.loop.runtime import AgentLoop, ModelTurnProvider
 from rag.agent.loop.state import (
     LoopPause,
@@ -56,12 +58,15 @@ from rag.agent.loop.stop_hooks import StopHookRunner, build_stop_hooks
 from rag.agent.memory.compactor import LoopContextCompactor, MessageCompactor
 from rag.agent.memory.models import MemoryPolicy
 from rag.agent.memory.store import WorkspaceMemoryStore
+from rag.agent.skills.catalog import SkillCatalog
+from rag.agent.skills.runtime import SkillRuntime
+from rag.agent.streaming.sink import StreamEventSink
 from rag.agent.tools.builtins import RESIDENT_CODING_TOOL_NAMES
 from rag.agent.tools.executor import ToolExecutor
 from rag.agent.tools.permissions import ToolExecutionContext
 from rag.agent.tools.registry import ToolRegistry
 from rag.agent.tools.selection import resolve_tool_options, select_tools
-from rag.agent.tools.tool import ToolCall, ToolCallOrigin, ToolResult
+from rag.agent.tools.tool import JsonValue, ToolCall, ToolCallOrigin, ToolResult
 from rag.agent.workspace import (
     WorkspaceRuntime,
     create_temp_workspace,
@@ -96,7 +101,7 @@ class AgentRunRequest(BaseModel):
     disabled_tools: tuple[str, ...] = ()
     allow_write_tools: bool = False
     allow_execute_tools: bool = False
-    allow_discovery_tools: bool = False
+    allow_discovery_tools: bool | None = None
 
     @field_validator("tools", "disabled_tools", mode="before")
     @classmethod
@@ -253,31 +258,37 @@ class AgentService:
         checkpointer: BaseCheckpointSaver[str] | None = None,
         runtime_diagnostics: Sequence[RuntimeDiagnostic] = (),
         catalog: object | None = None,
-        stream_sink: object | None = None,
+        stream_sink: StreamEventSink | None = None,
         mcp_registry: object | None = None,
-        skill_catalog: object | None = None,
+        skill_catalog: SkillCatalog | None = None,
+        skill_runtime: SkillRuntime | None = None,
         strict_model_provider: bool = True,
         latency_profile: AgentLatencyProfile | None = None,
         workspace: WorkspaceRuntime | None = None,
         configured_resident_tool_names: Sequence[str] = (),
+        discoverable_tool_names: Sequence[str] = (),
     ) -> None:
         del (
             retrieval_hint_provider,
             subagent_runner,
             catalog,
             mcp_registry,
-            skill_catalog,
         )
         if definition is not None and policy is not None:
             raise ValueError("Provide either 'definition' or 'policy', not both")
-        self._policy = definition or policy
-        if self._policy is None:
+        effective_policy = definition or policy
+        if effective_policy is None:
             raise ValueError("Provide either 'definition' or 'policy'")
+        self._policy: AgentRuntimePolicy = effective_policy
         self._tool_registry = tool_registry
         self._tool_snapshot = tool_registry.freeze()
         self._tool_executor = ToolExecutor(self._tool_snapshot)
         self._configured_resident_tool_names = tuple(
             configured_resident_tool_names
+        )
+        self._discoverable_tool_names = tuple(discoverable_tool_names)
+        self._skill_runtime = skill_runtime or (
+            None if skill_catalog is None else SkillRuntime(skill_catalog)
         )
         self._model_turn_provider = model_turn_provider
         self._model_registry = model_registry
@@ -376,7 +387,14 @@ class AgentService:
         request: AgentRunRequest,
     ) -> AsyncGenerator[object, None]:
         run_config = request.to_run_config(self._policy)
-        state, loop, workspace, started_at = self._prepare_execution(
+        (
+            state,
+            loop,
+            workspace,
+            started_at,
+            checkpoint_store,
+            tool_trace_start,
+        ) = self._prepare_execution(
             request,
             run_config=run_config,
         )
@@ -384,7 +402,16 @@ class AgentService:
             async for event in loop.run_streaming(state):
                 yield event
         finally:
-            self._finalize_state(state, started_at=started_at)
+            self._finalize_state(
+                state,
+                started_at=started_at,
+                tool_trace_start=tool_trace_start,
+            )
+            if state["status"] == "paused":
+                await checkpoint_store.save_snapshot(
+                    state,
+                    reason="service_pause_finalized",
+                )
             if state["status"] in {"completed", "failed"}:
                 RunRegistry.remove(run_config.run_id)
             self._workspace_by_run[run_config.run_id] = workspace
@@ -398,7 +425,14 @@ class AgentService:
     ) -> AgentRunResult:
         del streaming
         effective_config = run_config or request.to_run_config(self._policy)
-        state, loop, workspace, started_at = self._prepare_execution(
+        (
+            state,
+            loop,
+            workspace,
+            started_at,
+            checkpoint_store,
+            tool_trace_start,
+        ) = self._prepare_execution(
             request,
             run_config=effective_config,
         )
@@ -407,7 +441,16 @@ class AgentService:
         except Exception:
             RunRegistry.remove(effective_config.run_id)
             raise
-        self._finalize_state(result_state, started_at=started_at)
+        self._finalize_state(
+            result_state,
+            started_at=started_at,
+            tool_trace_start=tool_trace_start,
+        )
+        if result_state["status"] == "paused":
+            await checkpoint_store.save_snapshot(
+                result_state,
+                reason="service_pause_finalized",
+            )
         if result_state["status"] in {"completed", "failed"}:
             RunRegistry.remove(effective_config.run_id)
         self._workspace_by_run[effective_config.run_id] = workspace
@@ -422,11 +465,20 @@ class AgentService:
         request: AgentRunRequest,
         *,
         run_config: AgentRunConfig,
-    ) -> tuple[LoopState, AgentLoop, WorkspaceRuntime, float]:
+    ) -> tuple[
+        LoopState,
+        AgentLoop,
+        WorkspaceRuntime,
+        float,
+        LangGraphCheckpointStore,
+        int,
+    ]:
         started_at = time.perf_counter()
+        tool_trace_start = len(self._tool_executor.traces)
         workspace = self._workspace_for_request(request)
         if request.input_files:
             import_files(workspace, [Path(item) for item in request.input_files])
+        file_manifest = build_file_manifest(workspace)
         memory_store = WorkspaceMemoryStore(
             workspace=workspace,
             policy=run_config.memory_policy,
@@ -435,6 +487,7 @@ class AgentService:
             request,
             run_config=run_config,
             memory_store=memory_store,
+            file_manifest=file_manifest,
         )
         checkpoint_store = LangGraphCheckpointStore(
             self._checkpointer,
@@ -450,7 +503,14 @@ class AgentService:
             goal_spec=request.goal_spec,
             workspace=workspace,
         )
-        return state, loop, workspace, started_at
+        return (
+            state,
+            loop,
+            workspace,
+            started_at,
+            checkpoint_store,
+            tool_trace_start,
+        )
 
     def _initial_state(
         self,
@@ -458,6 +518,7 @@ class AgentService:
         *,
         run_config: AgentRunConfig,
         memory_store: WorkspaceMemoryStore | None = None,
+        file_manifest: FileManifest | None = None,
     ) -> LoopState:
         RunRegistry.remove(run_config.run_id)
         handles = RunRegistry.get_or_create(run_config)
@@ -469,14 +530,21 @@ class AgentService:
             pending_tool_calls=request.pending_tool_calls,
             messages=request.messages,
             runtime_diagnostics=self._runtime_diagnostics,
+            file_manifest=file_manifest,
+        )
+        allow_discovery_tools = (
+            bool(self._discoverable_tool_names)
+            if request.allow_discovery_tools is None
+            else request.allow_discovery_tools
         )
         options = resolve_tool_options(
             self._tool_snapshot,
             default_resident_names=self._default_resident_names(),
             configured_resident_names=self._configured_resident_tool_names,
+            discoverable_names=self._discoverable_tool_names,
             tools=request.tools,
             disabled_tools=request.disabled_tools,
-            allow_discovery_tools=request.allow_discovery_tools,
+            allow_discovery_tools=allow_discovery_tools,
         )
         if options.uses_default_tools:
             state["resident_tool_names"] = list(options.resident_names)
@@ -487,7 +555,7 @@ class AgentService:
         state["disabled_tool_names"] = list(options.disabled_names)
         state["allow_write_tools"] = request.allow_write_tools
         state["allow_execute_tools"] = request.allow_execute_tools
-        state["allow_discovery_tools"] = request.allow_discovery_tools
+        state["allow_discovery_tools"] = allow_discovery_tools
         state["approved_tool_call_ids"] = list(
             request.approved_tool_call_ids
         )
@@ -517,9 +585,12 @@ class AgentService:
         )
         state["context_revision"] = context.context_revision
         exposed_names = tuple(tool.definition.name for tool in selected)
+        manifest = state["tool_manifest"]
+        if manifest is None:
+            raise RuntimeError("initial tool manifest was not built")
         origin = ToolCallOrigin(
             request_id=f"{run_config.run_id}:initial",
-            toolset_revision=state["tool_manifest"].toolset_revision,
+            toolset_revision=manifest.toolset_revision,
             exposed_tool_names=exposed_names,
         )
         for pending in state["pending_tool_calls"]:
@@ -528,14 +599,17 @@ class AgentService:
             state["canonical_tool_calls"][pending.tool_call_id] = ToolCall(
                 tool_call_id=pending.tool_call_id,
                 tool_name=pending.tool_name,
-                arguments=pending.plan.arguments,
+                arguments=cast(
+                    Mapping[str, JsonValue],
+                    pending.plan.arguments,
+                ),
                 origin=effective_origin,
             )
         compacted = MessageCompactor(
             policy=run_config.memory_policy,
             store=memory_store,
         ).compact_initial_state(dict(state))
-        result = state.__class__(compacted)
+        result = cast(LoopState, compacted)
         result["latency_profile"] = self._latency_profile
         return result
 
@@ -555,6 +629,7 @@ class AgentService:
             registry_snapshot=self._tool_snapshot,
             strict_model_provider=self._strict_model_provider,
             stream_sink=self._stream_sink,
+            skill_runtime=self._skill_runtime,
         ).resolve(state)
         output_finalizer = self._resolve_output_finalizer(state)
         execution_context = ToolExecutionContext(
@@ -581,6 +656,8 @@ class AgentService:
             ),
             finish_candidate_builder=FinishCandidateBuilder(),
             stream_sink=self._stream_sink,
+            skill_runtime=self._skill_runtime,
+            discoverable_tool_names=self._discoverable_tool_names,
         )
 
     def _default_resident_names(self) -> tuple[str, ...]:
@@ -631,17 +708,28 @@ class AgentService:
         state: LoopState,
         *,
         started_at: float,
+        tool_trace_start: int,
     ) -> None:
-        tool_latency = sum(
-            trace.duration_ms for trace in self._tool_executor.traces
+        phase_tool_latency = sum(
+            trace.duration_ms
+            for trace in self._tool_executor.traces[tool_trace_start:]
         )
         profile = state.get("latency_profile") or AgentLatencyProfile()
+        tool_latency = profile.tool_latency_ms + phase_tool_latency
+        total_ms = profile.total_ms + (time.perf_counter() - started_at) * 1000
+        if profile.total_ms == 0:
+            total_ms += profile.startup_ms + profile.build_service_ms
+        total_ms = max(
+            total_ms,
+            profile.startup_ms
+            + profile.build_service_ms
+            + profile.model_latency_ms
+            + tool_latency,
+        )
         state["latency_profile"] = profile.model_copy(
             update={
                 "tool_latency_ms": tool_latency,
-                "total_ms": self._latency_profile.startup_ms
-                + self._latency_profile.build_service_ms
-                + (time.perf_counter() - started_at) * 1000,
+                "total_ms": total_ms,
             }
         )
 
@@ -689,8 +777,18 @@ class AgentService:
             goal_spec=checkpoint_store.compatibility_config.goal_spec,
             workspace=workspace,
         )
+        tool_trace_start = len(self._tool_executor.traces)
         result_state = await loop.run(state)
-        self._finalize_state(result_state, started_at=started_at)
+        self._finalize_state(
+            result_state,
+            started_at=started_at,
+            tool_trace_start=tool_trace_start,
+        )
+        if result_state["status"] == "paused":
+            await checkpoint_store.save_snapshot(
+                result_state,
+                reason="service_pause_finalized",
+            )
         if result_state["status"] in {"completed", "failed"}:
             RunRegistry.remove(run_id)
         return AgentRunResult.from_loop_result(
@@ -873,12 +971,22 @@ def _result_provenance(
         payload = _result_mapping(result)
         if payload is None:
             continue
-        for item in payload.get("evidence", ()) or ():
-            evidence.append(EvidenceItem.model_validate(item))
-        for item in payload.get("citations", ()) or ():
-            if not isinstance(item, (Mapping, AnswerCitation)):
-                continue
-            citations.append(AnswerCitation.model_validate(item))
+        raw_evidence = payload.get("evidence", ()) or ()
+        if isinstance(raw_evidence, Sequence) and not isinstance(
+            raw_evidence,
+            (str, bytes),
+        ):
+            for item in raw_evidence:
+                evidence.append(EvidenceItem.model_validate(item))
+        raw_citations = payload.get("citations", ()) or ()
+        if isinstance(raw_citations, Sequence) and not isinstance(
+            raw_citations,
+            (str, bytes),
+        ):
+            for item in raw_citations:
+                if not isinstance(item, (Mapping, AnswerCitation)):
+                    continue
+                citations.append(AnswerCitation.model_validate(item))
     return evidence, citations
 
 

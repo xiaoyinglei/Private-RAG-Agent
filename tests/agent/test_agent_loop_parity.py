@@ -122,11 +122,15 @@ async def test_final_loop_preserves_control_and_canonical_invariants() -> None:
             for origin in state["call_origins"]:
                 assert origin["request_id"]
                 assert origin["toolset_revision"]
-                tool_name = next(
+                tool_name = next((
                     result["tool_name"]
                     for result in state["tool_results"]
                     if result["tool_call_id"] == origin["tool_call_id"]
-                )
+                ), None)
+                if tool_name is None:
+                    assert state["status"] == "paused"
+                    assert state["pending_tool_names"]
+                    continue
                 assert tool_name in origin["exposed_tool_names"]
 
 

@@ -381,6 +381,7 @@ def test_openai_compatible_generator_system_prompt() -> None:
     mock_response = MagicMock()
     mock_response.choices = [MagicMock()]
     mock_response.choices[0].message.content = "response text"
+    mock_response.usage = None
 
     original_create = gen._client.chat.completions.create
 
@@ -407,6 +408,7 @@ def test_openai_compatible_generator_null_content() -> None:
     mock_response = MagicMock()
     mock_response.choices = [MagicMock()]
     mock_response.choices[0].message.content = None
+    mock_response.usage = None
 
     original_create = gen._client.chat.completions.create
     gen._client.chat.completions.create = lambda **kw: mock_response
@@ -425,6 +427,7 @@ def test_openai_compatible_generator_structured_fallback_parses_fenced_json() ->
     mock_response = MagicMock()
     mock_response.choices = [MagicMock()]
     mock_response.choices[0].message.content = '```json\n{"answer": "ok"}\n```'
+    mock_response.usage = None
 
     original_create = gen._client.chat.completions.create
     gen._client.chat.completions.create = lambda **kw: mock_response
@@ -444,6 +447,7 @@ def test_openai_compatible_generator_structured_fallback_includes_schema() -> No
     mock_response = MagicMock()
     mock_response.choices = [MagicMock()]
     mock_response.choices[0].message.content = '说明文字\n{"answer": "ok"}'
+    mock_response.usage = None
 
     original_create = gen._client.chat.completions.create
 

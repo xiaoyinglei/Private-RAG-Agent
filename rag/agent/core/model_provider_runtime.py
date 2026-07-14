@@ -11,6 +11,7 @@ from rag.agent.core.llm_registry import ModelResolver
 from rag.agent.core.runtime_diagnostics import RuntimeDiagnostic
 from rag.agent.loop.runtime import ModelTurnProvider
 from rag.agent.loop.state import LoopState, ModelTurnDraft
+from rag.agent.skills.runtime import SkillRuntime
 from rag.agent.tools.tool import Tool
 
 
@@ -67,14 +68,15 @@ class ModelProviderResolver:
     registry_snapshot: Mapping[str, Tool]
     strict_model_provider: bool = True
     stream_sink: object | None = None
+    skill_runtime: SkillRuntime | None = None
 
     def resolve(self, state: LoopState | None) -> ModelTurnProvider:
         if self.model_turn_provider is not None:
             return self.model_turn_provider
         if self.model_registry is not None:
             try:
-                resident = ()
-                disabled = ()
+                resident: tuple[str, ...] = ()
+                disabled: tuple[str, ...] = ()
                 if state is not None:
                     resident = (
                         *state.get("resident_tool_names", ()),
@@ -88,6 +90,7 @@ class ModelProviderResolver:
                     resident_tool_names=resident,
                     disabled_tool_names=disabled,
                     stream_sink=self.stream_sink,
+                    skill_runtime=self.skill_runtime,
                 )
             except Exception as exc:
                 if self.strict_model_provider:

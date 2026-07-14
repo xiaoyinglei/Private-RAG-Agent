@@ -12,14 +12,22 @@ from agent_runtime.runtime.builder import (
     resolve_cli_agent_definition,
 )
 from rag.agent.builtin import create_builtin_agent_registry
-from rag.agent.cli import _build_agent_service
-from rag.agent.service import AgentRunRequest
+from rag.agent.cli import (
+    _build_agent_service,
+    _CLIToolEventDisplay,
+    _display_result,
+)
+from rag.agent.service import AgentRunRequest, AgentRunResult
+from rag.agent.streaming.events import tool_use_start
 from rag.agent.tools.builtins import RESIDENT_CODING_TOOL_NAMES
 from rag.agent.tools.integrations.knowledge import KnowledgeSearchOutput
 from rag.agent.tools.integrations.mcp import (
     MCPToolDescriptor,
     create_mcp_tools,
 )
+from rag.agent.tools.integrations.skills import create_skill_tools
+from rag.agent.tools.tool import ToolResult
+from rag.agent.workspace import open_workspace
 
 
 class _ModelRegistry:
@@ -51,6 +59,23 @@ def test_builder_assembles_default_six_tools_in_product_order() -> None:
     assert service._tool_executor._tools is service._tool_snapshot
     state = service.initial_state(AgentRunRequest(task="Inspect repository."))
     assert tuple(state["resident_tool_names"]) == RESIDENT_CODING_TOOL_NAMES
+
+
+def test_builder_binds_coding_tools_to_the_supplied_workspace(
+    tmp_path: Path,
+) -> None:
+    workspace = open_workspace(tmp_path / "workspace", create=True)
+    (workspace.root / "visible.txt").write_text("visible", encoding="utf-8")
+
+    service = build_agent_service(
+        workspace,
+        model_control_plane=_ModelRegistry(),  # type: ignore[arg-type]
+    )
+    tool = service._tool_snapshot["list_files"]
+    output = tool.run(tool.validate_input({}))
+
+    assert service._workspace is workspace
+    assert any(entry.name == "visible.txt" for entry in output.entries)
 
 
 @pytest.mark.anyio
@@ -87,6 +112,71 @@ def test_cli_wrapper_uses_the_same_builder_snapshot() -> None:
     assert tuple(service._tool_snapshot) == RESIDENT_CODING_TOOL_NAMES
 
 
+def test_cli_shows_called_tool_names_without_verbose(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _display_result(
+        AgentRunResult(
+            run_id="visible-call",
+            thread_id="visible-call",
+            status="done",
+            tool_results=[
+                ToolResult(
+                    tool_call_id="call_search",
+                    tool_name="search_text",
+                )
+            ],
+        ),
+        verbose=False,
+    )
+
+    assert "✓ search_text" in capsys.readouterr().out
+
+
+@pytest.mark.anyio
+async def test_cli_displays_canonical_tool_start_with_bounded_preview(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    await _CLIToolEventDisplay().emit(
+        tool_use_start(
+            "read_file",
+            "call_read",
+            input_preview="path='src/service.py'",
+        )
+    )
+
+    assert "→ read_file: path='src/service.py'" in capsys.readouterr().out
+
+
+@pytest.mark.anyio
+async def test_cli_displays_one_start_for_resumed_tool_call(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    display = _CLIToolEventDisplay()
+    event = tool_use_start(
+        "apply_patch",
+        "call_patch",
+        input_preview="file_path='notes.txt'",
+    )
+
+    await display.emit(event)
+    await display.emit(event)
+
+    assert capsys.readouterr().out.count("→ apply_patch") == 1
+
+
+def test_builder_passes_canonical_events_to_cli_display() -> None:
+    display = _CLIToolEventDisplay()
+
+    service = build_agent_service(
+        None,
+        model_control_plane=_ModelRegistry(),  # type: ignore[arg-type]
+        stream_sink=display,
+    )
+
+    assert service._stream_sink is display
+
+
 def test_builder_installs_hidden_factory_outputs_with_find_tools() -> None:
     mcp_tools = create_mcp_tools(
         (
@@ -117,21 +207,48 @@ def test_builder_installs_hidden_factory_outputs_with_find_tools() -> None:
         "mcp__docs__search",
         "find_tools",
     )
-    default_state = service.initial_state(AgentRunRequest(task="Inspect docs."))
-    discovery_state = service.initial_state(
+    automatic_state = service.initial_state(AgentRunRequest(task="Inspect docs."))
+    disabled_state = service.initial_state(
         AgentRunRequest(
             task="Inspect docs.",
-            allow_discovery_tools=True,
+            allow_discovery_tools=False,
         )
     )
-    assert tuple(default_state["resident_tool_names"]) == (
-        RESIDENT_CODING_TOOL_NAMES
-    )
-    assert tuple(discovery_state["resident_tool_names"]) == (
+    assert tuple(automatic_state["resident_tool_names"]) == (
         *RESIDENT_CODING_TOOL_NAMES,
         "find_tools",
     )
-    assert discovery_state["active_tool_names"] == []
+    assert automatic_state["allow_discovery_tools"] is True
+    assert tuple(disabled_state["resident_tool_names"]) == (
+        RESIDENT_CODING_TOOL_NAMES
+    )
+    assert disabled_state["allow_discovery_tools"] is False
+    assert automatic_state["active_tool_names"] == []
+
+
+def test_builder_makes_skill_gateways_resident_when_skills_are_available(
+    tmp_path: Path,
+) -> None:
+    workspace = open_workspace(tmp_path / "workspace", create=True)
+    skill_tools = create_skill_tools(
+        workspace,
+        invoke_skill=lambda _arguments: {"success": False, "name": "missing"},
+        active_skill_root=lambda _skill_id: None,
+    )
+
+    service = build_agent_service(
+        workspace,
+        model_control_plane=_ModelRegistry(),  # type: ignore[arg-type]
+        skill_tools=skill_tools,
+    )
+    state = service.initial_state(AgentRunRequest(task="Use an installed skill."))
+
+    assert tuple(state["resident_tool_names"]) == (
+        *RESIDENT_CODING_TOOL_NAMES,
+        "invoke_skill",
+        "materialize_skill_asset",
+    )
+    assert "find_tools" not in state["resident_tool_names"]
 
 
 def test_auto_rag_config_prefers_explicit_arguments(

@@ -7,17 +7,27 @@ from pydantic import BaseModel, Field
 
 from rag.agent.core.definition import AgentRuntimePolicy, ModelSelectionPolicy
 from rag.agent.core.llm_registry import ModelResolver
-from rag.agent.core.messages import ModelMessage, StopReason, ToolUseResult
+from rag.agent.core.messages import (
+    ModelMessage,
+    StopReason,
+    ToolUseResult,
+    canonical_json_text,
+    model_message_payload,
+)
 from rag.agent.core.model_request import (
+    ContextBlock,
     ModelRequest,
     ModelSettings,
     bind_model_call_record,
     build_model_request,
     build_stable_context,
+    tool_definition_payload,
 )
+from rag.agent.core.runtime_diagnostics import AgentLatencyProfile
 from rag.agent.core.turn_contracts import ToolCallPlan
 from rag.agent.loop.runtime import ModelTurnEnvelope
 from rag.agent.loop.state import LoopState, ModelTurnDraft
+from rag.agent.skills.runtime import SkillRuntime
 from rag.agent.streaming.events import text_delta
 from rag.agent.tools.selection import select_tools
 from rag.agent.tools.tool import Tool, ToolCallOrigin
@@ -84,6 +94,7 @@ class LLMLoopModelTurnProvider:
         disabled_tool_names: Sequence[str] = (),
         kwargs: Mapping[str, object] | None = None,
         stream_sink: object | None = None,
+        skill_runtime: SkillRuntime | None = None,
     ) -> None:
         if not hasattr(gateway, "agenerate_model_request"):
             raise TypeError("gateway must execute canonical ModelRequest values")
@@ -102,6 +113,7 @@ class LLMLoopModelTurnProvider:
         self._disabled_tool_names = tuple(disabled_tool_names)
         self._kwargs = dict(kwargs or {})
         self._stream_sink = stream_sink
+        self._skill_runtime = skill_runtime
 
     async def next_turn(
         self,
@@ -127,8 +139,43 @@ class LLMLoopModelTurnProvider:
             active_names=tuple(state.get("active_tool_names", ())),
             disabled_names=disabled_names,
         )
+        skill_context = (
+            ""
+            if self._skill_runtime is None
+            else self._skill_runtime.render_prompt_context(state)
+        )
+        instructions = [
+            definition.system_instructions or "You are a helpful agent."
+        ]
+        if skill_context:
+            instructions.append(skill_context)
+        file_manifest = state.get("file_manifest")
+        frozen_run_context = (
+            ()
+            if file_manifest is None or not file_manifest.files
+            else (
+                ContextBlock(
+                    name="input_files",
+                    content={
+                        "instruction": (
+                            "Use these exact workspace-relative paths when calling "
+                            "file tools."
+                        ),
+                        "files": tuple(
+                            {
+                                "path": entry.path,
+                                "kind": entry.file_kind,
+                                "size_bytes": entry.size_bytes,
+                            }
+                            for entry in file_manifest.files
+                        ),
+                    },
+                ),
+            )
+        )
         context = build_stable_context(
-            instructions=(definition.system_instructions or "You are a helpful agent.",),
+            instructions=tuple(instructions),
+            frozen_run_context=frozen_run_context,
             initial_user_task=state["task"],
             initial_memory=tuple(state.get("persistent_memories", ())),
             transcript=tuple(state.get("canonical_transcript", ())),
@@ -141,6 +188,7 @@ class LLMLoopModelTurnProvider:
             selected_tools=selected_tools,
             settings=self._model_settings(definition.model_selection),
         )
+        _record_request_sizes(state, request)
         response = await self._gateway.agenerate_model_request(
             stage=LLMCallStage.TOOL_DECISION,
             request=request,
@@ -183,22 +231,24 @@ class LLMLoopModelTurnProvider:
             "temperature",
             selection.tool_decision_temperature,
         )
+        top_p = self._kwargs.get("top_p", 1.0)
+        seed = self._kwargs.get("seed")
         return ModelSettings(
             model=self._model,
-            max_output_tokens=int(max_output_tokens),
-            temperature=float(temperature),
+            max_output_tokens=_int_setting(max_output_tokens),
+            temperature=_float_setting(temperature),
             top_p=(
                 None
-                if self._kwargs.get("top_p", 1.0) is None
-                else float(self._kwargs.get("top_p", 1.0))
+                if top_p is None
+                else _float_setting(top_p)
             ),
             parallel_tool_calls=bool(
                 self._kwargs.get("parallel_tool_calls", True)
             ),
             seed=(
                 None
-                if self._kwargs.get("seed") is None
-                else int(self._kwargs["seed"])
+                if seed is None
+                else _int_setting(seed)
             ),
         )
 
@@ -210,6 +260,42 @@ class LLMLoopModelTurnProvider:
         if not callable(emit):
             return
         await emit(text_delta(value))
+
+
+def _record_request_sizes(state: LoopState, request: ModelRequest) -> None:
+    profile = state.get("latency_profile")
+    if not isinstance(profile, AgentLatencyProfile):
+        profile = AgentLatencyProfile()
+    prompt_bytes = len(
+        canonical_json_text(
+            tuple(model_message_payload(message) for message in request.messages)
+        ).encode("utf-8")
+    )
+    tool_schema_bytes = len(
+        canonical_json_text(
+            tuple(tool_definition_payload(tool) for tool in request.tools)
+        ).encode("utf-8")
+    )
+    state["latency_profile"] = profile.model_copy(
+        update={
+            "prompt_bytes": profile.prompt_bytes + prompt_bytes,
+            "tool_schema_bytes": (
+                profile.tool_schema_bytes + tool_schema_bytes
+            ),
+        }
+    )
+
+
+def _int_setting(value: object) -> int:
+    if isinstance(value, bool) or not isinstance(value, (str, int, float)):
+        raise TypeError("model integer setting must be numeric")
+    return int(value)
+
+
+def _float_setting(value: object) -> float:
+    if isinstance(value, bool) or not isinstance(value, (str, int, float)):
+        raise TypeError("model float setting must be numeric")
+    return float(value)
 
 
 def _draft_from_turn(
@@ -254,6 +340,7 @@ def create_loop_model_turn_provider(
     resident_tool_names: Sequence[str],
     disabled_tool_names: Sequence[str] = (),
     stream_sink: object | None = None,
+    skill_runtime: SkillRuntime | None = None,
 ) -> LLMLoopModelTurnProvider:
     resolved = registry.resolve_for_node(
         node_model=selection.tool_decision_model,
@@ -275,6 +362,7 @@ def create_loop_model_turn_provider(
         disabled_tool_names=disabled_tool_names,
         kwargs=resolved.kwargs,
         stream_sink=stream_sink,
+        skill_runtime=skill_runtime,
     )
 
 

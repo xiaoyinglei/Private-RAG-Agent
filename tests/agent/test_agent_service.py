@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from pathlib import Path
 
 import pytest
 from pydantic import BaseModel
@@ -84,6 +85,27 @@ class _UsageProvider:
                 ),
             ),
         )
+
+
+class _ManifestProvider:
+    def __init__(self) -> None:
+        self.paths: tuple[str, ...] = ()
+
+    async def next_turn(
+        self,
+        state: LoopState,
+        *,
+        definition: AgentRuntimePolicy,
+        budget_remaining: int,
+    ) -> ModelTurnDraft:
+        del definition, budget_remaining
+        manifest = state["file_manifest"]
+        self.paths = (
+            ()
+            if manifest is None
+            else tuple(entry.path for entry in manifest.files)
+        )
+        return ModelTurnDraft(action="finish", final_answer="inspected")
 
 
 def _tool(
@@ -314,6 +336,33 @@ async def test_service_projects_model_call_records_and_latency() -> None:
     assert result.model_call_records[0].request_id == "request-service"
     assert result.latency_profile is not None
     assert result.latency_profile.total_ms > 0
+
+
+@pytest.mark.anyio
+async def test_service_builds_manifest_for_imported_input_files(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "fixture.txt"
+    source.write_text("before\n", encoding="utf-8")
+    provider = _ManifestProvider()
+    service = AgentService(
+        definition=_definition(()),
+        tool_registry=_registry(),
+        model_turn_provider=provider,
+    )
+
+    result = await service.run(
+        AgentRunRequest(
+            task="Inspect the fixture.",
+            run_id="service-input-manifest",
+            thread_id="service-input-manifest",
+            input_files=[str(source)],
+            workspace_path=str(tmp_path / "workspace"),
+        )
+    )
+
+    assert result.status == "done"
+    assert provider.paths == ("input_files/fixture.txt",)
 
 
 def test_result_restores_configured_concrete_final_output() -> None:
