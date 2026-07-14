@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from enum import StrEnum
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -21,17 +21,35 @@ class ModelProvider(StrEnum):
     OPENAI_COMPATIBLE = "openai_compatible"
 
 
+class ModelRuntimeConfig(BaseModel):
+    health_url: str | None = None
+    launch_command: tuple[str, ...] = ()
+    expected_model_contains: str | None = None
+    startup_timeout_seconds: float = Field(default=60.0, gt=0)
+    poll_interval_seconds: float = Field(default=1.0, gt=0)
+
+
 class ModelSpec(BaseModel):
     """单个模型声明：只允许填写当前已实现 provider 支持的模型。"""
 
     provider: ModelProvider
     model: str
+    provider_name: str | None = None
+    protocol: str | None = None
     max_tokens: int = 2048
     timeout_seconds: float = 120.0
     base_url: str | None = None
     api_key_env: str | None = None
     defaults: dict[str, Any] = Field(default_factory=dict)
     context_window_tokens: int = Field(default=32_768, gt=0)
+    supports_tools: bool = True
+    supports_structured_output: bool = True
+    location: Literal["local", "cloud"] | None = None
+    input_cost_per_1m: float | None = None
+    output_cost_per_1m: float | None = None
+    cache_read_cost_per_1m: float | None = Field(default=None, ge=0)
+    cache_write_cost_per_1m: float | None = Field(default=None, ge=0)
+    runtime: ModelRuntimeConfig | None = None
 
 
 class AgentModelsConfig(BaseModel):

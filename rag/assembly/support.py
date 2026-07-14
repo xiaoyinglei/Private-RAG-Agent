@@ -181,13 +181,16 @@ class _OpenAICompatibleChatGenerator:
     ) -> str:
         return self.generate_text_with_usage(
             prompt=prompt,
-            system_instructions=system_prompt,
+            system_prompt=system_prompt,
             **kwargs,
         ).value
 
     def generate_text_with_usage(
         self, *, prompt: str, system_prompt: str | None = None, **kwargs: object
     ) -> LLMProviderResult[str]:
+        system_instructions = kwargs.pop("system_instructions", None)
+        if system_prompt is None and isinstance(system_instructions, str):
+            system_prompt = system_instructions
         messages: list[dict[str, str]] = []
         if system_prompt:
             messages.append({"role": "system", "content": system_prompt})
@@ -214,7 +217,7 @@ class _OpenAICompatibleChatGenerator:
         return self.generate_structured_with_usage(
             prompt=prompt,
             schema=schema,
-            system_instructions=system_prompt,
+            system_prompt=system_prompt,
             **kwargs,
         ).value
 
@@ -239,7 +242,7 @@ User task:
 """.strip()
         generated = self.generate_text_with_usage(
             prompt=structured_prompt,
-            system_instructions=system_prompt,
+            system_prompt=system_prompt,
             **kwargs,
         )
         raw_output = generated.value
@@ -265,7 +268,7 @@ User task:
         ``messages`` and ``tools`` are already in OpenAI wire format
         (caller used ``OpenAIAdapter.messages`` / ``OpenAIAdapter.tools``).
         """
-        response = self._client.chat.completions.create(
+        response = self._client.chat.completions.create(  # type: ignore[call-overload]
             model=self.chat_model_name,
             messages=messages,
             tools=tools or None,

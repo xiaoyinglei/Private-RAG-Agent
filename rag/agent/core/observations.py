@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
+import json
+from collections.abc import Mapping, Sequence
 from typing import Any, Literal, cast
 
 from pydantic import BaseModel, Field
 
 from rag.agent.memory.models import MemoryRef
-from rag.agent.tools.spec import ToolResult
+from rag.agent.tools.tool import ToolResult
 from rag.schema.query import AnswerCitation, EvidenceItem
 
 
@@ -140,12 +141,8 @@ class ObservationBatch(BaseModel):
 
 class ObservationBuilder:
     def from_tool_result(self, result: ToolResult) -> StructuredObservation:
-        if result.status == "error":
-            error_message = (
-                result.error.message
-                if result.error is not None
-                else "unknown tool error"
-            )
+        if result.is_error:
+            error_message = result.error_message or "unknown tool error"
             return StructuredObservation(
                 tool_call_id=result.tool_call_id,
                 tool_name=result.tool_name,
@@ -154,7 +151,7 @@ class ObservationBuilder:
                 raw_result_ref=result.tool_call_id,
             )
 
-        output = result.output
+        output = _result_output(result)
         observation_only = bool(getattr(output, "observation_only", False))
         if observation_only:
             evidence_refs: list[EvidenceRef] = []
@@ -321,6 +318,9 @@ def _answer_text(tool_name: str, output: BaseModel | None) -> str | None:
     text = getattr(output, "text", None)
     if isinstance(text, str) and text.strip():
         return text.strip()
+    answer_text = getattr(output, "answer_text", None)
+    if isinstance(answer_text, str) and answer_text.strip():
+        return answer_text.strip()
     markdown = getattr(output, "markdown", None)
     if isinstance(markdown, str) and markdown.strip():
         return markdown.strip()
@@ -346,6 +346,8 @@ def _evidence_refs_from_output(output: BaseModel | None) -> list[EvidenceRef]:
             )
         )
     for citation in getattr(output, "citations", []) or []:
+        if not isinstance(citation, (Mapping, AnswerCitation)):
+            continue
         citation_item = AnswerCitation.model_validate(citation)
         refs.append(
             EvidenceRef(
@@ -460,7 +462,7 @@ def _context_units_from_output(
     evidence_refs: Sequence[EvidenceRef],
     locators: Sequence[dict[str, object]],
 ) -> list[ContextUnit]:
-    output = result.output
+    output = _result_output(result)
     if output is None:
         return []
     if result.tool_name in {
@@ -517,7 +519,7 @@ def _retrieval_context_units(
     *,
     evidence_refs: Sequence[EvidenceRef],
 ) -> list[ContextUnit]:
-    items = getattr(result.output, "items", None)
+    items = getattr(_result_output(result), "items", None)
     if not isinstance(items, list):
         return []
     units: list[ContextUnit] = []
@@ -1108,9 +1110,9 @@ def _operation_from_output(output: BaseModel | None) -> str | None:
 
 
 def _computation_expression(result: ToolResult | None) -> str | None:
-    if result is None or result.output is None:
+    if result is None or result.structured_content is None:
         return None
-    query = getattr(result.output, "query", None)
+    query = getattr(_result_output(result), "query", None)
     if not isinstance(query, str) or not query.strip():
         return None
     return query.strip()[:1000]
@@ -1134,8 +1136,8 @@ def _evidence_from_outputs(
     return [
         EvidenceItem.model_validate(item)
         for result in tool_results
-        if result.tool_call_id in observed_ids and result.output is not None
-        for item in getattr(result.output, "evidence", []) or []
+        if result.tool_call_id in observed_ids and result.structured_content is not None
+        for item in getattr(_result_output(result), "evidence", []) or []
     ]
 
 
@@ -1147,8 +1149,9 @@ def _citations_from_outputs(
     return [
         AnswerCitation.model_validate(item)
         for result in tool_results
-        if result.tool_call_id in observed_ids and result.output is not None
-        for item in getattr(result.output, "citations", []) or []
+        if result.tool_call_id in observed_ids and result.structured_content is not None
+        for item in getattr(_result_output(result), "citations", []) or []
+        if isinstance(item, (Mapping, AnswerCitation))
     ]
 
 
@@ -1159,14 +1162,53 @@ def _errors_from_results(
         ObservationError(
             tool_call_id=result.tool_call_id,
             tool_name=result.tool_name,
-            code=result.error.code,
-            message=result.error.message,
-            retryable=result.error.retryable,
-            detail=dict(result.error.detail),
+            code=result.error_code or "tool_error",
+            message=result.error_message or "unknown tool error",
+            retryable=result.retryable,
+            detail=dict(result.metadata),
         )
         for result in tool_results
-        if result.status == "error" and result.error is not None
+        if result.is_error
     ]
+
+
+class _OutputView:
+    def __init__(self, value: Mapping[str, object]) -> None:
+        self._value = value
+
+    def __getattr__(self, name: str) -> object:
+        try:
+            return _plain_value(self._value[name])
+        except KeyError as exc:
+            raise AttributeError(name) from exc
+
+    def model_dump_json(self, *, exclude_none: bool = False) -> str:
+        value = _plain_value(self._value)
+        if exclude_none and isinstance(value, dict):
+            value = {
+                key: item
+                for key, item in value.items()
+                if item is not None
+            }
+        return json.dumps(value, ensure_ascii=False, sort_keys=True)
+
+
+def _result_output(result: ToolResult) -> _OutputView | None:
+    value = result.structured_content
+    if not isinstance(value, Mapping):
+        return None
+    return _OutputView(value)
+
+
+def _plain_value(value: object) -> object:
+    if isinstance(value, Mapping):
+        return {
+            str(key): _plain_value(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+        return [_plain_value(item) for item in value]
+    return value
 
 
 __all__ = [

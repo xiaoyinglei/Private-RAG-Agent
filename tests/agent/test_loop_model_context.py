@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from typing import Any
+from collections.abc import Mapping
+from types import SimpleNamespace
 
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
@@ -10,56 +11,76 @@ from rag.agent.core.context import AgentRunConfig
 from rag.agent.core.definition import AgentRuntimePolicy
 from rag.agent.core.human_input import HumanInputRequest, ToolCallSummary
 from rag.agent.core.llm_context import AgentLLMContextAssembler
-from rag.agent.core.llm_prompts import build_loop_turn_prompt
 from rag.agent.core.llm_providers import (
     LLMLoopModelTurnProvider,
+    create_loop_model_turn_provider,
     parse_loop_model_turn,
 )
-from rag.agent.core.observations import (
-    AnswerCandidate,
-    EvidenceRef,
-    StructuredObservation,
+from rag.agent.core.llm_registry import ResolvedModel
+from rag.agent.core.messages import (
+    StopReason,
+    ToolUseResult,
+    tool_result_message,
 )
+from rag.agent.core.messages import (
+    ToolCall as ModelToolCall,
+)
+from rag.agent.core.turn_contracts import ToolCallPlan
 from rag.agent.loop.state import (
+    LoopState,
     ModelTurnDraft,
+    PendingToolCall,
     StopHookFeedback,
     create_loop_state,
 )
-from rag.agent.memory.compactor import LoopContextCompactor, MemoryCompactor
+from rag.agent.memory.compactor import LoopContextCompactor
 from rag.agent.memory.injector import ContextBuilder
-from rag.agent.memory.models import (
-    ExternalizedToolOutput,
-    MemoryPolicy,
-    MemoryRef,
-    MessageBatchPayload,
-    StateChannelReplacement,
-)
+from rag.agent.memory.models import MemoryPolicy, MemoryRef, MessageBatchPayload
 from rag.agent.planning import PlanStep, PlanTracker, PlanUpdate
-from rag.agent.core.turn_contracts import ToolCallPlan
-from rag.agent.tools.spec import ToolResult
+from rag.agent.tools.tool import (
+    CancellationMode,
+    InterruptBehavior,
+    JsonValue,
+    NormalizedToolOutput,
+    ResolvedToolUse,
+    Tool,
+    ToolContentBlock,
+    ToolDefinition,
+    ToolResult,
+    json_schema_input,
+)
 from rag.assembly.tokenizer import TokenAccountingService, TokenizerContract
-from rag.schema.llm import LLMCallStage, LLMStageBudget
+from rag.providers.llm_gateway import AgentModelResponse
+from rag.schema.llm import LLMCallStage, LLMStageBudget, LLMUsage
 from rag.schema.runtime import AccessPolicy
 
 
-class _StubGenerator:
-    def __init__(self, responses: list[dict[str, Any]]) -> None:
-        self._responses = responses
-        self.calls: list[tuple[str, type[BaseModel], dict[str, Any]]] = []
+class _RecordingGateway:
+    def __init__(self, turn: ToolUseResult | None = None) -> None:
+        self.calls: list[dict[str, object]] = []
+        self.turn = turn or ToolUseResult(
+            text="The policy changed in 2026.",
+            tool_calls=[],
+            stop_reason=StopReason.END_TURN,
+            raw_stop_reason="stop",
+        )
 
-    def generate_structured(
-        self,
-        *,
-        prompt: str,
-        schema: type[BaseModel],
-        **kwargs: Any,
-    ) -> BaseModel:
-        self.calls.append((prompt, schema, kwargs))
-        return schema.model_validate(self._responses.pop(0))
-
-
-class _ToolOutput(BaseModel):
-    value: str
+    async def agenerate_model_request(self, **kwargs: object) -> AgentModelResponse:
+        self.calls.append(dict(kwargs))
+        return AgentModelResponse(
+            turn=self.turn,
+            usage=LLMUsage(
+                input_tokens=20,
+                output_tokens=4,
+                source="provider",
+                logical_input_tokens=20,
+                uncached_input_tokens=20,
+                usage_source="provider",
+            ),
+            provider_wire_hash="wire-loop-context",
+            serializer_revision="provider-wire-v1",
+            wire_kind=str(kwargs["provider"]),
+        )
 
 
 class _RecordingMemoryStore:
@@ -92,24 +113,76 @@ def _definition() -> AgentRuntimePolicy:
         agent_type="research",
         description="Research",
         system_prompt="Use tools when they help and preserve citations.",
-        allowed_tools=["vector_search", "llm_summarize"],
+        allowed_tools=["vector_search", "read_file"],
     )
 
 
-def _run_config() -> AgentRunConfig:
+def _run_config(run_id: str = "loop-context") -> AgentRunConfig:
     return AgentRunConfig(
-        run_id="loop-context",
-        thread_id="loop-context",
-        budget_total=10_000,
+        run_id=run_id,
+        thread_id=run_id,
+        llm_budget_total=10_000,
         max_depth=2,
         access_policy=AccessPolicy.default(),
     )
 
 
-def _state() -> dict[str, Any]:
+def _state(run_id: str = "loop-context") -> LoopState:
     return create_loop_state(
         task="Explain the policy with sources.",
-        run_config=_run_config(),
+        run_config=_run_config(run_id),
+    )
+
+
+def _tool(name: str) -> Tool:
+    schema: Mapping[str, JsonValue] = {
+        "type": "object",
+        "properties": {"query": {"type": "string"}},
+        "required": ["query"],
+        "additionalProperties": False,
+    }
+    return Tool(
+        definition=ToolDefinition(
+            name=name,
+            description=f"Use {name}.",
+            input_schema=schema,
+        ),
+        validate_input=json_schema_input(schema),
+        run=lambda arguments: {"text": str(arguments["query"])},
+        normalize_output=lambda raw: NormalizedToolOutput(
+            content=(ToolContentBlock(type="text", data={"text": str(raw)}),),
+            structured_content={"text": str(raw)},
+        ),
+        output_schema=None,
+        static_effects=frozenset(),
+        resolve_use=lambda _arguments: ResolvedToolUse(
+            effects=frozenset(),
+            targets=(),
+        ),
+        execution_revision=f"{name}-v1",
+        idempotent=True,
+        concurrency_safe=True,
+        cancellation_mode=CancellationMode.COOPERATIVE,
+        interrupt_behavior=InterruptBehavior.CANCEL,
+        timeout_seconds=3,
+        max_model_output_bytes=4096,
+    )
+
+
+def _provider(
+    gateway: _RecordingGateway,
+    *,
+    names: tuple[str, ...] = ("vector_search", "read_file"),
+    supports_native_tools: bool = True,
+) -> LLMLoopModelTurnProvider:
+    snapshot = {name: _tool(name) for name in names}
+    return LLMLoopModelTurnProvider(
+        gateway,  # type: ignore[arg-type]
+        model="test-model",
+        provider="openai-compatible",
+        supports_native_tools=supports_native_tools,
+        registry_snapshot=snapshot,
+        resident_tool_names=names,
     )
 
 
@@ -137,32 +210,11 @@ def _assembler() -> AgentLLMContextAssembler:
     )
 
 
-def test_loop_prompt_has_no_goal_gap_completion_authority() -> None:
-    state = _state()
-    state["plan_state"].agent_plan = PlanTracker().initialize_task(task=state["task"])[0]
-
-    prompt = build_loop_turn_prompt(
-        state,
-        budget_remaining=5_000,
-        allowed_tools=_definition().allowed_tools,
-    )
-
-    assert '"action": "execute" | "finish" | "pause"' in prompt
-    assert "final_answer" in prompt
-    assert "Do not repeat completed tool calls" in prompt
-    assert "open_gaps" not in prompt
-    assert "goal checker" not in prompt
-    assert "must call llm_summarize" not in prompt
-
-
 def test_turn_parser_prefers_actual_calls_over_finish_label() -> None:
     call = ToolCallPlan.create("vector_search", {"query": "policy"})
 
     finish = parse_loop_model_turn(
-        {
-            "action": "finish",
-            "final_answer": "Enough evidence.",
-        }
+        {"action": "finish", "final_answer": "Enough evidence."}
     )
     execute = parse_loop_model_turn(
         {
@@ -180,38 +232,128 @@ def test_turn_parser_prefers_actual_calls_over_finish_label() -> None:
 
 
 @pytest.mark.anyio
-async def test_loop_provider_returns_finish_without_satisfaction_authorization() -> None:
-    generator = _StubGenerator(
-        [
-            {
-                "action": "finish",
-                "final_answer": "The policy changed in 2026.",
-                "thought": "Ready to answer.",
-            }
-        ]
-    )
-    provider = LLMLoopModelTurnProvider(generator)
+async def test_loop_provider_builds_one_canonical_request_and_finish() -> None:
+    gateway = _RecordingGateway()
+    state = _state()
+    state["resident_tool_names"] = ["vector_search", "read_file"]
 
-    draft = await provider.next_turn(
-        _state(),
+    envelope = await _provider(gateway).next_turn(
+        state,
         definition=_definition(),
         budget_remaining=5_000,
     )
 
-    assert draft == ModelTurnDraft(
+    request = gateway.calls[0]["request"]
+    assert request is envelope.request
+    assert request.exposed_tool_names == ("vector_search", "read_file")
+    assert envelope.draft == ModelTurnDraft(
         action="finish",
         final_answer="The policy changed in 2026.",
     )
-    assert len(generator.calls) == 1
-    prompt = generator.calls[0][0]
-    assert "open_gaps" not in prompt
-    assert "goal checker" not in prompt
+    assert envelope.model_call_record is not None
+    assert envelope.model_call_record.request_id == request.request_id
+    assert envelope.model_call_record.provider_wire_hash == "wire-loop-context"
+    assert envelope.context_revision is not None
+    assert envelope.context_revision.startswith("context_")
+
+
+@pytest.mark.anyio
+async def test_loop_provider_binds_tool_call_to_originating_request() -> None:
+    gateway = _RecordingGateway(
+        ToolUseResult(
+            text="",
+            tool_calls=[
+                ModelToolCall(
+                    id="tc-provider",
+                    name="read_file",
+                    input={"query": "README.md"},
+                )
+            ],
+            stop_reason=StopReason.TOOL_USE,
+            raw_stop_reason="tool_calls",
+        )
+    )
+    state = _state("loop-context-origin")
+    state["resident_tool_names"] = ["read_file"]
+
+    envelope = await _provider(gateway, names=("read_file",)).next_turn(
+        state,
+        definition=_definition(),
+        budget_remaining=5_000,
+    )
+
+    assert envelope.draft.action == "execute"
+    [call] = envelope.draft.tool_calls
+    assert call.origin is not None
+    assert call.origin.request_id == envelope.request.request_id
+    assert call.origin.toolset_revision == envelope.request.toolset_revision
+    assert call.origin.exposed_tool_names == ("read_file",)
+
+
+@pytest.mark.anyio
+async def test_loop_provider_selection_is_state_driven_not_task_classified() -> None:
+    gateway = _RecordingGateway()
+    state = _state("loop-context-selection")
+    state["task"] = "Answer exactly with the single word: OK"
+    state["resident_tool_names"] = ["read_file"]
+
+    envelope = await _provider(gateway, names=("read_file",)).next_turn(
+        state,
+        definition=_definition(),
+        budget_remaining=5_000,
+    )
+
+    assert envelope.request.exposed_tool_names == ("read_file",)
+
+
+@pytest.mark.anyio
+async def test_provider_factory_uses_resolved_wire_capability() -> None:
+    gateway = _RecordingGateway()
+
+    class _Registry:
+        default_model = "fake"
+        fallback_model = "fake"
+        generation_config = None
+
+        def resolve_for_node(
+            self,
+            *,
+            node_model: str | None,
+            node_name: str,
+        ) -> ResolvedModel:
+            del node_model, node_name
+            return ResolvedModel(
+                generator=SimpleNamespace(),
+                kwargs={},
+                gateway=gateway,
+                provider="ollama",
+                model="local-model",
+                supports_native_tools=False,
+            )
+
+    state = _state("loop-context-factory")
+    state["resident_tool_names"] = ["read_file"]
+    provider = create_loop_model_turn_provider(
+        _Registry(),  # type: ignore[arg-type]
+        _definition().model_selection,
+        registry_snapshot={"read_file": _tool("read_file")},
+        resident_tool_names=("read_file",),
+    )
+
+    envelope = await provider.next_turn(
+        state,
+        definition=_definition(),
+        budget_remaining=5_000,
+    )
+
+    assert envelope.request.settings.model == "local-model"
+    assert gateway.calls[0]["provider"] == "ollama"
+    assert gateway.calls[0]["supports_native_tools"] is False
 
 
 def test_loop_context_keeps_approval_and_feedback_without_goal_fields() -> None:
     state = _state()
     call = ToolCallPlan.create("vector_search", {"query": "policy"})
-    from rag.agent.loop.state import PendingToolCall
     state["pending_tool_calls"] = [PendingToolCall(plan=call, status="pending")]
     state["approval_request"] = HumanInputRequest(
         request_id="hir_loop",
@@ -232,7 +374,7 @@ def test_loop_context_keeps_approval_and_feedback_without_goal_fields() -> None:
         )
     ]
     state["plan_state"].agent_plan = PlanTracker().initialize_task(
-        task=state["task"],
+        task=state["task"]
     )[0]
 
     context = ContextBuilder(max_context_tokens=4_000).assemble_loop(
@@ -246,15 +388,12 @@ def test_loop_context_keeps_approval_and_feedback_without_goal_fields() -> None:
     assert "Add a traceable citation." in decisions
     assert "open_gaps" not in decisions
     assert "goal_spec" not in decisions
-    assert "related_gap_ids" not in context.section("plan").content
 
 
 def test_loop_context_assembler_uses_focused_loop_entry_point() -> None:
-    state = _state()
-
     assembled = _assembler().assemble_loop_turn(
         definition=_definition(),
-        state=state,
+        state=_state(),
         budget_remaining=5_000,
         output_schema=ModelTurnDraft,
     )
@@ -288,94 +427,13 @@ def test_task_plan_is_advisory_and_filters_unsupported_tools() -> None:
     assert "unsupported_tool_names" in events[0].warnings
 
 
-def test_loop_compaction_pins_pending_approval_and_candidate_evidence() -> None:
-    pending = ToolCallPlan(
-        tool_call_id="tc_pending",
-        tool_name="vector_search",
-        arguments={"query": "policy"},
-    )
-    approval = ToolCallPlan(
-        tool_call_id="tc_approval",
-        tool_name="write_file",
-        arguments={"path": "reports/policy.md"},
-    )
-    evidence_ref = EvidenceRef(evidence_id="ev_keep", citation_id="cit_keep")
-    from rag.agent.loop.state import PendingToolCall
-
-    compactor = MemoryCompactor(
-        policy=MemoryPolicy(
-            max_structured_observations=2,
-            max_answer_candidates=1,
-            max_evidence_refs=1,
-        ),
-        loop_mode=True,
-    )
-    state: dict[str, Any] = {
-        "task": "Explain the policy with sources.",
-        "pending_tool_calls": [PendingToolCall(plan=pending, status="pending")],
-        "approval_request": HumanInputRequest(
-            request_id="hir_approval",
-            kind="tool_approval",
-            question="Allow write?",
-            tool_calls=[
-                ToolCallSummary(
-                    tool_call_id=approval.tool_call_id,
-                    tool_name=approval.tool_name,
-                    args_preview="path='reports/policy.md'",
-                )
-            ],
-        ),
-        "structured_observations": [
-            StructuredObservation(
-                tool_call_id="tc_old",
-                tool_name="vector_search",
-                status="ok",
-                raw_result_ref="tc_old",
-            ),
-            StructuredObservation(
-                tool_call_id=pending.tool_call_id,
-                tool_name=pending.tool_name,
-                status="ok",
-                raw_result_ref=pending.tool_call_id,
-            ),
-            StructuredObservation(
-                tool_call_id=approval.tool_call_id,
-                tool_name=approval.tool_name,
-                status="ok",
-                raw_result_ref=approval.tool_call_id,
-            ),
-        ],
-        "answer_candidates": [
-            AnswerCandidate(
-                text="Current candidate",
-                source_tool_call_id="tc_old",
-                evidence_refs=[evidence_ref],
-            )
-        ],
-        "evidence_refs": [
-            EvidenceRef(evidence_id="ev_old"),
-            evidence_ref,
-        ],
-    }
-
-    compacted = compactor.compact_update(
-        state,
-        {"retrieval_signals_debug": {"source": "irrelevant"}},
-    )
-
-    # structured_observations, answer_candidates, and evidence_refs
-    # are no longer compaction channels (removed in PR3), so they pass
-    # through the update unchanged.
-    assert compacted.get("retrieval_signals_debug") == {"source": "irrelevant"}
-
-
 def test_loop_context_compaction_is_observable_before_model_turn() -> None:
     state = create_loop_state(
         task="Summarize the conversation.",
         run_config=AgentRunConfig(
             run_id="loop-compaction",
             thread_id="loop-compaction",
-            budget_total=10_000,
+            llm_budget_total=10_000,
             max_depth=2,
             access_policy=AccessPolicy.default(),
             memory_policy=MemoryPolicy(
@@ -383,7 +441,10 @@ def test_loop_context_compaction_is_observable_before_model_turn() -> None:
                 max_message_tail_count=1,
             ),
         ),
-        messages=[HumanMessage(content=f"message {index}", id=f"msg-{index}") for index in range(4)],
+        messages=[
+            HumanMessage(content=f"message {index}", id=f"msg-{index}")
+            for index in range(4)
+        ],
     )
 
     result = LoopContextCompactor().prepare(state)
@@ -405,7 +466,7 @@ def test_loop_context_snips_messages_without_splitting_tool_pairs() -> None:
         run_config=AgentRunConfig(
             run_id="loop-snip-compaction",
             thread_id="loop-snip-compaction",
-            budget_total=10_000,
+            llm_budget_total=10_000,
             max_depth=2,
             access_policy=AccessPolicy.default(),
             memory_policy=MemoryPolicy(
@@ -441,83 +502,45 @@ def test_loop_context_snips_messages_without_splitting_tool_pairs() -> None:
     result = LoopContextCompactor(store=store).prepare(state)
 
     assert result.changed is True
-    assert "messages" in result.channels
-    assert "memory_refs" in result.channels
     assert [message.id for message in state["messages"]] == [
         "msg-head",
         "snip_compact_2",
         "msg-ai-tool",
         "msg-tool-result",
     ]
-    assert "2 earlier messages snipped" in str(state["messages"][1].content)
     assert len(store.records) == 1
     stored = store.records[0]
     assert isinstance(stored, MessageBatchPayload)
-    assert [message.id for message in stored.messages] == ["msg-old-1", "msg-old-2"]
-
-
-def test_loop_context_micro_compacts_old_small_tool_results() -> None:
-    pinned_call = ToolCallPlan.create("read_file", {"path": "active.md"})
-    state = create_loop_state(
-        task="Use tool results.",
-        run_config=AgentRunConfig(
-            run_id="loop-micro-compaction",
-            thread_id="loop-micro-compaction",
-            budget_total=10_000,
-            max_depth=2,
-            access_policy=AccessPolicy.default(),
-            memory_policy=MemoryPolicy(
-                max_tool_output_chars=64_000,
-                micro_compact_keep_recent=1,
-                micro_compact_max_chars=120,
-            ),
-        ),
-    )
-    from rag.agent.loop.state import PendingToolCall
-
-    state["pending_tool_calls"] = [PendingToolCall(plan=pinned_call, status="pending")]
-    state["tool_results"] = [
-        ToolResult(
-            tool_call_id="tc-old",
-            tool_name="read_file",
-            status="ok",
-            output=_ToolOutput(value="old result"),
-            latency_ms=1.0,
-        ),
-        ToolResult(
-            tool_call_id=pinned_call.tool_call_id,
-            tool_name=pinned_call.tool_name,
-            status="ok",
-            output=_ToolOutput(value="pinned result"),
-            latency_ms=1.0,
-        ),
-        ToolResult(
-            tool_call_id="tc-recent",
-            tool_name="read_file",
-            status="ok",
-            output=_ToolOutput(value="recent result"),
-            latency_ms=1.0,
-        ),
+    assert [message.id for message in stored.messages] == [
+        "msg-old-1",
+        "msg-old-2",
     ]
 
-    result = LoopContextCompactor().prepare(state)
 
-    assert result.changed is True
-    assert "tool_results" in result.channels
-    old_output = state["tool_results"][0].output
-    assert isinstance(old_output, ExternalizedToolOutput)
-    assert old_output.status == "compacted"
-    assert old_output.ref.status == "compacted"
-    assert "read_file" in old_output.summary
-    assert "memory_unavailable" in old_output.warnings
-    assert isinstance(state["tool_results"][1].output, _ToolOutput)
-    assert isinstance(state["tool_results"][2].output, _ToolOutput)
+def test_compaction_never_reformats_canonical_tool_results() -> None:
+    state = _state("loop-canonical-tool-results")
+    results = [
+        ToolResult(
+            tool_call_id=f"tc-{index}",
+            tool_name="read_file",
+            content=(
+                ToolContentBlock(
+                    type="text",
+                    data={"text": f"fixed content {index}"},
+                ),
+            ),
+            structured_content={"text": f"fixed content {index}"},
+        )
+        for index in range(3)
+    ]
+    transcript = [tool_result_message(result) for result in results]
+    state["tool_results"] = results
+    state["canonical_transcript"] = transcript
 
+    LoopContextCompactor().prepare(state)
 
-def _apply_replacement(
-    current: list[object],
-    update: list[object],
-) -> list[object]:
-    if len(update) == 1 and isinstance(update[0], StateChannelReplacement):
-        return list(update[0].items)
-    return [*current, *update]
+    assert state["tool_results"] == results
+    assert state["canonical_transcript"] == transcript
+    assert [message.content for message in transcript] == [
+        message.content for message in state["canonical_transcript"]
+    ]

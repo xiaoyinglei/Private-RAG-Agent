@@ -10,13 +10,12 @@ if TYPE_CHECKING:
 def build_loop_turn_prompt(
     state: LoopState,
     *,
+    budget_remaining: int | None = None,
     allowed_tools: Sequence[str] = (),
 ) -> str:
     """Build the model contract for the ordinary Python loop kernel.
 
-    ``allowed_tools`` should already be the resolved visible tool list
-    (caller uses VisibleToolResolver / resolve_visible_tools before
-    calling this function).
+    ``allowed_tools`` is the already-selected model-facing tool-name list.
     """
 
     task = state.get("task", "")
@@ -25,16 +24,23 @@ def build_loop_turn_prompt(
     ok_count = sum(1 for result in tool_results if getattr(result, "status", None) == "ok")
     error_count = sum(1 for result in tool_results if getattr(result, "status", None) == "error")
     visible_names = list(allowed_tools)
+    budget_line = ""
+    if budget_remaining is not None:
+        budget_text = "unbounded" if budget_remaining < 0 else str(budget_remaining)
+        budget_line = f"\nBudget remaining: {budget_text}"
 
     return f"""Task: {task}
 Iteration: {iteration}
 Tools completed: {ok_count} ok, {error_count} failed
-Available tools: {", ".join(visible_names) if visible_names else "none"}
+Available tools: {", ".join(visible_names) if visible_names else "none"}{budget_line}
 
 Analyze the task and current context, then decide your next action.
 
 If a tool can advance the task → return action="execute" with concrete tool_calls.
-If you have enough context to answer → return action="finish" with a complete, well-cited final_answer.
+For simple questions, greetings, literal reply requests, or tasks answerable
+from the current conversation → return action="finish" without calling tools.
+If you have enough context to answer → return action="finish" with a complete
+final_answer. Preserve citations when you used evidence.
 If you need external input → return action="pause" with a clear pause_reason.
 
 Do not repeat completed tool calls. Preserve citations, scores, and artifact paths.

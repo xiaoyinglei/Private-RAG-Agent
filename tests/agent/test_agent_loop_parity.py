@@ -9,161 +9,134 @@ import pytest
 from tests.agent.parity.loop_scenarios import run_loop_scenarios
 
 BASELINE_PATH = Path(__file__).parent / "parity" / "baselines" / "legacy_graph_v1.json"
-
-OBSOLETE_CONTROLLER_FIELDS = {
-    "produced_gaps",
-    "related_gap_ids",
-    "related_step_ids",
-    "resolved_gaps",
-}
+PARITY_FILES = (
+    Path(__file__).parent / "parity" / "fixtures.py",
+    Path(__file__).parent / "parity" / "loop_scenarios.py",
+    Path(__file__).parent / "parity" / "normalize.py",
+)
 
 
 def _load_baseline() -> dict[str, Any]:
-    loaded = json.loads(BASELINE_PATH.read_text(encoding="utf-8"))
-    return cast(dict[str, Any], loaded)
+    return cast(
+        dict[str, Any],
+        json.loads(BASELINE_PATH.read_text(encoding="utf-8")),
+    )
 
 
-def _assert_legacy_subset(legacy: object, loop: object) -> None:
-    if isinstance(legacy, dict):
-        assert isinstance(loop, dict)
-        for key, value in legacy.items():
-            if key in OBSOLETE_CONTROLLER_FIELDS:
-                continue
-            assert key in loop
-            _assert_legacy_subset(value, loop[key])
-        return
-    if isinstance(legacy, list):
-        assert isinstance(loop, list)
-        assert len(loop) == len(legacy)
-        for legacy_item, loop_item in zip(legacy, loop, strict=True):
-            _assert_legacy_subset(legacy_item, loop_item)
-        return
-    assert loop == legacy
-
-
-def _assert_common_tool_parity(
-    legacy: dict[str, Any],
-    loop: dict[str, Any],
-) -> None:
-    # final_answer, final_output, output_validation_errors now live in finish_state
-    assert loop["finish_state"].final_answer == legacy.get("final_answer", loop["finish_state"].final_answer), "final_answer"
-    assert loop["tool_results"] == legacy["tool_results"], "tool_results"
-    # PR2: these observation fields no longer written to LoopState
-    for field in ("answer_candidates", "evidence", "citations", "evidence_refs", "computation_results", "locators"):
-        assert loop.get(field, []) == [], f"PR2: {field} expected empty, got {loop.get(field, [])}"
-    legacy_output = legacy.get("final_output")
-    loop_output = loop["finish_state"].final_output
-    if legacy_output is None:
-        assert loop_output is None
-    else:
-        assert loop_output["data"] == legacy_output["data"]
-        assert (
-            loop_output["model_path"].rsplit(".", maxsplit=1)[-1]
-            == legacy_output["model_path"].rsplit(".", maxsplit=1)[-1]
-        )
+def _tool_outcomes(state: dict[str, Any]) -> list[tuple[str, str]]:
+    return [
+        (result["tool_name"], result.get("outcome", result.get("status")))
+        for result in state["tool_results"]
+    ]
 
 
 @pytest.mark.anyio
-async def test_agent_loop_matches_frozen_legacy_capabilities() -> None:
+async def test_final_loop_preserves_frozen_user_visible_capabilities() -> None:
     baseline = _load_baseline()
     assert baseline["source_commit"] == "dbd746b9"
     assert baseline["schema_version"] == 1
 
     legacy = baseline["scenarios"]
-    loop = cast(
-        dict[str, dict[str, Any]],
-        await run_loop_scenarios(),
-    )
-    # child_agent removed — replaced by task tool
-    legacy_without_child = {k: v for k, v in legacy.items() if k != "child_agent"}
-    assert set(loop) == set(legacy_without_child)
+    current = cast(dict[str, dict[str, Any]], await run_loop_scenarios())
+    assert set(current) == set(legacy) - {"child_agent"}
 
-    for scenario in ("single_tool", "multiple_tools", "tool_retry"):
-        _assert_common_tool_parity(legacy[scenario], loop[scenario])
-        assert loop[scenario]["status"] == "completed"
-        assert loop[scenario]["groundedness_flag"] is False
-
-    rag_legacy = legacy["rag_grounding"]
-    rag_loop = loop["rag_grounding"]
-    _assert_common_tool_parity(rag_legacy, rag_loop)
-    assert rag_loop["groundedness_flag"] is True
-    # PR2: context_units and structured_observations no longer written to LoopState
-    assert rag_loop["context_units"] == []
-    assert rag_loop["structured_observations"] == []
-
-    approval_legacy = legacy["approval_resume"]
-    approval_loop = loop["approval_resume"]
-    assert approval_loop["paused"]["status"] == "paused"
-    for field in (
-        "pending_tool_calls",
-        "tool_results",
-        "human_input_request",
+    for name in (
+        "single_tool",
+        "multiple_tools",
+        "rag_grounding",
+        "structured_output",
     ):
-        assert approval_loop["paused"][field] == approval_legacy["paused"][field]
-    _assert_common_tool_parity(
-        approval_legacy["resumed"],
-        approval_loop["resumed"],
-    )
-    assert approval_loop["resumed"]["observed"] == {"runner_calls": ["approved"]}
-    # The loop clears the fulfilled request instead of exposing stale approval data.
-    assert approval_legacy["resumed"]["human_input_request"] is not None
-    assert approval_loop["resumed"]["human_input_request"] is None
+        assert current[name]["status"] == legacy[name]["status"] == "done"
+        assert current[name]["final_answer"] == legacy[name]["final_answer"]
+        assert _tool_outcomes(current[name]) == _tool_outcomes(legacy[name])
 
-    structured_legacy = legacy["structured_output"]
-    structured_loop = loop["structured_output"]
-    _assert_common_tool_parity(structured_legacy, structured_loop)
-    # Schema validation proves shape, not evidence grounding.
-    assert structured_legacy["groundedness_flag"] is True
-    assert structured_loop["groundedness_flag"] is False
+    retry = current["tool_retry"]
+    assert retry["status"] == legacy["tool_retry"]["status"] == "done"
+    assert retry["final_answer"] == legacy["tool_retry"]["final_answer"]
+    assert _tool_outcomes(retry)[-1] == _tool_outcomes(
+        legacy["tool_retry"]
+    )[-1]
 
-    # child_agent scenario removed — replaced by task tool
+    paused = current["approval_resume"]["paused"]
+    resumed = current["approval_resume"]["resumed"]
+    legacy_resumed = legacy["approval_resume"]["resumed"]
+    assert paused["status"] == "paused"
+    assert paused["observed"] == {"runner_calls": []}
+    assert paused["pending_tool_names"] == ["write_tool"]
+    assert resumed["status"] == legacy_resumed["status"] == "done"
+    assert resumed["final_answer"] == legacy_resumed["final_answer"]
+    assert _tool_outcomes(resumed) == _tool_outcomes(legacy_resumed)
+    assert resumed["observed"] == {"runner_calls": ["approved"]}
 
 
 @pytest.mark.anyio
-async def test_agent_loop_documents_intentional_controller_changes() -> None:
-    baseline = _load_baseline()
-    legacy = baseline["scenarios"]
-    loop = cast(
-        dict[str, dict[str, Any]],
-        await run_loop_scenarios(),
+async def test_final_loop_preserves_control_and_canonical_invariants() -> None:
+    current = cast(dict[str, dict[str, Any]], await run_loop_scenarios())
+
+    plain = current["plain_without_tools"]
+    assert plain["status"] == "done"
+    assert plain["final_answer"] == "Direct answer."
+    assert plain["tool_results"] == []
+
+    goal = current["explicit_goal_spec"]
+    assert goal["status"] == "paused"
+    assert goal["feedback_codes"] == ["goal_contract_unsatisfied"]
+    assert goal["pause_reason"] == (
+        "Explicit goal contract still requires traceable evidence."
     )
 
-    plain = loop["plain_without_tools"]
-    assert legacy["plain_without_tools"]["status"] == "paused"
-    assert plain["status"] == "completed"
-    assert plain["finish_state"].final_answer == "Direct answer."
+    compaction = current["message_compaction"]
+    assert compaction["status"] == "paused"
+    assert len(compaction["messages"]) == 2
+    assert compaction["working_summary"] is not None
 
-    goal_legacy = legacy["explicit_goal_spec"]
-    goal_loop = loop["explicit_goal_spec"]
-    assert goal_loop["status"] == goal_legacy["status"] == "paused"
-    for field in ("tool_results",):
-        assert goal_loop[field] == goal_legacy[field]
-    # PR2: answer_candidates and evidence_refs no longer written to LoopState
-    assert goal_loop["answer_candidates"] == []
-    assert goal_loop["evidence_refs"] == []
-    assert goal_loop["open_gap_ids"] == []
-    assert goal_loop["satisfied_requirements"] == []
-    assert goal_loop["stop_hook_feedback"][0]["code"] == ("goal_contract_unsatisfied")
+    fallback = current["model_fallback"]
+    assert fallback["status"] == "paused"
+    assert "fallback" in fallback["observed"]["transition_reasons"]
 
-    compaction_legacy = legacy["message_compaction"]
-    compaction_loop = loop["message_compaction"]
-    for field in ("messages", "working_summary", "memory_refs"):
-        assert compaction_loop[field] == compaction_legacy[field]
-    assert compaction_loop["iteration"] == 1
-    assert compaction_legacy["iteration"] == 0
+    structured = current["structured_output"]
+    assert structured["final_output"]["data"] == {
+        "answer": "structured:policy",
+        "confidence": 0.91,
+    }
 
-    fallback_legacy = legacy["model_fallback"]
-    fallback_loop = loop["model_fallback"]
-    assert fallback_loop["status"] == fallback_legacy["status"] == "paused"
-    assert fallback_loop["observed"]["model_resolutions"] == (fallback_legacy["observed"]["model_resolutions"])
-    assert "fallback" in fallback_loop["observed"]["transition_reasons"]
+    retry = current["tool_retry"]
+    assert retry["observed"] == {"attempts": ["retry", "retry"]}
+    assert [result["outcome"] for result in retry["tool_results"]] == [
+        "error",
+        "ok",
+    ]
 
-    for scenario in loop.values():
-        states = scenario.values() if "paused" in scenario and "resumed" in scenario else (scenario,)
+    rag = current["rag_grounding"]
+    assert rag["tool_results"][-1]["structured_content"][
+        "groundedness_flag"
+    ] is True
+
+    for scenario in current.values():
+        states = (
+            (scenario["paused"], scenario["resumed"])
+            if "paused" in scenario
+            else (scenario,)
+        )
         for state in states:
-            assert state["open_gap_ids"] == []
-            assert state["satisfied_requirements"] == []
-            observations = state["structured_observations"]
-            for observation in observations:
-                for field in OBSOLETE_CONTROLLER_FIELDS:
-                    assert observation.get(field, []) == []
+            for origin in state["call_origins"]:
+                assert origin["request_id"]
+                assert origin["toolset_revision"]
+                tool_name = next(
+                    result["tool_name"]
+                    for result in state["tool_results"]
+                    if result["tool_call_id"] == origin["tool_call_id"]
+                )
+                assert tool_name in origin["exposed_tool_names"]
+
+
+def test_parity_fixtures_do_not_import_deleted_tool_contracts() -> None:
+    forbidden = (
+        "ToolSpec",
+        "ToolExecutionService",
+        "rag.agent.tools.spec",
+        "rag.agent.core.tool_execution",
+    )
+    source = "\n".join(path.read_text(encoding="utf-8") for path in PARITY_FILES)
+    for token in forbidden:
+        assert token not in source

@@ -1,95 +1,119 @@
 from __future__ import annotations
 
-from types import SimpleNamespace
+import ast
+from collections.abc import Mapping
+from pathlib import Path
+from typing import Any
 
 import pytest
 
-from rag.agent.core.context import AgentRunConfig, RunRegistry
-from rag.agent.tools.rag_answer_tools import (
-    RAGSearchAnswerInput,
-    RAGSearchAnswerRunner,
+from rag.agent.tools.executor import ToolExecutor
+from rag.agent.tools.integrations import knowledge as knowledge_module
+from rag.agent.tools.integrations.knowledge import (
+    KnowledgeSearchOutput,
+    create_knowledge_tools,
+    create_search_knowledge_tool,
 )
-from rag.agent.tools.registry import ToolExecutionContext
-from rag.providers.llm_gateway import current_llm_budget_ledger
-from rag.schema.query import (
-    AnswerCitation,
-    EvidenceItem,
-    GroundedAnswer,
-    RetrievalSignals,
-)
-from rag.schema.runtime import AccessPolicy
+from rag.agent.tools.permissions import ToolExecutionContext
+from rag.agent.tools.tool import Tool, ToolCall, ToolCallOrigin
+
+
+def _call(arguments: Mapping[str, Any]) -> ToolCall:
+    return ToolCall(
+        tool_call_id="call_knowledge",
+        tool_name="search_knowledge",
+        arguments=arguments,
+        origin=ToolCallOrigin(
+            request_id="request_knowledge",
+            toolset_revision="knowledge-v1",
+            exposed_tool_names=("search_knowledge",),
+        ),
+    )
+
+
+def test_knowledge_tool_requires_explicit_configuration() -> None:
+    assert create_knowledge_tools(None) == ()
+
+    tools = create_knowledge_tools(
+        lambda _arguments: KnowledgeSearchOutput(),
+        execution_revision="knowledge-v2",
+    )
+
+    assert len(tools) == 1
+    assert isinstance(tools[0], Tool)
+    assert tools[0].definition.name == "search_knowledge"
+    assert tools[0].execution_revision.endswith(":knowledge-v2")
 
 
 @pytest.mark.anyio
-async def test_rag_search_answer_runner_uses_fast_runtime_query_and_preserves_contract() -> None:
-    evidence = EvidenceItem(
-        evidence_id="ev-runtime",
-        doc_id=7,
-        text="Runtime evidence",
-        score=0.8,
-        citation_anchor="runtime#1",
-    )
-    citation = AnswerCitation(
-        citation_id="cit-runtime",
-        evidence_id="ev-runtime",
-        record_type="section",
-        citation_anchor="runtime#1",
-        doc_id=7,
-    )
+async def test_knowledge_search_normalizes_one_canonical_tool_result() -> None:
+    calls: list[Mapping[str, Any]] = []
 
-    class _Runtime:
-        def __init__(self) -> None:
-            self.calls: list[tuple[str, object]] = []
-            self.active_ledgers: list[object | None] = []
+    async def search(arguments: Mapping[str, Any]) -> Mapping[str, Any]:
+        calls.append(arguments)
+        return {
+            "results": [
+                {
+                    "evidence_id": "ev-1",
+                    "doc_id": "doc-7",
+                    "citation_anchor": "doc-7#p1",
+                    "text": "Canonical knowledge evidence",
+                    "score": 0.91,
+                    "source_type": "document",
+                    "file_name": "report.pdf",
+                }
+            ],
+            "answer_text": "Grounded answer",
+            "citations": ["doc-7#p1"],
+            "groundedness_flag": True,
+            "insufficient_evidence": False,
+            "total_found": 1,
+        }
 
-        def query_public(self, query: str, *, options: object) -> object:
-            self.calls.append((query, options))
-            self.active_ledgers.append(current_llm_budget_ledger())
-            return SimpleNamespace(
-                answer=GroundedAnswer(
-                    answer_text="Runtime fast answer",
-                    citations=[citation],
-                    groundedness_flag=True,
-                    insufficient_evidence_flag=False,
-                ),
-                context=SimpleNamespace(evidence=[evidence]),
-            )
-
-    run_config = AgentRunConfig(
-        run_id="rag-answer-test",
-        thread_id="rag-answer-test",
-        budget_total=10_000,
-        max_depth=2,
-        access_policy=AccessPolicy.default(),
-    )
-    RunRegistry.remove(run_config.run_id)
-    RunRegistry.get_or_create(run_config)
-    runtime = _Runtime()
-
-    output = await RAGSearchAnswerRunner(runtime=runtime).answer(
-        RAGSearchAnswerInput(
-            query="runtime query",
-            top_k=5,
-            retrieval_signals=RetrievalSignals(
-                special_targets=["table"],
-                quoted_terms=["runtime"],
-            ),
-        ),
-        ToolExecutionContext(run_config=run_config),
+    tool = create_search_knowledge_tool(search)
+    execution = await ToolExecutor({"search_knowledge": tool}).execute(
+        _call({"query": "What is canonical?", "top_k": 4}),
+        context=ToolExecutionContext(),
     )
 
-    assert output.text == "Runtime fast answer"
-    assert output.evidence == [evidence]
-    assert output.citations == [citation]
-    assert output.groundedness_flag is True
-    assert output.insufficient_evidence is False
-    [(query, options)] = runtime.calls
-    assert query == "runtime query"
-    assert options.retrieval_profile == "fast"
-    assert options.top_k == 5
-    assert options.retrieval_signals.quoted_terms == ["runtime"]
-    assert options.retrieval_signals_debug["special_targets"] == ["table"]
-    assert runtime.active_ledgers == [
-        RunRegistry.get(run_config.run_id).budget_ledger
-    ]
-    RunRegistry.remove(run_config.run_id)
+    assert execution.result.is_error is False
+    assert calls[0]["query"] == "What is canonical?"
+    assert calls[0]["top_k"] == 4
+    output = execution.result.structured_content
+    assert output is not None
+    assert output["results"][0]["evidence_id"] == "ev-1"
+    assert output["citations"] == ("doc-7#p1",)
+    assert output["groundedness_flag"] is True
+
+
+@pytest.mark.anyio
+async def test_invalid_knowledge_output_fails_at_the_final_executor() -> None:
+    tool = create_search_knowledge_tool(
+        lambda _arguments: {"results": "not-a-list"}
+    )
+
+    execution = await ToolExecutor({"search_knowledge": tool}).execute(
+        _call({"query": "bad provider output"}),
+        context=ToolExecutionContext(),
+    )
+
+    assert execution.result.is_error is True
+    assert execution.result.error_code == "normalization_failed"
+    assert execution.result.retryable is False
+
+
+def test_knowledge_integration_does_not_own_retrieval_lifecycle() -> None:
+    module_path = Path(knowledge_module.__file__ or "")
+    source = module_path.read_text(encoding="utf-8")
+    imports = {
+        node.module
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.ImportFrom) and node.module is not None
+    }
+
+    assert not any(
+        module.startswith(("rag.retrieval", "rag.ingestion"))
+        for module in imports
+    )
+    assert "VectorStore" not in source
+    assert "ingest" not in source.lower()

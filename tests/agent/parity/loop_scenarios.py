@@ -1,65 +1,42 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import cast
 
 from langchain_core.messages import HumanMessage
 from langgraph.checkpoint.memory import MemorySaver
-from pydantic import BaseModel
 
-from rag.agent.builtin.generic import GENERIC_AGENT
-from rag.agent.core.goal_contract import GoalDeliverable, GoalSpec
-from rag.agent.core.agent_as_tool import (
-    AgentAsToolAdapter,
-    AgentToolInput,
-    build_agent_tool_spec,
-)
 from rag.agent.core.checkpointing import (
     LangGraphCheckpointStore,
     agent_checkpoint_serde,
 )
+from rag.agent.core.context import RunRegistry
 from rag.agent.core.definition import AgentRuntimePolicy
 from rag.agent.core.finalization import FinishCandidateBuilder
+from rag.agent.core.goal_contract import GoalDeliverable, GoalSpec
 from rag.agent.core.human_input import HumanInputResponse
-from rag.agent.core.tool_execution import ToolExecutionService
-from rag.agent.loop.runtime import (
-    AgentLoop,
-    LoopEventSink,
-    ModelTurnEnvelope,
-)
-from rag.agent.loop.state import (
-    LoopState,
-    LoopTransition,
-    ModelTurnDraft,
-)
+from rag.agent.core.model_request import build_tool_manifest
+from rag.agent.core.turn_contracts import ToolCallPlan
+from rag.agent.loop.runtime import AgentLoop, LoopEventSink, ModelTurnEnvelope
+from rag.agent.loop.state import LoopState, LoopTransition, ModelTurnDraft
 from rag.agent.loop.stop_hooks import StopHookRunner, build_stop_hooks
-from rag.agent.memory.compactor import LoopContextCompactor
+from rag.agent.memory.compactor import LoopCompactionResult, LoopContextCompactor
 from rag.agent.memory.models import MemoryPolicy
 from rag.agent.memory.store import WorkspaceMemoryStore
-from rag.agent.core.turn_contracts import ToolCallPlan
-from rag.agent.tools.rag_answer_tools import (
-    RAGSearchAnswerOutput,
-    rag_search_answer,
-)
-from rag.agent.tools.rag_tools import SearchOutput, rerank, vector_search
+from rag.agent.tools.executor import ToolExecutor
+from rag.agent.tools.permissions import ToolExecutionContext
 from rag.agent.tools.registry import ToolRegistry
-from rag.agent.tools.spec import ToolError, ToolPermissions, ToolSpec
+from rag.agent.tools.tool import JsonValue, Tool, ToolEffect
 from rag.agent.workspace import WorkspaceRuntime
-from rag.schema.query import AnswerCitation, EvidenceItem, RetrievalSignals
 from tests.agent.parity.fixtures import (
     PARITY_SCENARIO_NAMES,
-    _CapturingDelegatedRunner,
-    _ComputationOutput,
-    _config,
     _definition,
     _state,
     _StructuredAnswer,
     _StructuredFinalizer,
-    _text_spec,
-    _TextInput,
-    _TextOutput,
+    _tool,
 )
 from tests.agent.parity.normalize import normalize_loop_state
 
@@ -87,24 +64,19 @@ class _CandidateProvider:
     ) -> ModelTurnDraft | ModelTurnEnvelope:
         del definition, budget_remaining
         if state["finish_state"].feedback and self._pause_after_feedback:
-            return ModelTurnDraft(
+            draft = ModelTurnDraft(
                 action="pause",
                 pause_reason=self._pause_after_feedback,
             )
-        if self._pause_reason is not None:
-            draft = ModelTurnDraft(
-                action="pause",
-                pause_reason=self._pause_reason,
-            )
-        else:
-            candidate = self._direct_answer
-            if candidate is None:
-                msg = "PR2: answer_candidates no longer written to LoopState; provide direct_answer"
-                raise ValueError(msg)
+        elif self._pause_reason is not None:
+            draft = ModelTurnDraft(action="pause", pause_reason=self._pause_reason)
+        elif self._direct_answer is not None:
             draft = ModelTurnDraft(
                 action="finish",
-                final_answer=candidate,
+                final_answer=self._direct_answer,
             )
+        else:
+            raise AssertionError("scenario provider has no configured outcome")
         if not self._fallback:
             return draft
         return ModelTurnEnvelope(
@@ -119,6 +91,21 @@ class _CandidateProvider:
         )
 
 
+class _SequenceProvider:
+    def __init__(self, turns: list[ModelTurnDraft]) -> None:
+        self._turns = turns
+
+    async def next_turn(
+        self,
+        state: LoopState,
+        *,
+        definition: AgentRuntimePolicy,
+        budget_remaining: int,
+    ) -> ModelTurnDraft:
+        del state, definition, budget_remaining
+        return self._turns.pop(0)
+
+
 @dataclass
 class _EventRecorder(LoopEventSink):
     reasons: list[str] = field(default_factory=list)
@@ -127,57 +114,96 @@ class _EventRecorder(LoopEventSink):
         self.reasons.append(transition.reason)
 
 
+class _NoCompaction:
+    def prepare(self, state: LoopState) -> LoopCompactionResult:
+        del state
+        return LoopCompactionResult(changed=False)
+
+
+@dataclass
+class _RuntimeHarness:
+    snapshot: Mapping[str, Tool]
+    executor: ToolExecutor
+    checkpoint_store: LangGraphCheckpointStore
+
+
+def _runtime_harness(
+    state: LoopState,
+    registry: ToolRegistry,
+) -> _RuntimeHarness:
+    snapshot = registry.freeze()
+    state["resident_tool_names"] = list(snapshot)
+    state["tool_manifest"] = build_tool_manifest(
+        tools=tuple(snapshot.values()),
+        resident_tool_names=tuple(snapshot),
+        explicit_tool_names=(),
+        active_tool_names=(),
+        provider_serializer_revision=state["provider_serializer_revision"],
+    )
+    return _RuntimeHarness(
+        snapshot=snapshot,
+        executor=ToolExecutor(snapshot),
+        checkpoint_store=LangGraphCheckpointStore(
+            MemorySaver(serde=agent_checkpoint_serde()),
+            run_config=state["run_config"],
+        ),
+    )
+
+
 async def _run_loop(
     *,
     definition: AgentRuntimePolicy,
     registry: ToolRegistry,
     state: LoopState,
-    provider: _CandidateProvider,
+    provider: object,
+    harness: _RuntimeHarness | None = None,
     goal_spec: GoalSpec | None = None,
     output_finalizer: object | None = None,
+    context_manager: object | None = None,
     memory_store: WorkspaceMemoryStore | None = None,
     event_recorder: _EventRecorder | None = None,
-) -> tuple[LoopState, LangGraphCheckpointStore]:
-    loop_state = state
+) -> tuple[LoopState, _RuntimeHarness]:
     if memory_store is not None:
-        from rag.agent.core.context import RunRegistry
-
-        RunRegistry.get(loop_state["run_config"].run_id).memory_store = memory_store
-    checkpoint_store = LangGraphCheckpointStore(
-        MemorySaver(serde=agent_checkpoint_serde()),
-        run_config=loop_state["run_config"],
-    )
-    hooks = build_stop_hooks(
-        definition=definition,
-        output_finalizer=output_finalizer,  # type: ignore[arg-type]
-        goal_spec=goal_spec,
-    )
+        RunRegistry.get(state["run_config"].run_id).memory_store = memory_store
+    runtime = harness or _runtime_harness(state, registry)
     loop = AgentLoop(
         definition=definition,
-        model_provider=provider,
-        context_manager=LoopContextCompactor(store=memory_store),
-        tool_runner=ToolExecutionService(
-            tool_registry=registry,
-            record_writer=checkpoint_store,
+        model_provider=provider,  # type: ignore[arg-type]
+        context_manager=context_manager or _NoCompaction(),  # type: ignore[arg-type]
+        tool_executor=runtime.executor,
+        registry_snapshot=runtime.snapshot,
+        execution_context=ToolExecutionContext(
+            workspace_root=Path.cwd(),
+            cwd=Path.cwd(),
         ),
-        checkpoint_store=checkpoint_store,
+        checkpoint_store=runtime.checkpoint_store,
         stop_hook_runner=StopHookRunner(
-            hooks=hooks,
+            hooks=build_stop_hooks(
+                definition=definition,
+                output_finalizer=output_finalizer,  # type: ignore[arg-type]
+                goal_spec=goal_spec,
+            ),
             max_blocks=definition.max_stop_hook_blocks,
         ),
         finish_candidate_builder=FinishCandidateBuilder(),
         event_sink=event_recorder,
     )
-    return await loop.run(loop_state), checkpoint_store
+    return await loop.run(state), runtime
+
+
+def _registry(*tools: Tool) -> ToolRegistry:
+    registry = ToolRegistry()
+    for tool in tools:
+        registry.register(tool)
+    return registry
 
 
 async def _plain_without_tools() -> dict[str, object]:
-    run_id = "loop-parity-plain"
     result, _ = await _run_loop(
-        definition=_definition("plain", []),
-        registry=ToolRegistry(),
+        definition=_definition("plain", ()),
+        registry=_registry(),
         state=_state(
-            run_id,
+            "loop-parity-plain",
             task="Answer directly without tools.",
         ),
         provider=_CandidateProvider(direct_answer="Direct answer."),
@@ -186,24 +212,20 @@ async def _plain_without_tools() -> dict[str, object]:
 
 
 async def _single_tool() -> dict[str, object]:
-    run_id = "loop-parity-single"
-    registry = ToolRegistry()
-    registry.register(
-        _text_spec("answer_tool"),
-        runner=lambda payload: _TextOutput(text=f"answer:{cast(_TextInput, payload).text}"),
-    )
-    call = ToolCallPlan(
-        tool_call_id="tc-single",
-        tool_name="answer_tool",
-        arguments={"text": "policy"},
+    call = ToolCallPlan.create("answer_tool", {"text": "policy"})
+    registry = _registry(
+        _tool(
+            "answer_tool",
+            lambda payload: {"text": f"answer:{payload['text']}"},
+        )
     )
     result, _ = await _run_loop(
-        definition=_definition("single", ["answer_tool"]),
+        definition=_definition("single", ("answer_tool",)),
         registry=registry,
         state=_state(
-            run_id,
+            "loop-parity-single",
             task="Answer with one tool.",
-            pending_tool_calls=[call],
+            pending_tool_calls=(call,),
         ),
         provider=_CandidateProvider(direct_answer="answer:policy"),
     )
@@ -211,50 +233,29 @@ async def _single_tool() -> dict[str, object]:
 
 
 async def _multiple_tools() -> dict[str, object]:
-    run_id = "loop-parity-multiple"
-    registry = ToolRegistry()
-    registry.register(
-        _text_spec("echo_tool", concurrency_safe=True),
-        runner=lambda payload: _TextOutput(text=f"echo:{cast(_TextInput, payload).text}"),
-    )
-    registry.register(
-        ToolSpec(
-            name="calculate_tool",
-            description="Calculate a deterministic expression.",
-            input_model=_TextInput,
-            output_model=_ComputationOutput,
-            error_model=ToolError,
-            permissions=ToolPermissions(),
-            timeout_seconds=1.0,
-            idempotent=True,
-            concurrency_safe=True,
+    registry = _registry(
+        _tool(
+            "echo_tool",
+            lambda payload: {"text": f"echo:{payload['text']}"},
         ),
-        runner=lambda payload: _ComputationOutput(
-            text="42",
-            operation="sum",
-            expression=cast(_TextInput, payload).text,
+        _tool(
+            "calculate_tool",
+            lambda payload: {
+                "text": "42",
+                "operation": "sum",
+                "expression": payload["text"],
+            },
         ),
     )
-    calls = [
-        ToolCallPlan(
-            tool_call_id="tc-echo",
-            tool_name="echo_tool",
-            arguments={"text": "first"},
-        ),
-        ToolCallPlan(
-            tool_call_id="tc-calculate",
-            tool_name="calculate_tool",
-            arguments={"text": "40 + 2"},
-        ),
-    ]
+    calls = (
+        ToolCallPlan.create("echo_tool", {"text": "first"}),
+        ToolCallPlan.create("calculate_tool", {"text": "40 + 2"}),
+    )
     result, _ = await _run_loop(
-        definition=_definition(
-            "multiple",
-            ["echo_tool", "calculate_tool"],
-        ),
+        definition=_definition("multiple", ("echo_tool", "calculate_tool")),
         registry=registry,
         state=_state(
-            run_id,
+            "loop-parity-multiple",
             task="Use multiple tools and calculate.",
             pending_tool_calls=calls,
         ),
@@ -264,127 +265,87 @@ async def _multiple_tools() -> dict[str, object]:
 
 
 async def _rag_grounding() -> dict[str, object]:
-    run_id = "loop-parity-rag"
-    evidence = EvidenceItem(
-        evidence_id="ev-policy",
-        doc_id=7,
-        citation_anchor="policy#leave",
-        text="Employees receive 15 days of annual leave.",
-        score=0.94,
-        record_type="section",
-        retrieval_channels=["vector", "rerank"],
-        retrieval_family="hybrid",
-    )
-    citation = AnswerCitation(
-        citation_id="cit-policy",
-        evidence_id=evidence.evidence_id,
-        record_type="section",
-        citation_anchor=evidence.citation_anchor,
-        doc_id=evidence.doc_id,
-    )
-    registry = ToolRegistry()
-    registry.register(
-        vector_search,
-        runner=lambda payload: SearchOutput(
-            items=[
-                {
-                    **evidence.model_dump(mode="json"),
-                    "rerank_score": 0.96,
-                }
-            ]
+    answer = "Employees receive 15 days of annual leave."
+    registry = _registry(
+        _tool(
+            "vector_search",
+            lambda payload: {
+                "text": "policy#leave",
+                "query": payload["text"],
+            },
+        ),
+        _tool(
+            "rerank",
+            lambda payload: {
+                "text": "policy#leave:0.99",
+                "query": payload["text"],
+            },
+        ),
+        _tool(
+            "rag_search_answer",
+            lambda payload: {
+                "text": answer,
+                "query": payload["text"],
+                "groundedness_flag": True,
+            },
         ),
     )
-    registry.register(
-        rerank,
-        runner=lambda payload: SearchOutput(
-            items=[
-                {
-                    **evidence.model_dump(mode="json"),
-                    "rerank_score": 0.99,
-                }
-            ]
-        ),
-    )
-    registry.register(
-        rag_search_answer,
-        runner=lambda payload: RAGSearchAnswerOutput(
-            text="Employees receive 15 days of annual leave.",
-            evidence=[evidence],
-            citations=[citation],
-            groundedness_flag=True,
-        ),
-    )
-    calls = [
-        ToolCallPlan(
-            tool_call_id="tc-vector",
-            tool_name="vector_search",
-            arguments={"query": "annual leave", "top_k": 4},
-        ),
-        ToolCallPlan(
-            tool_call_id="tc-rerank",
-            tool_name="rerank",
-            arguments={"query": "annual leave", "top_k": 4},
-        ),
-        ToolCallPlan(
-            tool_call_id="tc-rag-answer",
-            tool_name="rag_search_answer",
-            arguments={"query": "annual leave", "top_k": 4},
-        ),
-    ]
-    state = _state(
-        run_id,
-        task='Answer the "annual leave" policy with citations.',
-        pending_tool_calls=calls,
-    )
-    state["retrieval_signals"] = RetrievalSignals(
-        quoted_terms=["annual leave"],
-        allow_graph_expansion=True,
+    calls = tuple(
+        ToolCallPlan.create(name, {"text": "annual leave"})
+        for name in ("vector_search", "rerank", "rag_search_answer")
     )
     result, _ = await _run_loop(
         definition=_definition(
             "rag",
-            ["vector_search", "rerank", "rag_search_answer"],
+            ("vector_search", "rerank", "rag_search_answer"),
         ),
         registry=registry,
-        state=state,
-        provider=_CandidateProvider(direct_answer="Employees receive 15 days of annual leave."),
+        state=_state(
+            "loop-parity-rag",
+            task="Answer the annual leave policy with citations.",
+            pending_tool_calls=calls,
+        ),
+        provider=_CandidateProvider(direct_answer=answer),
     )
     return normalize_loop_state(result)
 
 
 async def _approval_resume() -> dict[str, object]:
-    run_id = "loop-parity-approval"
     calls: list[str] = []
-    registry = ToolRegistry()
 
-    def write_runner(payload: BaseModel) -> _TextOutput:
-        text = cast(_TextInput, payload).text
+    def write(payload: dict[str, JsonValue]) -> dict[str, JsonValue]:
+        text = str(payload["text"])
         calls.append(text)
-        return _TextOutput(text=f"wrote:{text}")
+        return {"text": f"wrote:{text}"}
 
-    registry.register(
-        _text_spec("write_tool", requires_confirmation=True),
-        runner=write_runner,
+    registry = _registry(
+        _tool(
+            "write_tool",
+            write,  # type: ignore[arg-type]
+            effects=frozenset({ToolEffect.WRITE_WORKSPACE}),
+            concurrency_safe=False,
+        )
     )
-    call = ToolCallPlan(
-        tool_call_id="tc-write",
-        tool_name="write_tool",
-        arguments={"text": "approved"},
+    call = ToolCallPlan.create("write_tool", {"text": "approved"})
+    state = _state(
+        "loop-parity-approval",
+        task="Run an approved mutation.",
+        pending_tool_calls=(call,),
     )
-    result, store = await _run_loop(
-        definition=_definition("approval", ["write_tool"]),
+    definition = _definition("approval", ("write_tool",))
+    paused_state, harness = await _run_loop(
+        definition=definition,
         registry=registry,
-        state=_state(
-            run_id,
-            task="Run an approved mutation.",
-            pending_tool_calls=[call],
-        ),
-        provider=_CandidateProvider(),
+        state=state,
+        provider=_CandidateProvider(direct_answer="wrote:approved"),
     )
-    paused = normalize_loop_state(result)
-    request = result["approval_request"]
+    paused = normalize_loop_state(
+        paused_state,
+        observed={"runner_calls": tuple(calls)},
+    )
+    request = paused_state["approval_request"]
     assert request is not None
-    resumed_state = await store.apply_human_response(
+    resumed_state = await harness.checkpoint_store.apply_human_response(
         HumanInputResponse(
             request_id=request.request_id,
             decision="allow_once",
@@ -392,63 +353,56 @@ async def _approval_resume() -> dict[str, object]:
         )
     )
     resumed, _ = await _run_loop(
-        definition=_definition("approval", ["write_tool"]),
+        definition=definition,
         registry=registry,
         state=resumed_state,
         provider=_CandidateProvider(direct_answer="wrote:approved"),
+        harness=harness,
     )
     return {
         "paused": paused,
         "resumed": normalize_loop_state(
             resumed,
-            observed={"runner_calls": calls},
+            observed={"runner_calls": tuple(calls)},
         ),
     }
 
 
 async def _tool_retry() -> dict[str, object]:
-    run_id = "loop-parity-retry"
     attempts: list[str] = []
 
-    def runner(payload: object) -> _TextOutput:
-        text = payload.text  # type: ignore[attr-defined]
+    def flaky(payload: dict[str, JsonValue]) -> dict[str, JsonValue]:
+        text = str(payload["text"])
         attempts.append(text)
         if len(attempts) == 1:
             raise RuntimeError("transient failure")
-        return _TextOutput(text=f"recovered:{text}")
+        return {"text": f"recovered:{text}"}
 
-    registry = ToolRegistry()
-    registry.register(
-        _text_spec(
-            "retry_tool",
-            idempotent=True,
-            max_retries=1,
-        ),
-        runner=runner,
-    )
-    call = ToolCallPlan(
-        tool_call_id="tc-retry",
-        tool_name="retry_tool",
-        arguments={"text": "retry"},
-    )
+    registry = _registry(_tool("retry_tool", flaky))  # type: ignore[arg-type]
+    first = ToolCallPlan.create("retry_tool", {"text": "retry"})
+    second = ToolCallPlan.create("retry_tool", {"text": "retry"})
     result, _ = await _run_loop(
-        definition=_definition("retry", ["retry_tool"]),
+        definition=_definition("retry", ("retry_tool",)),
         registry=registry,
         state=_state(
-            run_id,
+            "loop-parity-retry",
             task="Recover from a transient tool error.",
-            pending_tool_calls=[call],
+            pending_tool_calls=(first,),
         ),
-        provider=_CandidateProvider(direct_answer="recovered:retry"),
+        provider=_SequenceProvider(
+            [
+                ModelTurnDraft(action="execute", tool_calls=(second,)),
+                ModelTurnDraft(
+                    action="finish",
+                    final_answer="recovered:retry",
+                ),
+            ]
+        ),
     )
-    return normalize_loop_state(
-        result,
-        observed={"attempts": attempts},
-    )
+    return normalize_loop_state(result, observed={"attempts": tuple(attempts)})
 
 
 async def _message_compaction() -> dict[str, object]:
-    run_id = "loop-parity-compaction"
     policy = MemoryPolicy(
         message_compaction_min_count=4,
         max_message_tail_count=2,
@@ -460,50 +414,48 @@ async def _message_compaction() -> dict[str, object]:
         )
         workspace.initialize()
         store = WorkspaceMemoryStore(workspace=workspace, policy=policy)
-        result, _ = await _run_loop(
-            definition=_definition("compaction", []),
-            registry=ToolRegistry(),
-            state=_state(
-                run_id,
-                task="Compact prior messages.",
-                memory_policy=policy,
-                messages=[
-                    HumanMessage(
-                        content=f"history {index}",
-                        id=f"msg-{index}",
-                    )
-                    for index in range(6)
-                ],
+        state = _state(
+            "loop-parity-compaction",
+            task="Compact prior messages.",
+            memory_policy=policy,
+            messages=(
+                HumanMessage(content=f"history {index}", id=f"msg-{index}")
+                for index in range(6)
             ),
-            provider=_CandidateProvider(pause_reason="No model answer is configured."),
+        )
+        result, _ = await _run_loop(
+            definition=_definition("compaction", ()),
+            registry=_registry(),
+            state=state,
+            provider=_CandidateProvider(
+                pause_reason="No model answer is configured."
+            ),
+            context_manager=LoopContextCompactor(store=store),
             memory_store=store,
         )
         return normalize_loop_state(result)
 
 
 async def _structured_output() -> dict[str, object]:
-    run_id = "loop-parity-structured"
-    registry = ToolRegistry()
-    registry.register(
-        _text_spec("answer_tool"),
-        runner=lambda payload: _TextOutput(text=f"structured:{cast(_TextInput, payload).text}"),
-    )
-    call = ToolCallPlan(
-        tool_call_id="tc-structured",
-        tool_name="answer_tool",
-        arguments={"text": "policy"},
+    registry = _registry(
+        _tool(
+            "answer_tool",
+            lambda payload: {"text": f"structured:{payload['text']}"},
+        )
     )
     result, _ = await _run_loop(
         definition=_definition(
             "structured",
-            ["answer_tool"],
+            ("answer_tool",),
             output_model=_StructuredAnswer,
         ),
         registry=registry,
         state=_state(
-            run_id,
+            "loop-parity-structured",
             task="Return a structured answer.",
-            pending_tool_calls=[call],
+            pending_tool_calls=(
+                ToolCallPlan.create("answer_tool", {"text": "policy"}),
+            ),
         ),
         provider=_CandidateProvider(direct_answer="structured:policy"),
         output_finalizer=_StructuredFinalizer(),
@@ -512,11 +464,11 @@ async def _structured_output() -> dict[str, object]:
 
 
 async def _explicit_goal_spec() -> dict[str, object]:
-    run_id = "loop-parity-goal"
-    registry = ToolRegistry()
-    registry.register(
-        _text_spec("answer_tool"),
-        runner=lambda payload: _TextOutput(text=f"answer:{cast(_TextInput, payload).text}"),
+    registry = _registry(
+        _tool(
+            "answer_tool",
+            lambda payload: {"text": f"answer:{payload['text']}"},
+        )
     )
     goal = GoalSpec(
         original_query="Answer with evidence.",
@@ -533,22 +485,24 @@ async def _explicit_goal_spec() -> dict[str, object]:
             ),
         ],
     )
-    call = ToolCallPlan(
-        tool_call_id="tc-goal-answer",
-        tool_name="answer_tool",
-        arguments={"text": "without evidence"},
-    )
     result, _ = await _run_loop(
-        definition=_definition("goal", ["answer_tool"]),
+        definition=_definition("goal", ("answer_tool",)),
         registry=registry,
         state=_state(
-            run_id,
+            "loop-parity-goal",
             task="Answer with evidence.",
-            pending_tool_calls=[call],
+            pending_tool_calls=(
+                ToolCallPlan.create(
+                    "answer_tool",
+                    {"text": "without evidence"},
+                ),
+            ),
         ),
         provider=_CandidateProvider(
             direct_answer="answer:without evidence",
-            pause_after_feedback=("Explicit goal contract still requires traceable evidence."),
+            pause_after_feedback=(
+                "Explicit goal contract still requires traceable evidence."
+            ),
         ),
         goal_spec=goal,
     )
@@ -556,14 +510,13 @@ async def _explicit_goal_spec() -> dict[str, object]:
 
 
 async def _model_fallback() -> dict[str, object]:
-    run_id = "loop-parity-model-fallback"
     events = _EventRecorder()
     result, _ = await _run_loop(
-        definition=_definition("model_fallback", []),
-        registry=ToolRegistry(),
+        definition=_definition("model_fallback", ()),
+        registry=_registry(),
         state=_state(
-            run_id,
-            task='Use the "fallback" model.',
+            "loop-parity-model-fallback",
+            task="Use the fallback model.",
         ),
         provider=_CandidateProvider(
             pause_reason="Fallback model needs clarification.",
@@ -573,54 +526,7 @@ async def _model_fallback() -> dict[str, object]:
     )
     return normalize_loop_state(
         result,
-        observed={
-            "model_resolutions": ["missing"],
-            "transition_reasons": events.reasons,
-        },
-    )
-
-
-async def _child_agent() -> dict[str, object]:
-    run_id = "loop-parity-child"
-    delegated_runner = _CapturingDelegatedRunner()
-    registry = ToolRegistry()
-    agent_tool = build_agent_tool_spec(GENERIC_AGENT)
-    registry.register(
-        agent_tool.tool_spec,
-        runner=AgentAsToolAdapter(
-            runner=delegated_runner,
-            agent_type="research",
-            run_config=_config(
-                run_id,
-                max_depth=2,
-                source_scope=("doc-parent",),
-            ),
-        ),
-    )
-    call = ToolCallPlan(
-        tool_call_id="tc-child",
-        tool_name="agent_research",
-        arguments=AgentToolInput(
-            task="Find the child policy.",
-            goal="Return a grounded conclusion.",
-            required_outputs=["evidence", "conclusion"],
-        ).model_dump(mode="json"),
-    )
-    result, _ = await _run_loop(
-        definition=_definition("child", ["agent_research"]),
-        registry=registry,
-        state=_state(
-            run_id,
-            task="Delegate a bounded research task.",
-            pending_tool_calls=[call],
-            max_depth=2,
-            source_scope=("doc-parent",),
-        ),
-        provider=_CandidateProvider(),
-    )
-    return normalize_loop_state(
-        result,
-        observed={"delegations": delegated_runner.seen},
+        observed={"transition_reasons": tuple(events.reasons)},
     )
 
 

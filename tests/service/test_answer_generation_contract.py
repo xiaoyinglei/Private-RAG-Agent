@@ -6,7 +6,7 @@ from typing import Any
 
 import pytest
 
-from rag.agent.core.context import BudgetLedger
+from rag.agent.core.context import LLMBudgetLedger
 from rag.providers.generation import (
     AnswerGenerationService,
     AnswerGenerator,
@@ -222,7 +222,7 @@ async def test_answer_generator_uses_gateway_and_active_run_ledger() -> None:
             )
         },
     )
-    ledger = BudgetLedger(total=10_000)
+    ledger = LLMBudgetLedger(total=10_000)
     generator = AnswerGenerator(
         generators=(
             GeneratorBinding(
@@ -268,7 +268,7 @@ async def test_direct_answer_uses_gateway_and_active_run_ledger() -> None:
             )
         },
     )
-    ledger = BudgetLedger(total=10_000)
+    ledger = LLMBudgetLedger(total=10_000)
     generator = AnswerGenerator(
         generators=(
             GeneratorBinding(

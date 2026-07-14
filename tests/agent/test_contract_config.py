@@ -7,7 +7,7 @@ import pytest
 from rag.agent.core.context import (
     AgentRunConfig,
     AgentRuntimeHandles,
-    BudgetLedger,
+    LLMBudgetLedger,
     RunRegistry,
     derive_child_config,
 )
@@ -16,10 +16,10 @@ from rag.agent.core.registry import AgentRegistry
 from rag.schema.runtime import AccessPolicy, RuntimeMode
 
 
-class TestBudgetLedger:
+class TestLLMBudgetLedger:
     @pytest.mark.anyio
     async def test_reserve_commit(self) -> None:
-        ledger = BudgetLedger(total=1000)
+        ledger = LLMBudgetLedger(total=1000)
         ok = await ledger.reserve("lease-1", 300)
         assert ok is True
         assert await ledger.remaining() == 700
@@ -29,13 +29,13 @@ class TestBudgetLedger:
 
     @pytest.mark.anyio
     async def test_reserve_rejects_over_budget(self) -> None:
-        ledger = BudgetLedger(total=500)
+        ledger = LLMBudgetLedger(total=500)
         ok = await ledger.reserve("lease-1", 600)
         assert ok is False
 
     @pytest.mark.anyio
     async def test_refund_returns_tokens(self) -> None:
-        ledger = BudgetLedger(total=1000)
+        ledger = LLMBudgetLedger(total=1000)
         await ledger.reserve("lease-1", 300)
         refunded = await ledger.refund("lease-1")
         assert refunded == 300
@@ -43,7 +43,7 @@ class TestBudgetLedger:
 
     @pytest.mark.anyio
     async def test_commit_records_overrun(self) -> None:
-        ledger = BudgetLedger(total=1000)
+        ledger = LLMBudgetLedger(total=1000)
         await ledger.reserve("lease-1", 200)
         overrun = await ledger.commit("lease-1", 350)
         assert overrun == 150
@@ -51,7 +51,7 @@ class TestBudgetLedger:
 
     @pytest.mark.anyio
     async def test_concurrent_reserve(self) -> None:
-        ledger = BudgetLedger(total=500)
+        ledger = LLMBudgetLedger(total=500)
 
         async def reserve_300() -> bool:
             return await ledger.reserve("a", 300)
@@ -64,7 +64,7 @@ class TestBudgetLedger:
 
     @pytest.mark.anyio
     async def test_exposes_committed_and_reserved_totals(self) -> None:
-        ledger = BudgetLedger(total=500)
+        ledger = LLMBudgetLedger(total=500)
         assert await ledger.reserve("call-1", 200) is True
         assert await ledger.commit("call-1", 125) == 0
         assert await ledger.reserve("call-2", 50) is True
@@ -78,7 +78,7 @@ class TestAgentRunConfig:
         cfg = AgentRunConfig(
             run_id="r1",
             thread_id="t1",
-            budget_total=10000,
+            llm_budget_total=10000,
             max_depth=2,
             access_policy=AccessPolicy.default(),
         )
@@ -91,12 +91,12 @@ class TestAgentRunConfig:
         cfg = AgentRunConfig(
             run_id="r1",
             thread_id="t2",
-            budget_total=5000,
+            llm_budget_total=5000,
             max_depth=1,
             access_policy=AccessPolicy.default(),
         )
         assert cfg.deadline_iso is None
-        assert cfg.budget_committed == 0
+        assert cfg.llm_budget_total == 5000
         assert isinstance(cfg.tool_policy, ToolPolicy)
 
 
@@ -105,7 +105,7 @@ class TestDeriveChildConfig:
         parent = AgentRunConfig(
             run_id="parent",
             thread_id="parent-thread",
-            budget_total=20000,
+            llm_budget_total=20000,
             max_depth=2,
             access_policy=AccessPolicy.default(),
             source_scope=("doc-a", "doc-b"),
@@ -115,7 +115,6 @@ class TestDeriveChildConfig:
             description="Research",
             system_prompt="Research",
             allowed_tools=["vector_search"],
-            estimated_token_budget=3500,
             tool_policy=ToolPolicy(max_parallel_calls=1),
         )
 
@@ -129,9 +128,7 @@ class TestDeriveChildConfig:
         assert child.access_policy == parent.access_policy
         assert child.access_policy.allowed_runtimes == parent.access_policy.allowed_runtimes
         assert child.max_depth == 1
-        assert child.budget_total == 3500
-        assert child.budget_committed == 0
-        assert child.budget_reserved == {}
+        assert child.llm_budget_total == parent.llm_budget_total
         assert child.tool_policy.max_parallel_calls == 1
 
     @pytest.mark.anyio
@@ -139,7 +136,7 @@ class TestDeriveChildConfig:
         parent = AgentRunConfig(
             run_id="parent-shared-budget",
             thread_id="parent-shared-budget",
-            budget_total=20_000,
+            llm_budget_total=20_000,
             max_depth=2,
             access_policy=AccessPolicy.default(),
         )
@@ -150,7 +147,6 @@ class TestDeriveChildConfig:
                 description="Research",
                 system_prompt="Research",
                 allowed_tools=[],
-                estimated_token_budget=3_500,
             ),
         )
         RunRegistry.remove(parent.run_id)
@@ -158,9 +154,9 @@ class TestDeriveChildConfig:
         parent_handles = RunRegistry.get_or_create(parent)
         child_handles = RunRegistry.get_or_create(child)
 
-        assert child_handles.budget_ledger is parent_handles.budget_ledger
-        assert await child_handles.budget_ledger.reserve("child-call", 1_000)
-        assert await parent_handles.budget_ledger.remaining() == 19_000
+        assert child_handles.llm_budget_ledger is parent_handles.llm_budget_ledger
+        assert await child_handles.llm_budget_ledger.reserve("child-call", 1_000)
+        assert await parent_handles.llm_budget_ledger.remaining() == 19_000
         RunRegistry.remove(child.run_id)
         RunRegistry.remove(parent.run_id)
 
@@ -168,7 +164,7 @@ class TestDeriveChildConfig:
         parent = AgentRunConfig(
             run_id="parent-policy",
             thread_id="parent-policy-thread",
-            budget_total=10000,
+            llm_budget_total=10000,
             max_depth=2,
             access_policy=AccessPolicy.default(),
         )
@@ -188,7 +184,7 @@ class TestDeriveChildConfig:
         parent = AgentRunConfig(
             run_id="parent-depth",
             thread_id="parent-depth-thread",
-            budget_total=10000,
+            llm_budget_total=10000,
             max_depth=0,
             access_policy=AccessPolicy.default(),
         )
@@ -208,21 +204,21 @@ class TestRunRegistry:
         cfg = AgentRunConfig(
             run_id="reg-test",
             thread_id="t",
-            budget_total=8000,
+            llm_budget_total=8000,
             max_depth=2,
             access_policy=AccessPolicy.default(),
         )
         RunRegistry.remove(cfg.run_id)
         handles = RunRegistry.get_or_create(cfg)
         assert isinstance(handles, AgentRuntimeHandles)
-        assert isinstance(handles.budget_ledger, BudgetLedger)
+        assert isinstance(handles.llm_budget_ledger, LLMBudgetLedger)
         assert isinstance(handles.cancellation, asyncio.Event)
 
     def test_get_or_create_returns_same_handles(self) -> None:
         cfg = AgentRunConfig(
             run_id="reg-test-2",
             thread_id="t",
-            budget_total=8000,
+            llm_budget_total=8000,
             max_depth=2,
             access_policy=AccessPolicy.default(),
         )
@@ -235,7 +231,7 @@ class TestRunRegistry:
         cfg = AgentRunConfig(
             run_id="reg-test-3",
             thread_id="t",
-            budget_total=8000,
+            llm_budget_total=8000,
             max_depth=2,
             access_policy=AccessPolicy.default(),
         )
@@ -259,7 +255,7 @@ class TestAgentRuntimePolicy:
         assert ad.model_selection.retrieval_hint_model is None  # 默认不绑定特定模型
         assert ad.max_iterations == 10
         assert ad.max_depth == 2
-        assert ad.token_budget == 8000
+        assert not hasattr(ad, "token_budget")
         assert ad.output_validation_max_retries == 2
 
     def test_definition_rejects_negative_output_validation_retries(self) -> None:
@@ -283,10 +279,8 @@ class TestAgentRuntimePolicy:
             system_prompt="You compare documents.",
             allowed_tools=["vector_search", "llm_compare"],
             access_policy=policy,
-            estimated_token_budget=12000,
         )
         assert ad.access_policy_ceiling is policy
-        assert ad.token_budget == 12000
 
     def test_tool_policy_defaults(self) -> None:
         tp = ToolPolicy()

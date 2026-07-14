@@ -100,7 +100,7 @@ def _state(*, task: str = "Answer with confidence") -> LoopState:
     config = AgentRunConfig(
         run_id="output-finalizer",
         thread_id="output-finalizer",
-        budget_total=20_000,
+        llm_budget_total=20_000,
         max_depth=1,
         access_policy=AccessPolicy.default(),
     )

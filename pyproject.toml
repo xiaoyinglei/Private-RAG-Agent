@@ -3,9 +3,9 @@ requires = ["hatchling>=1.27.0"]
 build-backend = "hatchling.build"
 
 [project]
-name = "rag"
+name = "agent-runtime"
 version = "0.1.0"
-description = "Core RAG library with graph-aware retrieval and multimodal indexing."
+description = "Agent runtime with workspace tools and RAG-backed retrieval."
 readme = "README.md"
 requires-python = ">=3.12,<3.14"
 dependencies = [
@@ -41,6 +41,7 @@ dependencies = [
   "fastapi>=0.136.1",
   "uvicorn>=0.46.0",
   "rank-bm25>=0.2.2",
+  "jsonschema>=4.26.0",
 ]
 
 [dependency-groups]
@@ -52,10 +53,11 @@ dev = [
 ]
 
 [project.scripts]
+agent = "rag.agent.cli:agent_app"
 rag = "rag.cli:app"
 
 [tool.hatch.build.targets.wheel]
-packages = ["rag"]
+packages = ["agent_runtime", "rag"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -73,7 +75,7 @@ python_version = "3.12"
 mypy_path = ["."]
 strict = true
 warn_unused_configs = true
-packages = ["rag"]
+packages = ["agent_runtime", "rag"]
 
 [[tool.mypy.overrides]]
 module = [

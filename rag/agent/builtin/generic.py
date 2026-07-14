@@ -1,65 +1,33 @@
-"""Generic agent — one prompt, no role identity.
-
-Capabilities are tools discovered at runtime, not baked into the prompt.
-The model decides what tools to use based on the task, guided by tool_search
-and the deferred tool mechanism.
-
-Tool categories:
-  CORE (always visible):  tool_search, activate_tools, task,
-                           list_files, read_file, write_file,
-                           run_python, search_text, apply_patch,
-                           run_command, update_plan, tool_repl
-  DEFERRED (activate on demand): search_knowledge, search_assets,
-                                 llm_generate, llm_summarize, llm_compare,
-                                 structured_probe
-"""
+"""Generic coding and file agent definition."""
 
 from __future__ import annotations
 
-from rag.agent.core.definition import AgentRuntimePolicy, ModelSelectionPolicy, ToolPolicy
+from rag.agent.core.definition import (
+    AgentRuntimePolicy,
+    ModelSelectionPolicy,
+    ToolPolicy,
+)
+from rag.agent.tools.builtins import RESIDENT_CODING_TOOL_NAMES
 
 GENERIC_SYSTEM_PROMPT = """\
-You are a research assistant that uses tools to answer questions and
-analyze data. Retrieved evidence is your factual authority — never
-invent facts. When evidence is insufficient, say so. Be direct and
-concise; when you have enough context, answer immediately.
-
-Your tools carry their own instructions for when and how to use them.
-If the visible tools cannot fulfill the task, call tool_search to
-discover more, then activate_tools to load them. Preserve all citation
-identifiers, evidence links, and artifact paths in your answer."""
+You are a concise coding and file agent. Use the tools that are visible in the
+current request when the task requires workspace inspection, editing,
+execution, planning, configured knowledge, or another installed capability.
+Tool definitions are the authority for their inputs and effects. Preserve
+evidence identifiers and artifact paths. Never invent file contents or tool
+results, and finish directly when no tool is needed.
+"""
 
 
 GENERIC_AGENT = AgentRuntimePolicy(
     agent_type="generic",
-    description="General-purpose research assistant with tool discovery.",
+    description="General-purpose coding and file agent.",
     system_instructions=GENERIC_SYSTEM_PROMPT,
-    core_tool_names=(
-        "tool_search",
-        "activate_tools",
-        "task",
-        "list_files",
-        "read_file",
-        "write_file",
-        "run_python",
-        "search_text",
-        "apply_patch",
-        "run_command",
-        "update_plan",
-        "tool_repl",
-    ),
-    deferred_tool_names=(
-        "search_knowledge",
-        "search_assets",
-        "llm_summarize",
-        "llm_compare",
-        "llm_generate",
-        "structured_probe",
-    ),
-model_selection=ModelSelectionPolicy(
+    core_tool_names=RESIDENT_CODING_TOOL_NAMES,
+    deferred_tool_names=(),
+    model_selection=ModelSelectionPolicy(
         thinking=True,
-        retrieval_hint_max_tokens=256,
-        tool_decision_max_tokens=2048,
+        tool_decision_max_tokens=768,
     ),
     max_iterations=10,
     max_depth=2,

@@ -85,7 +85,7 @@ class WorkspaceRuntime:
 
 def create_temp_workspace(prefix: str = "agent_run_") -> WorkspaceRuntime:
     """Create a temporary workspace directory and initialize it."""
-    root = Path(tempfile.mkdtemp(prefix=prefix))
+    root = Path(tempfile.mkdtemp(prefix=prefix)).resolve()
     ws = WorkspaceRuntime(root=root, is_temporary=True)
     ws.initialize()
     return ws

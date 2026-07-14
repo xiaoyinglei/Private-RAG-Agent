@@ -5,7 +5,6 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from rag.agent.capabilities.catalog import ToolCatalogFilter
 from rag.schema.runtime import AccessPolicy
 
 
@@ -47,9 +46,6 @@ class AgentRuntimePolicy:
     max_iterations: int
     max_depth: int
     max_active_deferred_tools: int = 10
-    tool_catalog_filter: ToolCatalogFilter = field(
-        default_factory=ToolCatalogFilter,
-    )
     access_policy_ceiling: AccessPolicy | None = None
     model_selection: ModelSelectionPolicy = field(
         default_factory=ModelSelectionPolicy,
@@ -98,17 +94,12 @@ class AgentRuntimePolicy:
         tool_policy: Any = None,
     ) -> AgentRuntimePolicy:
         """Convenience factory — flat tool list + sensible defaults for tests."""
-        from rag.agent.capabilities.catalog import CORE_TOOLS, DEFERRED_TOOLS
-
         tools = allowed_tools or []
-        core = tuple(t for t in tools if t in CORE_TOOLS)
-        deferred = tuple(t for t in tools if t in DEFERRED_TOOLS)
-        core = core + tuple(t for t in tools if t not in CORE_TOOLS and t not in DEFERRED_TOOLS)
 
         return cls(
             system_instructions=system_prompt,
-            core_tool_names=core,
-            deferred_tool_names=deferred,
+            core_tool_names=tuple(tools),
+            deferred_tool_names=(),
             max_iterations=max_iterations,
             max_depth=max_depth,
             agent_type=agent_type,
@@ -120,5 +111,3 @@ class AgentRuntimePolicy:
             output_validation_max_retries=output_validation_max_retries,
             max_stop_hook_blocks=max_stop_hook_blocks,
         )
-
-

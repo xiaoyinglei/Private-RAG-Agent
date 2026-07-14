@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
 
 from pydantic import BaseModel
 
@@ -10,6 +9,7 @@ from rag.agent.core.definition import AgentRuntimePolicy
 from rag.agent.core.llm_prompts import (
     build_loop_turn_prompt,
 )
+from rag.agent.loop.state import LoopState
 from rag.agent.memory.injector import ContextBuilder, ContextTokenAccounting
 from rag.agent.memory.models import (
     ContextBudgetSnapshot,
@@ -19,10 +19,6 @@ from rag.agent.memory.models import (
 )
 from rag.providers.llm_gateway import structured_accounted_prompt
 from rag.schema.llm import LLMCallStage, LLMStageBudget
-
-if TYPE_CHECKING:
-    from rag.agent.loop.state import LoopState
-    from rag.agent.tools.formatter import ToolOutputFormatterResolver
 
 _OPTIONAL_STATE_SECTIONS: frozenset[ContextSectionName] = frozenset(
     {
@@ -67,11 +63,9 @@ class AgentLLMContextAssembler:
         *,
         token_accounting: ContextTokenAccounting,
         stage_budgets: Mapping[LLMCallStage, LLMStageBudget],
-        formatter_resolver: ToolOutputFormatterResolver | None = None,
     ) -> None:
         self._token_accounting = token_accounting
         self._stage_budgets = dict(stage_budgets)
-        self._formatter_resolver = formatter_resolver
 
     @property
     def token_accounting(self) -> ContextTokenAccounting:
@@ -82,6 +76,7 @@ class AgentLLMContextAssembler:
         *,
         definition: AgentRuntimePolicy,
         state: LoopState,
+        budget_remaining: int | None = None,
         output_schema: type[BaseModel] | None = None,
     ) -> AssembledAgentLLMContext:
         return self._assemble(
@@ -93,6 +88,7 @@ class AgentLLMContextAssembler:
                     "instructions",
                     build_loop_turn_prompt(
                         state,
+                        budget_remaining=budget_remaining,
                         allowed_tools=definition.allowed_tools,
                     ),
                 ),
@@ -318,7 +314,6 @@ class AgentLLMContextAssembler:
                 builder = ContextBuilder(
                     max_context_tokens=1,
                     token_accounting=self._token_accounting,
-                    formatter_resolver=self._formatter_resolver,
                 )
                 required_probe = builder.assemble_loop(
                     definition=self._empty_definition(),
@@ -365,7 +360,6 @@ class AgentLLMContextAssembler:
         builder = ContextBuilder(
             max_context_tokens=max_context_tokens,
             token_accounting=self._token_accounting,
-            formatter_resolver=self._formatter_resolver,
         )
         # Inject persistent memories as recalled_memories for the historical_hints section
         recalled = tuple(state.get("persistent_memories", ()))

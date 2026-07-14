@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from pydantic import BaseModel
-
 from rag.agent.core.observations import (
     ComputationResult,
     ContextUnit,
@@ -9,15 +7,8 @@ from rag.agent.core.observations import (
     ObservationExtractor,
     StructuredObservation,
 )
-from rag.agent.tools.asset_tools import AssetAnalyzeOutput
-from rag.agent.tools.rag_answer_tools import RAGSearchAnswerOutput
-from rag.agent.tools.rag_tools import SearchOutput
-from rag.agent.tools.spec import ToolError, ToolResult
+from rag.agent.tools.tool import ToolResult
 from rag.schema.query import AnswerCitation, EvidenceItem
-
-
-class _TextOutput(BaseModel):
-    text: str
 
 
 def test_neutral_rag_observation_preserves_evidence_and_citations() -> None:
@@ -43,14 +34,12 @@ def test_neutral_rag_observation_preserves_evidence_and_citations() -> None:
     result = ToolResult(
         tool_call_id="tc-rag",
         tool_name="rag_search_answer",
-        status="ok",
-        output=RAGSearchAnswerOutput(
-            text="Grounded answer",
-            evidence=[evidence],
-            citations=[citation],
-            groundedness_flag=True,
-        ),
-        latency_ms=0,
+        structured_content={
+            "text": "Grounded answer",
+            "evidence": [evidence.model_dump(mode="json")],
+            "citations": [citation.model_dump(mode="json")],
+            "groundedness_flag": True,
+        },
     )
 
     update = ObservationExtractor().reduce_tool_results({"tool_results": [result]})
@@ -79,9 +68,8 @@ def test_retrieval_observation_preserves_score_rerank_score_and_locator() -> Non
     result = ToolResult(
         tool_call_id="tc-search",
         tool_name="rerank",
-        status="ok",
-        output=SearchOutput(
-            items=[
+        structured_content={
+            "items": [
                 {
                     "text": "Ranked evidence",
                     "doc_id": 8,
@@ -96,8 +84,7 @@ def test_retrieval_observation_preserves_score_rerank_score_and_locator() -> Non
                     "retrieval_channels": ["vector", "rerank"],
                 }
             ]
-        ),
-        latency_ms=0,
+        },
     )
 
     update = ObservationExtractor().reduce_tool_results({"tool_results": [result]})
@@ -137,21 +124,19 @@ def test_computation_observation_preserves_expression_and_asset_provenance() -> 
     result = ToolResult(
         tool_call_id="tc-compute",
         tool_name="asset_analyze",
-        status="ok",
-        output=AssetAnalyzeOutput(
-            asset_id=14,
-            asset_type="table",
-            sheet_name="Sales",
-            operation="dataframe_sql",
-            columns=["total"],
-            rows=[["15.49"]],
-            raw_row_count=1,
-            elapsed_ms=1.0,
-            truncated=False,
-            query="SELECT SUM(amount) AS total FROM sheet",
-            markdown="| total |\n|---|\n| 15.49 |",
-        ),
-        latency_ms=0,
+        structured_content={
+            "asset_id": 14,
+            "asset_type": "table",
+            "sheet_name": "Sales",
+            "operation": "dataframe_sql",
+            "columns": ["total"],
+            "rows": [["15.49"]],
+            "raw_row_count": 1,
+            "elapsed_ms": 1.0,
+            "truncated": False,
+            "query": "SELECT SUM(amount) AS total FROM sheet",
+            "markdown": "| total |\n|---|\n| 15.49 |",
+        },
     )
 
     update = ObservationExtractor().reduce_tool_results({"tool_results": [result]})
@@ -181,14 +166,11 @@ def test_structured_tool_error_is_visible_without_controller_fields() -> None:
     result = ToolResult(
         tool_call_id="tc-error",
         tool_name="vector_search",
-        status="error",
-        error=ToolError(
-            code="timeout",
-            message="retrieval timed out",
-            retryable=True,
-            detail={"provider": "vector"},
-        ),
-        latency_ms=100,
+        is_error=True,
+        error_code="timeout",
+        error_message="retrieval timed out",
+        retryable=True,
+        metadata={"provider": "vector"},
     )
 
     update = ObservationExtractor().reduce_tool_results({"tool_results": [result]})
@@ -225,9 +207,7 @@ def test_neutral_reducer_skips_already_observed_tool_calls() -> None:
     result = ToolResult(
         tool_call_id="tc-text",
         tool_name="llm_summarize",
-        status="ok",
-        output=_TextOutput(text="Summary"),
-        latency_ms=0,
+        structured_content={"text": "Summary"},
     )
     existing = StructuredObservation(
         tool_call_id="tc-text",

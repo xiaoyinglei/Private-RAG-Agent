@@ -540,34 +540,30 @@ class TestRunPython:
 
 
 # ===================================================================
-# runners()
+# resident tools
 # ===================================================================
 
 
-class TestWorkspaceTools:
-    """All workspace tools are self-contained BaseTool classes."""
+class TestResidentTools:
+    """The public coding baseline consists only of canonical Tool values."""
 
-    def test_all_tool_classes_registered(self) -> None:
-        from rag.agent.tools.workspace_tools import WORKSPACE_TOOL_CLASSES
+    def test_create_resident_coding_tools(self, ws: WorkspaceRuntime) -> None:
+        from rag.agent.tools.builtins import (
+            RESIDENT_CODING_TOOL_NAMES,
+            create_resident_coding_tools,
+        )
+        from rag.agent.tools.tool import Tool
 
-        names = {cls.name for cls in WORKSPACE_TOOL_CLASSES}
-        assert "list_files" in names
-        assert "read_file" in names
-        assert "write_file" in names
-        assert "run_python" in names
-        assert "search_text" in names
-        assert "apply_patch" in names
-        assert "run_command" in names
-        assert "tool_repl" in names
-        assert "structured_probe" in names
+        tools = create_resident_coding_tools(
+            ws,
+            plan_updater=lambda _arguments: {
+                "accepted": True,
+                "revision": 1,
+                "message": "updated",
+            },
+        )
 
-    def test_create_workspace_tools(self, ops: PrimitiveOps) -> None:
-        from rag.agent.tools.workspace_tools import create_workspace_tools
-
-        tools = create_workspace_tools(ops._workspace)
-        assert len(tools) == 9
-        for tool in tools:
-            spec = tool.to_spec()
-            assert spec.name
-            assert spec.description
-            assert tool.aci is not None  # every tool has a ToolCard
+        assert tuple(tool.definition.name for tool in tools) == (
+            RESIDENT_CODING_TOOL_NAMES
+        )
+        assert all(isinstance(tool, Tool) for tool in tools)

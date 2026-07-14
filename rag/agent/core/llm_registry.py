@@ -4,14 +4,10 @@ import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 from rag.agent.core.llm_config import AgentModelsConfig, ModelProvider, ModelSpec
-from rag.assembly.models import ProviderConfig
-from rag.assembly.support import build_provider
-from rag.assembly.tokenizer import TokenAccountingService, TokenizerContract
 from rag.models.config import GenerationConfig, GenerationTaskConfig
-from rag.providers.llm_gateway import LLMGateway
 from rag.schema.llm import parse_llm_stage_budgets
 
 
@@ -28,8 +24,33 @@ class ResolvedModel:
     generator: object
     kwargs: dict[str, Any]
     context_window_tokens: int = 32_768
-    gateway: LLMGateway | None = None
-    token_accounting: TokenAccountingService | None = None
+    gateway: Any | None = None
+    token_accounting: Any | None = None
+    provider: str = "openai-compatible"
+    model: str = "agent-model"
+    supports_native_tools: bool = True
+
+
+class ModelResolver(Protocol):
+    @property
+    def default_model(self) -> str: ...
+
+    @property
+    def fallback_model(self) -> str | None: ...
+
+    @property
+    def generation_config(self) -> GenerationConfig: ...
+
+    def resolve(self, alias: str) -> ResolvedModel: ...
+
+    def resolve_or_fallback(self, alias: str) -> ResolvedModel: ...
+
+    def resolve_for_node(
+        self,
+        *,
+        node_model: str | None,
+        node_name: str,
+    ) -> ResolvedModel: ...
 
 
 class ModelRegistry:
@@ -55,6 +76,16 @@ class ModelRegistry:
     @property
     def generation_config(self) -> GenerationConfig:
         return self._config.generation
+
+    @property
+    def model_ids(self) -> tuple[str, ...]:
+        return tuple(self._config.models)
+
+    def get_model_spec(self, alias: str) -> ModelSpec:
+        spec = self._config.models.get(alias)
+        if spec is None:
+            raise UnknownModelAliasError(f"Model alias {alias!r} not found in config")
+        return spec
 
     @classmethod
     def from_env(cls, env_path: str = ".env", *, default_model: str | None = None) -> ModelRegistry:
@@ -97,11 +128,13 @@ class ModelRegistry:
         import yaml
 
         with open(path, encoding="utf-8") as fh:
-            data = yaml.safe_load(fh)
+            data = yaml.safe_load(fh) or {}
 
         # Support configs/models.yaml: models keyed by alias plus defaults.
         raw_models = data.get("models", {})
         defaults = data.get("defaults", {})
+        raw_providers = data.get("providers", {})
+        providers = raw_providers if isinstance(raw_providers, dict) else {}
 
         agent_models: dict[str, dict[str, object]] = {}
         for alias, entry in raw_models.items():
@@ -109,13 +142,32 @@ class ModelRegistry:
                 continue
             if entry.get("capability") != "chat":
                 continue
+            merged = _merge_provider_model_entry(
+                alias=str(alias),
+                entry=entry,
+                providers=providers,
+            )
+            cost = entry.get("cost")
+            if not isinstance(cost, dict):
+                cost = {}
             agent_models[alias] = {
-                "provider": _agent_provider_kind(entry),
+                "provider": _agent_provider_kind(merged),
+                "provider_name": entry.get("provider"),
+                "protocol": merged.get("protocol"),
                 "model": entry["model"],
                 "max_tokens": entry.get("max_tokens", 2048),
-                "base_url": entry.get("base_url"),
-                "api_key_env": entry.get("api_key_env"),
+                "base_url": merged.get("base_url"),
+                "api_key_env": merged.get("api_key_env"),
                 "context_window_tokens": entry.get("context_window_tokens", 32_768),
+                "supports_tools": entry.get("tools", entry.get("supports_tools", True)),
+                "supports_structured_output": entry.get(
+                    "structured_output",
+                    entry.get("supports_structured_output", True),
+                ),
+                "location": merged.get("location"),
+                "input_cost_per_1m": cost.get("input_per_1m"),
+                "output_cost_per_1m": cost.get("output_per_1m"),
+                "runtime": merged.get("runtime"),
             }
 
         default_model = defaults.get("primary_model", "")
@@ -133,6 +185,10 @@ class ModelRegistry:
 
     def resolve(self, alias: str) -> ResolvedModel:
         """别名 → (Generator, kwargs)。按 alias 缓存，同 alias 多次调用返回同一 Generator。"""
+        from rag.assembly.support import build_provider
+        from rag.assembly.tokenizer import TokenAccountingService, TokenizerContract
+        from rag.providers.llm_gateway import LLMGateway
+
         if alias in self._cache:
             return self._cache[alias]
 
@@ -173,6 +229,9 @@ class ModelRegistry:
                 stage_budgets=self._config.llm_stage_budgets,
             ),
             token_accounting=token_accounting,
+            provider=spec.provider_name or spec.provider.value,
+            model=spec.model,
+            supports_native_tools=spec.supports_tools,
         )
         self._cache[alias] = resolved
         return resolved
@@ -201,7 +260,9 @@ class ModelRegistry:
         return self.resolve_or_fallback(alias)
 
     @staticmethod
-    def _spec_to_provider_config(spec: ModelSpec) -> ProviderConfig:
+    def _spec_to_provider_config(spec: ModelSpec) -> Any:
+        from rag.assembly.models import ProviderConfig
+
         if spec.provider == ModelProvider.MLX:
             return ProviderConfig(
                 provider_kind="openai-compatible",
@@ -225,12 +286,105 @@ class ModelRegistry:
         raise ValueError(f"Unsupported provider: {spec.provider}")
 
 
+def _merge_provider_model_entry(
+    *,
+    alias: str,
+    entry: dict[str, object],
+    providers: dict[object, object],
+) -> dict[str, object]:
+    """Merge connection-level provider fields into a model declaration.
+
+    Newer configs split ``providers`` (how to connect) from ``models`` (what to
+    run). Older configs keep those fields directly on the model; those continue
+    to work because model fields override provider fields.
+    """
+    provider_ref = entry.get("provider")
+    provider_entry = providers.get(provider_ref)
+    provider = provider_entry if isinstance(provider_entry, dict) else {}
+    merged: dict[str, object] = {
+        "provider": provider_ref,
+        "protocol": _first_present(entry, provider, "protocol"),
+        "base_url": _first_present(entry, provider, "base_url"),
+        "api_key_env": _first_present(entry, provider, "api_key_env"),
+        "location": _first_present(entry, provider, "location"),
+    }
+    runtime = _merge_runtime_config(
+        alias=alias,
+        model=str(entry.get("model", "")),
+        provider_runtime=provider.get("runtime"),
+        model_runtime=entry.get("runtime"),
+    )
+    if runtime:
+        merged["runtime"] = runtime
+    return merged
+
+
+def _first_present(
+    primary: dict[str, object],
+    fallback: dict[object, object],
+    key: str,
+) -> object | None:
+    value = primary.get(key)
+    if value is not None:
+        return value
+    fallback_value = fallback.get(key)
+    return fallback_value if fallback_value is not None else None
+
+
+def _merge_runtime_config(
+    *,
+    alias: str,
+    model: str,
+    provider_runtime: object,
+    model_runtime: object,
+) -> dict[str, object]:
+    provider = provider_runtime if isinstance(provider_runtime, dict) else {}
+    model_specific = model_runtime if isinstance(model_runtime, dict) else {}
+    runtime: dict[str, object] = {}
+    for key in (
+        "health_url",
+        "expected_model_contains",
+        "startup_timeout_seconds",
+        "poll_interval_seconds",
+    ):
+        value = _first_present(model_specific, provider, key)
+        if value is not None:
+            runtime[key] = value
+
+    launch_command = _first_present(model_specific, provider, "launch_command")
+    if launch_command is None:
+        template = _first_present(model_specific, provider, "launch_command_template")
+        if isinstance(template, list | tuple):
+            launch_command = _expand_launch_command_template(
+                template,
+                alias=alias,
+                model=model,
+            )
+    if launch_command is not None:
+        runtime["launch_command"] = launch_command
+    return runtime
+
+
+def _expand_launch_command_template(
+    template: list[object] | tuple[object, ...],
+    *,
+    alias: str,
+    model: str,
+) -> list[str]:
+    return [
+        str(part)
+        .replace("{model}", model)
+        .replace("{alias}", alias)
+        for part in template
+    ]
+
+
 def _agent_provider_kind(entry: dict[str, object]) -> str:
     protocol = _normalized_provider_value(entry.get("protocol"))
     provider = _normalized_provider_value(entry.get("provider"))
     if protocol == "openai_compatible":
         return ModelProvider.OPENAI_COMPATIBLE.value
-    if provider in {"openai_compatible", "qwen", "deepseek"}:
+    if provider in {"openai_compatible", "qwen", "deepseek", "groq", "mimo"}:
         return ModelProvider.OPENAI_COMPATIBLE.value
     if provider == "ollama":
         return ModelProvider.OLLAMA.value

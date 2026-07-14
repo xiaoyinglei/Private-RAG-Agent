@@ -6,9 +6,16 @@ from typing import Any, cast
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 
+from rag.agent.core.context import AgentRunConfig
+from rag.agent.loop.state import create_loop_state
+from rag.agent.loop.substate import MemoryState
 from rag.agent.memory.persistent.extractor import MemoryExtractor
 from rag.agent.memory.persistent.models import MemoryFile
+from rag.agent.memory.persistent.runtime import PersistentMemoryRuntime
 from rag.agent.memory.persistent.selector import MemorySelector
+from rag.agent.memory.persistent.store import PersistentMemoryStore
+from rag.agent.workspace import open_workspace
+from rag.schema.runtime import AccessPolicy
 
 
 class _StaticGateway:
@@ -99,3 +106,35 @@ async def test_selector_skips_llm_when_user_memories_fill_selection() -> None:
         "user-3",
         "user-4",
     ]
+
+
+@pytest.mark.anyio
+async def test_persistent_memory_runtime_loads_selected_memories(
+    tmp_path,
+) -> None:
+    workspace = open_workspace(tmp_path, create=True)
+    store = PersistentMemoryStore(workspace)
+    store.write_memory(_memory("project-direct-agent"))
+    state = create_loop_state(
+        task="continue direct agent work",
+        run_config=AgentRunConfig(
+            run_id="memory-runtime-load",
+            thread_id="memory-runtime-load",
+            max_depth=1,
+            access_policy=AccessPolicy.default(),
+        ),
+    )
+
+    await PersistentMemoryRuntime(model_registry=None).load(
+        state,
+        store,
+        task="continue direct agent work",
+    )
+
+    assert "project-direct-agent" in state["memory_index"]
+    assert any(
+        "project-direct-agent content" in memory
+        for memory in state["persistent_memories"]
+    )
+    assert isinstance(state["memory_state"], MemoryState)
+    assert state["memory_state"].persistent.selected_count == 1

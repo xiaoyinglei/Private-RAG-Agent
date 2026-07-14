@@ -1,193 +1,119 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
+from dataclasses import replace
+
 import pytest
-from pydantic import BaseModel
 
-from rag.agent.core.context import AgentRunConfig
-from rag.agent.core.definition import AgentRuntimePolicy
-from rag.agent.tools.registry import (
-    ToolInputValidationError,
-    ToolOutputValidationError,
-    ToolRegistry,
-    ToolRunnerMissingError,
-)
-from rag.agent.tools.spec import ToolError, ToolPermissions, ToolSpec
-from rag.schema.runtime import AccessPolicy
-
-
-class DummyInput(BaseModel):
-    text: str
-
-
-class DummyOutput(BaseModel):
-    result: str
-
-
-_dummy_spec = ToolSpec(
-    name="dummy",
-    description="A dummy tool",
-    input_model=DummyInput,
-    output_model=DummyOutput,
-    error_model=ToolError,
-    permissions=ToolPermissions(),
-    timeout_seconds=1.0,
+from rag.agent.core.model_request import build_tool_manifest
+from rag.agent.tools.registry import ToolRegistry
+from rag.agent.tools.tool import (
+    CancellationMode,
+    InterruptBehavior,
+    JsonValue,
+    NormalizedToolOutput,
+    ResolvedToolUse,
+    Tool,
+    ToolDefinition,
+    json_schema_input,
 )
 
 
-class TestToolRegistry:
-    def test_register_and_get(self) -> None:
-        registry = ToolRegistry()
-        registry.register(_dummy_spec)
-        assert registry.get("dummy") is _dummy_spec
+def _tool(
+    name: str,
+    *,
+    execution_revision: str = "runner-v1",
+) -> Tool:
+    schema: Mapping[str, JsonValue] = {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": False,
+    }
+    return Tool(
+        definition=ToolDefinition(
+            name=name,
+            description=f"Use {name} for its documented operation.",
+            input_schema=schema,
+        ),
+        validate_input=json_schema_input(schema),
+        run=lambda _arguments: {},
+        normalize_output=lambda _raw: NormalizedToolOutput(),
+        output_schema=None,
+        static_effects=frozenset(),
+        resolve_use=lambda _arguments: ResolvedToolUse(
+            effects=frozenset(),
+            targets=(),
+        ),
+        execution_revision=execution_revision,
+        idempotent=True,
+        concurrency_safe=True,
+        cancellation_mode=CancellationMode.COOPERATIVE,
+        interrupt_behavior=InterruptBehavior.CANCEL,
+        timeout_seconds=1.0,
+        max_model_output_bytes=4096,
+    )
 
-    def test_get_missing_raises(self) -> None:
-        registry = ToolRegistry()
-        with pytest.raises(KeyError, match="not found"):
-            registry.get("nonexistent")
 
-    def test_list_all(self) -> None:
-        registry = ToolRegistry()
-        registry.register(_dummy_spec)
-        another = ToolSpec(
-            name="another",
-            description="x",
-            input_model=DummyInput,
-            output_model=DummyOutput,
-            error_model=ToolError,
-            permissions=ToolPermissions(),
-            timeout_seconds=2.0,
-        )
-        registry.register(another)
-        names = [spec.name for spec in registry.list_all()]
-        assert "dummy" in names
-        assert "another" in names
+def test_registry_registers_canonical_tools_in_insertion_order() -> None:
+    first = _tool("first")
+    second = _tool("second")
+    registry = ToolRegistry()
 
-    def test_register_duplicate_overwrites(self) -> None:
-        registry = ToolRegistry()
-        registry.register(_dummy_spec)
-        updated = ToolSpec(
-            name="dummy",
-            description="updated",
-            input_model=DummyInput,
-            output_model=DummyOutput,
-            error_model=ToolError,
-            permissions=ToolPermissions(),
-            timeout_seconds=3.0,
-        )
-        registry.register(updated)
-        assert registry.get("dummy").timeout_seconds == 3.0
+    registry.register(first)
+    registry.register(second)
 
-    @pytest.mark.anyio
-    async def test_runner_executes_with_validated_input_and_output(self) -> None:
-        registry = ToolRegistry()
+    assert registry.get("first") is first
+    assert registry.list_all() == (first, second)
 
-        def runner(payload: DummyInput) -> dict[str, str]:
-            return {"result": payload.text.upper()}
 
-        registry.register(_dummy_spec, runner=runner)
+def test_registry_rejects_duplicate_names_instead_of_overwriting() -> None:
+    registry = ToolRegistry()
+    registry.register(_tool("duplicate"))
 
-        result = await registry.run("dummy", {"text": "hello"})
+    with pytest.raises(ValueError, match="duplicate.*already registered"):
+        registry.register(_tool("duplicate", execution_revision="runner-v2"))
 
-        assert result == DummyOutput(result="HELLO")
 
-    @pytest.mark.anyio
-    async def test_contextual_runner_receives_trusted_run_config(self) -> None:
-        from rag.agent.tools.registry import ToolExecutionContext
+def test_registry_freezes_once_and_rejects_later_registration() -> None:
+    first = _tool("first")
+    registry = ToolRegistry()
+    registry.register(first)
 
-        access_policy = AccessPolicy(allowed_runtimes=frozenset())
-        run_config = AgentRunConfig(
-            run_id="contextual-runner",
-            thread_id="contextual-runner",
-            budget_total=100,
-            max_depth=1,
-            access_policy=access_policy,
-        )
-        seen_contexts: list[ToolExecutionContext] = []
+    snapshot = registry.freeze()
 
-        def runner(
-            payload: DummyInput,
-            context: ToolExecutionContext,
-        ) -> DummyOutput:
-            seen_contexts.append(context)
-            return DummyOutput(result=payload.text)
+    assert snapshot is registry.freeze()
+    assert tuple(snapshot) == ("first",)
+    assert snapshot["first"] is first
+    with pytest.raises(TypeError):
+        snapshot["second"] = _tool("second")  # type: ignore[index]
+    with pytest.raises(RuntimeError, match="frozen"):
+        registry.register(_tool("second"))
 
-        registry = ToolRegistry()
-        registry.register(_dummy_spec)
-        registry.register_contextual_runner("dummy", runner)
 
-        result = await registry.run(
-            "dummy",
-            {"text": "hello"},
-            execution_context=ToolExecutionContext(run_config=run_config),
-        )
+def test_registry_get_missing_name_fails_loudly() -> None:
+    with pytest.raises(KeyError, match="missing"):
+        ToolRegistry().get("missing")
 
-        assert result == DummyOutput(result="hello")
-        assert seen_contexts[0].run_config is run_config
 
-    @pytest.mark.anyio
-    async def test_contextual_runner_receives_trusted_state_and_definition(self) -> None:
-        from rag.agent.tools.registry import ToolExecutionContext
+def test_manifest_changes_when_execution_contract_changes() -> None:
+    original = _tool("read_file", execution_revision="runner-v1")
+    changed = replace(original, execution_revision="runner-v2")
 
-        run_config = AgentRunConfig(
-            run_id="trusted-context",
-            thread_id="trusted-context",
-            budget_total=100,
-            max_depth=1,
-            access_policy=AccessPolicy.default(),
-        )
-        state = {"task": "trusted task", "run_config": run_config}
-        definition = AgentRuntimePolicy.test_factory(
-            agent_type="test",
-            description="test",
-            system_prompt="trusted policy",
-            allowed_tools=["dummy"],
-        )
-        seen_contexts: list[ToolExecutionContext] = []
+    first_registry = ToolRegistry()
+    first_registry.register(original)
+    second_registry = ToolRegistry()
+    second_registry.register(changed)
 
-        def runner(
-            payload: DummyInput,
-            context: ToolExecutionContext,
-        ) -> DummyOutput:
-            seen_contexts.append(context)
-            return DummyOutput(result=payload.text)
+    first = build_tool_manifest(
+        tools=tuple(first_registry.freeze().values()),
+        resident_tool_names=("read_file",),
+        provider_serializer_revision="provider-v1",
+    )
+    second = build_tool_manifest(
+        tools=tuple(second_registry.freeze().values()),
+        resident_tool_names=("read_file",),
+        provider_serializer_revision="provider-v1",
+    )
 
-        registry = ToolRegistry()
-        registry.register(_dummy_spec)
-        registry.register_contextual_runner("dummy", runner)
-
-        await registry.run(
-            "dummy",
-            {"text": "hello"},
-            execution_context=ToolExecutionContext(
-                run_config=run_config,
-                state=state,  # type: ignore[arg-type]
-                definition=definition,
-            ),
-        )
-
-        assert seen_contexts[0].state is state
-        assert seen_contexts[0].definition is definition
-
-    @pytest.mark.anyio
-    async def test_missing_runner_fails_closed(self) -> None:
-        registry = ToolRegistry()
-        registry.register(_dummy_spec)
-
-        with pytest.raises(ToolRunnerMissingError, match="dummy has no registered callable runner"):
-            await registry.run("dummy", {"text": "hello"})
-
-    @pytest.mark.anyio
-    async def test_invalid_runner_input_raises_typed_validation_error(self) -> None:
-        registry = ToolRegistry()
-        registry.register(_dummy_spec, runner=lambda payload: DummyOutput(result=payload.text))
-
-        with pytest.raises(ToolInputValidationError):
-            await registry.run("dummy", {"unexpected": "hello"})
-
-    @pytest.mark.anyio
-    async def test_invalid_runner_output_raises_typed_validation_error(self) -> None:
-        registry = ToolRegistry()
-        registry.register(_dummy_spec, runner=lambda payload: {"missing": payload.text})
-
-        with pytest.raises(ToolOutputValidationError):
-            await registry.run("dummy", {"text": "hello"})
+    assert first.toolset_revision != second.toolset_revision
+    assert first.entries[0].execution_contract_hash != second.entries[0].execution_contract_hash

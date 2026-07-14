@@ -10,7 +10,7 @@
 uv sync
 ```
 
-准备 `.env`：
+如果要临时走云端模型，再准备 `.env`；默认本地 Qwen 不需要 API key：
 
 ```bash
 cat > .env <<'EOF'
@@ -45,16 +45,32 @@ lsof -nP -iTCP:6379 -sTCP:LISTEN
 
 | 能力 | 默认别名 | 实际模型 / 服务 |
 | --- | --- | --- |
-| 生成 / 摘要 / Agent tool decision | `mimo_cloud` | `mimo-v2.5-pro`，OpenAI-compatible，`MIMO_API_KEY` |
+| 生成 / 摘要 / Agent tool decision | `qwen3_8b_mlx_4bit` | `mlx-community/Qwen3-8B-4bit`，OpenAI-compatible，`127.0.0.1:8080` |
 | Embedding | `qwen3_embedding_4b_4bit_dwq` | `mlx-community/Qwen3-Embedding-4B-4bit-DWQ`，HTTP service，`127.0.0.1:9090` |
 | Rerank | `bge_reranker_v2_m3` | `BAAI/bge-reranker-v2-m3`，HTTP service，`127.0.0.1:9092` |
 
 内存策略：
 
-- 默认 chat 走 Mimo 云服务，不需要本地常驻 Qwen。
+- 默认 chat 走本地 Qwen 服务。`agent run --model qwen3_8b_mlx_4bit`
+  会先检查 `runtime.health_url`，未启动时按 `runtime.launch_command`
+  自动拉起 `127.0.0.1:8080` 的 OpenAI-compatible server。
 - 入库和查询需要 embedding；建议启动 embedding HTTP 服务，避免每条命令重复加载模型。
 - rerank 是可选服务，默认省内存时关闭。
 - 切换 embedding 模型后必须换新的 Milvus collection prefix，旧向量不能混用。
+- chat 模型的当前选择是 Agent session state，不是 `configs/models.yaml`
+  的全局改写。
+- 指定什么 chat 模型就必须用什么模型；不会 silent fallback，不会自动换端口，也不会自动杀已有进程。如果 `8080` 已经跑着别的模型，会报 endpoint conflict。
+
+查看和切换当前 Agent 模型 session：
+
+```bash
+uv run agent model list
+uv run agent model current
+uv run agent model switch mimo_cloud
+```
+
+`agent model switch` 写 `.rag/agent_model_session.json`。临时只跑一次其他模型时，用
+`agent run --model mimo_cloud ...`，不要改 `configs/models.yaml`。
 
 先检查是否已经有同模型服务，避免重复常驻占内存：
 
@@ -95,14 +111,16 @@ uv run rag rerank-service \
 '
 ```
 
-如果你要改用本地 Qwen chat 服务，可以启动本地 OpenAI-compatible server，并在命令里用 `--model qwen3_8b_mlx_4bit`：
+可选：手动预热默认本地 Qwen chat 服务。通常不需要；Agent 会按
+`configs/models.yaml` 的 runtime 配置自动启动。手动预热适合提前加载模型、
+减少第一次请求等待：
 
 ```bash
 screen -S rag_qwen_8080 -X quit >/dev/null 2>&1 || true
 screen -dmS rag_qwen_8080 zsh -lc '
 cd "/Users/leixiaoying/LLM/RAG学习"
 uv run python -m mlx_lm.server \
-  --model Qwen/Qwen3-8B-MLX-4bit \
+  --model mlx-community/Qwen3-8B-4bit \
   --host 127.0.0.1 \
   --port 8080 \
   --chat-template-args '"'"'{"enable_thinking": false}'"'"'
@@ -128,11 +146,11 @@ screen -S rag_rerank_9092 -X quit >/dev/null 2>&1 || true
 
 ## 私有文档端到端运行手册
 
-先启动 embedding 服务；rerank 默认不开，需要时再按"常用开关"打开。默认 chat 走 `configs/models.yaml` 中的 `mimo_cloud`，需要 `.env` 里有 `MIMO_API_KEY`。
+先准备 embedding 服务；rerank 默认不开，需要时再按"常用开关"打开。默认 chat 走 `configs/models.yaml` 中的 `qwen3_8b_mlx_4bit`，Agent 会按 runtime 配置自动检查和启动本地 chat 服务。
 
 ### 统一变量
 
-入库和查询必须使用同一套 `STORAGE_ROOT / VECTOR_DSN / VECTOR_PREFIX`。切换 embedding 模型或想重建干净索引时，换新的 `STORAGE_ROOT` 和 `VECTOR_PREFIX`。
+入库和 `agent run --knowledge ...` 必须使用同一套 `STORAGE_ROOT / VECTOR_DSN / VECTOR_PREFIX`。切换 embedding 模型或想重建干净索引时，换新的 `STORAGE_ROOT` 和 `VECTOR_PREFIX`。
 
 ```bash
 cd "/Users/leixiaoying/LLM/RAG学习"
@@ -141,7 +159,7 @@ cd "/Users/leixiaoying/LLM/RAG学习"
 export INPUT_PATH="/absolute/path/to/one-file.docx"
 export INPUT_DIR="/absolute/path/to/private-docs"
 
-# 索引位置：同一批入库和查询必须保持一致。
+# 索引位置：同一批入库和显式 --knowledge 查询必须保持一致。
 export STORAGE_ROOT="data/indexes/private_docs_v1"
 export VECTOR_DSN="http://127.0.0.1:19530"
 export VECTOR_PREFIX="private_docs_v1"
@@ -209,40 +227,31 @@ finally:
 PY
 ```
 
-### RAG 查询
+### Agent 查询已入库知识
 
-普通制度/流程问答用 `auto`：
+日常查询只调用 Agent。不要手动判断 retrieval profile；如果 `STORAGE_ROOT / VECTOR_DSN / VECTOR_PREFIX` 指向已入库索引，Agent 会把知识库检索作为 deferred tools 暴露给模型，由模型自己决定是否调用。
 
-```bash
-unset RAG_RERANK_SERVICE_URL
-
-uv run rag query \
-  --query "单笔国内差旅报销金额超过 12000 元需要谁审批？请给出处" \
-  --storage-root "$STORAGE_ROOT" \
-  --vector-backend milvus \
-  --vector-dsn "$VECTOR_DSN" \
-  --vector-collection-prefix "$VECTOR_PREFIX" \
-  --reranker-model none \
-  --retrieval-profile auto
-```
-
-Excel / 表格 / PPT 表格 / 图片 OCR 这类资产问题优先用 `asset`，并建议加 `--json` 看证据和计算结果：
+普通制度/流程问答：
 
 ```bash
 unset RAG_RERANK_SERVICE_URL
 
-uv run rag query \
-  --query "日提货总量是多少？请给出处" \
-  --storage-root "$STORAGE_ROOT" \
-  --vector-backend milvus \
-  --vector-dsn "$VECTOR_DSN" \
-  --vector-collection-prefix "$VECTOR_PREFIX" \
-  --reranker-model none \
-  --retrieval-profile asset \
-  --json
+uv run agent run \
+  "单笔国内差旅报销金额超过 12000 元需要谁审批？请给出处" \
+  --verbose
 ```
 
-JSON 重点字段：
+Excel / 表格 / PPT 表格 / 图片 OCR 这类已入库资产问题也直接问 Agent：
+
+```bash
+unset RAG_RERANK_SERVICE_URL
+
+uv run agent run \
+  "日提货总量是多少？请检查相关表格并给出处" \
+  --verbose
+```
+
+需要看底层 evidence / diagnostics 时，才临时用 `rag query --json` 做检索诊断；这不是日常用户入口。JSON 重点字段：
 
 - `answer.answer_text`
 - `answer.answer_sections[].evidence_ids`
@@ -278,43 +287,36 @@ uv run python scripts/evaluate_private_retrieval.py \
 
 ### Agent 测试
 
+`agent run` 默认是纯 Agent + workspace tools，不会因为当前环境已有 `STORAGE_ROOT`、`VECTOR_DSN`、`VECTOR_PREFIX` 就自动启动 RAG。需要知识库证据时显式传入 `--knowledge`；RAG 会作为 lazy knowledge provider 注册，并在模型首次调用 `search_knowledge` 时初始化。
+
 普通制度问答：
 
 ```bash
 unset RAG_RERANK_SERVICE_URL
 
-uv run rag agent run \
+uv run agent run \
   "单笔国内差旅报销金额超过 12000 元需要谁审批？请给出处" \
   --agent generic \
-  --storage-root "$STORAGE_ROOT" \
-  --vector-backend milvus \
-  --vector-dsn "$VECTOR_DSN" \
-  --vector-collection-prefix "$VECTOR_PREFIX" \
-  --reranker-model none \
   --verbose
 ```
 
 已入库资产问题：
 
 ```bash
-uv run rag agent run \
+uv run agent run \
   "日提货总量是多少？请检查相关表格并给出处" \
   --agent generic \
-  --storage-root "$STORAGE_ROOT" \
-  --vector-backend milvus \
-  --vector-dsn "$VECTOR_DSN" \
-  --vector-collection-prefix "$VECTOR_PREFIX" \
-  --reranker-model none \
+  --knowledge private_docs \
   --verbose
 ```
 
 本地文件直接分析，不需要先入 RAG：
 
 ```bash
-uv run rag agent run \
+uv run agent run \
   "读取这个 Excel，汇总关键指标，并写一个简短摘要" \
   --agent generic \
-  --input-file "/absolute/path/to/report.xlsx" \
+  --file "/absolute/path/to/report.xlsx" \
   --verbose
 ```
 
@@ -322,59 +324,54 @@ uv run rag agent run \
 
 ```text
 本地文件：
-  list_files -> structured_probe 或 run_python_inline -> final answer / write_file
+  list_files -> structured_probe 或 run_python -> final answer / write_file
 
 知识库问题：
-  tool_search -> activate_tools -> rag_search_answer 或 asset_inspect / asset_analyze -> final answer
+  tool_search -> activate_tools -> search_knowledge 或 search_assets -> final answer
 ```
 
 交互式：
 
 ```bash
-uv run rag agent chat \
-  --agent generic \
-  --storage-root "$STORAGE_ROOT" \
-  --vector-backend milvus \
-  --vector-dsn "$VECTOR_DSN" \
-  --vector-collection-prefix "$VECTOR_PREFIX" \
-  --reranker-model none
+uv run agent chat \
+  --agent generic
 ```
 
 ### 常用开关
 
 | 需求 | 做法 |
 | --- | --- |
-| 关闭 rerank 省内存 | `unset RAG_RERANK_SERVICE_URL`，查询命令加 `--reranker-model none` |
-| 开启 HTTP rerank | 启动 `rag_rerank_9092`，`export RAG_RERANK_SERVICE_URL=http://127.0.0.1:9092`，命令里不要传 `--reranker-model none` |
-| 看 evidence / diagnostics | `rag query` 加 `--json` |
-| 普通制度问答 | `--retrieval-profile auto` |
-| Excel/PPT 表格/图片 OCR 资产问题 | `--retrieval-profile asset` |
-| Agent 直接读本地文件 | `rag agent run ... --input-file "/path/to/file.xlsx"` |
-| 一次性指定模型 | `--model mimo_cloud` 或 `--model qwen3_8b_mlx_4bit` |
+| 关闭 rerank 省内存 | `unset RAG_RERANK_SERVICE_URL`；只在显式 `--knowledge` 的知识库路径中相关 |
+| 开启 HTTP rerank | 启动 `rag_rerank_9092`，`export RAG_RERANK_SERVICE_URL=http://127.0.0.1:9092` |
+| 看 evidence / diagnostics | 先用 `agent run --verbose`；需要检索调试时才用 `rag query --json` |
+| 普通制度问答 | 直接问 `agent run` |
+| Excel/PPT 表格/图片 OCR 已入库资产问题 | `agent run ... --knowledge <name>`，模型会按需找 `search_assets` |
+| Agent 直接读本地文件 | `agent run ... --file "/path/to/file.xlsx"` |
+| 查看/切换当前 chat 模型 | `agent model list/current/switch <model_id>`；这是 session state，不改 YAML |
+| 一次性指定模型 | 默认不需要；如要临时走云端可用 `--model mimo_cloud` |
 | 恢复常驻 embedding | `export RAG_EMBEDDING_SERVICE_URL=http://127.0.0.1:9090` |
 
 ### 快速 smoke 测试
 
 ```bash
+export STORAGE_ROOT="data/smoke_milvus"
+export VECTOR_PREFIX="smoke_milvus_v1"
+
 uv run rag ingest \
-  --storage-root data/smoke_milvus \
+  --storage-root "$STORAGE_ROOT" \
   --vector-backend milvus \
   --vector-dsn "$VECTOR_DSN" \
-  --vector-collection-prefix smoke_milvus_v1 \
+  --vector-collection-prefix "$VECTOR_PREFIX" \
   --source-type plain_text \
   --location memory://smoke/support-sla \
   --title "示例客服 SLA Smoke" \
   --owner smoke \
   --content "示例客服 SLA：P1 工单首次响应目标为 30 分钟，解决目标为 4 小时。"
 
-uv run rag query \
-  --query "P1 工单首次响应目标是多少？" \
-  --storage-root data/smoke_milvus \
-  --vector-backend milvus \
-  --vector-dsn "$VECTOR_DSN" \
-  --vector-collection-prefix smoke_milvus_v1 \
-  --reranker-model none \
-  --retrieval-profile auto
+uv run agent run \
+  "P1 工单首次响应目标是多少？请给出处" \
+  --knowledge smoke \
+  --verbose
 ```
 
 说明：CLI 默认 metadata 仍可用本地 metadata repo 做快速验证。正式端到端可以使用下面的 `Postgres + parquet object + Milvus` runtime 配置。
@@ -480,7 +477,7 @@ PY
 - 入库和查询必须使用同一个 embedding space；切换 embedding 模型后必须重建 Milvus collection。
 - 每次真实实验建议使用新的 `STORAGE_ROOT` 和 Milvus collection prefix，避免不同 embedding 维度或旧 schema 污染结果。
 - `9091` 被 Milvus 占用，rerank 服务使用 `9092`。
-- RAG 是 Agent 的一个工具，不是所有文件任务的默认入口。本地文件分析优先用 `--input-file`、workspace、`structured_probe` 和 `run_python_inline`。
+- RAG 是 Agent 的一个显式 knowledge provider，不是所有文件任务的默认入口。本地文件分析优先用 `--file`、workspace、`structured_probe` 和 `run_python`；需要知识库证据时再加 `--knowledge`。
 - 对表格真实值问题，不要信任 `sample_rows`；正确路径是资产 inspect/read/analyze 或本地 Python 计算。
 - OpenAI-compatible chat provider 的结构化输出能力依赖后端；降级必须可见，不能静默吞掉失败。
 - 批量入库脚本支持 `--summary-provider none`，可跳过 LLM 摘要生成，直接用原文进入 summary index；质量会低于严格摘要链路。

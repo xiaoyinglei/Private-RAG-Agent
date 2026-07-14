@@ -1,16 +1,28 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
-from collections.abc import AsyncGenerator, Iterator, Mapping
+from collections.abc import AsyncGenerator, Awaitable, Callable, Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Protocol
 from uuid import uuid4
 
 from pydantic import BaseModel
 
+from rag.agent.core.messages import StopReason, ToolCall, ToolUseResult
+from rag.agent.core.model_request import ModelRequest
+from rag.providers.local_agent_wire import (
+    parse_local_agent_response,
+    render_local_agent_request,
+)
+from rag.providers.openai_wire import (
+    parse_openai_response,
+    parse_openai_usage,
+    serialize_openai_request,
+)
 from rag.schema.llm import (
     DEFAULT_LLM_STAGE_BUDGETS,
     LLMCallResult,
@@ -18,6 +30,7 @@ from rag.schema.llm import (
     LLMProviderResult,
     LLMStageBudget,
     LLMUsage,
+    normalize_llm_usage,
 )
 
 
@@ -31,6 +44,16 @@ class StreamChunk:
     tool_name: str = ""
     tool_id: str = ""
     stop_reason: str = ""  # "end_turn" | "tool_use" | "max_tokens"
+    usage: LLMUsage | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class AgentModelResponse:
+    turn: ToolUseResult
+    usage: LLMUsage
+    provider_wire_hash: str
+    serializer_revision: str
+    wire_kind: str
 
 
 class TokenAccounting(Protocol):
@@ -158,6 +181,184 @@ class LLMGateway:
             }
         )
 
+    async def agenerate_model_request(
+        self,
+        *,
+        stage: LLMCallStage,
+        request: ModelRequest,
+        provider: str,
+        supports_native_tools: bool,
+        stream: bool = False,
+        text_delta_sink: Callable[[str], None | Awaitable[None]] | None = None,
+        ledger: AsyncBudgetLedger | None = None,
+        lease_id: str | None = None,
+    ) -> AgentModelResponse:
+        """Serialize and execute one already-selected canonical agent request."""
+
+        if not isinstance(request, ModelRequest):
+            raise TypeError("request must be a canonical ModelRequest")
+        if not isinstance(provider, str) or not provider:
+            raise ValueError("provider must be a non-empty string")
+        if type(supports_native_tools) is not bool:
+            raise TypeError("supports_native_tools must be a bool")
+        if type(stream) is not bool:
+            raise TypeError("stream must be a bool")
+
+        if provider in {"mlx", "ollama"} and not supports_native_tools:
+            wire = render_local_agent_request(request, provider=provider)
+            budget, stage_kwargs, input_tokens, reservation = self._prepare_call(
+                stage=stage,
+                prompt=wire.prompt,
+                kwargs=wire.generation_options,
+            )
+            del budget
+            effective_ledger = ledger or current_llm_budget_ledger()
+            effective_lease_id = lease_id or f"{stage.value}:canonical:{request.request_id}"
+            if effective_ledger is not None:
+                if not await effective_ledger.reserve(effective_lease_id, reservation):
+                    raise LLMBudgetExceededError(stage=stage, required_tokens=reservation)
+            try:
+                provider_result = await asyncio.to_thread(
+                    self._invoke_text,
+                    wire.prompt,
+                    stage_kwargs,
+                )
+            except BaseException:
+                if effective_ledger is not None:
+                    await effective_ledger.refund(effective_lease_id)
+                raise
+            turn = parse_local_agent_response(provider_result.value)
+            usage = provider_result.usage or normalize_llm_usage(
+                input_tokens=input_tokens,
+                output_tokens=self._token_accounting.count(provider_result.value),
+                input_tokens_include_cache=True,
+                usage_source="tokenizer_estimate",
+            )
+            if effective_ledger is not None:
+                await effective_ledger.commit(effective_lease_id, usage.total_tokens)
+            if stream and turn.text and text_delta_sink is not None:
+                await _emit_text_delta(text_delta_sink, turn.text)
+            return AgentModelResponse(
+                turn=turn,
+                usage=usage,
+                provider_wire_hash=wire.provider_wire_hash,
+                serializer_revision=wire.serializer_revision,
+                wire_kind=provider,
+            )
+
+        wire = serialize_openai_request(request)
+        payload = _plain_wire_mapping(wire.payload)
+        messages = _plain_wire_sequence(payload.get("messages", []), field_name="messages")
+        tools = _plain_wire_sequence(payload.get("tools", []), field_name="tools")
+        provider_kwargs = {
+            key: value
+            for key, value in payload.items()
+            if key not in {"messages", "tools", "max_completion_tokens"}
+        }
+        if stream:
+            chunks = self.astream_with_tools(
+                stage=stage,
+                messages=messages,
+                tools=tools,
+                ledger=ledger,
+                lease_id=lease_id or f"{stage.value}:canonical-stream:{request.request_id}",
+                kwargs=provider_kwargs,
+            )
+            text = ""
+            calls: list[ToolCall] = []
+            current_id = ""
+            current_name = ""
+            current_arguments = ""
+            stop_reason = "end_turn"
+            final_usage: LLMUsage | None = None
+            async for chunk in chunks:
+                if chunk.type == "text_delta":
+                    text += chunk.content
+                    if text_delta_sink is not None:
+                        await _emit_text_delta(text_delta_sink, chunk.content)
+                elif chunk.type == "tool_use_start":
+                    current_id = chunk.tool_id
+                    current_name = chunk.tool_name
+                    current_arguments = ""
+                elif chunk.type == "tool_input_delta":
+                    current_arguments += chunk.content
+                elif chunk.type == "content_block_stop" and current_name:
+                    calls.append(
+                        ToolCall(
+                            id=current_id or f"call_{len(calls) + 1}",
+                            name=current_name,
+                            input=_tool_arguments(current_arguments),
+                        )
+                    )
+                    current_id = ""
+                    current_name = ""
+                    current_arguments = ""
+                elif chunk.type == "message_stop":
+                    stop_reason = chunk.stop_reason or stop_reason
+                    final_usage = chunk.usage
+            if final_usage is None:
+                raise RuntimeError("canonical streaming call ended without usage")
+            normalized_stop = (
+                StopReason.TOOL_USE
+                if calls or stop_reason in {"tool_use", "tool_calls"}
+                else StopReason.MAX_TOKENS
+                if stop_reason == "max_tokens"
+                else StopReason.END_TURN
+            )
+            turn = ToolUseResult(
+                tool_calls=calls,
+                text=text,
+                stop_reason=normalized_stop,
+                raw_stop_reason=stop_reason,
+            )
+            return AgentModelResponse(
+                turn=turn,
+                usage=final_usage,
+                provider_wire_hash=wire.provider_wire_hash,
+                serializer_revision=wire.serializer_revision,
+                wire_kind="openai",
+            )
+
+        accounted_prompt = wire.serialized_json
+        budget, stage_kwargs, input_tokens, reservation = self._prepare_call(
+            stage=stage,
+            prompt=accounted_prompt,
+            kwargs=provider_kwargs,
+        )
+        del budget
+        effective_ledger = ledger or current_llm_budget_ledger()
+        effective_lease_id = lease_id or f"{stage.value}:canonical:{request.request_id}"
+        if effective_ledger is not None:
+            if not await effective_ledger.reserve(effective_lease_id, reservation):
+                raise LLMBudgetExceededError(stage=stage, required_tokens=reservation)
+        try:
+            provider_result = await asyncio.to_thread(
+                self._invoke_with_tools,
+                messages,
+                tools,
+                stage_kwargs,
+            )
+        except BaseException:
+            if effective_ledger is not None:
+                await effective_ledger.refund(effective_lease_id)
+            raise
+        turn = parse_openai_response(provider_result.value)
+        usage = provider_result.usage or parse_openai_usage(provider_result.value) or normalize_llm_usage(
+            input_tokens=input_tokens,
+            output_tokens=self._token_accounting.count(turn.text),
+            input_tokens_include_cache=True,
+            usage_source="tokenizer_estimate",
+        )
+        if effective_ledger is not None:
+            await effective_ledger.commit(effective_lease_id, usage.total_tokens)
+        return AgentModelResponse(
+            turn=turn,
+            usage=usage,
+            provider_wire_hash=wire.provider_wire_hash,
+            serializer_revision=wire.serializer_revision,
+            wire_kind="openai",
+        )
+
     async def agenerate_text(
         self,
         *,
@@ -188,6 +389,10 @@ class LLMGateway:
                 prompt,
                 call_kwargs,
             )
+        except asyncio.CancelledError:
+            if effective_ledger is not None:
+                await effective_ledger.refund(effective_lease_id)
+            raise
         except Exception:
             if effective_ledger is not None:
                 await effective_ledger.refund(effective_lease_id)
@@ -239,6 +444,10 @@ class LLMGateway:
                 schema,
                 call_kwargs,
             )
+        except asyncio.CancelledError:
+            if effective_ledger is not None:
+                await effective_ledger.refund(effective_lease_id)
+            raise
         except Exception:
             if effective_ledger is not None:
                 await effective_ledger.refund(effective_lease_id)
@@ -299,6 +508,10 @@ class LLMGateway:
                 tools,
                 call_kwargs,
             )
+        except asyncio.CancelledError:
+            if effective_ledger is not None:
+                await effective_ledger.refund(effective_lease_id)
+            raise
         except Exception:
             if effective_ledger is not None:
                 await effective_ledger.refund(effective_lease_id)
@@ -380,6 +593,8 @@ class LLMGateway:
 
         # 并发 yield chunks
         total_output_tokens = 0
+        final_stop: StreamChunk | None = None
+        reported_usage: LLMUsage | None = None
         try:
             while True:
                 chunk = await queue.get()
@@ -389,7 +604,19 @@ class LLMGateway:
                     total_output_tokens += self._token_accounting.count(
                         chunk.content
                     )
+                if chunk.type == "message_stop":
+                    final_stop = chunk
+                    reported_usage = chunk.usage
+                    continue
                 yield chunk
+        except asyncio.CancelledError:
+            if effective_ledger is not None:
+                await effective_ledger.refund(effective_lease_id)
+            raise
+        except GeneratorExit:
+            if effective_ledger is not None:
+                await effective_ledger.refund(effective_lease_id)
+            raise
         finally:
             # 确保 producer 线程完成
             await producer_task
@@ -401,15 +628,20 @@ class LLMGateway:
             raise producer_error[0]
 
         # 提交预算
-        usage = LLMUsage(
+        usage = reported_usage or normalize_llm_usage(
             input_tokens=input_tokens,
             output_tokens=total_output_tokens,
-            source="tokenizer_estimate",
+            input_tokens_include_cache=True,
+            usage_source="tokenizer_estimate",
         )
         if effective_ledger is not None:
             await effective_ledger.commit(
                 effective_lease_id, usage.total_tokens
             )
+        yield replace(
+            final_stop or StreamChunk(type="message_stop", stop_reason="end_turn"),
+            usage=usage,
+        )
 
     def generate_text(
         self,
@@ -680,6 +912,48 @@ def _render_messages_as_prompt(messages: list[dict[str, Any]]) -> str:
     return "\n\n".join(parts)
 
 
+async def _emit_text_delta(
+    sink: Callable[[str], None | Awaitable[None]],
+    value: str,
+) -> None:
+    emitted = sink(value)
+    if inspect.isawaitable(emitted):
+        await emitted
+
+
+def _plain_wire_mapping(value: Mapping[str, object]) -> dict[str, Any]:
+    return {key: _plain_wire_value(item) for key, item in value.items()}
+
+
+def _plain_wire_sequence(value: object, *, field_name: str) -> list[dict[str, Any]]:
+    if not isinstance(value, (list, tuple)):
+        raise TypeError(f"canonical wire {field_name} must be a sequence")
+    items: list[dict[str, Any]] = []
+    for item in value:
+        if not isinstance(item, Mapping):
+            raise TypeError(f"canonical wire {field_name} must contain mappings")
+        items.append(_plain_wire_mapping(item))
+    return items
+
+
+def _plain_wire_value(value: object) -> Any:
+    if isinstance(value, Mapping):
+        return _plain_wire_mapping(value)
+    if isinstance(value, tuple):
+        return [_plain_wire_value(item) for item in value]
+    return value
+
+
+def _tool_arguments(value: str) -> dict[str, Any]:
+    if not value:
+        return {}
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError:
+        return {"_raw": value[:20_000]}
+    return dict(parsed) if isinstance(parsed, Mapping) else {"_raw": parsed}
+
+
 def _account_messages(
     messages: list[dict[str, Any]],
     tools: list[dict[str, Any]],
@@ -703,10 +977,12 @@ def structured_accounted_prompt(
 
 
 __all__ = [
+    "AgentModelResponse",
     "LLMBudgetExceededError",
     "LLMContextOverflowError",
     "LLMGateway",
     "LLMGatewayError",
+    "StreamChunk",
     "current_llm_budget_ledger",
     "llm_budget_scope",
     "structured_accounted_prompt",

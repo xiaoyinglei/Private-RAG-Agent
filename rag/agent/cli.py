@@ -1,84 +1,99 @@
 from __future__ import annotations
 
 import asyncio
+import logging
+import os
+import time
+from collections.abc import Callable, Sequence
+from contextlib import nullcontext
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Annotated, Any, Literal, cast
+from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
 
 import typer
 
-from rag.agent.builtin import create_builtin_agent_registry
-from rag.agent.builtin_registry import create_builtin_tool_registry
-from rag.agent.core.agent_service_factory import AgentServiceFactory
-from rag.agent.core.checkpointing import create_agent_checkpointer
-from rag.agent.core.definition import AgentRuntimePolicy
-from rag.agent.core.human_input import HumanInputRequest, HumanInputResponse
-from rag.agent.core.llm_registry import ModelRegistry, ResolvedModel
-from rag.agent.core.llm_tool_runners import create_model_llm_tool_runners
-from rag.agent.core.registry import AgentRegistry
-from rag.agent.core.runtime_diagnostics import RuntimeDiagnostic
-from rag.agent.core.subagent_runner import BuiltinSubAgentRunner
-from rag.agent.service import AgentRunRequest, AgentRunResult, AgentService
-from rag.agent.tools.rag_answer_tools import RAGSearchAnswerRunner
-from rag.agent.tools.registry import ContextualToolRunner, ToolRunner
-from rag.assembly.tokenizer import TokenAccountingService, TokenizerContract
-from rag.providers.llm_gateway import LLMGateway
-from rag.schema.llm import DEFAULT_LLM_STAGE_BUDGETS
-from rag.storage.runtime_config import DEFAULT_VECTOR_BACKEND, runtime_storage_config
-from rag.utils.text import load_env_file
+from agent_runtime.models import (
+    ModelControlPlane,
+    ModelPolicyError,
+    format_model_rows,
+)
+from rag.agent.core.llm_registry import UnknownModelAliasError
+
+if TYPE_CHECKING:
+    from agent_runtime import AgentResult
+    from rag.agent.core.definition import AgentRuntimePolicy
+    from rag.agent.core.human_input import HumanInputResponse
+    from rag.agent.core.registry import AgentRegistry
+    from rag.agent.core.runtime_diagnostics import RuntimeDiagnostic
+    from rag.agent.service import AgentRunResult, AgentService
 
 agent_app = typer.Typer(add_completion=False, no_args_is_help=True)
+model_app = typer.Typer(add_completion=False, no_args_is_help=True)
+agent_app.add_typer(model_app, name="model", help="查看和切换当前模型会话。")
+logger = logging.getLogger(__name__)
 
 CLI_AGENT_CHOICES = ("generic",)
+DEFAULT_MODEL_SESSION_PATH = Path(".rag/agent_model_session.json")
+DEFAULT_VECTOR_BACKEND = "milvus"
 
 
-def _build_llm_tool_runners(
-    primary_chat: Any,
+@dataclass(frozen=True)
+class AutoRAGConfig:
+    storage_root: Path
+    vector_backend: str
+    vector_dsn: str | None
+    vector_namespace: str | None
+    vector_collection_prefix: str | None
+    explicit: bool
+
+
+def _resolve_auto_rag_config(
     *,
-    token_accounting: object | None = None,
-    model_context_tokens: int = 32_768,
-    stage_budgets: object | None = None,
-) -> dict[str, ContextualToolRunner]:
-    if primary_chat is None:
-        return {}
-
-    accounting = token_accounting or TokenAccountingService(
-        TokenizerContract(
-            embedding_model_name="cli-chat",
-            tokenizer_model_name="cli-chat",
-            chunking_tokenizer_model_name="cli-chat",
-            tokenizer_backend="simple",
-            max_context_tokens=model_context_tokens,
-            prompt_reserved_tokens=512,
-            local_files_only=True,
-        )
+    storage_root: Path,
+    vector_backend: str,
+    vector_dsn: str | None,
+    vector_namespace: str | None,
+    vector_collection_prefix: str | None,
+) -> AutoRAGConfig:
+    effective_storage_root = storage_root
+    env_storage_root = (
+        os.environ.get("AGENT_RAG_STORAGE_ROOT")
+        or os.environ.get("RAG_STORAGE_ROOT")
+        or os.environ.get("STORAGE_ROOT")
     )
-    gateway = LLMGateway(
-        generator=primary_chat,
-        token_accounting=cast(Any, accounting),
-        model_context_tokens=model_context_tokens,
-        stage_budgets=cast(
-            Any,
-            stage_budgets or DEFAULT_LLM_STAGE_BUDGETS,
+    if storage_root == Path(".rag"):
+        if env_storage_root:
+            effective_storage_root = Path(env_storage_root)
+    env_vector_backend = os.environ.get("AGENT_VECTOR_BACKEND") or os.environ.get("VECTOR_BACKEND")
+    env_vector_dsn = os.environ.get("AGENT_VECTOR_DSN") or os.environ.get("VECTOR_DSN")
+    env_vector_namespace = os.environ.get("AGENT_VECTOR_NAMESPACE") or os.environ.get("VECTOR_NAMESPACE")
+    env_vector_prefix = os.environ.get("AGENT_VECTOR_PREFIX") or os.environ.get("VECTOR_PREFIX")
+    return AutoRAGConfig(
+        storage_root=effective_storage_root,
+        vector_backend=env_vector_backend or vector_backend,
+        vector_dsn=vector_dsn or env_vector_dsn,
+        vector_namespace=vector_namespace or env_vector_namespace,
+        vector_collection_prefix=vector_collection_prefix or env_vector_prefix,
+        explicit=(
+            storage_root != Path(".rag")
+            or bool(env_storage_root)
+            or vector_backend != DEFAULT_VECTOR_BACKEND
+            or bool(env_vector_backend)
+            or bool(vector_dsn)
+            or bool(env_vector_dsn)
+            or bool(vector_namespace)
+            or bool(env_vector_namespace)
+            or bool(vector_collection_prefix)
+            or bool(env_vector_prefix)
         ),
     )
 
-    class _Registry:
-        def resolve_for_node(
-            self,
-            *,
-            node_model: str | None,
-            node_name: str,
-        ) -> ResolvedModel:
-            del node_model, node_name
-            return ResolvedModel(
-                generator=primary_chat,
-                kwargs={},
-                context_window_tokens=model_context_tokens,
-                gateway=gateway,
-                token_accounting=cast(Any, accounting),
-            )
 
-    return create_model_llm_tool_runners(cast(Any, _Registry()))
+def _looks_like_rag_storage(storage_root: Path) -> bool:
+    return any(
+        (storage_root / marker).exists()
+        for marker in ("metadata.sqlite3", "vectors.sqlite3", "index.sqlite")
+    )
 
 
 def _resolve_cli_agent_definition(
@@ -91,150 +106,81 @@ def _resolve_cli_agent_definition(
     return agent_registry.get(agent_type)
 
 
+def _service_model_alias(service: AgentService, requested_model: str | None) -> str:
+    registry = getattr(service, "_model_registry", None)
+    if registry is not None:
+        return str(registry.default_model)
+    return requested_model or "unavailable"
+
+
+def _build_model_control_plane(
+    *,
+    model_alias: str | None = None,
+    session_path: Path | None = None,
+) -> ModelControlPlane:
+    return ModelControlPlane.from_env(
+        initial_model_id=model_alias,
+        session_path=session_path,
+    )
+
+
+def _service_model_control_plane(service: AgentService) -> ModelControlPlane | None:
+    registry = getattr(service, "_model_registry", None)
+    return registry if isinstance(registry, ModelControlPlane) else None
+
+
 def _build_agent_service(
-    runtime: Any,
+    runtime: Any | None,
     *,
     checkpoint_db: Path | None = None,
     agent_type: str = "generic",
     model_alias: str | None = None,
+    model_control_plane: ModelControlPlane | None = None,
+    runtime_diagnostics: Sequence[RuntimeDiagnostic] = (),
+    knowledge_runner: Callable[..., object] | None = None,
+    strict_model_provider: bool = True,
+    startup_ms: float = 0.0,
 ) -> AgentService:
-    """从 RAGRuntime 构造 AgentService，注册真实 RAG tool runners。
+    from agent_runtime.runtime.builder import build_agent_service
 
-    只在可以构造 RAGRuntime / retrieval_service 时成功。
-    无法构造时报错，不静默使用 stub。
-    """
-    agent_registry = create_builtin_agent_registry()
-    definition = _resolve_cli_agent_definition(agent_registry, agent_type)
-
-    chat_bindings = list(runtime.capability_bundle.chat_bindings)
-    primary_chat = chat_bindings[0] if chat_bindings else None
-
-    runners: dict[str, ToolRunner] = {}
-    contextual_runners: dict[str, ContextualToolRunner] = {}
-
-    # RAG tools — AsyncRAGToolRunner（aretrieve_payload → to_thread fallback）
-    from rag.agent.tools.rag_tool_runner import AsyncRAGToolRunner
-
-    rag_runner = AsyncRAGToolRunner(
-        runtime=runtime,
-        retrieval_service=runtime.retrieval_service,
-        max_context_tokens=4096,
-    )
-    for name in ("vector_search", "keyword_search", "grounding", "rerank", "graph_expand"):
-        contextual_runners[name] = cast(
-            ContextualToolRunner,
-            rag_runner.retrieve_evidence,
-        )
-    rag_answer_runner = RAGSearchAnswerRunner(runtime=runtime)
-    contextual_runners["rag_search_answer"] = cast(
-        ContextualToolRunner,
-        rag_answer_runner.answer,
-    )
-    # Semantic RAG tools (search_knowledge → same runner as rag_search_answer)
-    contextual_runners["search_knowledge"] = cast(
-        ContextualToolRunner,
-        rag_answer_runner.answer,
-    )
-
-    from rag.agent.tools.asset_tools import AssetToolRunner
-
-    stores = getattr(runtime, "stores", None)
-    metadata_repo = getattr(stores, "metadata_repo", None)
-    object_store = getattr(stores, "object_store", None)
-    if metadata_repo is not None and object_store is not None:
-        asset_runner = AssetToolRunner(
-            metadata_repo=metadata_repo,
-            object_store=object_store,
-        )
-        runners["asset_list"] = cast(ToolRunner, asset_runner.list_assets)
-        runners["asset_inspect"] = cast(ToolRunner, asset_runner.inspect_asset)
-        runners["asset_read_slice"] = cast(ToolRunner, asset_runner.read_slice)
-        runners["asset_analyze"] = cast(ToolRunner, asset_runner.analyze_asset)
-
-        # Semantic asset tool — composite: list → inspect → read_slice
-        async def _search_assets_runner(payload: Any) -> Any:
-            from rag.agent.tools.rag_semantic_tools import AssetSearchInput, AssetSearchOutput, AssetResult
-
-            if isinstance(payload, dict):
-                inp = AssetSearchInput(**payload)
-            else:
-                inp = payload
-            # List
-            list_out = asset_runner.list_assets(
-                type("_In", (), {"doc_id": inp.doc_id, "asset_type": inp.asset_type})()
-            )
-            results: list[AssetResult] = []
-            for a in list_out.assets[:inp.max_results]:
-                ar = AssetResult(
-                    asset_id=a.asset_id, doc_id=a.doc_id,
-                    asset_type=a.asset_type, sheet_name=a.sheet_name,
-                    caption=a.caption, columns=list(a.columns or []),
-                    row_count=a.row_count, column_count=a.column_count,
-                )
-                # Inspect if preview requested
-                if inp.include_preview and a.asset_id:
-                    try:
-                        insp = asset_runner.inspect_asset(
-                            type("_In2", (), {"asset_id": a.asset_id, "head_rows": 3})()
-                        )
-                        if insp.head_rows:
-                            ar.preview_rows = insp.head_rows[:3]
-                        ar.analysis_capabilities = list(insp.analysis_capabilities or [])
-                    except Exception:
-                        pass
-                results.append(ar)
-            return AssetSearchOutput(assets=results, total_found=len(list_out.assets))
-
-        contextual_runners["search_assets"] = cast(ContextualToolRunner, _search_assets_runner)
-
-    contextual_runners.update(
-        _build_llm_tool_runners(
-            primary_chat,
-            token_accounting=runtime.token_accounting,
-            model_context_tokens=getattr(
-                runtime,
-                "chat_context_window_tokens",
-                32_768,
-            ),
-            stage_budgets=getattr(
-                runtime,
-                "llm_stage_budgets",
-                DEFAULT_LLM_STAGE_BUDGETS,
-            ),
-        )
-    )
-
-    tool_registry = create_builtin_tool_registry(
-        runners=runners,
-        contextual_runners=contextual_runners,
-    )
-    runtime_diagnostics: tuple[RuntimeDiagnostic, ...] = ()
-    try:
-        model_registry = ModelRegistry.from_env(default_model=model_alias)
-    except Exception as exc:
-        if model_alias is not None:
-            raise
-        model_registry = None
-        runtime_diagnostics = (
-            RuntimeDiagnostic.from_exception(
-                code="model_registry_initialization_failed",
-                component="model_registry",
-                error=exc,
-            ),
-        )
-
-    service_factory = AgentServiceFactory(
-        tool_registry=tool_registry,
-        model_registry=model_registry,
-        checkpointer=create_agent_checkpointer(checkpoint_db),
+    return build_agent_service(
+        runtime,
+        checkpoint_db=checkpoint_db,
+        agent_type=agent_type,
+        model_alias=model_alias,
+        model_control_plane=model_control_plane,
         runtime_diagnostics=runtime_diagnostics,
+        knowledge_runner=knowledge_runner,
+        strict_model_provider=strict_model_provider,
+        startup_ms=startup_ms,
     )
-    subagent_runner = BuiltinSubAgentRunner(
-        agent_registry=agent_registry,
-        service_factory=service_factory,
+
+
+def _build_optional_rag_runtime(
+    *,
+    storage_root: Path,
+    model_alias: str | None,
+    embedding_model_alias: str | None,
+    reranker_model_alias: str | None,
+    vector_backend: str,
+    vector_dsn: str | None,
+    vector_namespace: str | None,
+    vector_collection_prefix: str | None,
+    explicit: bool = False,
+) -> tuple[Any | None, tuple[RuntimeDiagnostic, ...]]:
+    from agent_runtime.runtime.builder import build_optional_rag_runtime
+
+    return build_optional_rag_runtime(
+        storage_root=storage_root,
+        model_alias=model_alias,
+        embedding_model_alias=embedding_model_alias,
+        reranker_model_alias=reranker_model_alias,
+        vector_backend=vector_backend,
+        vector_dsn=vector_dsn,
+        vector_namespace=vector_namespace,
+        vector_collection_prefix=vector_collection_prefix,
+        explicit=explicit,
     )
-    service_factory.bind_subagent_runner(subagent_runner)
-    return service_factory.create(definition)
 
 
 def _format_tool_summary(result: AgentRunResult) -> str:
@@ -242,32 +188,93 @@ def _format_tool_summary(result: AgentRunResult) -> str:
         return ""
     lines = ["", "─" * 40, "工具执行:"]
     for tr in result.tool_results:
-        status_icon = "✓" if tr.status == "ok" else "✗"
+        status_icon = "✗" if tr.is_error else "✓"
         tool_info = f"  {status_icon} {tr.tool_name}"
-        if tr.status == "error" and tr.error:
-            tool_info += f" ({tr.error.code}: {tr.error.message[:60]})"
+        if tr.is_error:
+            tool_info += (
+                f" ({tr.error_code or 'tool_error'}: "
+                f"{(tr.error_message or 'unknown tool error')[:60]})"
+            )
         lines.append(tool_info)
     return "\n".join(lines)
 
 
+def _failure_title(stop_reason: str | None) -> str:
+    if stop_reason == "model_provider_failed":
+        return "错误: 模型调用失败 (model_provider_failed)"
+    if stop_reason:
+        return f"错误: Agent 运行失败 ({stop_reason})"
+    return "错误: Agent 运行失败"
+
+
+def _failure_diagnostics(
+    diagnostics: Sequence[object],
+    *,
+    stop_reason: str | None,
+) -> list[object]:
+    all_diagnostics = list(diagnostics)
+    if not all_diagnostics:
+        return []
+    if stop_reason:
+        exact = [
+            diagnostic for diagnostic in all_diagnostics
+            if getattr(diagnostic, "code", None) == stop_reason
+        ]
+        if exact:
+            return exact
+    errors = [
+        diagnostic for diagnostic in all_diagnostics
+        if getattr(diagnostic, "severity", None) == "error"
+    ]
+    return errors or all_diagnostics[:1]
+
+
+def _print_diagnostic(diagnostic: object) -> None:
+    component = getattr(diagnostic, "component", "diagnostic")
+    code = getattr(diagnostic, "code", "unknown")
+    message = getattr(diagnostic, "message", "")
+    error_type = getattr(diagnostic, "error_type", None)
+    suffix = f", {error_type}" if error_type is not None else ""
+    print(f"  [{component}] {code}: {message}{suffix}")
+
+
+def _display_failure(
+    *,
+    stop_reason: str | None,
+    diagnostics: Sequence[object],
+    verbose: bool,
+) -> None:
+    print(f"\n{_failure_title(stop_reason)}")
+    selected = _failure_diagnostics(diagnostics, stop_reason=stop_reason)
+    if selected:
+        for diagnostic in selected:
+            _print_diagnostic(diagnostic)
+    elif verbose and stop_reason:
+        print(f"  stop_reason: {stop_reason}")
+    if verbose:
+        selected_ids = {id(diagnostic) for diagnostic in selected}
+        for diagnostic in diagnostics:
+            if id(diagnostic) not in selected_ids:
+                _print_diagnostic(diagnostic)
+
+
 def _display_result(result: AgentRunResult, *, verbose: bool) -> None:
     """干净输出 AgentRunResult。"""
-    if result.runtime_diagnostics:
+    if result.status == "failed":
+        _display_failure(
+            stop_reason=result.stop_reason,
+            diagnostics=result.runtime_diagnostics,
+            verbose=verbose,
+        )
+    elif result.runtime_diagnostics:
         degraded = sum(
             1 for diagnostic in result.runtime_diagnostics if diagnostic.degraded
         )
-        print(f"\n警告: Agent 以降级模式运行（{degraded} 项诊断）")
+        if degraded:
+            print(f"\n警告: Agent 以降级模式运行（{degraded} 项诊断）")
         if verbose:
             for diagnostic in result.runtime_diagnostics:
-                error_type = (
-                    f", {diagnostic.error_type}"
-                    if diagnostic.error_type is not None
-                    else ""
-                )
-                print(
-                    f"  [{diagnostic.component}] {diagnostic.code}: "
-                    f"{diagnostic.message}{error_type}"
-                )
+                _print_diagnostic(diagnostic)
 
     if result.final_answer:
         print(f"\n{result.final_answer}")
@@ -276,8 +283,8 @@ def _display_result(result: AgentRunResult, *, verbose: bool) -> None:
         if verbose:
             print(_format_tool_summary(result))
         else:
-            ok = sum(1 for tr in result.tool_results if tr.status == "ok")
-            err = sum(1 for tr in result.tool_results if tr.status == "error")
+            ok = sum(1 for tr in result.tool_results if not tr.is_error)
+            err = sum(1 for tr in result.tool_results if tr.is_error)
             summary_parts = [f"{ok} 成功"] if ok else []
             if err:
                 summary_parts.append(f"{err} 失败")
@@ -292,6 +299,21 @@ def _display_result(result: AgentRunResult, *, verbose: bool) -> None:
             print(f"\n调用统计: native={m.native_calls}({m.native_errors}err/{m.native_latency_ms_total:.0f}ms) "
                   f"deferred={m.deferred_calls} mcp={m.mcp_calls}({m.mcp_errors}err/{m.mcp_latency_ms_total:.0f}ms)")
 
+    if verbose and result.latency_profile is not None:
+        p = result.latency_profile
+        print(
+            "\n耗时: "
+            f"total={p.total_ms:.0f}ms "
+            f"startup={p.startup_ms:.0f}ms "
+            f"build={p.build_service_ms:.0f}ms "
+            f"model_ready={p.model_ready_ms:.0f}ms "
+            f"model={p.model_latency_ms:.0f}ms "
+            f"tool={p.tool_latency_ms:.0f}ms "
+            f"finalize={p.finalize_latency_ms:.0f}ms "
+            f"prompt_bytes={p.prompt_bytes} "
+            f"tool_schema_bytes={p.tool_schema_bytes}"
+        )
+
     if verbose and result.evidence:
         print(f"证据: {len(result.evidence)} 条")
 
@@ -299,7 +321,47 @@ def _display_result(result: AgentRunResult, *, verbose: bool) -> None:
         print(f"停止原因: {result.stop_reason}")
 
 
+def _display_agent_result(result: AgentResult, *, verbose: bool) -> None:
+    from rag.agent.service import AgentRunResult
+
+    if isinstance(result.raw, AgentRunResult):
+        _display_result(result.raw, verbose=verbose)
+        return
+
+    if result.status == "failed":
+        _display_failure(
+            stop_reason=None,
+            diagnostics=result.diagnostics,
+            verbose=verbose,
+        )
+    elif result.diagnostics:
+        degraded = sum(1 for diagnostic in result.diagnostics if getattr(diagnostic, "degraded", False))
+        if degraded:
+            print(f"\n警告: Agent 以降级模式运行（{degraded} 项诊断）")
+        if verbose:
+            for diagnostic in result.diagnostics:
+                _print_diagnostic(diagnostic)
+
+    if result.answer:
+        print(f"\n{result.answer}")
+
+    if verbose and result.tool_calls:
+        print(_format_public_tool_summary(result.tool_calls))
+
+    if verbose:
+        print(f"状态: {result.status}")
+
+
+def _format_public_tool_summary(tool_calls: Sequence[str]) -> str:
+    lines = ["", "─" * 40, "工具执行:"]
+    for tool_name in tool_calls:
+        lines.append(f"  ✓ {tool_name}")
+    return "\n".join(lines)
+
+
 def _handle_pause(result: AgentRunResult, run_id: str) -> HumanInputResponse | None:
+    from rag.agent.core.human_input import HumanInputRequest, HumanInputResponse
+
     """展示暂停信息，获取用户决策。返回 None 表示退出。"""
     req = result.human_input_request
     if req is None:
@@ -353,6 +415,8 @@ def _handle_pause(result: AgentRunResult, run_id: str) -> HumanInputResponse | N
 
 
 def _build_resume_response(request: object, decision: str) -> HumanInputResponse:
+    from rag.agent.core.human_input import HumanInputRequest, HumanInputResponse
+
     r = cast(HumanInputRequest, request)
     tool_call_ids = [
         tool_call.tool_call_id
@@ -366,19 +430,149 @@ def _build_resume_response(request: object, decision: str) -> HumanInputResponse
     )
 
 
+def _close_agent_service(service: object) -> None:
+    close_method = getattr(service, "aclose", None)
+    if callable(close_method):
+        asyncio.run(close_method())
+
+
+def _create_agent_facade(
+    *,
+    model: str | None = None,
+    agent_type: str = "generic",
+    checkpoint_db: Path | None = None,
+    model_session_path: Path | None = None,
+    knowledge: tuple[str, ...] | list[str] | None = None,
+    rag_storage_root: Path = Path(".rag"),
+    embedding_model: str | None = None,
+    reranker_model: str | None = None,
+    vector_backend: str = DEFAULT_VECTOR_BACKEND,
+    vector_dsn: str | None = None,
+    vector_namespace: str | None = None,
+    vector_collection_prefix: str | None = None,
+) -> Any:
+    from agent_runtime import Agent
+
+    return Agent(
+        model=model,
+        agent_type=agent_type,
+        checkpoint_db=checkpoint_db,
+        model_session_path=model_session_path,
+        knowledge=knowledge,
+        rag_storage_root=rag_storage_root,
+        embedding_model=embedding_model,
+        reranker_model=reranker_model,
+        vector_backend=vector_backend,
+        vector_dsn=vector_dsn,
+        vector_namespace=vector_namespace,
+        vector_collection_prefix=vector_collection_prefix,
+    )
+
+
 def _print_startup_banner(model_alias: str, *, agent_type: str) -> None:
     print(f"Agent 就绪 (agent: {agent_type}, 模型: {model_alias})")
-    print("输入查询，或 /exit 退出，/verbose 切换详细输出")
+    print("输入查询，或 /exit 退出，/verbose 切换详细输出，/model 查看/切换模型")
     print()
+
+
+def _print_current_model(control_plane: ModelControlPlane) -> None:
+    spec = control_plane.current_model()
+    print(f"{spec.id}")
+    print(f"provider: {spec.provider}")
+    print(f"provider_model: {spec.provider_model}")
+    print(f"context_window: {spec.context_window}")
+    print(f"location: {spec.location}")
+
+
+def _handle_model_slash_command(
+    query: str,
+    *,
+    control_plane: ModelControlPlane | None,
+) -> None:
+    if control_plane is None:
+        print("模型控制平面不可用。")
+        return
+    parts = query.split()
+    action = parts[1] if len(parts) > 1 else "current"
+    try:
+        if action == "list":
+            for line in format_model_rows(
+                control_plane.list_models(),
+                current_model_id=control_plane.current_model().id,
+            ):
+                print(line)
+            return
+        if action == "current":
+            _print_current_model(control_plane)
+            return
+        if action in {"switch", "use"}:
+            if len(parts) < 3:
+                print("用法: /model switch <model_id>")
+                return
+            spec = control_plane.switch_model(parts[2], requested_by="user")
+            print(f"已切换模型: {spec.id}")
+            return
+        if len(parts) == 2:
+            spec = control_plane.switch_model(action, requested_by="user")
+            print(f"已切换模型: {spec.id}")
+            return
+    except (ModelPolicyError, UnknownModelAliasError) as exc:
+        print(f"模型切换失败: {exc}")
+        return
+    print("用法: /model [current|list|switch <model_id>]")
 
 
 # ── CLI Commands ──
 
 
+@model_app.command(name="list")
+def model_list(
+    session_path: Annotated[
+        Path,
+        typer.Option("--session-path", help="模型 session state 文件"),
+    ] = DEFAULT_MODEL_SESSION_PATH,
+) -> None:
+    """列出可用模型，并标记当前会话模型。"""
+    control_plane = _build_model_control_plane(session_path=session_path)
+    for line in format_model_rows(
+        control_plane.list_models(),
+        current_model_id=control_plane.current_model().id,
+    ):
+        print(line)
+
+
+@model_app.command(name="current")
+def model_current(
+    session_path: Annotated[
+        Path,
+        typer.Option("--session-path", help="模型 session state 文件"),
+    ] = DEFAULT_MODEL_SESSION_PATH,
+) -> None:
+    """显示当前会话模型。"""
+    _print_current_model(_build_model_control_plane(session_path=session_path))
+
+
+@model_app.command(name="switch")
+def model_switch(
+    model_id: Annotated[str, typer.Argument(help="要切换到的模型 id")],
+    session_path: Annotated[
+        Path,
+        typer.Option("--session-path", help="模型 session state 文件"),
+    ] = DEFAULT_MODEL_SESSION_PATH,
+) -> None:
+    """切换当前模型 session state，不修改 models.yaml。"""
+    control_plane = _build_model_control_plane(session_path=session_path)
+    try:
+        spec = control_plane.switch_model(model_id, requested_by="user")
+    except (ModelPolicyError, UnknownModelAliasError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    print(f"已切换模型: {spec.id}")
+
+
 @agent_app.command(name="chat")
 def agent_chat(
     storage_root: Annotated[
-        Path, typer.Option("--storage-root", help="RAG 存储根目录")
+        Path, typer.Option("--storage-root", help="RAG 存储根目录", hidden=True)
     ] = Path(".rag"),
     agent: Annotated[
         str,
@@ -391,11 +585,16 @@ def agent_chat(
         str | None,
         typer.Option("--model", help="主生成模型别名，对应 configs/models.yaml 中 capability=chat 的条目"),
     ] = None,
+    budget: Annotated[
+        int | None,
+        typer.Option("--budget", min=1, help="本次 Agent 运行的 LLM/工具预算上限"),
+    ] = None,
     embedding_model: Annotated[
         str | None,
         typer.Option(
             "--embedding-model",
             help="Embedding 模型别名，对应 configs/models.yaml 中 capability=embedding 的条目",
+            hidden=True,
         ),
     ] = None,
     reranker_model: Annotated[
@@ -403,115 +602,126 @@ def agent_chat(
         typer.Option(
             "--reranker-model",
             help="Reranker 模型别名，对应 configs/models.yaml 中 capability=reranker 的条目",
+            hidden=True,
         ),
     ] = None,
     vector_backend: Annotated[
         str,
-        typer.Option("--vector-backend", help="Vector backend: milvus or sqlite."),
+        typer.Option("--vector-backend", help="Vector backend: milvus or sqlite.", hidden=True),
     ] = DEFAULT_VECTOR_BACKEND,
     vector_dsn: Annotated[
         str | None,
-        typer.Option("--vector-dsn", help="Vector backend DSN."),
+        typer.Option("--vector-dsn", help="Vector backend DSN.", hidden=True),
     ] = None,
     vector_namespace: Annotated[
         str | None,
-        typer.Option("--vector-namespace", help="Vector namespace/database."),
+        typer.Option("--vector-namespace", help="Vector namespace/database.", hidden=True),
     ] = None,
     vector_collection_prefix: Annotated[
         str | None,
-        typer.Option("--vector-collection-prefix", help="Milvus collection prefix used at ingest time."),
+        typer.Option("--vector-collection-prefix", help="Milvus collection prefix used at ingest time.", hidden=True),
     ] = None,
 ) -> None:
     """交互式 Agent 对话。暂停时支持工具审批。"""
-    from rag import AssemblyRequest, CapabilityRequirements, RAGRuntime
-    from rag.models.assembly_adapter import to_assembly_overrides
-    from rag.models.runtime import RuntimeOverrides, resolve_runtime_config
-    from rag.retrieval import QueryOptions
+    from rag.agent.service import AgentRunRequest
+    from rag.utils.text import load_env_file
 
+    startup_started_at = time.perf_counter()
     load_env_file()
-    runtime_config = resolve_runtime_config(
-        RuntimeOverrides(
-            model_alias=model,
-            embedding_model_alias=embedding_model,
-            reranker_model_alias=reranker_model,
-        )
-    )
-    assembly_overrides = to_assembly_overrides(runtime_config)
-
-    storage = runtime_storage_config(
-        storage_root,
+    runtime, diagnostics = _build_optional_rag_runtime(
+        storage_root=storage_root,
+        model_alias=model,
+        embedding_model_alias=embedding_model,
+        reranker_model_alias=reranker_model,
         vector_backend=vector_backend,
         vector_dsn=vector_dsn,
         vector_namespace=vector_namespace,
         vector_collection_prefix=vector_collection_prefix,
-    )
-    requirements = CapabilityRequirements(
-        require_chat=True,
-        default_context_tokens=QueryOptions().max_context_tokens,
-    )
-    runtime = RAGRuntime.from_request(
-        storage=storage,
-        request=AssemblyRequest(
-            requirements=requirements,
-            overrides=assembly_overrides,
-        ),
-        generation_config=runtime_config.generation,
-        chat_context_window_tokens=(
-            runtime_config.primary_model.context_window_tokens or 32_768
-        ),
-        llm_stage_budgets=runtime_config.llm_stage_budgets,
+        explicit=False,
     )
 
-    with runtime:
-        service = _build_agent_service(runtime, agent_type=agent, model_alias=model)
-        run_id = f"chat_{id(service):x}"
-        verbose = False
-
-        _print_startup_banner(runtime_config.primary_model.alias, agent_type=agent)
-
-        while True:
-            try:
-                query = input("> ").strip()
-            except (EOFError, KeyboardInterrupt):
-                print("\n再见。")
-                break
-
-            if not query:
-                continue
-            if query == "/exit":
-                break
-            if query == "/verbose":
-                verbose = not verbose
-                print(f"详细输出: {'开' if verbose else '关'}")
-                continue
-
-            result = asyncio.run(
-                service.run(AgentRunRequest(task=query, run_id=run_id, thread_id=run_id))
+    with runtime if runtime is not None else nullcontext():
+        try:
+            model_control_plane = _build_model_control_plane(
+                model_alias=model,
+                session_path=DEFAULT_MODEL_SESSION_PATH,
             )
+        except Exception:
+            if model is not None:
+                raise
+            model_control_plane = None
+        service = _build_agent_service(
+            runtime,
+            agent_type=agent,
+            model_alias=model,
+            model_control_plane=model_control_plane,
+            runtime_diagnostics=diagnostics,
+            startup_ms=(time.perf_counter() - startup_started_at) * 1000,
+        )
+        try:
+            run_id = f"chat_{id(service):x}"
+            verbose = False
 
-            while result.status == "paused":
-                _display_result(result, verbose=verbose)
-                response = _handle_pause(result, run_id)
-                if response is None:
-                    print("已取消。")
+            _print_startup_banner(_service_model_alias(service, model), agent_type=agent)
+
+            while True:
+                try:
+                    query = input("> ").strip()
+                except (EOFError, KeyboardInterrupt):
+                    print("\n再见。")
                     break
+
+                if not query:
+                    continue
+                if query == "/exit":
+                    break
+                if query == "/verbose":
+                    verbose = not verbose
+                    print(f"详细输出: {'开' if verbose else '关'}")
+                    continue
+                if query == "/model" or query.startswith("/model "):
+                    _handle_model_slash_command(
+                        query,
+                        control_plane=_service_model_control_plane(service),
+                    )
+                    continue
+
                 result = asyncio.run(
-                    service.resume(run_id=run_id, response=response)
+                    service.run(
+                        AgentRunRequest(
+                            task=query,
+                            run_id=run_id,
+                            thread_id=run_id,
+                            llm_budget_total=budget,
+                        )
+                    )
                 )
 
-            if result.status in ("done", "failed"):
-                _display_result(result, verbose=verbose)
+                while result.status == "paused":
+                    _display_result(result, verbose=verbose)
+                    response = _handle_pause(result, run_id)
+                    if response is None:
+                        print("已取消。")
+                        break
+                    result = asyncio.run(
+                        service.resume(run_id=run_id, response=response)
+                    )
 
-            if result.status == "failed" and result.stop_reason:
-                if verbose:
-                    print(f"失败: {result.stop_reason}")
+                if result.status in ("done", "failed"):
+                    _display_result(result, verbose=verbose)
+
+                if result.status == "failed" and result.stop_reason:
+                    if verbose:
+                        print(f"失败: {result.stop_reason}")
+        finally:
+            _close_agent_service(service)
 
 
 @agent_app.command(name="run")
 def agent_run(
     task: Annotated[str, typer.Argument(help="查询任务")],
     storage_root: Annotated[
-        Path, typer.Option("--storage-root", help="RAG 存储根目录")
+        Path, typer.Option("--storage-root", help="RAG 存储根目录", hidden=True)
     ] = Path(".rag"),
     agent: Annotated[
         str,
@@ -533,15 +743,20 @@ def agent_run(
         Path | None,
         typer.Option("--checkpoint-db", help="SQLite checkpoint 文件；启用后可跨进程 resume"),
     ] = None,
+    budget: Annotated[
+        int | None,
+        typer.Option("--max-tokens-total", "--budget", min=1, help="本次 Agent 运行的 LLM/工具预算上限", hidden=True),
+    ] = None,
     model: Annotated[
         str | None,
-        typer.Option("--model", help="主生成模型别名，对应 configs/models.yaml 中 capability=chat 的条目"),
+        typer.Option("--model", "-m", help="主生成模型别名，对应 configs/models.yaml 中 capability=chat 的条目"),
     ] = None,
     embedding_model: Annotated[
         str | None,
         typer.Option(
             "--embedding-model",
             help="Embedding 模型别名，对应 configs/models.yaml 中 capability=embedding 的条目",
+            hidden=True,
         ),
     ] = None,
     reranker_model: Annotated[
@@ -549,118 +764,128 @@ def agent_run(
         typer.Option(
             "--reranker-model",
             help="Reranker 模型别名，对应 configs/models.yaml 中 capability=reranker 的条目",
+            hidden=True,
         ),
     ] = None,
     vector_backend: Annotated[
         str,
-        typer.Option("--vector-backend", help="Vector backend: milvus or sqlite."),
+        typer.Option("--vector-backend", help="Vector backend: milvus or sqlite.", hidden=True),
     ] = DEFAULT_VECTOR_BACKEND,
     vector_dsn: Annotated[
         str | None,
-        typer.Option("--vector-dsn", help="Vector backend DSN."),
+        typer.Option("--vector-dsn", help="Vector backend DSN.", hidden=True),
     ] = None,
     vector_namespace: Annotated[
         str | None,
-        typer.Option("--vector-namespace", help="Vector namespace/database."),
+        typer.Option("--vector-namespace", help="Vector namespace/database.", hidden=True),
     ] = None,
     vector_collection_prefix: Annotated[
         str | None,
-        typer.Option("--vector-collection-prefix", help="Milvus collection prefix used at ingest time."),
+        typer.Option("--vector-collection-prefix", help="Milvus collection prefix used at ingest time.", hidden=True),
+    ] = None,
+    knowledge: Annotated[
+        list[str] | None,
+        typer.Option("--knowledge", help="启用显式知识库，可多次指定"),
     ] = None,
     input_files: Annotated[
         list[str] | None,
-        typer.Option("--input-file", help="导入 workspace 的输入文件，可多次指定"),
+        typer.Option("--file", "-f", "--input-file", help="导入 workspace 的输入文件，可多次指定"),
     ] = None,
+    tool_names: Annotated[
+        list[str] | None,
+        typer.Option("--tool", help="显式发送给模型的工具 schema，可多次指定"),
+    ] = None,
+    disabled_tool_names: Annotated[
+        list[str] | None,
+        typer.Option("--disable-tool", help="从本次工具面中禁用的工具，可多次指定"),
+    ] = None,
+    allow_write_tools: Annotated[
+        bool,
+        typer.Option("--allow-write-tools", help="允许本次工具面暴露写入类工具"),
+    ] = False,
+    allow_execute_tools: Annotated[
+        bool,
+        typer.Option("--allow-execute-tools", help="允许本次工具面暴露执行类工具"),
+    ] = False,
+    allow_discovery_tools: Annotated[
+        bool,
+        typer.Option("--allow-discovery-tools", help="允许本次工具面暴露 discovery 工具"),
+    ] = False,
 ) -> None:
     """单次 Agent 运行。传入 --checkpoint-db 后支持跨进程恢复。"""
-    from rag import AssemblyRequest, CapabilityRequirements, RAGRuntime
-    from rag.models.assembly_adapter import to_assembly_overrides
-    from rag.models.runtime import RuntimeOverrides, resolve_runtime_config
-    from rag.retrieval import QueryOptions
+    from rag.agent.service import AgentRunResult
 
-    load_env_file()
-    runtime_config = resolve_runtime_config(
-        RuntimeOverrides(
-            model_alias=model,
-            embedding_model_alias=embedding_model,
-            reranker_model_alias=reranker_model,
-        )
-    )
-    assembly_overrides = to_assembly_overrides(runtime_config)
-
-    storage = runtime_storage_config(
-        storage_root,
+    facade = _create_agent_facade(
+        model=model,
+        agent_type=agent,
+        checkpoint_db=checkpoint_db,
+        model_session_path=DEFAULT_MODEL_SESSION_PATH,
+        knowledge=tuple(knowledge or ()),
+        rag_storage_root=storage_root,
+        embedding_model=embedding_model,
+        reranker_model=reranker_model,
         vector_backend=vector_backend,
         vector_dsn=vector_dsn,
         vector_namespace=vector_namespace,
         vector_collection_prefix=vector_collection_prefix,
     )
-    requirements = CapabilityRequirements(
-        require_chat=True,
-        default_context_tokens=QueryOptions().max_context_tokens,
-    )
-    runtime = RAGRuntime.from_request(
-        storage=storage,
-        request=AssemblyRequest(requirements=requirements, overrides=assembly_overrides),
-        generation_config=runtime_config.generation,
-        chat_context_window_tokens=(
-            runtime_config.primary_model.context_window_tokens or 32_768
-        ),
-        llm_stage_budgets=runtime_config.llm_stage_budgets,
-    )
-
-    with runtime:
-        service = _build_agent_service(
-            runtime,
-            checkpoint_db=checkpoint_db,
-            agent_type=agent,
-            model_alias=model,
+    effective_run_id = run_id or f"run_{id(facade):x}"
+    run_kwargs: dict[str, object] = {
+        "files": input_files or [],
+        "run_id": effective_run_id,
+        "max_tokens_total": budget,
+    }
+    if (
+        tool_names
+        or disabled_tool_names
+        or allow_write_tools
+        or allow_execute_tools
+        or allow_discovery_tools
+    ):
+        run_kwargs.update(
+            {
+                "tools": tool_names or [],
+                "disabled_tools": disabled_tool_names or [],
+                "allow_write_tools": allow_write_tools,
+                "allow_execute_tools": allow_execute_tools,
+                "allow_discovery_tools": allow_discovery_tools,
+            }
         )
-        effective_run_id = run_id or f"run_{id(service):x}"
-        result = asyncio.run(
-            service.run(
-                AgentRunRequest(
-                    task=task,
-                    run_id=effective_run_id,
-                    thread_id=effective_run_id,
-                    input_files=input_files or [],
-                )
+    result = facade.run(task, **run_kwargs)
+    _display_agent_result(result, verbose=verbose)
+
+    raw_result = result.raw if isinstance(result.raw, AgentRunResult) else None
+    if result.status == "paused":
+        print()
+        if checkpoint_db is None:
+            print("⚠  当前命令使用 MemorySaver，进程结束后暂停状态无法恢复。")
+            print("   请使用 --checkpoint-db 启用 SQLite checkpoint 后重试。")
+        else:
+            print("⏸  已保存 checkpoint，可跨进程恢复:")
+            resume_cmd = (
+                f"   agent resume {effective_run_id} "
+                f"--agent {agent} "
+                f"--checkpoint-db {checkpoint_db}"
             )
-        )
+            if raw_result is not None and raw_result.workspace_path:
+                resume_cmd += f" --workspace-path {raw_result.workspace_path}"
+            print(resume_cmd)
 
-        _display_result(result, verbose=verbose)
+        if raw_result is not None and raw_result.needs_user_input:
+            print(f"\n   待处理: {raw_result.needs_user_input}")
 
-        if result.status == "paused":
-            print()
-            if checkpoint_db is None:
-                print("⚠  当前命令使用 MemorySaver，进程结束后暂停状态无法恢复。")
-                print("   请使用 --checkpoint-db 启用 SQLite checkpoint 后重试。")
-            else:
-                print("⏸  已保存 checkpoint，可跨进程恢复:")
-                resume_cmd = (
-                    f"   rag agent resume {effective_run_id} "
-                    f"--agent {agent} "
-                    f"--checkpoint-db {checkpoint_db}"
-                )
-                if result.workspace_path:
-                    resume_cmd += f" --workspace-path {result.workspace_path}"
-                print(resume_cmd)
+        if non_interactive:
+            raise typer.Exit(code=2)
 
-            if result.needs_user_input:
-                print(f"\n   待处理: {result.needs_user_input}")
-
-            if non_interactive:
-                raise typer.Exit(code=2)
-
-        if result.status == "failed":
-            raise typer.Exit(code=1)
+    if result.status == "failed":
+        raise typer.Exit(code=1)
 
 
 @agent_app.command(name="resume")
 def agent_resume(
     run_id: Annotated[str, typer.Argument(help="要恢复的 run_id/thread_id")],
     storage_root: Annotated[
-        Path, typer.Option("--storage-root", help="RAG 存储根目录")
+        Path, typer.Option("--storage-root", help="RAG 存储根目录", hidden=True)
     ] = Path(".rag"),
     agent: Annotated[
         str,
@@ -689,6 +914,7 @@ def agent_resume(
         typer.Option(
             "--embedding-model",
             help="Embedding 模型别名，对应 configs/models.yaml 中 capability=embedding 的条目",
+            hidden=True,
         ),
     ] = None,
     reranker_model: Annotated[
@@ -696,23 +922,24 @@ def agent_resume(
         typer.Option(
             "--reranker-model",
             help="Reranker 模型别名，对应 configs/models.yaml 中 capability=reranker 的条目",
+            hidden=True,
         ),
     ] = None,
     vector_backend: Annotated[
         str,
-        typer.Option("--vector-backend", help="Vector backend: milvus or sqlite."),
+        typer.Option("--vector-backend", help="Vector backend: milvus or sqlite.", hidden=True),
     ] = DEFAULT_VECTOR_BACKEND,
     vector_dsn: Annotated[
         str | None,
-        typer.Option("--vector-dsn", help="Vector backend DSN."),
+        typer.Option("--vector-dsn", help="Vector backend DSN.", hidden=True),
     ] = None,
     vector_namespace: Annotated[
         str | None,
-        typer.Option("--vector-namespace", help="Vector namespace/database."),
+        typer.Option("--vector-namespace", help="Vector namespace/database.", hidden=True),
     ] = None,
     vector_collection_prefix: Annotated[
         str | None,
-        typer.Option("--vector-collection-prefix", help="Milvus collection prefix used at ingest time."),
+        typer.Option("--vector-collection-prefix", help="Milvus collection prefix used at ingest time.", hidden=True),
     ] = None,
     workspace_path: Annotated[
         str | None,
@@ -720,52 +947,46 @@ def agent_resume(
     ] = None,
 ) -> None:
     """从 SQLite checkpoint 恢复暂停的 Agent 运行。"""
-    from rag import AssemblyRequest, CapabilityRequirements, RAGRuntime
-    from rag.models.assembly_adapter import to_assembly_overrides
-    from rag.models.runtime import RuntimeOverrides, resolve_runtime_config
-    from rag.retrieval import QueryOptions
+    from rag.utils.text import load_env_file
 
+    startup_started_at = time.perf_counter()
     load_env_file()
-    runtime_config = resolve_runtime_config(
-        RuntimeOverrides(
-            model_alias=model,
-            embedding_model_alias=embedding_model,
-            reranker_model_alias=reranker_model,
-        )
-    )
-    assembly_overrides = to_assembly_overrides(runtime_config)
-
-    storage = runtime_storage_config(
-        storage_root,
+    runtime, diagnostics = _build_optional_rag_runtime(
+        storage_root=storage_root,
+        model_alias=model,
+        embedding_model_alias=embedding_model,
+        reranker_model_alias=reranker_model,
         vector_backend=vector_backend,
         vector_dsn=vector_dsn,
         vector_namespace=vector_namespace,
         vector_collection_prefix=vector_collection_prefix,
     )
-    requirements = CapabilityRequirements(
-        require_chat=True,
-        default_context_tokens=QueryOptions().max_context_tokens,
-    )
-    runtime = RAGRuntime.from_request(
-        storage=storage,
-        request=AssemblyRequest(requirements=requirements, overrides=assembly_overrides),
-        generation_config=runtime_config.generation,
-        chat_context_window_tokens=(
-            runtime_config.primary_model.context_window_tokens or 32_768
-        ),
-        llm_stage_budgets=runtime_config.llm_stage_budgets,
-    )
 
-    with runtime:
+    with runtime if runtime is not None else nullcontext():
+        try:
+            model_control_plane = _build_model_control_plane(
+                model_alias=model,
+                session_path=DEFAULT_MODEL_SESSION_PATH,
+            )
+        except Exception:
+            if model is not None:
+                raise
+            model_control_plane = None
         service = _build_agent_service(
             runtime,
             checkpoint_db=checkpoint_db,
             agent_type=agent,
             model_alias=model,
+            model_control_plane=model_control_plane,
+            runtime_diagnostics=diagnostics,
+            startup_ms=(time.perf_counter() - startup_started_at) * 1000,
         )
-        request = asyncio.run(service.apending_human_input_request(run_id=run_id))
-        response = _build_resume_response(request, decision)
-        result = asyncio.run(service.resume(run_id=run_id, response=response, workspace_path=workspace_path))
-        _display_result(result, verbose=verbose)
-        if result.status == "failed":
-            raise typer.Exit(code=1)
+        try:
+            request = asyncio.run(service.apending_human_input_request(run_id=run_id))
+            response = _build_resume_response(request, decision)
+            result = asyncio.run(service.resume(run_id=run_id, response=response, workspace_path=workspace_path))
+            _display_result(result, verbose=verbose)
+            if result.status == "failed":
+                raise typer.Exit(code=1)
+        finally:
+            _close_agent_service(service)

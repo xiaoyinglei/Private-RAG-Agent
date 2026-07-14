@@ -5,9 +5,8 @@ from __future__ import annotations
 import base64
 import csv
 import mimetypes
-import os
 from pathlib import Path
-from typing import Any, Literal
+from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -81,7 +80,12 @@ class ReadFileOutput(BaseModel):
 
 
 class WriteFileInput(BaseModel):
-    path: str
+    path: str = Field(
+        description=(
+            "Workspace-relative destination path. Must start with one of: "
+            "scratch/, artifacts/, reports/, logs/."
+        )
+    )
     content: str
     encoding: str = "utf-8"
     overwrite: bool = False
@@ -109,7 +113,7 @@ class RunPythonInput(BaseModel):
     timeout_seconds: float = Field(default=30.0, gt=0, le=MAX_PYTHON_TIMEOUT)
 
     @model_validator(mode="after")
-    def _require_script_or_code(self) -> "RunPythonInput":
+    def _require_script_or_code(self) -> RunPythonInput:
         if not self.script_path and not self.code:
             raise ValueError("Either script_path or code must be provided")
         return self
@@ -330,23 +334,16 @@ class PrimitiveOps:
         return self._execute_python_file(script_abs, payload.args, payload.timeout_seconds)
 
     def _run_python_code(self, payload: RunPythonInput) -> RunPythonOutput:
-        """Execute Python code with SDK preamble injected.
-
-        Writes code to a temp .py file in scratch/, prepends the Tool SDK
-        so agent-written Python can use tools.declare().
-        """
+        """Execute Python code from a temporary workspace-local file."""
         import tempfile
 
         # Resolve scratch dir (must be first — used by _matplotlib_preamble below)
         scratch = self._workspace.root / "scratch"
         scratch.mkdir(parents=True, exist_ok=True)
 
-        # Load SDK preamble
-        sdk_source = _load_sdk_preamble()
-
-        # Build the full script: matplotlib preamble + SDK + user code
+        # Build the full script: matplotlib preamble + user code.
         matplot_preamble = _matplotlib_preamble(scratch)
-        full_code = f"{matplot_preamble}\n\n{sdk_source}\n\n{payload.code}"
+        full_code = f"{matplot_preamble}\n\n{payload.code}"
 
         # Write to temp file in scratch/
         with tempfile.NamedTemporaryFile(
@@ -359,19 +356,11 @@ class PrimitiveOps:
             tf.write(full_code)
             temp_path = Path(tf.name)
 
-        # Set AGENT_SCRATCH_DIR so the SDK knows where to write tool_calls.jsonl
-        prev_scratch = os.environ.get("AGENT_SCRATCH_DIR")
         try:
-            os.environ["AGENT_SCRATCH_DIR"] = str(scratch)
             return self._execute_python_file(
                 temp_path, payload.args, payload.timeout_seconds,
             )
         finally:
-            if prev_scratch is not None:
-                os.environ["AGENT_SCRATCH_DIR"] = prev_scratch
-            else:
-                os.environ.pop("AGENT_SCRATCH_DIR", None)
-            # Clean up temp file
             try:
                 temp_path.unlink(missing_ok=True)
             except OSError:
@@ -493,128 +482,6 @@ class PrimitiveOps:
             truncated=truncated,
             errors=errors,
         )
-
-    # -- generic tool runners -----------------------------------------------
-
-    def search_text(self, payload: Any) -> Any:
-        """Search workspace files with grep -rn."""
-        from rag.agent.tools.generic_tools import SearchTextInput, SearchTextMatch, SearchTextOutput
-
-        if isinstance(payload, dict):
-            inp = SearchTextInput(**payload)
-        else:
-            inp = payload
-        args = ["grep", "-rn", "--include=*"]
-        if inp.file_types:
-            # Convert comma-sep to --include globs
-            for ext in inp.file_types.split(","):
-                ext = ext.strip()
-                if ext:
-                    args = args[:-1] + [f"--include=*{ext}", "--include=*"]
-            args.pop()  # remove trailing --include=*
-        if inp.regex:
-            args.append("-E")
-        else:
-            args.append("-F")
-        args.extend([inp.pattern, inp.path])
-        import subprocess as _sp
-
-        try:
-            proc = _sp.run(args, capture_output=True, text=True, timeout=15.0)
-            result = type("_R", (), {"stdout": proc.stdout or "", "stderr": proc.stderr or "", "exit_code": proc.returncode})()
-        except Exception:
-            result = type("_R", (), {"stdout": "", "stderr": "grep failed", "exit_code": 1})()
-        matches: list[SearchTextMatch] = []
-        for line in result.stdout.split("\n")[:inp.max_results]:
-            line = line.strip()
-            if not line:
-                continue
-            parts = line.split(":", 2)
-            if len(parts) >= 3:
-                matches.append(SearchTextMatch(
-                    file_path=parts[0], line_number=int(parts[1]) if parts[1].isdigit() else 0,
-                    line_content=parts[2],
-                ))
-        return SearchTextOutput(matches=matches, total_matches=len(matches),
-                                truncated=len(result.stdout.split("\n")) > inp.max_results)
-
-    def apply_patch(self, payload: Any) -> Any:
-        """Apply a string replacement to a file."""
-        from rag.agent.tools.generic_tools import ApplyPatchInput, ApplyPatchOutput
-
-        if isinstance(payload, dict):
-            inp = ApplyPatchInput(**payload)
-        else:
-            inp = payload
-        file_path = self._workspace.resolve_path(inp.file_path)
-        if not file_path.is_file():
-            return ApplyPatchOutput(file_path=inp.file_path, replaced=False,
-                                    occurrences=0, message="file not found")
-        content = file_path.read_text(encoding="utf-8")
-        count = content.count(inp.old_string) if inp.replace_all else 1 if inp.old_string in content else 0
-        if count == 0:
-            return ApplyPatchOutput(file_path=inp.file_path, replaced=False,
-                                    occurrences=0, message="old_string not found")
-        if count > 1 and not inp.replace_all:
-            return ApplyPatchOutput(file_path=inp.file_path, replaced=False,
-                                    occurrences=count, message="not unique, use replace_all=True")
-        new_content = content.replace(inp.old_string, inp.new_string) if inp.replace_all else content.replace(inp.old_string, inp.new_string, 1)
-        file_path.write_text(new_content, encoding="utf-8")
-        return ApplyPatchOutput(file_path=inp.file_path, replaced=True,
-                                occurrences=count, message="ok")
-
-    def run_command(self, payload: Any) -> Any:
-        """Execute a shell command."""
-        from rag.agent.tools.generic_tools import RunCommandInput, RunCommandOutput
-
-        if isinstance(payload, dict):
-            inp = RunCommandInput(**payload)
-        else:
-            inp = payload
-        import subprocess, time
-
-        cwd = self._workspace.resolve_path(inp.working_dir)
-        start = time.monotonic()
-        try:
-            proc = subprocess.run(
-                inp.command, shell=True, cwd=str(cwd),
-                capture_output=True, text=True,
-                timeout=inp.timeout_seconds,
-            )
-            ok = proc.returncode == 0
-            stdout = proc.stdout or ""
-            stderr = proc.stderr or ""
-            timed_out = False
-            exit_code = proc.returncode
-        except subprocess.TimeoutExpired:
-            ok = False
-            stdout = ""
-            stderr = "command timed out"
-            timed_out = True
-            exit_code = -1
-        duration = (time.monotonic() - start) * 1000
-        return RunCommandOutput(
-            stdout=stdout[:50000], stderr=stderr[:50000],
-            exit_code=exit_code, timed_out=timed_out,
-            truncated=len(stdout) > 50000 or len(stderr) > 50000,
-            duration_ms=duration,
-        )
-
-    def tool_repl(self, payload: Any) -> RunPythonOutput:
-        """Execute tool_repl — batch tool calling via Python code.
-
-        Adapts RunCommandInput.command → RunPythonInput.code.
-        """
-        from rag.agent.tools.generic_tools import RunCommandInput
-
-        if isinstance(payload, RunCommandInput):
-            code = payload.command
-        elif isinstance(payload, dict):
-            code = payload.get("command", "")
-        else:
-            code = str(getattr(payload, "command", ""))
-        return self.run_python(RunPythonInput(code=code))
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -1002,35 +869,6 @@ except ImportError:
     pass
 # -- end preamble --
 '''
-
-
-_SDK_PREAMBLE_CACHE: str | None = None
-
-
-def _load_sdk_preamble() -> str:
-    """Load the Tool SDK source as a string to prepend to user code."""
-    global _SDK_PREAMBLE_CACHE
-    if _SDK_PREAMBLE_CACHE is not None:
-        return _SDK_PREAMBLE_CACHE
-    sdk_path = Path(__file__).resolve().parent / "tool_sdk.py"
-    if sdk_path.exists():
-        _SDK_PREAMBLE_CACHE = sdk_path.read_text(encoding="utf-8")
-        return _SDK_PREAMBLE_CACHE
-    # Fallback: minimal inline SDK
-    _SDK_PREAMBLE_CACHE = """
-import json, os
-class _ToolDeclarer:
-    def __init__(self): self._count = 0
-    def declare(self, name, **args):
-        if self._count >= int(os.environ.get('AGENT_MAX_BATCH_SIZE','10')): return {'declared':False}
-        batch=os.path.join(os.environ.get('AGENT_SCRATCH_DIR','.'),'tool_calls.jsonl')
-        import pathlib; pathlib.Path(batch).parent.mkdir(parents=True,exist_ok=True)
-        with open(batch,'a') as f: f.write(json.dumps({'tool_name':name,'arguments':args},default=str)+'\\n')
-        self._count+=1; return {'declared':name,'seq':self._count}
-    def list_available(self): return os.environ.get('AGENT_AVAILABLE_TOOLS','').split(',')
-tools = _ToolDeclarer()
-"""
-    return _SDK_PREAMBLE_CACHE
 
 
 def _collect_image_previews(

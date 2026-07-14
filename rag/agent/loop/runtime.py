@@ -2,33 +2,33 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import AsyncGenerator, Awaitable, Sequence
+import time
+from collections.abc import AsyncGenerator, Awaitable, Mapping, Sequence
+from dataclasses import replace
 from inspect import isawaitable
-from pathlib import Path
 from typing import Any, Protocol, cast
+from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, ValidationError
 
-from rag.agent.capabilities.catalog import CORE_TOOLS, DeferredToolStore, ToolCatalog
-from rag.agent.capabilities.context import iteration_var
 from rag.agent.core.checkpointing import CheckpointStore
 from rag.agent.core.context import RunRegistry
-from rag.agent.core.turn_contracts import ToolCallPlan
-from rag.agent.tools.spec import ToolResult
 from rag.agent.core.definition import AgentRuntimePolicy
 from rag.agent.core.finalization import (
     FinishCandidateBuilder,
     FinishCandidateBuildError,
 )
-from rag.agent.core.human_input import HumanInputRequest
+from rag.agent.core.human_input import HumanInputRequest, ToolCallSummary
 from rag.agent.core.llm_context import AgentLLMContextOverflowError
+from rag.agent.core.messages import ModelMessage, tool_result_message
+from rag.agent.core.model_request import (
+    ModelCallRecord,
+    ModelRequest,
+    build_tool_manifest,
+)
 from rag.agent.core.observations import ObservationBatch, ObservationExtractor
 from rag.agent.core.output_models import ValidatedFinalOutput
-from rag.agent.core.runtime_diagnostics import RuntimeDiagnostic
-from rag.agent.core.tool_execution import (
-    ToolBatchRequest,
-    ToolBatchResult,
-)
+from rag.agent.core.runtime_diagnostics import AgentLatencyProfile, RuntimeDiagnostic
 from rag.agent.loop.state import (
     LoopPause,
     LoopState,
@@ -42,35 +42,51 @@ from rag.agent.loop.state import (
     replace_latest_transition,
 )
 from rag.agent.loop.stop_hooks import StopHookOutcome, StopHookRunner
-from rag.agent.loop.substate import DeferredToolState, MemoryState, PlanState
 from rag.agent.memory.compactor import LoopCompactionResult
 from rag.agent.planning import MAX_PLAN_EVENTS, PlanEvent, PlanTracker
+from rag.agent.streaming.events import StreamEvent
+from rag.agent.streaming.sink import StreamEventSink
+from rag.agent.tools.executor import ToolExecutionRecord, ToolExecutor
+from rag.agent.tools.permissions import ToolExecutionContext
+from rag.agent.tools.selection import FIND_TOOLS_NAME, reduce_tool_activation
+from rag.agent.tools.tool import Tool, ToolCall, ToolCallOrigin, ToolResult
+from rag.providers.llm_gateway import LLMContextOverflowError
 
 logger = logging.getLogger(__name__)
 
-# ── B2c: tool classification for metrics ──
+# Tool classification used by runtime metrics.
 _NATIVE_TOOL_SET = frozenset({
-    "read_file", "write_file", "search_text", "apply_patch",
-    "run_command", "run_python", "list_files", "update_plan",
-    "task", "tool_search", "activate_tools", "tool_repl",
+    "list_files",
+    "search_text",
+    "read_file",
+    "apply_patch",
+    "run_command",
+    "update_plan",
+    "find_tools",
 })
-_DEFERRED_TOOL_SET = frozenset({
-    "search_knowledge", "search_assets", "llm_generate",
-    "llm_summarize", "llm_compare", "structured_probe",
-})
-from rag.agent.streaming.events import StreamEvent
-from rag.agent.streaming.sink import StreamEventSink
-from rag.agent.tools.observation import ToolExecutionObservation
-from rag.providers.llm_gateway import LLMContextOverflowError
+
+
+def _add_model_latency(state: LoopState, latency_ms: float) -> None:
+    profile = state.get("latency_profile")
+    if not isinstance(profile, AgentLatencyProfile):
+        profile = AgentLatencyProfile()
+    state["latency_profile"] = profile.model_copy(
+        update={"model_latency_ms": profile.model_latency_ms + latency_ms}
+    )
 
 
 class ModelTurnEnvelope(BaseModel):
     """Optional provider metadata surrounding one accepted draft."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, arbitrary_types_allowed=True)
 
     draft: ModelTurnDraft
     transitions: tuple[LoopTransition, ...] = ()
+    request: ModelRequest | None = None
+    model_call_record: ModelCallRecord | None = None
+    assistant_message: ModelMessage | None = None
+    context_revision: str | None = None
+    provider_serializer_revision: str | None = None
 
 
 class ModelTurnProvider(Protocol):
@@ -79,6 +95,7 @@ class ModelTurnProvider(Protocol):
         state: LoopState,
         *,
         definition: AgentRuntimePolicy,
+        budget_remaining: int,
     ) -> ModelTurnDraft | ModelTurnEnvelope: ...
 
 
@@ -87,16 +104,6 @@ class LoopContextManager(Protocol):
         self,
         state: LoopState,
     ) -> LoopCompactionResult | Awaitable[LoopCompactionResult]: ...
-
-
-class LoopToolRunner(Protocol):
-    def execute_batch(
-        self,
-        request: ToolBatchRequest,
-        *,
-        state: LoopState | None,
-        definition: AgentRuntimePolicy | None = None,
-    ) -> ToolBatchResult | Awaitable[ToolBatchResult]: ...
 
 
 class LoopEventSink(Protocol):
@@ -117,7 +124,9 @@ class AgentLoop:
         definition: AgentRuntimePolicy,
         model_provider: ModelTurnProvider,
         context_manager: LoopContextManager,
-        tool_runner: LoopToolRunner,
+        tool_executor: ToolExecutor,
+        registry_snapshot: Mapping[str, Tool],
+        execution_context: ToolExecutionContext,
         checkpoint_store: CheckpointStore,
         stop_hook_runner: StopHookRunner,
         finish_candidate_builder: FinishCandidateBuilder,
@@ -126,16 +135,15 @@ class AgentLoop:
         observation_extractor: ObservationExtractor | None = None,
         plan_tracker: PlanTracker | None = None,
         max_model_retries: int = 1,
-        catalog: ToolCatalog | None = None,
-        deferred_store: DeferredToolStore | None = None,
-        scratch_dir: Path | None = None,
     ) -> None:
         if max_model_retries < 0:
             raise ValueError("max_model_retries must be non-negative")
         self._definition = definition
         self._model_provider = model_provider
         self._context_manager = context_manager
-        self._tool_runner = tool_runner
+        self._tool_executor = tool_executor
+        self._registry_snapshot = registry_snapshot
+        self._execution_context = execution_context
         self._checkpoint_store = checkpoint_store
         self._stop_hook_runner = stop_hook_runner
         self._finish_candidate_builder = finish_candidate_builder
@@ -146,14 +154,11 @@ class AgentLoop:
         self._observed_tool_call_ids: set[str] = set()
         self._plan_tracker = plan_tracker or PlanTracker()
         self._max_model_retries = max_model_retries
-        self._catalog = catalog
-        self._deferred_store = deferred_store
-        self._scratch_dir = scratch_dir
 
     def _set_stream_sink(self, sink: StreamEventSink | None) -> None:
         """Set the active stream sink, propagating to sub-components that support it."""
         self._stream_sink = sink
-        for target in (self._model_provider, self._tool_runner):
+        for target in (self._model_provider,):
             if hasattr(target, "_stream_sink"):
                 target._stream_sink = sink
 
@@ -210,18 +215,24 @@ class AgentLoop:
 
         retries = 0
         while state["status"] == "running":
+            budget_remaining = await _remaining_llm_budget(handles)
+            if budget_remaining is not None and budget_remaining <= 0:
+                await self._fail(
+                    state,
+                    stop_reason="budget_exhausted",
+                    error="LLM/tool budget exhausted.",
+                    transition_reason="failed",
+                    checkpoint_reason="budget_exhausted",
+                )
+                return state
             await self._emit_stream(
                 _stream_turn_start(run_id=state["run_config"].run_id, turn=state["iteration"] + 1)
             )
 
             # Execute any pending tool calls first
             if state["pending_tool_calls"]:
-                token = iteration_var.set(state["iteration"])
-                try:
-                    if await self._execute_pending_tools(state):
-                        return state
-                finally:
-                    iteration_var.reset(token)
+                if await self._execute_pending_tools(state):
+                    return state
                 continue
 
             # Guard rails
@@ -237,7 +248,11 @@ class AgentLoop:
             
             # Model turn — call the LLM, handle errors, return (turn | None)
             state["iteration"] += 1
-            turn, retries = await self._model_turn(state, retries)
+            turn, retries = await self._model_turn(
+                state,
+                retries,
+                budget_remaining=(-1 if budget_remaining is None else budget_remaining),
+            )
             if turn is None:
                 if state["status"] != "running":
                     return state  # terminal
@@ -308,14 +323,26 @@ class AgentLoop:
         return True
 
     async def _model_turn(
-        self, state: LoopState, retries: int,
+        self,
+        state: LoopState,
+        retries: int,
+        *,
+        budget_remaining: int,
     ) -> tuple[ModelTurn | None, int]:
         """Call the model, handle errors.  Returns (turn, retries) or (None, _) on terminal failure."""
         turn: ModelTurn | None = None
         try:
-            provided = await self._model_provider.next_turn(
-                state, definition=self._definition)
+            model_started_at = time.perf_counter()
+            try:
+                provided = await self._model_provider.next_turn(
+                    state,
+                    definition=self._definition,
+                    budget_remaining=budget_remaining,
+                )
+            finally:
+                _add_model_latency(state, (time.perf_counter() - model_started_at) * 1000)
             envelope = provided if isinstance(provided, ModelTurnEnvelope) else ModelTurnEnvelope(draft=provided)
+            self._apply_model_envelope(state, envelope)
             for t in envelope.transitions:
                 tr = t.model_copy(update={"iteration": state["iteration"]})
                 replace_latest_transition(state, tr)
@@ -334,6 +361,74 @@ class AgentLoop:
         except Exception as exc:
             turn, retries = await self._handle_provider_error(state, exc, retries)
             return turn, retries
+
+    def _apply_model_envelope(
+        self,
+        state: LoopState,
+        envelope: ModelTurnEnvelope,
+    ) -> None:
+        request = envelope.request
+        if envelope.model_call_record is not None:
+            state["model_call_records"] = [
+                *state.get("model_call_records", []),
+                envelope.model_call_record,
+            ]
+        if envelope.assistant_message is not None:
+            state["canonical_transcript"] = [
+                *state.get("canonical_transcript", []),
+                envelope.assistant_message,
+            ]
+        if envelope.context_revision is not None:
+            state["context_revision"] = envelope.context_revision
+        if request is None:
+            return
+        state["prompt_revision"] = request.prompt_revision
+        serializer_revision = (
+            envelope.provider_serializer_revision
+            or state.get("provider_serializer_revision")
+            or "provider-wire-v1"
+        )
+        state["provider_serializer_revision"] = serializer_revision
+        selected = tuple(
+            self._registry_snapshot[name]
+            for name in request.exposed_tool_names
+        )
+        resident = tuple(
+            name
+            for name in state.get("resident_tool_names", ())
+            if name in request.exposed_tool_names
+        )
+        explicit = tuple(
+            name
+            for name in state.get("explicit_tool_names", ())
+            if name in request.exposed_tool_names and name not in resident
+        )
+        active = tuple(
+            name
+            for name in state.get("active_tool_names", ())
+            if name in request.exposed_tool_names
+            and name not in resident
+            and name not in explicit
+        )
+        state["tool_manifest"] = build_tool_manifest(
+            tools=selected,
+            resident_tool_names=resident,
+            explicit_tool_names=explicit,
+            active_tool_names=active,
+            provider_serializer_revision=serializer_revision,
+        )
+        for plan in envelope.draft.tool_calls:
+            origin = plan.origin or ToolCallOrigin(
+                request_id=request.request_id,
+                toolset_revision=request.toolset_revision,
+                exposed_tool_names=request.exposed_tool_names,
+            )
+            state["canonical_tool_calls"][plan.tool_call_id] = ToolCall(
+                tool_call_id=plan.tool_call_id,
+                tool_name=plan.tool_name,
+                arguments=plan.arguments,
+                origin=origin,
+            )
 
     async def _handle_overflow(
         self, state: LoopState, exc: Exception,
@@ -438,16 +533,15 @@ class AgentLoop:
             checkpoint_reason="model_retry")
         return None, retries  # caller will retry
 
-    def _sync_discovery_to_state(self, state: LoopState) -> None:
-        """Sync deferred store state to LoopState deferred_tool_state."""
-        if self._deferred_store is not None:
-            self._deferred_store.sync_to_state(cast(dict[Any, Any], state))
-
     async def _execute_pending_tools(self, state: LoopState) -> bool:
-        # ── 流式事件：工具开始执行 ──
         run_id = state["run_config"].run_id
         turn = state["iteration"]
-        for call in state["pending_tool_calls"]:
+        pending = tuple(state["pending_tool_calls"])
+        calls = tuple(
+            self._canonical_call(state, pending_call)
+            for pending_call in pending
+        )
+        for call in calls:
             await self._emit_stream(
                 _stream_tool_use_start(
                     tool_name=call.tool_name,
@@ -456,41 +550,71 @@ class AgentLoop:
                     turn=turn,
                 )
             )
-
-        result = await _await_value(
-            self._tool_runner.execute_batch(
-                ToolBatchRequest(
-                    calls=tuple(call.plan for call in state["pending_tool_calls"]),
-                    run_config=state["run_config"],
-                    allowed_tools=frozenset(self._definition.allowed_tools),
-                    approved_tool_call_ids=tuple(state["approved_tool_call_ids"]),
-                    denied_tool_call_ids=tuple(state["denied_tool_call_ids"]),
-                    execution_records=state["tool_execution_records"],
-                ),
-                state=state,
-                definition=self._definition,
-            )
+        context = replace(
+            self._execution_context,
+            approved_tool_call_ids=frozenset(
+                state["approved_tool_call_ids"]
+            ),
+            denied_tool_call_ids=frozenset(
+                state["denied_tool_call_ids"]
+            ),
         )
-        state["run_config"] = result.run_config
-        state["pending_tool_calls"] = [
-            PendingToolCall(plan=call, status="pending") for call in result.pending_tool_calls
-        ]
-        state["tool_execution_records"] = {
-            call_id: record.model_copy(deep=True) for call_id, record in result.execution_records.items()
+        executions = await self._tool_executor.execute_batch(
+            calls,
+            context=context,
+            records=state["tool_execution_records"],
+        )
+        new_results = [execution.result for execution in executions]
+        for execution in executions:
+            if execution.record is not None:
+                state["tool_execution_records"][
+                    execution.record.tool_call_id
+                ] = execution.record
+
+        approval_execution = next(
+            (
+                execution
+                for execution in executions
+                if execution.result.error_code == "approval_required"
+            ),
+            None,
+        )
+        reconciliation_execution = next(
+            (
+                execution
+                for execution in executions
+                if execution.record is not None
+                and execution.record.requires_reconciliation
+            ),
+            None,
+        )
+        blocked_ids = {
+            execution.result.tool_call_id
+            for execution in (approval_execution, reconciliation_execution)
+            if execution is not None
         }
-        new_results = list(result.tool_results)
+        state["pending_tool_calls"] = [
+            PendingToolCall(plan=item.plan, status="pending")
+            for item in pending
+            if item.tool_call_id in blocked_ids
+        ]
+
+        self._apply_activation_results(state, new_results)
         state["tool_results"] = _merge_keyed(
             state["tool_results"],
             new_results,
         )
+        state["canonical_transcript"] = [
+            *state.get("canonical_transcript", []),
+            *(tool_result_message(result) for result in new_results),
+        ]
 
-        # ── 流式事件：工具执行结果 ──
         for tool_result in new_results:
-            if tool_result.status == "error":
+            if tool_result.is_error:
                 await self._emit_stream(
                     _stream_tool_use_error(
                         tool_id=tool_result.tool_call_id,
-                        error=tool_result.error.message if tool_result.error else "Unknown error",
+                        error=tool_result.error_message or "Unknown error",
                         run_id=run_id,
                         turn=turn,
                     )
@@ -500,14 +624,11 @@ class AgentLoop:
                     _stream_tool_use_result(
                         tool_name=tool_result.tool_name,
                         tool_id=tool_result.tool_call_id,
-                        result=str(tool_result.output)[:500] if tool_result.output else "",
+                        result=_tool_result_text(tool_result)[:500],
                         run_id=run_id,
                         turn=turn,
                     )
                 )
-
-        if result.context_budget is not None:
-            state["memory_state"].context_budget = result.context_budget
 
         batch = self._observation_extractor.extract(
             new_results,
@@ -517,42 +638,31 @@ class AgentLoop:
         self._merge_observations(state, batch)
         self._record_plan_observations(state, batch)
 
-        for tool_result in new_results:
-            if tool_result.retry_count <= 0:
-                continue
-            await self._transition(
-                state,
-                reason="retry",
-                detail={
-                    "component": "tool",
-                    "tool_call_id": tool_result.tool_call_id,
-                    "retry_count": tool_result.retry_count,
-                },
-                checkpoint_reason="tool_retry",
-            )
-
-        if result.status in {"paused", "reconciliation_required"}:
-            request = result.human_input_request
-            reason = request.question if request is not None else result.decision_reason or result.status
+        if approval_execution is not None:
+            request = _approval_request(approval_execution.result)
             state["approval_request"] = request
-            # Sync active set even on pause (tool_search may have activated)
-            self._sync_discovery_to_state(state)
             await self._pause(
                 state,
-                reason=reason,
+                reason=request.question,
                 request=request,
                 checkpoint_reason="tool_pause",
                 transition_reason="approval_required",
             )
             return True
-
-        # Sync active deferred tools after tool execution
-        self._sync_discovery_to_state(state)
-
-        # Process declarative tool batch (B2b: code-as-tool)
-        batch_plans = self._process_tool_batch(state)
-        if batch_plans:
-            state["pending_tool_calls"].extend(batch_plans)
+        if reconciliation_execution is not None:
+            request = _reconciliation_request(
+                reconciliation_execution.result,
+                reconciliation_execution.record,
+            )
+            state["approval_request"] = request
+            await self._pause(
+                state,
+                reason=request.question,
+                request=request,
+                checkpoint_reason="tool_reconciliation",
+                transition_reason="approval_required",
+            )
+            return True
 
         await self._transition(
             state,
@@ -561,7 +671,6 @@ class AgentLoop:
                 "phase": "recorded",
                 "result_count": len(new_results),
                 "pending_count": len(state["pending_tool_calls"]),
-                "skipped_completed_tool_call_ids": list(result.skipped_completed_tool_call_ids),
             },
             checkpoint_reason="tool_results_recorded",
         )
@@ -574,17 +683,81 @@ class AgentLoop:
             active_ids.add(tr.tool_call_id)
         state["tool_call_ledger"].trim(active_tool_call_ids=active_ids)
 
-        # ── B2c: tool call metrics ──
+        # Record tool call metrics.
         self._record_metrics(state, new_results)
 
         return False
+
+    def _canonical_call(
+        self,
+        state: LoopState,
+        pending: PendingToolCall,
+    ) -> ToolCall:
+        existing = state["canonical_tool_calls"].get(pending.tool_call_id)
+        if existing is not None:
+            return existing
+        plan = pending.plan
+        exposed = tuple(
+            dict.fromkeys(
+                (
+                    *state.get("resident_tool_names", ()),
+                    *state.get("explicit_tool_names", ()),
+                    *state.get("active_tool_names", ()),
+                    plan.tool_name,
+                )
+            )
+        )
+        origin = plan.origin or ToolCallOrigin(
+            request_id=f"{state['run_config'].run_id}:initial",
+            toolset_revision=(
+                state["tool_manifest"].toolset_revision
+                if state.get("tool_manifest") is not None
+                else "tools_initial"
+            ),
+            exposed_tool_names=exposed,
+        )
+        call = ToolCall(
+            tool_call_id=plan.tool_call_id,
+            tool_name=plan.tool_name,
+            arguments=plan.arguments,
+            origin=origin,
+        )
+        state["canonical_tool_calls"][call.tool_call_id] = call
+        return call
+
+    def _apply_activation_results(
+        self,
+        state: LoopState,
+        results: Sequence[ToolResult],
+    ) -> None:
+        for result in results:
+            if result.tool_name != FIND_TOOLS_NAME or result.is_error:
+                continue
+            proposals = result.metadata.get("proposed_activation_names", ())
+            if not isinstance(proposals, Sequence) or isinstance(
+                proposals,
+                (str, bytes),
+            ):
+                continue
+            reduction = reduce_tool_activation(
+                self._registry_snapshot,
+                proposed_names=tuple(str(name) for name in proposals),
+                resident_names=(
+                    *state.get("resident_tool_names", ()),
+                    *state.get("explicit_tool_names", ()),
+                ),
+                active_names=state.get("active_tool_names", ()),
+                disabled_names=state.get("disabled_tool_names", ()),
+                max_active_tools=self._definition.max_active_deferred_tools,
+            )
+            state["active_tool_names"] = list(reduction.active_names)
 
     def _record_metrics(
         self,
         state: LoopState,
         new_results: list[ToolResult],
     ) -> None:
-        """B2c: accumulate structured ToolCallMetrics across turns.
+        """Accumulate structured ToolCallMetrics across turns.
 
         ToolCallMetrics is stored in LoopState and exposed via AgentRunResult.
         The diagnostic string is kept as a compact summary for inline display.
@@ -597,18 +770,32 @@ class AgentLoop:
 
         native = sum(1 for tr in new_results
                      if tr.tool_name in _NATIVE_TOOL_SET)
-        deferred = sum(1 for tr in new_results
-                       if tr.tool_name in _DEFERRED_TOOL_SET)
+        deferred = sum(
+            1
+            for result in new_results
+            if result.tool_name not in _NATIVE_TOOL_SET
+            and not result.tool_name.startswith("mcp__")
+        )
         mcp_calls = sum(1 for tr in new_results
                         if tr.tool_name.startswith("mcp__"))
         native_err = sum(1 for tr in new_results
-                         if tr.tool_name in _NATIVE_TOOL_SET and tr.status == "error")
+                         if tr.tool_name in _NATIVE_TOOL_SET and tr.is_error)
         mcp_err = sum(1 for tr in new_results
-                      if tr.tool_name.startswith("mcp__") and tr.status == "error")
-        native_lat = sum(tr.latency_ms for tr in new_results
-                         if tr.tool_name in _NATIVE_TOOL_SET)
-        mcp_lat = sum(tr.latency_ms for tr in new_results
-                      if tr.tool_name.startswith("mcp__"))
+                      if tr.tool_name.startswith("mcp__") and tr.is_error)
+        durations = {
+            trace.tool_call_id: trace.duration_ms
+            for trace in self._tool_executor.traces
+        }
+        native_lat = sum(
+            durations.get(tr.tool_call_id, 0.0)
+            for tr in new_results
+            if tr.tool_name in _NATIVE_TOOL_SET
+        )
+        mcp_lat = sum(
+            durations.get(tr.tool_call_id, 0.0)
+            for tr in new_results
+            if tr.tool_name.startswith("mcp__")
+        )
 
         metrics = prev.model_copy(
             update={
@@ -638,81 +825,6 @@ class AgentLoop:
                 severity="warning",
                 degraded=False,
             )][-20:]
-
-    def _process_tool_batch(self, state: LoopState) -> list[PendingToolCall]:
-        """Check scratch/tool_calls.jsonl for declarative batch declarations.
-
-        Validates activation + allowed_tools.  Input schema validation is
-        deferred to ToolExecutionService.  Failed declarations become error
-        ToolResults so the model gets structured feedback.
-        """
-        if self._scratch_dir is None:
-            return []
-
-        batch_file = self._scratch_dir / "tool_calls.jsonl"
-        if not batch_file.exists():
-            return []
-
-        from rag.agent.core.tool_batch_reader import clean_batch_file, read_tool_batch
-        from rag.agent.tools.spec import ToolError, ToolResult
-
-        declarations = read_tool_batch(str(self._scratch_dir))
-        if not declarations:
-            clean_batch_file(str(self._scratch_dir))
-            return []
-
-        allowed = self._definition.allowed_tools
-        new_pending: list[PendingToolCall] = []
-        for decl in declarations:
-            name = decl.tool_name
-
-            if name not in allowed:
-                state["tool_results"].append(
-                    ToolResult(
-                        tool_call_id=f"batch_err__{name}__{decl.line_number}",
-                        tool_name=name,
-                        status="error",
-                        error=ToolError(
-                            code="batch_not_allowed",
-                            message=f"'{name}' not in allowed_tools",
-                            retryable=False,
-                        ),
-                        latency_ms=0.0,
-                    )
-                )
-                continue
-
-            if name not in CORE_TOOLS and (
-                self._deferred_store is None or not self._deferred_store.is_active(name)
-            ):
-                state["tool_results"].append(
-                    ToolResult(
-                        tool_call_id=f"batch_err__{name}__{decl.line_number}",
-                        tool_name=name,
-                        status="error",
-                        error=ToolError(
-                            code="batch_not_activated",
-                            message=f"'{name}' is not activated — use tool_search + activate_tools",
-                            retryable=True,
-                        ),
-                        latency_ms=0.0,
-                    )
-                )
-                continue
-
-            plan = ToolCallPlan(
-                tool_call_id=f"batch__{name}__{decl.line_number}",
-                tool_name=name,
-                arguments=decl.arguments,
-            )
-            new_pending.append(PendingToolCall(plan=plan, status="pending"))
-
-        if new_pending:
-            logger.info(
-                f"Batch: {len(new_pending)}/{len(declarations)} tool(s) queued"
-            )
-        clean_batch_file(str(self._scratch_dir))
-        return new_pending
 
     async def _evaluate_finish(
         self,
@@ -902,19 +1014,9 @@ class AgentLoop:
         state: LoopState,
         batch: ObservationBatch,
     ) -> None:
-        typed_observations = [
-            ToolExecutionObservation(
-                tool_call_id=obs.tool_call_id,
-                tool_name=obs.tool_name,
-                status=obs.status,
-                related_step_ids=list(getattr(obs, "related_step_ids", []) or []),
-                metadata=dict(getattr(obs, "metadata", {}) or {}),
-            )
-            for obs in batch.structured_observations
-        ]
         plan, events = self._plan_tracker.record_observation_progress(
             plan=state["plan_state"].agent_plan,
-            observations=typed_observations,
+            observations=batch.structured_observations,
         )
         if plan is not None:
             state["plan_state"].agent_plan = plan
@@ -935,8 +1037,8 @@ class AgentLoop:
         state: LoopState,
         batch: ObservationBatch,
     ) -> None:
-        # PR2: ObservationExtractor no longer writes tool-semantic fields to LoopState.
-        # Tool output rendering is handled by ToolOutputFormatter via ContextBuilder.
+        # Tool semantics are already fixed in canonical ToolResult values and the
+        # append-only model transcript; observations do not re-render them.
         return
 
 
@@ -944,6 +1046,13 @@ async def _await_value[T](value: T | Awaitable[T]) -> T:
     if isawaitable(value):
         return await value
     return value
+
+
+async def _remaining_llm_budget(handles: Any) -> int | None:
+    ledger = getattr(handles, "llm_budget_ledger", None)
+    if ledger is None:
+        return None
+    return cast(int, await ledger.remaining())
 
 
 def _merge_keyed[T](existing: list[T], additions: list[T]) -> list[T]:
@@ -975,17 +1084,68 @@ def _item_key(item: object) -> str:
 
 
 def _has_tool_error(state: LoopState) -> bool:
-    return any(result.status == "error" for result in state["tool_results"])
+    return any(result.is_error for result in state["tool_results"])
 
 
 def _latest_tool_error_message(state: LoopState) -> str:
     for result in reversed(state["tool_results"]):
-        if result.status != "error":
+        if not result.is_error:
             continue
-        if result.error is not None:
-            return result.error.message
-        return f"Tool {result.tool_name} failed."
+        return result.error_message or f"Tool {result.tool_name} failed."
     return "Tool execution failed."
+
+
+def _tool_result_text(result: ToolResult) -> str:
+    if result.structured_content is not None:
+        return str(result.structured_content)
+    return "\n".join(
+        str(block.data.get("text", ""))
+        for block in result.content
+        if block.type == "text"
+    )
+
+
+def _approval_request(result: ToolResult) -> HumanInputRequest:
+    reason = result.error_message or "Tool execution requires approval."
+    return HumanInputRequest(
+        request_id=f"hir_{uuid4().hex[:12]}",
+        kind="tool_approval",
+        question=f"Allow {result.tool_name} to run once? {reason}",
+        tool_calls=[
+            ToolCallSummary(
+                tool_call_id=result.tool_call_id,
+                tool_name=result.tool_name,
+                args_preview="",
+                risk_level="medium",
+                reason=reason,
+            )
+        ],
+        context={"tool_call_id": result.tool_call_id},
+        options=["allow_once", "deny"],
+    )
+
+
+def _reconciliation_request(
+    result: ToolResult,
+    record: ToolExecutionRecord | None,
+) -> HumanInputRequest:
+    return HumanInputRequest(
+        request_id=f"hir_{uuid4().hex[:12]}",
+        kind="tool_reconciliation",
+        question=(
+            f"Tool {result.tool_name} has an unknown external outcome; "
+            "choose how to reconcile it before continuing."
+        ),
+        context={
+            "tool_call_id": result.tool_call_id,
+            "tool_name": result.tool_name,
+            "operation_id": None if record is None else record.operation_id,
+            "execution_status": (
+                None if record is None else record.status.value
+            ),
+        },
+        options=["mark_completed", "mark_failed", "retry_new_operation"],
+    )
 
 
 # ── 流式事件 helper ──────────────────────────────────────
@@ -1099,7 +1259,6 @@ __all__ = [
     "AgentLoop",
     "LoopContextManager",
     "LoopEventSink",
-    "LoopToolRunner",
     "ModelTurnEnvelope",
     "ModelTurnProvider",
     "NullLoopEventSink",

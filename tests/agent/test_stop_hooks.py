@@ -5,13 +5,13 @@ from dataclasses import dataclass
 import pytest
 from pydantic import BaseModel
 
-from rag.agent.core.goal_contract import GoalDeliverable, GoalSpec
 from rag.agent.core.context import AgentRunConfig
 from rag.agent.core.definition import AgentRuntimePolicy
 from rag.agent.core.finalization import (
     FinishCandidateBuilder,
     FinishCandidateBuildError,
 )
+from rag.agent.core.goal_contract import GoalDeliverable, GoalSpec
 from rag.agent.core.output_finalizer import OutputValidationExhaustedError
 from rag.agent.loop.state import ModelTurnDraft, create_loop_state
 from rag.agent.loop.stop_hooks import (
@@ -22,6 +22,7 @@ from rag.agent.loop.stop_hooks import (
     StructuredOutputStopHook,
     build_stop_hooks,
 )
+from rag.agent.tools.tool import ToolResult
 from rag.schema.runtime import AccessPolicy
 
 
@@ -33,7 +34,7 @@ def _config(run_id: str = "stop-hooks") -> AgentRunConfig:
     return AgentRunConfig(
         run_id=run_id,
         thread_id=run_id,
-        budget_total=100,
+        llm_budget_total=100,
         max_depth=2,
         access_policy=AccessPolicy.default(),
     )
@@ -352,23 +353,18 @@ async def test_explicit_goal_contract_accepts_traceable_evidence() -> None:
         ],
     )
     state = _state()
-    # PR2: evidence_refs derived from tool_results, not direct state field
-    from pydantic import BaseModel
-
-    from rag.agent.tools.spec import ToolResult
-
-    class _EvidenceOutput(BaseModel):
-        evidence_refs: list[dict[str, object]]
-
     state["tool_results"] = [
         ToolResult(
             tool_call_id="tc-1",
             tool_name="test",
-            status="ok",
-            output=_EvidenceOutput(
-                evidence_refs=[{"evidence_id": "evidence-1", "citation_id": "citation-1"}],
-            ),
-            latency_ms=100,
+            structured_content={
+                "evidence_refs": [
+                    {
+                        "evidence_id": "evidence-1",
+                        "citation_id": "citation-1",
+                    }
+                ]
+            },
         )
     ]
 

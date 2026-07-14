@@ -7,10 +7,8 @@ from pydantic import BaseModel, ConfigDict, Field
 from typing_extensions import TypedDict
 
 from rag.agent.core.context import AgentRunConfig
-from rag.agent.tools.spec import ToolResult
+from rag.agent.tools.tool import ToolResult
 from rag.schema.query import AnswerCitation, EvidenceItem
-
-DEFAULT_DELEGATION_TOKEN_BUDGET = 10000
 
 
 class AgentAsToolExecutionError(RuntimeError):
@@ -43,6 +41,7 @@ class AgentDelegationRequest(BaseModel):
     agent_type: str
     prompt: str
     max_turns: int | None = None
+    llm_budget_total: int | None = Field(default=None, ge=1)
 
 
 class DelegatedAgentResult(Protocol):
@@ -67,7 +66,6 @@ class DelegatedAgentRunner(Protocol):
 __all__ = [
     "AgentDelegationRequest",
     "AgentAsToolExecutionError",
-    "DEFAULT_DELEGATION_TOKEN_BUDGET",
     "DelegatedAgentResult",
     "DelegatedAgentRunner",
     "ParentAgentContext",

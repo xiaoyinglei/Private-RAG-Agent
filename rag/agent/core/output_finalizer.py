@@ -9,7 +9,7 @@ from pydantic import BaseModel, ValidationError
 
 from rag.agent.core.context import RunRegistry
 from rag.agent.core.llm_context import AgentLLMContextAssembler
-from rag.agent.core.llm_registry import ModelRegistry
+from rag.agent.core.llm_registry import ModelResolver
 from rag.agent.core.output_models import (
     ValidatedFinalOutput,
     output_model_path,
@@ -62,7 +62,6 @@ class ModelStructuredOutputFinalizer:
                     kwargs=self._kwargs,
                 )
             },
-            formatter_resolver=None,
         )
 
     @property
@@ -80,7 +79,7 @@ class ModelStructuredOutputFinalizer:
         if output_model is None:
             raise ValueError("AgentRuntimePolicy.output_model is not configured")
         try:
-            ledger = None
+            handles = RunRegistry.get(state["run_config"].run_id)
         except KeyError as exc:
             raise RuntimeError(f"Runtime handles missing for run_id={state['run_config'].run_id}") from exc
 
@@ -100,7 +99,7 @@ class ModelStructuredOutputFinalizer:
                     stage=LLMCallStage.FINAL_SYNTHESIS,
                     prompt=assembled.prompt,
                     schema=output_model,
-                    ledger=ledger,
+                    ledger=handles.llm_budget_ledger,
                     lease_id=(f"{state['run_config'].run_id}:final_output:{attempt_index}:{uuid4().hex}"),
                     kwargs=self._kwargs,
                 )
@@ -157,7 +156,7 @@ def final_answer_from_output(output: BaseModel) -> str:
 
 
 def create_model_structured_output_finalizer(
-    registry: ModelRegistry,
+    registry: ModelResolver,
 ) -> ModelStructuredOutputFinalizer:
     resolved = registry.resolve_for_node(
         node_model=None,

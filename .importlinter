@@ -30,13 +30,3 @@ forbidden_modules =
     rag.agent.graphs
     rag.agent.service
     rag.cli
-
-[importlinter:contract:state_boundary]
-name = State contract does not depend on agent orchestration
-type = forbidden
-source_modules =
-    rag.agent.state
-forbidden_modules =
-    rag.agent.graphs
-    rag.agent.service
-    rag.cli

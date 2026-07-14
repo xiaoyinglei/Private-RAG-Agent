@@ -2,134 +2,101 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import asdict, is_dataclass
-from typing import Any
 
 from langchain_core.messages import BaseMessage
 from pydantic import BaseModel
 
-from rag.agent.tools.spec import ToolResult
-
-
-def _derive_groundedness(tool_results: list[ToolResult]) -> bool:
-    """Derive groundedness_flag from the last RAG generation ToolResult.output."""
-    for result in reversed(tool_results):
-        if result.status == "ok" and result.output is not None:
-            if bool(getattr(result.output, "groundedness_flag", False)):
-                return True
-    return False
-
-
-def _derive_insufficient_evidence(tool_results: list[ToolResult]) -> bool:
-    """Derive insufficient_evidence_flag from the last RAG generation ToolResult.output."""
-    for result in reversed(tool_results):
-        if result.status == "ok" and result.output is not None:
-            if bool(getattr(result.output, "insufficient_evidence", False)) or bool(
-                getattr(result.output, "insufficient_evidence_flag", False)
-            ):
-                return True
-    return False
+from rag.agent.loop.state import LoopState
 
 
 def normalize_loop_state(
-    state: Mapping[str, Any],
+    state: LoopState,
     *,
-    observed: dict[str, object] | None = None,
+    observed: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
-    """Return the loop state in the same behavioral comparison shape."""
+    """Project a loop state onto stable, user-visible runtime invariants."""
 
     terminal = state.get("terminal")
     pause = state.get("pause")
+    finish = state["finish_state"]
     normalized: dict[str, object] = {
-        "status": state.get("status"),
-        "stop_reason": getattr(terminal, "stop_reason", None),
-        "decision_reason": (None if state.get("latest_transition") is None else state["latest_transition"].reason),
-        "final_answer": state.get("final_answer"),
-        "final_output": _normalize_value(state.get("final_output")),
-        "output_validation_errors": _normalize_value(state.get("output_validation_errors", [])),
-        "iteration": state.get("iteration", 0),
-        "groundedness_flag": _derive_groundedness(list(state.get("tool_results", []))),
-        "insufficient_evidence_flag": _derive_insufficient_evidence(list(state.get("tool_results", []))),
-        "needs_user_input": getattr(pause, "reason", None),
-        "human_input_request": _normalize_value(state.get("approval_request")),
-        "pending_tool_calls": [
-            {
-                "tool_call_id": call.tool_call_id,
-                "tool_name": call.tool_name,
-                "arguments": _normalize_value(call.plan.arguments),
-            }
-            for call in state.get("pending_tool_calls", [])
-        ],
+        "status": "done" if state["status"] == "completed" else state["status"],
+        "final_answer": finish.final_answer,
+        "final_output": _plain(finish.final_output),
+        "stop_reason": None if terminal is None else terminal.stop_reason,
+        "pause_reason": None if pause is None else pause.reason,
+        "iteration": state["iteration"],
         "tool_results": [
             {
                 "tool_call_id": result.tool_call_id,
                 "tool_name": result.tool_name,
-                "status": result.status,
-                "output": _normalize_value(result.output),
-                "error": _normalize_value(result.error),
-                "work_units_used": result.work_units_used,
-                "retry_count": result.retry_count,
+                "outcome": "error" if result.is_error else "ok",
+                "text": _result_text(result.content),
+                "structured_content": _plain(result.structured_content),
+                "error_code": result.error_code,
+                "retryable": result.retryable,
             }
-            for result in state.get("tool_results", [])
+            for result in state["tool_results"]
         ],
-        "evidence": _normalize_value(state.get("evidence", [])),
-        "citations": _normalize_value(state.get("citations", [])),
-        "retrieval_signals": _normalize_value(state.get("retrieval_signals")),
-        "retrieval_signals_debug": _normalize_value(state.get("retrieval_signals_debug")),
-        "structured_observations": _normalize_value(state.get("structured_observations", [])),
-        "answer_candidates": _normalize_value(state.get("answer_candidates", [])),
-        "evidence_refs": _normalize_value(state.get("evidence_refs", [])),
-        "computation_results": _normalize_value(state.get("computation_results", [])),
-        "context_units": _normalize_value(state.get("context_units", [])),
-        "locators": _normalize_value(state.get("locators", [])),
-        "satisfied_requirements": [],
-        "open_gap_ids": [],
-        "messages": [_normalize_message(message) for message in state.get("messages", [])],
-        "working_summary": _normalize_value(state["memory_state"].working_summary),
-        "memory_refs": _normalize_value(state["memory_state"].memory_refs),
-        "memory_budget": _normalize_value(state.get("memory_budget")),
-        "memory_warnings": list(state["memory_state"].memory_warnings),
-        "runtime_diagnostics": _normalize_value(state.get("runtime_diagnostics", [])),
-        "stop_hook_feedback": _normalize_value(state["finish_state"].feedback),
+        "pending_tool_names": [
+            pending.tool_name for pending in state["pending_tool_calls"]
+        ],
+        "active_tool_names": list(state["active_tool_names"]),
+        "transcript_roles": [
+            message.role for message in state["canonical_transcript"]
+        ],
+        "call_origins": [
+            {
+                "tool_call_id": call.tool_call_id,
+                "request_id": call.origin.request_id,
+                "toolset_revision": call.origin.toolset_revision,
+                "exposed_tool_names": list(call.origin.exposed_tool_names),
+            }
+            for call in state["canonical_tool_calls"].values()
+        ],
+        "messages": [_message(message) for message in state["messages"]],
+        "working_summary": _plain(state["memory_state"].working_summary),
+        "memory_ref_count": len(state["memory_state"].memory_refs),
+        "feedback_codes": [item.code for item in finish.feedback],
     }
     if observed is not None:
-        normalized["observed"] = _normalize_value(observed)
+        normalized["observed"] = _plain(observed)
     return normalized
 
 
-def _normalize_message(message: object) -> dict[str, object]:
+def _result_text(content: object) -> str:
+    blocks = content if isinstance(content, tuple) else ()
+    values: list[str] = []
+    for block in blocks:
+        data = getattr(block, "data", None)
+        if isinstance(data, Mapping):
+            text = data.get("text")
+            if isinstance(text, str):
+                values.append(text)
+    return "\n".join(values)
+
+
+def _message(message: object) -> dict[str, object]:
     if not isinstance(message, BaseMessage):
-        return {"value": _normalize_value(message)}
+        return {"value": _plain(message)}
     return {
         "type": message.type,
-        "id": message.id,
-        "content": _normalize_value(message.content),
+        "content": _plain(message.content),
     }
 
 
-def _normalize_value(value: object, *, key: str | None = None) -> object:
+def _plain(value: object) -> object:
     if isinstance(value, BaseModel):
-        return _normalize_value(value.model_dump(mode="json"), key=key)
+        return _plain(value.model_dump(mode="json"))
     if is_dataclass(value) and not isinstance(value, type):
-        return _normalize_value(asdict(value), key=key)
-    if isinstance(value, dict):
+        return _plain(asdict(value))
+    if isinstance(value, Mapping):
         return {
-            str(item_key): _normalize_value(item_value, key=str(item_key))
-            for item_key, item_value in sorted(value.items(), key=lambda item: str(item[0]))
+            str(key): _plain(item)
+            for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
         }
     if isinstance(value, (list, tuple)):
-        return [_normalize_value(item) for item in value]
-    if key == "request_id":
-        return "<request_id>"
-    if key in {"run_id", "thread_id"}:
-        return f"<{key}>"
-    if key == "delegation_id":
-        return "<delegation_id>"
-    if key == "ref_id":
-        return "<memory_ref_id>"
-    if key == "updated_at":
-        return "<timestamp>"
-    if key == "path" and isinstance(value, str) and ".agent_memory" in value:
-        return "<memory_path>"
+        return [_plain(item) for item in value]
     if isinstance(value, float):
         return round(value, 6)
     return value
