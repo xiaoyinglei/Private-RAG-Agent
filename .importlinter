@@ -18,8 +18,6 @@ forbidden_modules =
     rag.agent.graphs
     rag.agent.service
     rag.cli
-ignore_imports =
-    rag.agent.tools.builtin_registry -> rag.agent.builtin_registry
 
 [importlinter:contract:memory_boundary]
 name = Memory does not depend on agent orchestration
