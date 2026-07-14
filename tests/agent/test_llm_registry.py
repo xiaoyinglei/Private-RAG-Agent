@@ -194,6 +194,20 @@ def test_load_configs_models_supports_provider_section_schema(
     )
 
 
+def test_repository_catalog_declares_local_qwen35_9b() -> None:
+    config = ModelRegistry._load_yaml_file(Path("configs/models.yaml"))
+
+    spec = config.models["qwen3_5_9b_mlx_4bit"]
+    assert spec.provider is ModelProvider.OPENAI_COMPATIBLE
+    assert spec.provider_name == "local_mlx_chat_8080"
+    assert spec.model == "mlx-community/Qwen3.5-9B-4bit"
+    assert spec.context_window_tokens == 262_144
+    assert spec.location == "local"
+    assert spec.runtime is not None
+    assert spec.runtime.health_url == "http://127.0.0.1:8080/v1/models"
+    assert spec.runtime.expected_model_contains == "Qwen3.5-9B-4bit"
+
+
 def test_load_configs_models_preserves_memory_generation_config(tmp_path: Path) -> None:
     config_path = tmp_path / "models.yaml"
     config_path.write_text(

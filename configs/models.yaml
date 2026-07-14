@@ -96,6 +96,14 @@ models:
     runtime:
       expected_model_contains: Qwen3-14B-4bit
 
+  qwen3_5_9b_mlx_4bit:
+    capability: chat
+    provider: local_mlx_chat_8080
+    model: mlx-community/Qwen3.5-9B-4bit
+    context_window_tokens: 262144
+    runtime:
+      expected_model_contains: Qwen3.5-9B-4bit
+
   # -------------------------------------------------------------------------
   # Chat models: DeepSeek.
   # -------------------------------------------------------------------------
