@@ -1,0 +1,483 @@
+from __future__ import annotations
+
+import copy
+import importlib.util
+import json
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+FIXTURE_PATH = Path(__file__).parent / "fixtures" / "model_quality_cases.json"
+BASELINE_PATH = Path(__file__).parents[2] / "evals" / "model_quality" / "baseline_v1.json"
+SCRIPT_PATH = Path(__file__).parents[2] / "scripts" / "agent_model_quality_gate.py"
+
+
+def _load_gate_module():
+    spec = importlib.util.spec_from_file_location(
+        "agent_model_quality_gate",
+        SCRIPT_PATH,
+    )
+    assert spec is not None
+    assert spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _trial_metrics(**overrides: float) -> dict[str, float]:
+    metrics = {
+        "task_success_rate": 1.0,
+        "file_tool_selection_rate": 1.0,
+        "failure_recovery_rate": 1.0,
+        "approval_continuation_rate": 1.0,
+        "repeated_failure_control_rate": 1.0,
+        "argument_validity_rate": 1.0,
+        "redundant_tool_call_rate": 0.0,
+        "mean_tool_calls_per_case": 1.4,
+        "mean_model_calls_per_case": 2.4,
+    }
+    metrics.update(overrides)
+    return metrics
+
+
+def test_fixture_locks_models_and_quality_capabilities() -> None:
+    payload = json.loads(FIXTURE_PATH.read_text(encoding="utf-8"))
+
+    assert payload["schema_version"] == 1
+    assert payload["models"] == [
+        "qwen3_5_9b_mlx_4bit",
+        "groq_gpt_oss_120b",
+    ]
+    assert {case["capability"] for case in payload["cases"]} == {
+        "file_tool_selection",
+        "failure_recovery",
+        "approval_continuation",
+        "repeated_failure_control",
+    }
+    assert len({case["id"] for case in payload["cases"]}) == 5
+    assert "thresholds" not in payload
+
+
+def test_thresholds_are_the_empirical_worst_trial_not_literals() -> None:
+    module = _load_gate_module()
+    trials = [
+        _trial_metrics(),
+        _trial_metrics(
+            task_success_rate=0.8,
+            redundant_tool_call_rate=0.2,
+            mean_tool_calls_per_case=1.8,
+        ),
+        _trial_metrics(
+            failure_recovery_rate=0.0,
+            mean_model_calls_per_case=2.8,
+        ),
+    ]
+
+    thresholds = module.derive_thresholds(trials)
+
+    assert thresholds["task_success_rate"] == {
+        "direction": "min",
+        "value": 0.8,
+    }
+    assert thresholds["failure_recovery_rate"] == {
+        "direction": "min",
+        "value": 0.0,
+    }
+    assert thresholds["redundant_tool_call_rate"] == {
+        "direction": "max",
+        "value": 0.2,
+    }
+    assert thresholds["mean_tool_calls_per_case"] == {
+        "direction": "max",
+        "value": 1.8,
+    }
+    assert thresholds["mean_model_calls_per_case"] == {
+        "direction": "max",
+        "value": 2.8,
+    }
+
+
+def test_calibration_requires_repeated_real_trials() -> None:
+    module = _load_gate_module()
+
+    with pytest.raises(ValueError, match="at least 3 real trials"):
+        module.derive_thresholds([_trial_metrics(), _trial_metrics()])
+
+
+def test_baseline_validation_recomputes_and_rejects_edited_thresholds() -> None:
+    module = _load_gate_module()
+    trials = [_trial_metrics() for _ in range(3)]
+    baseline = {
+        "schema_version": 1,
+        "suite_revision": "suite_123",
+        "threshold_method": module.THRESHOLD_METHOD,
+        "models": {
+            "qwen3_5_9b_mlx_4bit": {
+                "provider_model": "mlx-community/Qwen3.5-9B-4bit",
+                "trial_count": 3,
+                "trial_metrics": trials,
+                "thresholds": module.derive_thresholds(trials),
+            }
+        },
+    }
+    baseline["models"]["qwen3_5_9b_mlx_4bit"]["thresholds"]["task_success_rate"]["value"] = 0.5
+
+    with pytest.raises(ValueError, match="do not match measured trials"):
+        module.validate_baseline(baseline)
+
+
+def test_committed_live_baseline_recomputes_from_raw_observations() -> None:
+    module = _load_gate_module()
+    suite = module.load_suite(FIXTURE_PATH)
+    baseline = json.loads(BASELINE_PATH.read_text(encoding="utf-8"))
+
+    module.validate_baseline(baseline, suite=suite)
+
+    assert set(baseline["models"]) == set(suite["models"])
+    assert all(entry["trial_count"] == 3 for entry in baseline["models"].values())
+
+
+def test_raw_baseline_tampering_is_detected_before_thresholds() -> None:
+    module = _load_gate_module()
+    suite = module.load_suite(FIXTURE_PATH)
+    baseline = json.loads(BASELINE_PATH.read_text(encoding="utf-8"))
+    tampered = copy.deepcopy(baseline)
+    first_model = tampered["models"][suite["models"][0]]
+    first_model["trials"][0]["cases"][0]["observation"]["tool_calls"] = []
+
+    with pytest.raises(ValueError, match="does not match raw observations"):
+        module.validate_baseline(tampered, suite=suite)
+
+
+def test_gate_uses_worst_current_trial_and_reports_regressions() -> None:
+    module = _load_gate_module()
+    baseline_trials = [_trial_metrics() for _ in range(3)]
+    model_baseline = {
+        "provider_model": "openai/gpt-oss-120b",
+        "trial_count": 3,
+        "trial_metrics": baseline_trials,
+        "thresholds": module.derive_thresholds(baseline_trials),
+    }
+    current_trials = [
+        _trial_metrics(),
+        _trial_metrics(repeated_failure_control_rate=0.0),
+        _trial_metrics(),
+    ]
+
+    result = module.evaluate_model_gate(
+        model_alias="groq_gpt_oss_120b",
+        provider_model="openai/gpt-oss-120b",
+        trial_metrics=current_trials,
+        baseline=model_baseline,
+    )
+
+    assert result["passed"] is False
+    assert result["observed"]["repeated_failure_control_rate"] == 0.0
+    assert result["failures"] == ["repeated_failure_control_rate: observed 0.0 < baseline floor 1.0"]
+
+
+def test_live_gate_excludes_runtime_determinism_from_threshold_metrics() -> None:
+    module = _load_gate_module()
+
+    assert "latency_ms" not in module.GATED_METRIC_DIRECTIONS
+    assert "tool_schema_bytes" not in module.GATED_METRIC_DIRECTIONS
+    assert "checkpoint_count" not in module.GATED_METRIC_DIRECTIONS
+    assert set(module.GATED_METRIC_DIRECTIONS) == set(_trial_metrics())
+
+
+def test_approval_quality_allows_reads_around_one_approved_write() -> None:
+    module = _load_gate_module()
+    case = {
+        "id": "approval_continue",
+        "capability": "approval_continuation",
+        "expected_first_tool": "apply_patch",
+        "expected_tool_sequence": ["apply_patch"],
+    }
+    calls = (
+        module.ToolCallEvidence("read-1", "read_file", {"path": "a.txt"}, False, None),
+        module.ToolCallEvidence(
+            "patch-1",
+            "apply_patch",
+            {"file_path": "a.txt", "old_string": "a", "new_string": "b"},
+            False,
+            None,
+        ),
+        module.ToolCallEvidence("read-2", "read_file", {"path": "a.txt"}, False, None),
+    )
+    observation = module.CaseObservation(
+        case_id="approval_continue",
+        capability="approval_continuation",
+        status="done",
+        answer="done",
+        tool_calls=calls,
+        model_calls=4,
+        input_tokens=1,
+        output_tokens=1,
+        latency_ms=1.0,
+        tool_schema_bytes=1,
+        approval_pause_observed=True,
+        approval_kind="tool_approval",
+        approval_resumes=1,
+        workspace_assertions_passed=True,
+    )
+
+    score = module._score_case(case, observation)
+
+    assert score["capability_passed"] is True
+    assert score["redundant_tool_calls"] == 0
+
+
+def test_redundancy_counts_only_replayed_identical_failures() -> None:
+    module = _load_gate_module()
+    case = {
+        "id": "single_failure_no_retry",
+        "capability": "repeated_failure_control",
+        "expected_first_tool": "read_file",
+        "intentional_error_tool": "read_file",
+        "max_identical_failed_calls": 1,
+    }
+    call = module.ToolCallEvidence(
+        "read-1",
+        "read_file",
+        {"path": "missing.txt"},
+        True,
+        "runner_failed",
+    )
+    observation = module.CaseObservation(
+        case_id="single_failure_no_retry",
+        capability="repeated_failure_control",
+        status="done",
+        answer="FILE_UNAVAILABLE",
+        tool_calls=(call, call),
+        model_calls=3,
+        input_tokens=1,
+        output_tokens=1,
+        latency_ms=1.0,
+        tool_schema_bytes=1,
+        approval_pause_observed=False,
+        approval_kind=None,
+        approval_resumes=0,
+        workspace_assertions_passed=True,
+    )
+
+    score = module._score_case(case, observation)
+
+    assert score["capability_passed"] is False
+    assert score["redundant_tool_calls"] == 1
+
+
+def test_file_selection_allows_preflight_but_keeps_call_cost_visible() -> None:
+    module = _load_gate_module()
+    case = {
+        "id": "symbol_search_then_read",
+        "capability": "file_tool_selection",
+        "expected_first_tool": "search_text",
+        "expected_tool_sequence": ["search_text", "read_file"],
+        "expected_tool_calls": [
+            {"tool_name": "search_text", "arguments": {"pattern": "target"}},
+            {"tool_name": "read_file", "arguments": {"path": "target.py"}},
+        ],
+    }
+    calls = (
+        module.ToolCallEvidence("list", "list_files", {"path": "input_files"}, False, None),
+        module.ToolCallEvidence("search", "search_text", {"pattern": "target"}, False, None),
+        module.ToolCallEvidence("read", "read_file", {"path": "target.py"}, False, None),
+    )
+    observation = module.CaseObservation(
+        case_id="symbol_search_then_read",
+        capability="file_tool_selection",
+        status="done",
+        answer="TARGET_VALUE_731",
+        tool_calls=calls,
+        model_calls=4,
+        input_tokens=1,
+        output_tokens=1,
+        latency_ms=1.0,
+        tool_schema_bytes=1,
+        approval_pause_observed=False,
+        approval_kind=None,
+        approval_resumes=0,
+        workspace_assertions_passed=True,
+    )
+
+    score = module._score_case(case, observation)
+
+    assert score["capability_passed"] is True
+    assert score["tool_call_count"] == 3
+
+
+def test_file_selection_rejects_the_right_tool_with_the_wrong_path() -> None:
+    module = _load_gate_module()
+    case = {
+        "id": "exact_file_read",
+        "capability": "file_tool_selection",
+        "expected_first_tool": "read_file",
+        "require_first_tool": True,
+        "expected_tool_sequence": ["read_file"],
+        "expected_tool_calls": [
+            {
+                "tool_name": "read_file",
+                "arguments": {"path": "input_files/exact.txt"},
+            }
+        ],
+    }
+    observation = module.CaseObservation(
+        case_id="exact_file_read",
+        capability="file_tool_selection",
+        status="done",
+        answer="QUALITY_GATE_EXACT",
+        tool_calls=(
+            module.ToolCallEvidence(
+                "read",
+                "read_file",
+                {"path": "input_files/wrong.txt"},
+                False,
+                None,
+            ),
+        ),
+        model_calls=2,
+        input_tokens=1,
+        output_tokens=1,
+        latency_ms=1.0,
+        tool_schema_bytes=1,
+        approval_pause_observed=False,
+        approval_kind=None,
+        approval_resumes=0,
+        workspace_assertions_passed=True,
+    )
+
+    score = module._score_case(case, observation)
+
+    assert score["capability_passed"] is False
+
+
+def test_recovery_is_measured_after_the_actual_failure_not_call_zero() -> None:
+    module = _load_gate_module()
+    case = {
+        "id": "missing_file_recovery",
+        "capability": "failure_recovery",
+        "intentional_error_tool": "read_file",
+        "expected_failed_call": {
+            "tool_name": "read_file",
+            "arguments": {"path": "report.txt"},
+        },
+        "expected_recovery_call": {
+            "tool_name": "read_file",
+            "arguments": {"path": "report-final.txt"},
+        },
+        "recovery_tools": ["list_files", "search_text", "read_file"],
+    }
+    calls = (
+        module.ToolCallEvidence("list", "list_files", {"path": "input_files"}, False, None),
+        module.ToolCallEvidence(
+            "missing",
+            "read_file",
+            {"path": "report.txt"},
+            True,
+            "runner_failed",
+        ),
+        module.ToolCallEvidence(
+            "found",
+            "read_file",
+            {"path": "report-final.txt"},
+            False,
+            None,
+        ),
+    )
+
+    assert module._failure_recovered(case, calls) is True
+
+
+def test_provider_failure_is_inconclusive_not_a_model_quality_score() -> None:
+    module = _load_gate_module()
+    suite = module.load_suite(FIXTURE_PATH)
+    observations = [
+        module.CaseObservation(
+            case_id=str(case["id"]),
+            capability=str(case["capability"]),
+            status="failed",
+            answer=None,
+            tool_calls=(),
+            model_calls=0,
+            input_tokens=0,
+            output_tokens=0,
+            latency_ms=0.0,
+            tool_schema_bytes=0,
+            approval_pause_observed=False,
+            approval_kind=None,
+            approval_resumes=0,
+            workspace_assertions_passed=False,
+            stop_reason="model_provider_failed",
+            diagnostic_codes=("model_provider_failed",),
+            diagnostic_error_types=("RateLimitError",),
+            infrastructure_failure=True,
+        )
+        for case in suite["cases"]
+    ]
+
+    with pytest.raises(module.InfrastructureUnavailableError, match="RateLimitError"):
+        module.score_trial(suite["cases"], observations)
+
+
+@pytest.mark.parametrize(
+    ("status", "stop_reason", "expected"),
+    [
+        ("error", None, True),
+        ("failed", "model_provider_failed", True),
+        ("failed", "context_overflow", True),
+        ("failed", "budget_exhausted", True),
+        ("failed", "tool_error", True),
+        ("failed", "invalid_model_turn", False),
+        ("failed", "max_iterations", False),
+        ("done", "accepted", False),
+    ],
+)
+def test_infrastructure_classification_excludes_model_behavior(
+    status: str,
+    stop_reason: str | None,
+    expected: bool,
+) -> None:
+    module = _load_gate_module()
+
+    assert module.is_infrastructure_failure(status, stop_reason) is expected
+
+
+def test_calibrate_cli_cannot_create_a_partial_model_baseline() -> None:
+    module = _load_gate_module()
+    parser = module._parser()
+
+    args = parser.parse_args(["calibrate"])
+
+    assert not hasattr(args, "models")
+    with pytest.raises(SystemExit):
+        parser.parse_args(["calibrate", "--model", "qwen3_5_9b_mlx_4bit"])
+
+
+@pytest.mark.anyio
+async def test_calibration_rejects_too_few_trials_before_live_calls(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    module = _load_gate_module()
+    called = False
+
+    async def should_not_run(**_kwargs: object) -> dict[str, object]:
+        nonlocal called
+        called = True
+        return {}
+
+    monkeypatch.setattr(module, "run_model_trials", should_not_run)
+    args = SimpleNamespace(
+        fixture=FIXTURE_PATH,
+        trials=2,
+        env_file=tmp_path / ".env",
+        baseline=tmp_path / "baseline.json",
+    )
+
+    with pytest.raises(ValueError, match="at least 3 real trials"):
+        await module._calibrate(args)
+
+    assert called is False

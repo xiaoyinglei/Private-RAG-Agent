@@ -1,0 +1,1903 @@
+{
+  "git_commit": "e0faaa135bcea20a7d73ba0ee411f0d00014fede",
+  "measured_at": "2026-07-15T07:44:37.237359+00:00",
+  "models": {
+    "groq_gpt_oss_120b": {
+      "provider": "groq",
+      "provider_model": "openai/gpt-oss-120b",
+      "thresholds": {
+        "approval_continuation_rate": {
+          "direction": "min",
+          "value": 1.0
+        },
+        "argument_validity_rate": {
+          "direction": "min",
+          "value": 1.0
+        },
+        "failure_recovery_rate": {
+          "direction": "min",
+          "value": 1.0
+        },
+        "file_tool_selection_rate": {
+          "direction": "min",
+          "value": 1.0
+        },
+        "mean_model_calls_per_case": {
+          "direction": "max",
+          "value": 3.0
+        },
+        "mean_tool_calls_per_case": {
+          "direction": "max",
+          "value": 2.0
+        },
+        "redundant_tool_call_rate": {
+          "direction": "max",
+          "value": 0.0
+        },
+        "repeated_failure_control_rate": {
+          "direction": "min",
+          "value": 1.0
+        },
+        "task_success_rate": {
+          "direction": "min",
+          "value": 1.0
+        }
+      },
+      "trial_count": 3,
+      "trial_metrics": [
+        {
+          "approval_continuation_rate": 1.0,
+          "argument_validity_rate": 1.0,
+          "failure_recovery_rate": 1.0,
+          "file_tool_selection_rate": 1.0,
+          "mean_model_calls_per_case": 3.0,
+          "mean_tool_calls_per_case": 2.0,
+          "redundant_tool_call_rate": 0.0,
+          "repeated_failure_control_rate": 1.0,
+          "task_success_rate": 1.0
+        },
+        {
+          "approval_continuation_rate": 1.0,
+          "argument_validity_rate": 1.0,
+          "failure_recovery_rate": 1.0,
+          "file_tool_selection_rate": 1.0,
+          "mean_model_calls_per_case": 3.0,
+          "mean_tool_calls_per_case": 2.0,
+          "redundant_tool_call_rate": 0.0,
+          "repeated_failure_control_rate": 1.0,
+          "task_success_rate": 1.0
+        },
+        {
+          "approval_continuation_rate": 1.0,
+          "argument_validity_rate": 1.0,
+          "failure_recovery_rate": 1.0,
+          "file_tool_selection_rate": 1.0,
+          "mean_model_calls_per_case": 3.0,
+          "mean_tool_calls_per_case": 2.0,
+          "redundant_tool_call_rate": 0.0,
+          "repeated_failure_control_rate": 1.0,
+          "task_success_rate": 1.0
+        }
+      ],
+      "trials": [
+        {
+          "cases": [
+            {
+              "observation": {
+                "answer": "QUALITY_GATE_EXACT",
+                "approval_kind": null,
+                "approval_pause_observed": false,
+                "approval_resumes": 0,
+                "capability": "file_tool_selection",
+                "case_id": "exact_file_read",
+                "error": "",
+                "input_tokens": 3122,
+                "latency_ms": 1934.0580409916583,
+                "model_calls": 2,
+                "output_tokens": 93,
+                "status": "done",
+                "tool_calls": [
+                  {
+                    "arguments": {
+                      "encoding": "utf-8",
+                      "path": "input_files/exact.txt"
+                    },
+                    "error_code": null,
+                    "is_error": false,
+                    "tool_call_id": "fc_79055529-d992-466f-a7e0-667327b9bcda",
+                    "tool_name": "read_file"
+                  }
+                ],
+                "tool_schema_bytes": 14310,
+                "workspace_assertions_passed": true
+              },
+              "score": {
+                "capability": "file_tool_selection",
+                "capability_passed": true,
+                "case_id": "exact_file_read",
+                "core_success": true,
+                "expected_sequence_matched": true,
+                "first_tool_matched": true,
+                "invalid_tool_calls": 0,
+                "model_call_count": 2,
+                "passed": true,
+                "redundant_tool_calls": 0,
+                "tool_call_count": 1,
+                "valid_tool_calls": 1
+              }
+            },
+            {
+              "observation": {
+                "answer": "TARGET_VALUE_731",
+                "approval_kind": null,
+                "approval_pause_observed": false,
+                "approval_resumes": 0,
+                "capability": "file_tool_selection",
+                "case_id": "symbol_search_then_read",
+                "error": "",
+                "input_tokens": 7100,
+                "latency_ms": 29074.319457991805,
+                "model_calls": 4,
+                "output_tokens": 210,
+                "status": "done",
+                "tool_calls": [
+                  {
+                    "arguments": {
+                      "limit": 200,
+                      "path": "."
+                    },
+                    "error_code": null,
+                    "is_error": false,
+                    "tool_call_id": "fc_f32f3318-6c87-4240-9e9f-0546e68b144e",
+                    "tool_name": "list_files"
+                  },
+                  {
+                    "arguments": {
+                      "context_lines": 0,
+                      "max_results": 20,
+                      "path": ".",
+                      "pattern": "MODEL_QUALITY_TARGET",
+                      "regex": false
+                    },
+                    "error_code": null,
+                    "is_error": false,
+                    "tool_call_id": "fc_8cbb5413-f50e-4e9c-b93d-d738512ae54e",
+                    "tool_name": "search_text"
+                  },
+                  {
+                    "arguments": {
+                      "encoding": "utf-8",
+                      "path": "input_files/target.py"
+                    },
+                    "error_code": null,
+                    "is_error": false,
+                    "tool_call_id": "fc_c910fa62-f997-47c2-a8b9-d0de95f9bca7",
+                    "tool_name": "read_file"
+                  }
+                ],
+                "tool_schema_bytes": 28620,
+                "workspace_assertions_passed": true
+              },
+              "score": {
+                "capability": "file_tool_selection",
+                "capability_passed": true,
+                "case_id": "symbol_search_then_read",
+                "core_success": true,
+                "expected_sequence_matched": true,
+                "first_tool_matched": false,
+                "invalid_tool_calls": 0,
+                "model_call_count": 4,
+                "passed": true,
+                "redundant_tool_calls": 0,
+                "tool_call_count": 3,
+                "valid_tool_calls": 3
+              }
+            },
+            {
+              "observation": {
+                "answer": "RECOVERED_842",
+                "approval_kind": null,
+                "approval_pause_observed": false,
+                "approval_resumes": 0,
+                "capability": "failure_recovery",
+                "case_id": "missing_file_recovery",
+                "error": "",
+                "input_tokens": 6664,
+                "latency_ms": 72737.64700000902,
+                "model_calls": 4,
+                "output_tokens": 307,
+                "status": "done",
+                "tool_calls": [
+                  {
+                    "arguments": {
+                      "path": "input_files/report.txt"
+                    },
+                    "error_code": "runner_failed",
+                    "is_error": true,
+                    "tool_call_id": "fc_5da627ee-dd17-4f73-a476-5814421e1801",
+                    "tool_name": "read_file"
+                  },
+                  {
+                    "arguments": {
+                      "limit": 20,
+                      "path": "input_files"
+                    },
+                    "error_code": null,
+                    "is_error": false,
+                    "tool_call_id": "fc_d1f8a332-cfd8-4691-b58a-e8678323dae4",
+                    "tool_name": "list_files"
+                  },
+                  {
+                    "arguments": {
+                      "path": "input_files/report-final.txt"
+                    },
+                    "error_code": null,
+                    "is_error": false,
+                    "tool_call_id": "fc_576650bf-d974-4911-8b53-837c8c3ad8ac",
+                    "tool_name": "read_file"
+                  }
+                ],
+                "tool_schema_bytes": 28620,
+                "workspace_assertions_passed": true
+              },
+              "score": {
+                "capability": "failure_recovery",
+                "capability_passed": true,
+                "case_id": "missing_file_recovery",
+                "core_success": true,
+                "expected_sequence_matched": true,
+                "first_tool_matched": true,
+                "invalid_tool_calls": 0,
+                "model_call_count": 4,
+                "passed": true,
+                "redundant_tool_calls": 0,
+                "tool_call_count": 3,
+                "valid_tool_calls": 3
+              }
+            },
+            {
+              "observation": {
+                "answer": "The text in **`input_files/approval.txt`** has been successfully changed from `before_gate` to `after_gate`. The operation is complete.",
+                "approval_kind": "tool_approval",
+                "approval_pause_observed": true,
+                "approval_resumes": 1,
+                "capability": "approval_continuation",
+                "case_id": "approval_continue",
+                "error": "",
+                "input_tokens": 4825,
+                "latency_ms": 38237.73758400057,
+                "model_calls": 3,
+                "output_tokens": 177,
+                "status": "done",
+                "tool_calls": [
+                  {
+                    "arguments": {
+                      "encoding": "utf-8",
+                      "path": "input_files/approval.txt"
+                    },
+                    "error_code": null,
+                    "is_error": false,
+                    "tool_call_id": "fc_95c4ed01-a7f5-4848-87da-3f2614d616c0",
+                    "tool_name": "read_file"
+                  },
+                  {
+                    "arguments": {
+                      "file_path": "input_files/approval.txt",
+                      "new_string": "after_gate",
+                      "old_string": "before_gate"
+                    },
+                    "error_code": null,
+                    "is_error": false,
+                    "tool_call_id": "fc_ab4fc7f8-79f2-4550-b606-8ecb1be829fb",
+                    "tool_name": "apply_patch"
+                  }
+                ],
+                "tool_schema_bytes": 21465,
+                "workspace_assertions_passed": true
+              },
+              "score": {
+                "capability": "approval_continuation",
+                "capability_passed": true,
+                "case_id": "approval_continue",
+                "core_success": true,
+                "expected_sequence_matched": true,
+                "first_tool_matched": false,
+                "invalid_tool_calls": 0,
+                "model_call_count": 3,
+                "passed": true,
+                "redundant_tool_calls": 0,
+                "tool_call_count": 2,
+                "valid_tool_calls": 2
+              }
+            },
+            {
+              "observation": {
+                "answer": "FILE_UNAVAILABLE",
+                "approval_kind": null,
+                "approval_pause_observed": false,
+                "approval_resumes": 0,
+                "capability": "repeated_failure_control",
+                "case_id": "single_failure_no_retry",
+                "error": "",
+                "input_tokens": 3035,
+                "latency_ms": 16373.615958997107,
+                "model_calls": 2,
+                "output_tokens": 334,
+                "status": "done",
+                "tool_calls": [
+                  {
+                    "arguments": {
+                      "path": "input_files/definitely-missing.txt"
+                    },
+                    "error_code": "runner_failed",
+                    "is_error": true,
+                    "tool_call_id": "fc_a099d799-6cd2-4f2b-9332-f85ad75f485c",
+                    "tool_name": "read_file"
+                  }
+                ],
+                "tool_schema_bytes": 14310,
+                "workspace_assertions_passed": true
+              },
+              "score": {
+                "capability": "repeated_failure_control",
+                "capability_passed": true,
+                "case_id": "single_failure_no_retry",
+                "core_success": true,
+                "expected_sequence_matched": true,
+                "first_tool_matched": true,
+                "invalid_tool_calls": 0,
+                "model_call_count": 2,
+                "passed": true,
+                "redundant_tool_calls": 0,
+                "tool_call_count": 1,
+                "valid_tool_calls": 1
+              }
+            }
+          ],
+          "informational_metrics": {
+            "mean_input_tokens_per_case": 4949.2,
+            "mean_latency_ms_per_case": 31671.475608398032,
+            "mean_output_tokens_per_case": 224.2,
+            "mean_tool_schema_bytes_per_case": 21465.0
+          },
+          "metrics": {
+            "approval_continuation_rate": 1.0,
+            "argument_validity_rate": 1.0,
+            "failure_recovery_rate": 1.0,
+            "file_tool_selection_rate": 1.0,
+            "mean_model_calls_per_case": 3.0,
+            "mean_tool_calls_per_case": 2.0,
+            "redundant_tool_call_rate": 0.0,
+            "repeated_failure_control_rate": 1.0,
+            "task_success_rate": 1.0
+          },
+          "trial": 1
+        },
+        {
+          "cases": [
+            {
+              "observation": {
+                "answer": "QUALITY_GATE_EXACT",
+                "approval_kind": null,
+                "approval_pause_observed": false,
+                "approval_resumes": 0,
+                "capability": "file_tool_selection",
+                "case_id": "exact_file_read",
+                "error": "",
+                "input_tokens": 3122,
+                "latency_ms": 28535.759874997893,
+                "model_calls": 2,
+                "output_tokens": 93,
+                "status": "done",
+                "tool_calls": [
+                  {
+                    "arguments": {
+                      "encoding": "utf-8",
+                      "path": "input_files/exact.txt"
+                    },
+                    "error_code": null,
+                    "is_error": false,
+                    "tool_call_id": "fc_bf37315f-3e66-48f2-b986-eb3675738e7a",
+                    "tool_name": "read_file"
+                  }
+                ],
+                "tool_schema_bytes": 14310,
+                "workspace_assertions_passed": true
+              },
+              "score": {
+                "capability": "file_tool_selection",
+                "capability_passed": true,
+                "case_id": "exact_file_read",
+                "core_success": true,
+                "expected_sequence_matched": true,
+                "first_tool_matched": true,
+                "invalid_tool_calls": 0,
+                "model_call_count": 2,
+                "passed": true,
+                "redundant_tool_calls": 0,
+                "tool_call_count": 1,
+                "valid_tool_calls": 1
+              }
+            },
+            {
+              "observation": {
+                "answer": "TARGET_VALUE_731",
+                "approval_kind": null,
+                "approval_pause_observed": false,
+                "approval_resumes": 0,
+                "capability": "file_tool_selection",
+                "case_id": "symbol_search_then_read",
+                "error": "",
+                "input_tokens": 7100,
+                "latency_ms": 31305.301958011114,
+                "model_calls": 4,
+                "output_tokens": 211,
+                "status": "done",
+                "tool_calls": [
+                  {
+                    "arguments": {
+                      "limit": 200,
+                      "path": "."
+                    },
+                    "error_code": null,
+                    "is_error": false,
+                    "tool_call_id": "fc_6df03a32-2462-4f75-b7f9-cbaefa6f58b4",
+                    "tool_name": "list_files"
+                  },
+                  {
+                    "arguments": {
+                      "context_lines": 0,
+                      "max_results": 20,
+                      "path": ".",
+                      "pattern": "MODEL_QUALITY_TARGET",
+                      "regex": false
+                    },
+                    "error_code": null,
+                    "is_error": false,
+                    "tool_call_id": "fc_cb85450d-21fb-4a95-a6b4-df1f7e6e36a4",
+                    "tool_name": "search_text"
+                  },
+                  {
+                    "arguments": {
+                      "encoding": "utf-8",
+                      "path": "input_files/target.py"
+                    },
+                    "error_code": null,
+                    "is_error": false,
+                    "tool_call_id": "fc_21e71501-4241-477b-8711-db651ff1919e",
+                    "tool_name": "read_file"
+                  }
+                ],
+                "tool_schema_bytes": 28620,
+                "workspace_assertions_passed": true
+              },
+              "score": {
+                "capability": "file_tool_selection",
+                "capability_passed": true,
+                "case_id": "symbol_search_then_read",
+                "core_success": true,
+                "expected_sequence_matched": true,
+                "first_tool_matched": false,
+                "invalid_tool_calls": 0,
+                "model_call_count": 4,
+                "passed": true,
+                "redundant_tool_calls": 0,
+                "tool_call_count": 3,
+                "valid_tool_calls": 3
+              }
+            },
+            {
+              "observation": {
+                "answer": "RECOVERED_842",
+                "approval_kind": null,
+                "approval_pause_observed": false,
+                "approval_resumes": 0,
+                "capability": "failure_recovery",
+                "case_id": "missing_file_recovery",
+                "error": "",
+                "input_tokens": 6703,
+                "latency_ms": 54094.79520899913,
+                "model_calls": 4,
+                "output_tokens": 370,
+                "status": "done",
+                "tool_calls": [
+                  {
+                    "arguments": {
+                      "limit": 20,
+                      "path": "input_files"
+                    },
+                    "error_code": null,
+                    "is_error": false,
+                    "tool_call_id": "fc_edf4856f-34d4-478f-ac31-c3a88dda2161",
+                    "tool_name": "list_files"
+                  },
+                  {
+                    "arguments": {
+                      "encoding": "utf-8",
+                      "path": "input_files/report.txt"
+                    },
+                    "error_code": "runner_failed",
+                    "is_error": true,
+                    "tool_call_id": "fc_eab49ee8-26fe-46c1-ad61-1cde3eedfca4",
+                    "tool_name": "read_file"
+                  },
+                  {
+                    "arguments": {
+                      "encoding": "utf-8",
+                      "path": "input_files/report-final.txt"
+                    },
+                    "error_code": null,
+                    "is_error": false,
+                    "tool_call_id": "fc_54f3caa3-d4ab-4a50-835c-3504812ade79",
+                    "tool_name": "read_file"
+                  }
+                ],
+                "tool_schema_bytes": 28620,
+                "workspace_assertions_passed": true
+              },
+              "score": {
+                "capability": "failure_recovery",
+                "capability_passed": true,
+                "case_id": "missing_file_recovery",
+                "core_success": true,
+                "expected_sequence_matched": true,
+                "first_tool_matched": false,
+                "invalid_tool_calls": 0,
+                "model_call_count": 4,
+                "passed": true,
+                "redundant_tool_calls": 0,
+                "tool_call_count": 3,
+                "valid_tool_calls": 3
+              }
+            },
+            {
+              "observation": {
+                "answer": "The text in **`input_files/approval.txt`** has been successfully changed from `before_gate` to `after_gate`.",
+                "approval_kind": "tool_approval",
+                "approval_pause_observed": true,
+                "approval_resumes": 1,
+                "capability": "approval_continuation",
+                "case_id": "approval_continue",
+                "error": "",
+                "input_tokens": 4825,
+                "latency_ms": 29894.103209000605,
+                "model_calls": 3,
+                "output_tokens": 196,
+                "status": "done",
+                "tool_calls": [
+                  {
+                    "arguments": {
+                      "encoding": "utf-8",
+                      "path": "input_files/approval.txt"
+                    },
+                    "error_code": null,
+                    "is_error": false,
+                    "tool_call_id": "fc_059d722b-4385-4877-acf9-eaf881d5264b",
+                    "tool_name": "read_file"
+                  },
+                  {
+                    "arguments": {
+                      "file_path": "input_files/approval.txt",
+                      "new_string": "after_gate",
+                      "old_string": "before_gate"
+                    },
+                    "error_code": null,
+                    "is_error": false,
+                    "tool_call_id": "fc_8bd412d1-da78-451d-a16f-c8da04e6c2dc",
+                    "tool_name": "apply_patch"
+                  }
+                ],
+                "tool_schema_bytes": 21465,
+                "workspace_assertions_passed": true
+              },
+              "score": {
+                "capability": "approval_continuation",
+                "capability_passed": true,
+                "case_id": "approval_continue",
+                "core_success": true,
+                "expected_sequence_matched": true,
+                "first_tool_matched": false,
+                "invalid_tool_calls": 0,
+                "model_call_count": 3,
+                "passed": true,
+                "redundant_tool_calls": 0,
+                "tool_call_count": 2,
+                "valid_tool_calls": 2
+              }
+            },
+            {
+              "observation": {
+                "answer": "FILE_UNAVAILABLE",
+                "approval_kind": null,
+                "approval_pause_observed": false,
+                "approval_resumes": 0,
+                "capability": "repeated_failure_control",
+                "case_id": "single_failure_no_retry",
+                "error": "",
+                "input_tokens": 3035,
+                "latency_ms": 19709.51233300002,
+                "model_calls": 2,
+                "output_tokens": 387,
+                "status": "done",
+                "tool_calls": [
+                  {
+                    "arguments": {
+                      "path": "input_files/definitely-missing.txt"
+                    },
+                    "error_code": "runner_failed",
+                    "is_error": true,
+                    "tool_call_id": "fc_b5524d43-5ce2-4953-b21b-2db11caed93e",
+                    "tool_name": "read_file"
+                  }
+                ],
+                "tool_schema_bytes": 14310,
+                "workspace_assertions_passed": true
+              },
+              "score": {
+                "capability": "repeated_failure_control",
+                "capability_passed": true,
+                "case_id": "single_failure_no_retry",
+                "core_success": true,
+                "expected_sequence_matched": true,
+                "first_tool_matched": true,
+                "invalid_tool_calls": 0,
+                "model_call_count": 2,
+                "passed": true,
+                "redundant_tool_calls": 0,
+                "tool_call_count": 1,
+                "valid_tool_calls": 1
+              }
+            }
+          ],
+          "informational_metrics": {
+            "mean_input_tokens_per_case": 4957.0,
+            "mean_latency_ms_per_case": 32707.894516801753,
+            "mean_output_tokens_per_case": 251.4,
+            "mean_tool_schema_bytes_per_case": 21465.0
+          },
+          "metrics": {
+            "approval_continuation_rate": 1.0,
+            "argument_validity_rate": 1.0,
+            "failure_recovery_rate": 1.0,
+            "file_tool_selection_rate": 1.0,
+            "mean_model_calls_per_case": 3.0,
+            "mean_tool_calls_per_case": 2.0,
+            "redundant_tool_call_rate": 0.0,
+            "repeated_failure_control_rate": 1.0,
+            "task_success_rate": 1.0
+          },
+          "trial": 2
+        },
+        {
+          "cases": [
+            {
+              "observation": {
+                "answer": "QUALITY_GATE_EXACT",
+                "approval_kind": null,
+                "approval_pause_observed": false,
+                "approval_resumes": 0,
+                "capability": "file_tool_selection",
+                "case_id": "exact_file_read",
+                "error": "",
+                "input_tokens": 3116,
+                "latency_ms": 29128.388541990716,
+                "model_calls": 2,
+                "output_tokens": 73,
+                "status": "done",
+                "tool_calls": [
+                  {
+                    "arguments": {
+                      "path": "input_files/exact.txt"
+                    },
+                    "error_code": null,
+                    "is_error": false,
+                    "tool_call_id": "fc_45f6c98e-ab17-406c-a3fc-535a3dda3099",
+                    "tool_name": "read_file"
+                  }
+                ],
+                "tool_schema_bytes": 14310,
+                "workspace_assertions_passed": true
+              },
+              "score": {
+                "capability": "file_tool_selection",
+                "capability_passed": true,
+                "case_id": "exact_file_read",
+                "core_success": true,
+                "expected_sequence_matched": true,
+                "first_tool_matched": true,
+                "invalid_tool_calls": 0,
+                "model_call_count": 2,
+                "passed": true,
+                "redundant_tool_calls": 0,
+                "tool_call_count": 1,
+                "valid_tool_calls": 1
+              }
+            },
+            {
+              "observation": {
+                "answer": "TARGET_VALUE_731",
+                "approval_kind": null,
+                "approval_pause_observed": false,
+                "approval_resumes": 0,
+                "capability": "file_tool_selection",
+                "case_id": "symbol_search_then_read",
+                "error": "",
+                "input_tokens": 7100,
+                "latency_ms": 30396.77825000399,
+                "model_calls": 4,
+                "output_tokens": 202,
+                "status": "done",
+                "tool_calls": [
+                  {
+                    "arguments": {
+                      "limit": 200,
+                      "path": "."
+                    },
+                    "error_code": null,
+                    "is_error": false,
+                    "tool_call_id": "fc_a1aa15f5-6033-4dce-8be5-4d2f339c5c48",
+                    "tool_name": "list_files"
+                  },
+                  {
+                    "arguments": {
+                      "context_lines": 0,
+                      "max_results": 20,
+                      "path": ".",
+                      "pattern": "MODEL_QUALITY_TARGET",
+                      "regex": false
+                    },
+                    "error_code": null,
+                    "is_error": false,
+                    "tool_call_id": "fc_2520f62e-5d11-4571-854e-1f6af20cec9a",
+                    "tool_name": "search_text"
+                  },
+                  {
+                    "arguments": {
+                      "encoding": "utf-8",
+                      "path": "input_files/target.py"
+                    },
+                    "error_code": null,
+                    "is_error": false,
+                    "tool_call_id": "fc_c6d011a6-e20b-4527-ad56-2ff2b0136e2d",
+                    "tool_name": "read_file"
+                  }
+                ],
+                "tool_schema_bytes": 28620,
+                "workspace_assertions_passed": true
+              },
+              "score": {
+                "capability": "file_tool_selection",
+                "capability_passed": true,
+                "case_id": "symbol_search_then_read",
+                "core_success": true,
+                "expected_sequence_matched": true,
+                "first_tool_matched": false,
+                "invalid_tool_calls": 0,
+                "model_call_count": 4,
+                "passed": true,
+                "redundant_tool_calls": 0,
+                "tool_call_count": 3,
+                "valid_tool_calls": 3
+              }
+            },
+            {
+              "observation": {
+                "answer": "RECOVERED_842",
+                "approval_kind": null,
+                "approval_pause_observed": false,
+                "approval_resumes": 0,
+                "capability": "failure_recovery",
+                "case_id": "missing_file_recovery",
+                "error": "",
+                "input_tokens": 6703,
+                "latency_ms": 59452.61337500415,
+                "model_calls": 4,
+                "output_tokens": 377,
+                "status": "done",
+                "tool_calls": [
+                  {
+                    "arguments": {
+                      "limit": 20,
+                      "path": "input_files"
+                    },
+                    "error_code": null,
+                    "is_error": false,
+                    "tool_call_id": "fc_b2970377-3a34-4a86-b595-50a682f953fa",
+                    "tool_name": "list_files"
+                  },
+                  {
+                    "arguments": {
+                      "encoding": "utf-8",
+                      "path": "input_files/report.txt"
+                    },
+                    "error_code": "runner_failed",
+                    "is_error": true,
+                    "tool_call_id": "fc_2f33ef00-1051-422f-a64b-55c90fcabe5e",
+                    "tool_name": "read_file"
+                  },
+                  {
+                    "arguments": {
+                      "encoding": "utf-8",
+                      "path": "input_files/report-final.txt"
+                    },
+                    "error_code": null,
+                    "is_error": false,
+                    "tool_call_id": "fc_60ad119c-6d52-49c9-9964-1d21020c8e53",
+                    "tool_name": "read_file"
+                  }
+                ],
+                "tool_schema_bytes": 28620,
+                "workspace_assertions_passed": true
+              },
+              "score": {
+                "capability": "failure_recovery",
+                "capability_passed": true,
+                "case_id": "missing_file_recovery",
+                "core_success": true,
+                "expected_sequence_matched": true,
+                "first_tool_matched": false,
+                "invalid_tool_calls": 0,
+                "model_call_count": 4,
+                "passed": true,
+                "redundant_tool_calls": 0,
+                "tool_call_count": 3,
+                "valid_tool_calls": 3
+              }
+            },
+            {
+              "observation": {
+                "answer": "The text in **input_files/approval.txt** has been successfully changed from `before_gate` to `after_gate`.",
+                "approval_kind": "tool_approval",
+                "approval_pause_observed": true,
+                "approval_resumes": 1,
+                "capability": "approval_continuation",
+                "case_id": "approval_continue",
+                "error": "",
+                "input_tokens": 4813,
+                "latency_ms": 31600.581958002294,
+                "model_calls": 3,
+                "output_tokens": 161,
+                "status": "done",
+                "tool_calls": [
+                  {
+                    "arguments": {
+                      "path": "input_files/approval.txt"
+                    },
+                    "error_code": null,
+                    "is_error": false,
+                    "tool_call_id": "fc_41f8bda5-7831-4f70-897d-ca9cd1f894a9",
+                    "tool_name": "read_file"
+                  },
+                  {
+                    "arguments": {
+                      "file_path": "input_files/approval.txt",
+                      "new_string": "after_gate",
+                      "old_string": "before_gate"
+                    },
+                    "error_code": null,
+                    "is_error": false,
+                    "tool_call_id": "fc_4faecdb1-cbaf-44e7-baaf-cece50316248",
+                    "tool_name": "apply_patch"
+                  }
+                ],
+                "tool_schema_bytes": 21465,
+                "workspace_assertions_passed": true
+              },
+              "score": {
+                "capability": "approval_continuation",
+                "capability_passed": true,
+                "case_id": "approval_continue",
+                "core_success": true,
+                "expected_sequence_matched": true,
+                "first_tool_matched": false,
+                "invalid_tool_calls": 0,
+                "model_call_count": 3,
+                "passed": true,
+                "redundant_tool_calls": 0,
+                "tool_call_count": 2,
+                "valid_tool_calls": 2
+              }
+            },
+            {
+              "observation": {
+                "answer": "FILE_UNAVAILABLE",
+                "approval_kind": null,
+                "approval_pause_observed": false,
+                "approval_resumes": 0,
+                "capability": "repeated_failure_control",
+                "case_id": "single_failure_no_retry",
+                "error": "",
+                "input_tokens": 3035,
+                "latency_ms": 14748.768665995158,
+                "model_calls": 2,
+                "output_tokens": 468,
+                "status": "done",
+                "tool_calls": [
+                  {
+                    "arguments": {
+                      "path": "input_files/definitely-missing.txt"
+                    },
+                    "error_code": "runner_failed",
+                    "is_error": true,
+                    "tool_call_id": "fc_bd53e897-9849-42f4-b6e5-8391160da224",
+                    "tool_name": "read_file"
+                  }
+                ],
+                "tool_schema_bytes": 14310,
+                "workspace_assertions_passed": true
+              },
+              "score": {
+                "capability": "repeated_failure_control",
+                "capability_passed": true,
+                "case_id": "single_failure_no_retry",
+                "core_success": true,
+                "expected_sequence_matched": true,
+                "first_tool_matched": true,
+                "invalid_tool_calls": 0,
+                "model_call_count": 2,
+                "passed": true,
+                "redundant_tool_calls": 0,
+                "tool_call_count": 1,
+                "valid_tool_calls": 1
+              }
+            }
+          ],
+          "informational_metrics": {
+            "mean_input_tokens_per_case": 4953.4,
+            "mean_latency_ms_per_case": 33065.42615819926,
+            "mean_output_tokens_per_case": 256.2,
+            "mean_tool_schema_bytes_per_case": 21465.0
+          },
+          "metrics": {
+            "approval_continuation_rate": 1.0,
+            "argument_validity_rate": 1.0,
+            "failure_recovery_rate": 1.0,
+            "file_tool_selection_rate": 1.0,
+            "mean_model_calls_per_case": 3.0,
+            "mean_tool_calls_per_case": 2.0,
+            "redundant_tool_call_rate": 0.0,
+            "repeated_failure_control_rate": 1.0,
+            "task_success_rate": 1.0
+          },
+          "trial": 3
+        }
+      ]
+    },
+    "qwen3_5_9b_mlx_4bit": {
+      "provider": "local_mlx_chat_8080",
+      "provider_model": "mlx-community/Qwen3.5-9B-4bit",
+      "thresholds": {
+        "approval_continuation_rate": {
+          "direction": "min",
+          "value": 1.0
+        },
+        "argument_validity_rate": {
+          "direction": "min",
+          "value": 1.0
+        },
+        "failure_recovery_rate": {
+          "direction": "min",
+          "value": 1.0
+        },
+        "file_tool_selection_rate": {
+          "direction": "min",
+          "value": 1.0
+        },
+        "mean_model_calls_per_case": {
+          "direction": "max",
+          "value": 3.0
+        },
+        "mean_tool_calls_per_case": {
+          "direction": "max",
+          "value": 2.0
+        },
+        "redundant_tool_call_rate": {
+          "direction": "max",
+          "value": 0.0
+        },
+        "repeated_failure_control_rate": {
+          "direction": "min",
+          "value": 1.0
+        },
+        "task_success_rate": {
+          "direction": "min",
+          "value": 1.0
+        }
+      },
+      "trial_count": 3,
+      "trial_metrics": [
+        {
+          "approval_continuation_rate": 1.0,
+          "argument_validity_rate": 1.0,
+          "failure_recovery_rate": 1.0,
+          "file_tool_selection_rate": 1.0,
+          "mean_model_calls_per_case": 3.0,
+          "mean_tool_calls_per_case": 2.0,
+          "redundant_tool_call_rate": 0.0,
+          "repeated_failure_control_rate": 1.0,
+          "task_success_rate": 1.0
+        },
+        {
+          "approval_continuation_rate": 1.0,
+          "argument_validity_rate": 1.0,
+          "failure_recovery_rate": 1.0,
+          "file_tool_selection_rate": 1.0,
+          "mean_model_calls_per_case": 3.0,
+          "mean_tool_calls_per_case": 2.0,
+          "redundant_tool_call_rate": 0.0,
+          "repeated_failure_control_rate": 1.0,
+          "task_success_rate": 1.0
+        },
+        {
+          "approval_continuation_rate": 1.0,
+          "argument_validity_rate": 1.0,
+          "failure_recovery_rate": 1.0,
+          "file_tool_selection_rate": 1.0,
+          "mean_model_calls_per_case": 3.0,
+          "mean_tool_calls_per_case": 2.0,
+          "redundant_tool_call_rate": 0.0,
+          "repeated_failure_control_rate": 1.0,
+          "task_success_rate": 1.0
+        }
+      ],
+      "trials": [
+        {
+          "cases": [
+            {
+              "observation": {
+                "answer": "QUALITY_GATE_EXACT",
+                "approval_kind": null,
+                "approval_pause_observed": false,
+                "approval_resumes": 0,
+                "capability": "file_tool_selection",
+                "case_id": "exact_file_read",
+                "error": "",
+                "input_tokens": 4963,
+                "latency_ms": 9215.862334996928,
+                "model_calls": 2,
+                "output_tokens": 35,
+                "status": "done",
+                "tool_calls": [
+                  {
+                    "arguments": {
+                      "path": "input_files/exact.txt"
+                    },
+                    "error_code": null,
+                    "is_error": false,
+                    "tool_call_id": "39b459b0-ebe8-468d-9ee5-16f73c57166f",
+                    "tool_name": "read_file"
+                  }
+                ],
+                "tool_schema_bytes": 14310,
+                "workspace_assertions_passed": true
+              },
+              "score": {
+                "capability": "file_tool_selection",
+                "capability_passed": true,
+                "case_id": "exact_file_read",
+                "core_success": true,
+                "expected_sequence_matched": true,
+                "first_tool_matched": true,
+                "invalid_tool_calls": 0,
+                "model_call_count": 2,
+                "passed": true,
+                "redundant_tool_calls": 0,
+                "tool_call_count": 1,
+                "valid_tool_calls": 1
+              }
+            },
+            {
+              "observation": {
+                "answer": "TARGET_VALUE_731",
+                "approval_kind": null,
+                "approval_pause_observed": false,
+                "approval_resumes": 0,
+                "capability": "file_tool_selection",
+                "case_id": "symbol_search_then_read",
+                "error": "",
+                "input_tokens": 7748,
+                "latency_ms": 9414.752000011504,
+                "model_calls": 3,
+                "output_tokens": 64,
+                "status": "done",
+                "tool_calls": [
+                  {
+                    "arguments": {
+                      "pattern": "MODEL_QUALITY_TARGET"
+                    },
+                    "error_code": null,
+                    "is_error": false,
+                    "tool_call_id": "5d956c2e-0d7a-4f16-a5f5-174c68efb48e",
+                    "tool_name": "search_text"
+                  },
+                  {
+                    "arguments": {
+                      "path": "input_files/target.py"
+                    },
+                    "error_code": null,
+                    "is_error": false,
+                    "tool_call_id": "b2d4bd1f-e507-48b5-a893-9c45b1ea347f",
+                    "tool_name": "read_file"
+                  }
+                ],
+                "tool_schema_bytes": 21465,
+                "workspace_assertions_passed": true
+              },
+              "score": {
+                "capability": "file_tool_selection",
+                "capability_passed": true,
+                "case_id": "symbol_search_then_read",
+                "core_success": true,
+                "expected_sequence_matched": true,
+                "first_tool_matched": true,
+                "invalid_tool_calls": 0,
+                "model_call_count": 3,
+                "passed": true,
+                "redundant_tool_calls": 0,
+                "tool_call_count": 2,
+                "valid_tool_calls": 2
+              }
+            },
+            {
+              "observation": {
+                "answer": "RECOVERED_842",
+                "approval_kind": null,
+                "approval_pause_observed": false,
+                "approval_resumes": 0,
+                "capability": "failure_recovery",
+                "case_id": "missing_file_recovery",
+                "error": "",
+                "input_tokens": 10417,
+                "latency_ms": 10209.142874999088,
+                "model_calls": 4,
+                "output_tokens": 91,
+                "status": "done",
+                "tool_calls": [
+                  {
+                    "arguments": {
+                      "path": "input_files/report.txt"
+                    },
+                    "error_code": "runner_failed",
+                    "is_error": true,
+                    "tool_call_id": "c8b4a7c4-14e5-41db-9b46-ad9508349101",
+                    "tool_name": "read_file"
+                  },
+                  {
+                    "arguments": {
+                      "path": "input_files"
+                    },
+                    "error_code": null,
+                    "is_error": false,
+                    "tool_call_id": "295b21c0-ada8-41c0-bdc9-88711e57b4aa",
+                    "tool_name": "list_files"
+                  },
+                  {
+                    "arguments": {
+                      "path": "input_files/report-final.txt"
+                    },
+                    "error_code": null,
+                    "is_error": false,
+                    "tool_call_id": "dcbcdda6-99d0-4b2a-b33c-8a6c137d6d39",
+                    "tool_name": "read_file"
+                  }
+                ],
+                "tool_schema_bytes": 28620,
+                "workspace_assertions_passed": true
+              },
+              "score": {
+                "capability": "failure_recovery",
+                "capability_passed": true,
+                "case_id": "missing_file_recovery",
+                "core_success": true,
+                "expected_sequence_matched": true,
+                "first_tool_matched": true,
+                "invalid_tool_calls": 0,
+                "model_call_count": 4,
+                "passed": true,
+                "redundant_tool_calls": 0,
+                "tool_call_count": 3,
+                "valid_tool_calls": 3
+              }
+            },
+            {
+              "observation": {
+                "answer": "The text `before_gate` has been successfully changed to `after_gate` in `input_files/approval.txt`. The file now contains `after_gate` (11 bytes). Completion confirmed.",
+                "approval_kind": "tool_approval",
+                "approval_pause_observed": true,
+                "approval_resumes": 1,
+                "capability": "approval_continuation",
+                "case_id": "approval_continue",
+                "error": "",
+                "input_tokens": 10422,
+                "latency_ms": 11844.597791001434,
+                "model_calls": 4,
+                "output_tokens": 160,
+                "status": "done",
+                "tool_calls": [
+                  {
+                    "arguments": {
+                      "path": "input_files/approval.txt"
+                    },
+                    "error_code": null,
+                    "is_error": false,
+                    "tool_call_id": "59abede8-d750-48bc-b1a1-cfcf027f4943",
+                    "tool_name": "read_file"
+                  },
+                  {
+                    "arguments": {
+                      "file_path": "input_files/approval.txt",
+                      "new_string": "after_gate",
+                      "old_string": "before_gate"
+                    },
+                    "error_code": null,
+                    "is_error": false,
+                    "tool_call_id": "14e510d6-6835-431f-aad5-6fa357245317",
+                    "tool_name": "apply_patch"
+                  },
+                  {
+                    "arguments": {
+                      "path": "input_files/approval.txt"
+                    },
+                    "error_code": null,
+                    "is_error": false,
+                    "tool_call_id": "ba833be7-8001-4831-981b-60b54dc05543",
+                    "tool_name": "read_file"
+                  }
+                ],
+                "tool_schema_bytes": 28620,
+                "workspace_assertions_passed": true
+              },
+              "score": {
+                "capability": "approval_continuation",
+                "capability_passed": true,
+                "case_id": "approval_continue",
+                "core_success": true,
+                "expected_sequence_matched": true,
+                "first_tool_matched": false,
+                "invalid_tool_calls": 0,
+                "model_call_count": 4,
+                "passed": true,
+                "redundant_tool_calls": 0,
+                "tool_call_count": 3,
+                "valid_tool_calls": 3
+              }
+            },
+            {
+              "observation": {
+                "answer": "FILE_UNAVAILABLE",
+                "approval_kind": null,
+                "approval_pause_observed": false,
+                "approval_resumes": 0,
+                "capability": "repeated_failure_control",
+                "case_id": "single_failure_no_retry",
+                "error": "",
+                "input_tokens": 4876,
+                "latency_ms": 8721.201834006933,
+                "model_calls": 2,
+                "output_tokens": 36,
+                "status": "done",
+                "tool_calls": [
+                  {
+                    "arguments": {
+                      "path": "input_files/definitely-missing.txt"
+                    },
+                    "error_code": "runner_failed",
+                    "is_error": true,
+                    "tool_call_id": "e0654530-9a15-415e-9c81-78cc828bfd1e",
+                    "tool_name": "read_file"
+                  }
+                ],
+                "tool_schema_bytes": 14310,
+                "workspace_assertions_passed": true
+              },
+              "score": {
+                "capability": "repeated_failure_control",
+                "capability_passed": true,
+                "case_id": "single_failure_no_retry",
+                "core_success": true,
+                "expected_sequence_matched": true,
+                "first_tool_matched": true,
+                "invalid_tool_calls": 0,
+                "model_call_count": 2,
+                "passed": true,
+                "redundant_tool_calls": 0,
+                "tool_call_count": 1,
+                "valid_tool_calls": 1
+              }
+            }
+          ],
+          "informational_metrics": {
+            "mean_input_tokens_per_case": 7685.2,
+            "mean_latency_ms_per_case": 9881.111367003177,
+            "mean_output_tokens_per_case": 77.2,
+            "mean_tool_schema_bytes_per_case": 21465.0
+          },
+          "metrics": {
+            "approval_continuation_rate": 1.0,
+            "argument_validity_rate": 1.0,
+            "failure_recovery_rate": 1.0,
+            "file_tool_selection_rate": 1.0,
+            "mean_model_calls_per_case": 3.0,
+            "mean_tool_calls_per_case": 2.0,
+            "redundant_tool_call_rate": 0.0,
+            "repeated_failure_control_rate": 1.0,
+            "task_success_rate": 1.0
+          },
+          "trial": 1
+        },
+        {
+          "cases": [
+            {
+              "observation": {
+                "answer": "QUALITY_GATE_EXACT",
+                "approval_kind": null,
+                "approval_pause_observed": false,
+                "approval_resumes": 0,
+                "capability": "file_tool_selection",
+                "case_id": "exact_file_read",
+                "error": "",
+                "input_tokens": 4963,
+                "latency_ms": 9945.095499002491,
+                "model_calls": 2,
+                "output_tokens": 35,
+                "status": "done",
+                "tool_calls": [
+                  {
+                    "arguments": {
+                      "path": "input_files/exact.txt"
+                    },
+                    "error_code": null,
+                    "is_error": false,
+                    "tool_call_id": "06bab61b-a2cc-4c61-84f0-c80210022f32",
+                    "tool_name": "read_file"
+                  }
+                ],
+                "tool_schema_bytes": 14310,
+                "workspace_assertions_passed": true
+              },
+              "score": {
+                "capability": "file_tool_selection",
+                "capability_passed": true,
+                "case_id": "exact_file_read",
+                "core_success": true,
+                "expected_sequence_matched": true,
+                "first_tool_matched": true,
+                "invalid_tool_calls": 0,
+                "model_call_count": 2,
+                "passed": true,
+                "redundant_tool_calls": 0,
+                "tool_call_count": 1,
+                "valid_tool_calls": 1
+              }
+            },
+            {
+              "observation": {
+                "answer": "TARGET_VALUE_731",
+                "approval_kind": null,
+                "approval_pause_observed": false,
+                "approval_resumes": 0,
+                "capability": "file_tool_selection",
+                "case_id": "symbol_search_then_read",
+                "error": "",
+                "input_tokens": 7748,
+                "latency_ms": 9850.458500004606,
+                "model_calls": 3,
+                "output_tokens": 64,
+                "status": "done",
+                "tool_calls": [
+                  {
+                    "arguments": {
+                      "pattern": "MODEL_QUALITY_TARGET"
+                    },
+                    "error_code": null,
+                    "is_error": false,
+                    "tool_call_id": "a6143ab1-7984-4119-8eb3-4894ac9b974c",
+                    "tool_name": "search_text"
+                  },
+                  {
+                    "arguments": {
+                      "path": "input_files/target.py"
+                    },
+                    "error_code": null,
+                    "is_error": false,
+                    "tool_call_id": "d94a97d9-b5d8-4474-b417-6028a8240cdc",
+                    "tool_name": "read_file"
+                  }
+                ],
+                "tool_schema_bytes": 21465,
+                "workspace_assertions_passed": true
+              },
+              "score": {
+                "capability": "file_tool_selection",
+                "capability_passed": true,
+                "case_id": "symbol_search_then_read",
+                "core_success": true,
+                "expected_sequence_matched": true,
+                "first_tool_matched": true,
+                "invalid_tool_calls": 0,
+                "model_call_count": 3,
+                "passed": true,
+                "redundant_tool_calls": 0,
+                "tool_call_count": 2,
+                "valid_tool_calls": 2
+              }
+            },
+            {
+              "observation": {
+                "answer": "RECOVERED_842",
+                "approval_kind": null,
+                "approval_pause_observed": false,
+                "approval_resumes": 0,
+                "capability": "failure_recovery",
+                "case_id": "missing_file_recovery",
+                "error": "",
+                "input_tokens": 10417,
+                "latency_ms": 10355.020417002379,
+                "model_calls": 4,
+                "output_tokens": 91,
+                "status": "done",
+                "tool_calls": [
+                  {
+                    "arguments": {
+                      "path": "input_files/report.txt"
+                    },
+                    "error_code": "runner_failed",
+                    "is_error": true,
+                    "tool_call_id": "4684f3f3-b74c-4895-8843-7fb9c5288e7a",
+                    "tool_name": "read_file"
+                  },
+                  {
+                    "arguments": {
+                      "path": "input_files"
+                    },
+                    "error_code": null,
+                    "is_error": false,
+                    "tool_call_id": "5808352c-0c94-4e76-be90-3096b8fd75e9",
+                    "tool_name": "list_files"
+                  },
+                  {
+                    "arguments": {
+                      "path": "input_files/report-final.txt"
+                    },
+                    "error_code": null,
+                    "is_error": false,
+                    "tool_call_id": "c0d2a9e4-2905-4a8a-89d5-34780c836caf",
+                    "tool_name": "read_file"
+                  }
+                ],
+                "tool_schema_bytes": 28620,
+                "workspace_assertions_passed": true
+              },
+              "score": {
+                "capability": "failure_recovery",
+                "capability_passed": true,
+                "case_id": "missing_file_recovery",
+                "core_success": true,
+                "expected_sequence_matched": true,
+                "first_tool_matched": true,
+                "invalid_tool_calls": 0,
+                "model_call_count": 4,
+                "passed": true,
+                "redundant_tool_calls": 0,
+                "tool_call_count": 3,
+                "valid_tool_calls": 3
+              }
+            },
+            {
+              "observation": {
+                "answer": "The text `before_gate` has been successfully changed to `after_gate` in `input_files/approval.txt`. The file now contains `after_gate` (11 bytes). Completion confirmed.",
+                "approval_kind": "tool_approval",
+                "approval_pause_observed": true,
+                "approval_resumes": 1,
+                "capability": "approval_continuation",
+                "case_id": "approval_continue",
+                "error": "",
+                "input_tokens": 10422,
+                "latency_ms": 11877.085667001666,
+                "model_calls": 4,
+                "output_tokens": 160,
+                "status": "done",
+                "tool_calls": [
+                  {
+                    "arguments": {
+                      "path": "input_files/approval.txt"
+                    },
+                    "error_code": null,
+                    "is_error": false,
+                    "tool_call_id": "021dde21-15e3-4fff-b698-198350cf98b7",
+                    "tool_name": "read_file"
+                  },
+                  {
+                    "arguments": {
+                      "file_path": "input_files/approval.txt",
+                      "new_string": "after_gate",
+                      "old_string": "before_gate"
+                    },
+                    "error_code": null,
+                    "is_error": false,
+                    "tool_call_id": "4f7d1c97-2d64-4665-9198-a680385eb097",
+                    "tool_name": "apply_patch"
+                  },
+                  {
+                    "arguments": {
+                      "path": "input_files/approval.txt"
+                    },
+                    "error_code": null,
+                    "is_error": false,
+                    "tool_call_id": "02b4a0de-8bb8-4b0d-8dd7-9414ac4de070",
+                    "tool_name": "read_file"
+                  }
+                ],
+                "tool_schema_bytes": 28620,
+                "workspace_assertions_passed": true
+              },
+              "score": {
+                "capability": "approval_continuation",
+                "capability_passed": true,
+                "case_id": "approval_continue",
+                "core_success": true,
+                "expected_sequence_matched": true,
+                "first_tool_matched": false,
+                "invalid_tool_calls": 0,
+                "model_call_count": 4,
+                "passed": true,
+                "redundant_tool_calls": 0,
+                "tool_call_count": 3,
+                "valid_tool_calls": 3
+              }
+            },
+            {
+              "observation": {
+                "answer": "FILE_UNAVAILABLE",
+                "approval_kind": null,
+                "approval_pause_observed": false,
+                "approval_resumes": 0,
+                "capability": "repeated_failure_control",
+                "case_id": "single_failure_no_retry",
+                "error": "",
+                "input_tokens": 4876,
+                "latency_ms": 7976.374249992659,
+                "model_calls": 2,
+                "output_tokens": 36,
+                "status": "done",
+                "tool_calls": [
+                  {
+                    "arguments": {
+                      "path": "input_files/definitely-missing.txt"
+                    },
+                    "error_code": "runner_failed",
+                    "is_error": true,
+                    "tool_call_id": "c9284743-7378-4974-9aad-6c6854729a1f",
+                    "tool_name": "read_file"
+                  }
+                ],
+                "tool_schema_bytes": 14310,
+                "workspace_assertions_passed": true
+              },
+              "score": {
+                "capability": "repeated_failure_control",
+                "capability_passed": true,
+                "case_id": "single_failure_no_retry",
+                "core_success": true,
+                "expected_sequence_matched": true,
+                "first_tool_matched": true,
+                "invalid_tool_calls": 0,
+                "model_call_count": 2,
+                "passed": true,
+                "redundant_tool_calls": 0,
+                "tool_call_count": 1,
+                "valid_tool_calls": 1
+              }
+            }
+          ],
+          "informational_metrics": {
+            "mean_input_tokens_per_case": 7685.2,
+            "mean_latency_ms_per_case": 10000.80686660076,
+            "mean_output_tokens_per_case": 77.2,
+            "mean_tool_schema_bytes_per_case": 21465.0
+          },
+          "metrics": {
+            "approval_continuation_rate": 1.0,
+            "argument_validity_rate": 1.0,
+            "failure_recovery_rate": 1.0,
+            "file_tool_selection_rate": 1.0,
+            "mean_model_calls_per_case": 3.0,
+            "mean_tool_calls_per_case": 2.0,
+            "redundant_tool_call_rate": 0.0,
+            "repeated_failure_control_rate": 1.0,
+            "task_success_rate": 1.0
+          },
+          "trial": 2
+        },
+        {
+          "cases": [
+            {
+              "observation": {
+                "answer": "QUALITY_GATE_EXACT",
+                "approval_kind": null,
+                "approval_pause_observed": false,
+                "approval_resumes": 0,
+                "capability": "file_tool_selection",
+                "case_id": "exact_file_read",
+                "error": "",
+                "input_tokens": 4963,
+                "latency_ms": 8077.511790994322,
+                "model_calls": 2,
+                "output_tokens": 35,
+                "status": "done",
+                "tool_calls": [
+                  {
+                    "arguments": {
+                      "path": "input_files/exact.txt"
+                    },
+                    "error_code": null,
+                    "is_error": false,
+                    "tool_call_id": "258f03ab-c734-4ae7-9eb7-7bdcad22c9d0",
+                    "tool_name": "read_file"
+                  }
+                ],
+                "tool_schema_bytes": 14310,
+                "workspace_assertions_passed": true
+              },
+              "score": {
+                "capability": "file_tool_selection",
+                "capability_passed": true,
+                "case_id": "exact_file_read",
+                "core_success": true,
+                "expected_sequence_matched": true,
+                "first_tool_matched": true,
+                "invalid_tool_calls": 0,
+                "model_call_count": 2,
+                "passed": true,
+                "redundant_tool_calls": 0,
+                "tool_call_count": 1,
+                "valid_tool_calls": 1
+              }
+            },
+            {
+              "observation": {
+                "answer": "TARGET_VALUE_731",
+                "approval_kind": null,
+                "approval_pause_observed": false,
+                "approval_resumes": 0,
+                "capability": "file_tool_selection",
+                "case_id": "symbol_search_then_read",
+                "error": "",
+                "input_tokens": 7748,
+                "latency_ms": 9441.992248997849,
+                "model_calls": 3,
+                "output_tokens": 64,
+                "status": "done",
+                "tool_calls": [
+                  {
+                    "arguments": {
+                      "pattern": "MODEL_QUALITY_TARGET"
+                    },
+                    "error_code": null,
+                    "is_error": false,
+                    "tool_call_id": "b02ee95b-8bc8-48e4-8b92-ac1c12b2b87e",
+                    "tool_name": "search_text"
+                  },
+                  {
+                    "arguments": {
+                      "path": "input_files/target.py"
+                    },
+                    "error_code": null,
+                    "is_error": false,
+                    "tool_call_id": "2a397a0f-4e6e-4d81-a551-5e022f7f3f40",
+                    "tool_name": "read_file"
+                  }
+                ],
+                "tool_schema_bytes": 21465,
+                "workspace_assertions_passed": true
+              },
+              "score": {
+                "capability": "file_tool_selection",
+                "capability_passed": true,
+                "case_id": "symbol_search_then_read",
+                "core_success": true,
+                "expected_sequence_matched": true,
+                "first_tool_matched": true,
+                "invalid_tool_calls": 0,
+                "model_call_count": 3,
+                "passed": true,
+                "redundant_tool_calls": 0,
+                "tool_call_count": 2,
+                "valid_tool_calls": 2
+              }
+            },
+            {
+              "observation": {
+                "answer": "RECOVERED_842",
+                "approval_kind": null,
+                "approval_pause_observed": false,
+                "approval_resumes": 0,
+                "capability": "failure_recovery",
+                "case_id": "missing_file_recovery",
+                "error": "",
+                "input_tokens": 10417,
+                "latency_ms": 10195.760873997642,
+                "model_calls": 4,
+                "output_tokens": 91,
+                "status": "done",
+                "tool_calls": [
+                  {
+                    "arguments": {
+                      "path": "input_files/report.txt"
+                    },
+                    "error_code": "runner_failed",
+                    "is_error": true,
+                    "tool_call_id": "1a32e282-d1bc-4317-bb07-637240c537bd",
+                    "tool_name": "read_file"
+                  },
+                  {
+                    "arguments": {
+                      "path": "input_files"
+                    },
+                    "error_code": null,
+                    "is_error": false,
+                    "tool_call_id": "adb54f67-809e-4e1a-99ea-861c1527bfae",
+                    "tool_name": "list_files"
+                  },
+                  {
+                    "arguments": {
+                      "path": "input_files/report-final.txt"
+                    },
+                    "error_code": null,
+                    "is_error": false,
+                    "tool_call_id": "64505787-8b6f-4c6e-979a-ac330ae1c663",
+                    "tool_name": "read_file"
+                  }
+                ],
+                "tool_schema_bytes": 28620,
+                "workspace_assertions_passed": true
+              },
+              "score": {
+                "capability": "failure_recovery",
+                "capability_passed": true,
+                "case_id": "missing_file_recovery",
+                "core_success": true,
+                "expected_sequence_matched": true,
+                "first_tool_matched": true,
+                "invalid_tool_calls": 0,
+                "model_call_count": 4,
+                "passed": true,
+                "redundant_tool_calls": 0,
+                "tool_call_count": 3,
+                "valid_tool_calls": 3
+              }
+            },
+            {
+              "observation": {
+                "answer": "The text `before_gate` has been successfully changed to `after_gate` in `input_files/approval.txt`. The file now contains `after_gate` (11 bytes). Completion confirmed.",
+                "approval_kind": "tool_approval",
+                "approval_pause_observed": true,
+                "approval_resumes": 1,
+                "capability": "approval_continuation",
+                "case_id": "approval_continue",
+                "error": "",
+                "input_tokens": 10422,
+                "latency_ms": 11927.320583999972,
+                "model_calls": 4,
+                "output_tokens": 160,
+                "status": "done",
+                "tool_calls": [
+                  {
+                    "arguments": {
+                      "path": "input_files/approval.txt"
+                    },
+                    "error_code": null,
+                    "is_error": false,
+                    "tool_call_id": "471016f1-cc4f-4432-8d6e-56ceabd2cd5d",
+                    "tool_name": "read_file"
+                  },
+                  {
+                    "arguments": {
+                      "file_path": "input_files/approval.txt",
+                      "new_string": "after_gate",
+                      "old_string": "before_gate"
+                    },
+                    "error_code": null,
+                    "is_error": false,
+                    "tool_call_id": "dd0880a5-311d-4b87-94dd-b8910a857cfb",
+                    "tool_name": "apply_patch"
+                  },
+                  {
+                    "arguments": {
+                      "path": "input_files/approval.txt"
+                    },
+                    "error_code": null,
+                    "is_error": false,
+                    "tool_call_id": "b0959e64-1b86-4331-b76d-26c65b9ded17",
+                    "tool_name": "read_file"
+                  }
+                ],
+                "tool_schema_bytes": 28620,
+                "workspace_assertions_passed": true
+              },
+              "score": {
+                "capability": "approval_continuation",
+                "capability_passed": true,
+                "case_id": "approval_continue",
+                "core_success": true,
+                "expected_sequence_matched": true,
+                "first_tool_matched": false,
+                "invalid_tool_calls": 0,
+                "model_call_count": 4,
+                "passed": true,
+                "redundant_tool_calls": 0,
+                "tool_call_count": 3,
+                "valid_tool_calls": 3
+              }
+            },
+            {
+              "observation": {
+                "answer": "FILE_UNAVAILABLE",
+                "approval_kind": null,
+                "approval_pause_observed": false,
+                "approval_resumes": 0,
+                "capability": "repeated_failure_control",
+                "case_id": "single_failure_no_retry",
+                "error": "",
+                "input_tokens": 4876,
+                "latency_ms": 8060.78225098463,
+                "model_calls": 2,
+                "output_tokens": 36,
+                "status": "done",
+                "tool_calls": [
+                  {
+                    "arguments": {
+                      "path": "input_files/definitely-missing.txt"
+                    },
+                    "error_code": "runner_failed",
+                    "is_error": true,
+                    "tool_call_id": "9b81274b-7da4-4133-82d8-d086cf01383a",
+                    "tool_name": "read_file"
+                  }
+                ],
+                "tool_schema_bytes": 14310,
+                "workspace_assertions_passed": true
+              },
+              "score": {
+                "capability": "repeated_failure_control",
+                "capability_passed": true,
+                "case_id": "single_failure_no_retry",
+                "core_success": true,
+                "expected_sequence_matched": true,
+                "first_tool_matched": true,
+                "invalid_tool_calls": 0,
+                "model_call_count": 2,
+                "passed": true,
+                "redundant_tool_calls": 0,
+                "tool_call_count": 1,
+                "valid_tool_calls": 1
+              }
+            }
+          ],
+          "informational_metrics": {
+            "mean_input_tokens_per_case": 7685.2,
+            "mean_latency_ms_per_case": 9540.673549794883,
+            "mean_output_tokens_per_case": 77.2,
+            "mean_tool_schema_bytes_per_case": 21465.0
+          },
+          "metrics": {
+            "approval_continuation_rate": 1.0,
+            "argument_validity_rate": 1.0,
+            "failure_recovery_rate": 1.0,
+            "file_tool_selection_rate": 1.0,
+            "mean_model_calls_per_case": 3.0,
+            "mean_tool_calls_per_case": 2.0,
+            "redundant_tool_call_rate": 0.0,
+            "repeated_failure_control_rate": 1.0,
+            "task_success_rate": 1.0
+          },
+          "trial": 3
+        }
+      ]
+    }
+  },
+  "schema_version": 1,
+  "suite_id": "agent-model-tool-quality-v1",
+  "suite_revision": "suite_e5d107e182252cb886d4",
+  "threshold_method": "empirical_worst_trial_v1"
+}
