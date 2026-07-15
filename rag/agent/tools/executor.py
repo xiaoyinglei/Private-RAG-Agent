@@ -46,10 +46,15 @@ class ExecutionBoundary(StrEnum):
 
 class ExecutionStatus(StrEnum):
     PREPARED = "prepared"
-    RUNNING = "running"
+    STARTED = "started"
     COMPLETED = "completed"
     FAILED = "failed"
-    UNKNOWN = "unknown"
+    OUTCOME_UNKNOWN = "outcome_unknown"
+
+    # Source compatibility for checkpoints and callers created before the
+    # durable prepared/started boundary was made explicit.
+    RUNNING = "started"
+    UNKNOWN = "outcome_unknown"
 
 
 @dataclass(frozen=True, slots=True)
@@ -128,6 +133,10 @@ type Externalizer = Callable[
     tuple[NormalizedToolOutput, bool],
 ]
 type TraceSink = Callable[[ToolExecutionTrace], None | Awaitable[None]]
+type RecordSink = Callable[
+    [ToolExecutionRecord],
+    None | Awaitable[None],
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -139,6 +148,7 @@ class _PreparedExecution:
     boundary: ExecutionBoundary
     decision: CanUseToolResult
     record: ToolExecutionRecord
+    record_sink: RecordSink | None
     started_at: float
 
 
@@ -196,6 +206,7 @@ class ToolExecutor:
         *,
         context: ToolExecutionContext,
         record: ToolExecutionRecord | None = None,
+        record_sink: RecordSink | None = None,
     ) -> ToolExecution:
         trace_count = len(self._traces)
         started_at = time.monotonic()
@@ -204,6 +215,7 @@ class ToolExecutor:
                 call,
                 context=context,
                 record=record,
+                record_sink=record_sink,
                 started_at=started_at,
             )
             if isinstance(prepared, ToolExecution):
@@ -230,6 +242,7 @@ class ToolExecutor:
         *,
         context: ToolExecutionContext,
         records: Mapping[str, ToolExecutionRecord] | None = None,
+        record_sink: RecordSink | None = None,
     ) -> tuple[ToolExecution, ...]:
         prior_records = records or {}
         completed: dict[int, ToolExecution] = {}
@@ -239,6 +252,7 @@ class ToolExecutor:
                 call,
                 context=context,
                 record=prior_records.get(call.tool_call_id),
+                record_sink=record_sink,
                 started_at=time.monotonic(),
             )
             if isinstance(item, ToolExecution):
@@ -263,6 +277,7 @@ class ToolExecutor:
         *,
         context: ToolExecutionContext,
         record: ToolExecutionRecord | None,
+        record_sink: RecordSink | None,
         started_at: float,
     ) -> _PreparedExecution | ToolExecution:
         tool = self._tools.get(call.tool_name)
@@ -296,13 +311,24 @@ class ToolExecutor:
             if (
                 record is not None
                 and record_error == "tool_reconciliation_required"
-                and record.status is ExecutionStatus.RUNNING
+                and record.status is ExecutionStatus.STARTED
             ):
                 record = replace(
                     record,
-                    status=ExecutionStatus.UNKNOWN,
+                    status=ExecutionStatus.OUTCOME_UNKNOWN,
                     error_code="interrupted_outcome_unknown",
                     requires_reconciliation=True,
+                )
+            if record is not None and record_error in {
+                "execution_already_completed",
+                "execution_already_failed",
+            }:
+                return await self._finish(
+                    call=call,
+                    result=_recorded_outcome_result(call, record),
+                    record=record,
+                    record_sink=record_sink,
+                    started_at=started_at,
                 )
             return await self._finish(
                 call=call,
@@ -317,6 +343,7 @@ class ToolExecutor:
                     retryable=False,
                 ),
                 record=record,
+                record_sink=record_sink,
                 started_at=started_at,
             )
 
@@ -498,14 +525,13 @@ class ToolExecutor:
                     decision=decision.decision,
                 )
 
-        execution_record = record or ToolExecutionRecord.prepare(call, tool)
         execution_record = replace(
-            execution_record,
-            status=ExecutionStatus.RUNNING,
-            attempt_count=execution_record.attempt_count + 1,
+            record or ToolExecutionRecord.prepare(call, tool),
+            status=ExecutionStatus.PREPARED,
             error_code=None,
             requires_reconciliation=False,
         )
+        await _emit_record(record_sink, execution_record)
         return _PreparedExecution(
             call=call,
             tool=tool,
@@ -514,10 +540,20 @@ class ToolExecutor:
             boundary=boundary,
             decision=decision,
             record=execution_record,
+            record_sink=record_sink,
             started_at=started_at,
         )
 
     async def _invoke(self, prepared: _PreparedExecution) -> ToolExecution:
+        started_record = replace(
+            prepared.record,
+            status=ExecutionStatus.STARTED,
+            attempt_count=prepared.record.attempt_count + 1,
+            error_code=None,
+            requires_reconciliation=False,
+        )
+        await _emit_record(prepared.record_sink, started_record)
+        prepared = replace(prepared, record=started_record)
         try:
             raw = await _run_with_timeout(
                 prepared.tool,
@@ -544,7 +580,7 @@ class ToolExecutor:
             requires_reconciliation = not prepared.tool.idempotent
             record = replace(
                 prepared.record,
-                status=ExecutionStatus.UNKNOWN,
+                status=ExecutionStatus.OUTCOME_UNKNOWN,
                 error_code="timeout_outcome_unknown",
                 requires_reconciliation=requires_reconciliation,
             )
@@ -563,7 +599,7 @@ class ToolExecutor:
             requires_reconciliation = not prepared.tool.idempotent
             record = replace(
                 prepared.record,
-                status=ExecutionStatus.UNKNOWN,
+                status=ExecutionStatus.OUTCOME_UNKNOWN,
                 error_code="cancelled_outcome_unknown",
                 requires_reconciliation=requires_reconciliation,
             )
@@ -709,6 +745,7 @@ class ToolExecutor:
         call: ToolCall,
         result: ToolResult,
         record: ToolExecutionRecord | None,
+        record_sink: RecordSink | None = None,
         started_at: float | None = None,
         resolved: ResolvedToolUse | None = None,
         boundary: ExecutionBoundary | None = None,
@@ -720,6 +757,9 @@ class ToolExecutor:
             resolved = prepared.resolved
             boundary = prepared.boundary
             decision = prepared.decision.decision
+            record_sink = prepared.record_sink
+        if record is not None:
+            await _emit_record(record_sink, record)
         trace = ToolExecutionTrace(
             tool_call_id=call.tool_call_id,
             tool_name=call.tool_name,
@@ -942,14 +982,60 @@ def _record_error(
     ):
         return "execution_record_mismatch"
     if (
-        record.status is ExecutionStatus.UNKNOWN
+        record.status is ExecutionStatus.OUTCOME_UNKNOWN
         and record.requires_reconciliation
     ) or (
-        record.status is ExecutionStatus.RUNNING
+        record.status is ExecutionStatus.STARTED
         and not record.idempotent
     ):
         return "tool_reconciliation_required"
+    if record.status is ExecutionStatus.COMPLETED:
+        return "execution_already_completed"
+    if record.status is ExecutionStatus.FAILED:
+        return "execution_already_failed"
     return None
+
+
+async def _emit_record(
+    sink: RecordSink | None,
+    record: ToolExecutionRecord,
+) -> None:
+    if sink is None:
+        return
+    emitted = sink(record)
+    if inspect.isawaitable(emitted):
+        await emitted
+
+
+def _recorded_outcome_result(
+    call: ToolCall,
+    record: ToolExecutionRecord,
+) -> ToolResult:
+    completed = record.status is ExecutionStatus.COMPLETED
+    text = (
+        "The tool outcome was reconciled as completed; the operation was not "
+        "replayed."
+        if completed
+        else "The tool outcome was reconciled as failed; the operation was not replayed."
+    )
+    return ToolResult(
+        tool_call_id=call.tool_call_id,
+        tool_name=call.tool_name,
+        content=(ToolContentBlock(type="text", data={"text": text}),),
+        structured_content={
+            "operation_id": record.operation_id,
+            "status": record.status.value,
+            "reconciled": True,
+        },
+        is_error=not completed,
+        error_code=(None if completed else record.error_code or "reconciled_failed"),
+        error_message=(None if completed else text),
+        retryable=False,
+        metadata={
+            "operation_id": record.operation_id,
+            "reconciled": True,
+        },
+    )
 
 
 def _arguments_digest(arguments: Mapping[str, JsonValue]) -> str:

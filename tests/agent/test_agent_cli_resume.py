@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+from uuid import uuid4
 
 import pytest
 
+from agent_runtime import AgentResult
 from rag.agent import cli
 from rag.agent.cli import _build_resume_response
 from rag.agent.core.human_input import HumanInputRequest, ToolCallSummary
@@ -75,49 +77,26 @@ def test_agent_resume_closes_service_after_result(
     closed: list[bool] = []
     facade_options: list[dict[str, object]] = []
 
-    class _Service:
-        async def apending_human_input_request(self, *, run_id: str) -> HumanInputRequest:
-            return HumanInputRequest(
-                request_id=f"hir_{run_id}",
-                kind="tool_approval",
-                question="approve?",
-                tool_calls=[
-                    ToolCallSummary(
-                        tool_call_id="tc_one",
-                        tool_name="write_file",
-                        args_preview="path='scratch/out.txt'",
-                    )
-                ],
-            )
-
-        async def resume(
-            self,
-            *,
-            run_id: str,
-            response: object,
-            workspace_path: str | None,
-        ) -> AgentRunResult:
-            del response, workspace_path
-            return AgentRunResult(
-                run_id=run_id,
-                thread_id=run_id,
-                status="done",
-                final_answer="resumed",
-            )
-
-        async def aclose(self) -> None:
-            closed.append(True)
-
     class _Facade:
-        workspace_path = tmp_path
-
-        @asynccontextmanager
-        async def _open_product_runtime(self, **_kwargs: object):
-            service = _Service()
-            try:
-                yield service
-            finally:
-                await service.aclose()
+        async def aresume(
+            self,
+            turn_id: str,
+            action: str,
+            *,
+            user_input: str | None,
+        ) -> AgentResult:
+            assert action == "allow_once"
+            assert user_input is None
+            closed.append(True)
+            return AgentResult.from_internal(
+                AgentRunResult(
+                    run_id=turn_id,
+                    thread_id=turn_id,
+                    session_id=str(uuid4()),
+                    status="done",
+                    final_answer="resumed",
+                )
+            )
 
     def create_facade(**kwargs: object) -> _Facade:
         facade_options.append(kwargs)
@@ -125,14 +104,20 @@ def test_agent_resume_closes_service_after_result(
 
     monkeypatch.setattr(cli, "_create_agent_facade", create_facade)
 
+    turn_id = str(uuid4())
     cli.agent_resume(
-        run_id="resume-close",
+        turn_id=turn_id,
         checkpoint_db=tmp_path / "agent.sqlite",
-        knowledge=["company-docs"],
+        action="allow_once",
     )
 
     assert closed == [True]
-    assert facade_options[0]["knowledge"] == ("company-docs",)
+    assert facade_options == [
+        {
+            "checkpoint_db": tmp_path / "agent.sqlite",
+            "vector_dsn": None,
+        }
+    ]
 
 
 def test_interactive_terminal_fails_closed_for_ci_or_non_tty(
@@ -179,22 +164,30 @@ async def test_inline_approval_resumes_on_the_same_runtime(
     calls: list[str] = []
 
     class _Service:
-        async def run(self, run_request: object) -> AgentRunResult:
-            calls.append("run")
+        async def chat(self, run_request: object) -> AgentRunResult:
+            calls.append("chat")
             return AgentRunResult(
-                run_id="inline-run",
-                thread_id="inline-run",
+                run_id=run_request.run_id,
+                thread_id=run_request.run_id,
+                session_id=str(uuid4()),
                 status="paused",
                 human_input_request=request,
                 needs_user_input="approve?",
             )
 
-        async def resume(self, *, run_id: str, response: object) -> AgentRunResult:
-            del run_id, response
+        async def resume_turn(
+            self,
+            *,
+            turn_id: str,
+            action: str,
+            user_input: str | None,
+        ) -> AgentRunResult:
+            del action, user_input
             calls.append("resume")
             return AgentRunResult(
-                run_id="inline-run",
-                thread_id="inline-run",
+                run_id=turn_id,
+                thread_id=turn_id,
+                session_id=str(uuid4()),
                 status="done",
                 final_answer="continued",
             )
@@ -223,10 +216,10 @@ async def test_inline_approval_resumes_on_the_same_runtime(
         _Facade(),
         task="run tests",
         files=(),
-        run_id="inline-run",
+        turn_id=str(uuid4()),
         max_tokens_total=None,
         interactive_approval=True,
     )
 
     assert result.answer == "continued"
-    assert calls == ["open", "run", "resume", "close"]
+    assert calls == ["open", "chat", "resume", "close"]

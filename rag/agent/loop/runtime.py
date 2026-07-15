@@ -85,6 +85,23 @@ def _add_model_latency(state: LoopState, latency_ms: float) -> None:
     )
 
 
+def _append_canonical_messages(
+    state: LoopState,
+    messages: Sequence[ModelMessage],
+) -> None:
+    if not messages:
+        return
+    state["canonical_transcript"] = [
+        *state.get("canonical_transcript", []),
+        *messages,
+    ]
+    if state["run_config"].session_id is not None:
+        state["turn_transcript"] = [
+            *state.get("turn_transcript", []),
+            *messages,
+        ]
+
+
 class ModelTurnEnvelope(BaseModel):
     """Optional provider metadata surrounding one accepted draft."""
 
@@ -392,10 +409,7 @@ class AgentLoop:
                 envelope.model_call_record,
             ]
         if envelope.assistant_message is not None:
-            state["canonical_transcript"] = [
-                *state.get("canonical_transcript", []),
-                envelope.assistant_message,
-            ]
+            _append_canonical_messages(state, (envelope.assistant_message,))
         if envelope.context_revision is not None:
             state["context_revision"] = envelope.context_revision
         if request is None:
@@ -555,13 +569,15 @@ class AgentLoop:
             }
             if exc.failed_generation:
                 feedback["failed_generation"] = exc.failed_generation
-            state["canonical_transcript"] = [
-                *state.get("canonical_transcript", []),
-                context_event_message(
-                    "model_tool_call_rejected",
-                    feedback,
+            _append_canonical_messages(
+                state,
+                (
+                    context_event_message(
+                        "model_tool_call_rejected",
+                        feedback,
+                    ),
                 ),
-            ]
+            )
         await self._emit_stream(_stream_recovery(
             strategy="model_retry",
             detail=f"attempt={retries}, error={str(exc)[:200]}",
@@ -607,6 +623,7 @@ class AgentLoop:
             calls,
             context=context,
             records=state["tool_execution_records"],
+            record_sink=self._checkpoint_store.write_execution_record,
         )
         for execution in executions:
             if execution.record is not None:
@@ -652,10 +669,10 @@ class AgentLoop:
             state["tool_results"],
             new_results,
         )
-        state["canonical_transcript"] = [
-            *state.get("canonical_transcript", []),
-            *(tool_result_message(result) for result in new_results),
-        ]
+        _append_canonical_messages(
+            state,
+            tuple(tool_result_message(result) for result in new_results),
+        )
 
         for tool_result in new_results:
             if tool_result.is_error:
@@ -1268,7 +1285,7 @@ def _reconciliation_request(
                 None if record is None else record.status.value
             ),
         },
-        options=["mark_completed", "mark_failed", "retry_new_operation"],
+        options=["mark_completed", "mark_failed"],
     )
 
 

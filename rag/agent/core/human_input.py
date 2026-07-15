@@ -53,7 +53,6 @@ class HumanInputResponse(BaseModel):
         "abort",
         "mark_completed",
         "mark_failed",
-        "retry_new_operation",
     ]
     approved_tool_call_ids: list[str] = Field(default_factory=list)
     denied_tool_call_ids: list[str] = Field(default_factory=list)

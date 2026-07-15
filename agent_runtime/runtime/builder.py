@@ -12,10 +12,13 @@ from typing import TYPE_CHECKING, Any, cast
 from agent_runtime.models import ModelControlPlane
 
 if TYPE_CHECKING:
+    from langgraph.checkpoint.base import BaseCheckpointSaver
+
     from rag.agent.core.definition import AgentRuntimePolicy
     from rag.agent.core.registry import AgentRegistry
     from rag.agent.core.runtime_diagnostics import RuntimeDiagnostic
     from rag.agent.service import AgentService
+    from rag.agent.sessions import RuntimeBinding, SessionStore
     from rag.agent.skills.runtime import SkillRuntime
     from rag.agent.streaming.sink import StreamEventSink
     from rag.agent.tools.tool import Tool
@@ -110,6 +113,7 @@ def build_agent_service(
     runtime: Any | None,
     *,
     checkpoint_db: Path | None = None,
+    checkpointer: BaseCheckpointSaver[str] | None = None,
     agent_type: str = "generic",
     model_alias: str | None = None,
     model_control_plane: ModelControlPlane | None = None,
@@ -123,6 +127,8 @@ def build_agent_service(
     stream_sink: StreamEventSink | None = None,
     strict_model_provider: bool = True,
     startup_ms: float = 0.0,
+    session_store: SessionStore | None = None,
+    runtime_binding: RuntimeBinding | None = None,
 ) -> AgentService:
     """Build one CLI/SDK runtime from ordinary canonical Tool values."""
     from rag.agent.builtin import create_builtin_agent_registry
@@ -256,7 +262,11 @@ def build_agent_service(
         definition=definition,
         tool_registry=tool_registry,
         model_registry=model_registry,
-        checkpointer=create_agent_checkpointer(checkpoint_db),
+        checkpointer=(
+            checkpointer
+            if checkpointer is not None
+            else create_agent_checkpointer(checkpoint_db)
+        ),
         runtime_diagnostics=diagnostics,
         strict_model_provider=strict_model_provider,
         latency_profile=AgentLatencyProfile(
@@ -269,6 +279,8 @@ def build_agent_service(
         discoverable_tool_names=discoverable_tool_names,
         skill_runtime=skill_runtime,
         stream_sink=stream_sink,
+        session_store=session_store,
+        runtime_binding=runtime_binding,
     )
 
 

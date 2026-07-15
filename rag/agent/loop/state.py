@@ -194,6 +194,7 @@ class LoopState(TypedDict):
     denied_tool_call_ids: list[str]
     tool_results: list[ToolResult]
     canonical_transcript: list[ModelMessage]
+    turn_transcript: list[ModelMessage]
     canonical_tool_calls: dict[str, ToolCall]
     model_call_records: list[ModelCallRecord]
     tool_manifest: ToolManifest | None
@@ -266,6 +267,7 @@ def create_loop_state(
         "denied_tool_call_ids": [],
         "tool_results": [],
         "canonical_transcript": [],
+        "turn_transcript": [],
         "canonical_tool_calls": {},
         "model_call_records": [],
         "tool_manifest": None,

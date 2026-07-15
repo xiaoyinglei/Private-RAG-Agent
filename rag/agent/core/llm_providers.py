@@ -18,6 +18,7 @@ from rag.agent.core.model_request import (
     ContextBlock,
     ModelRequest,
     ModelSettings,
+    StableModelContext,
     bind_model_call_record,
     build_model_request,
     build_stable_context,
@@ -93,6 +94,7 @@ class LLMLoopModelTurnProvider:
         resident_tool_names: Sequence[str],
         disabled_tool_names: Sequence[str] = (),
         kwargs: Mapping[str, object] | None = None,
+        context_window_tokens: int = 32_768,
         stream_sink: object | None = None,
         skill_runtime: SkillRuntime | None = None,
     ) -> None:
@@ -104,6 +106,8 @@ class LLMLoopModelTurnProvider:
             raise ValueError("provider must be non-empty")
         if type(supports_native_tools) is not bool:
             raise TypeError("supports_native_tools must be a bool")
+        if context_window_tokens <= 0:
+            raise ValueError("context_window_tokens must be positive")
         self._gateway = gateway
         self._model = model
         self._provider = provider
@@ -112,6 +116,7 @@ class LLMLoopModelTurnProvider:
         self._resident_tool_names = tuple(resident_tool_names)
         self._disabled_tool_names = tuple(disabled_tool_names)
         self._kwargs = dict(kwargs or {})
+        self._context_window_tokens = context_window_tokens
         self._stream_sink = stream_sink
         self._skill_runtime = skill_runtime
 
@@ -173,6 +178,7 @@ class LLMLoopModelTurnProvider:
                 ),
             )
         )
+        settings = self._model_settings(definition.model_selection)
         context = build_stable_context(
             instructions=tuple(instructions),
             frozen_run_context=frozen_run_context,
@@ -180,13 +186,24 @@ class LLMLoopModelTurnProvider:
             initial_memory=tuple(state.get("persistent_memories", ())),
             transcript=tuple(state.get("canonical_transcript", ())),
         )
+        context_limit = (
+            state["run_config"].max_context_tokens
+            or self._context_window_tokens
+        )
+        context = _project_model_context(
+            context,
+            max_input_tokens=max(
+                256,
+                context_limit - settings.max_output_tokens - 1_024,
+            ),
+        )
         request = build_model_request(
             request_id=(
                 f"{state['run_config'].run_id}:turn:{state['iteration']}"
             ),
             context=context,
             selected_tools=selected_tools,
-            settings=self._model_settings(definition.model_selection),
+            settings=settings,
         )
         _record_request_sizes(state, request)
         response = await self._gateway.agenerate_model_request(
@@ -260,6 +277,83 @@ class LLMLoopModelTurnProvider:
         if not callable(emit):
             return
         await emit(text_delta(value))
+
+
+def _project_model_context(
+    context: StableModelContext,
+    *,
+    max_input_tokens: int,
+) -> StableModelContext:
+    """Bound model-visible history without mutating canonical Session history."""
+
+    if not context.transcript:
+        return context
+    maximum_bytes = max_input_tokens * 4
+    visible = (*context.stable_messages, *context.transcript)
+    if _messages_size(visible) <= maximum_bytes:
+        return context
+
+    tail_budget = max(512, maximum_bytes // 2)
+    tail_start = len(context.transcript)
+    used = 0
+    for index in range(len(context.transcript) - 1, -1, -1):
+        size = _message_size(context.transcript[index])
+        if tail_start < len(context.transcript) and used + size > tail_budget:
+            break
+        tail_start = index
+        used += size
+    tail_start = _extend_tail_for_tool_pair(context.transcript, tail_start)
+    tail = context.transcript[tail_start:]
+    covered = context.transcript[:tail_start]
+    summary_limit = min(12_000, max(256, maximum_bytes // 4))
+    summary = _deterministic_transcript_summary(
+        covered,
+        max_chars=summary_limit,
+    )
+    return context.compact(summary=summary, retained_tail=tail)
+
+
+def _extend_tail_for_tool_pair(
+    transcript: tuple[ModelMessage, ...],
+    start: int,
+) -> int:
+    if start <= 0 or start >= len(transcript):
+        return start
+    first = transcript[start]
+    if first.role != "tool" or first.tool_call_id is None:
+        return start
+    for index in range(start - 1, -1, -1):
+        message = transcript[index]
+        if any(call.id == first.tool_call_id for call in message.tool_calls):
+            return index
+    return start
+
+
+def _deterministic_transcript_summary(
+    messages: tuple[ModelMessage, ...],
+    *,
+    max_chars: int,
+) -> str:
+    if not messages:
+        return "Earlier conversation omitted to fit the model context window."
+    lines = [
+        f"{message.role}: {canonical_json_text(model_message_payload(message))}"
+        for message in messages
+    ]
+    summary = "\n".join(lines)
+    if len(summary) <= max_chars:
+        return summary
+    return summary[:max_chars].rstrip() + " [truncated]"
+
+
+def _messages_size(messages: Sequence[ModelMessage]) -> int:
+    return sum(_message_size(message) for message in messages)
+
+
+def _message_size(message: ModelMessage) -> int:
+    return len(
+        canonical_json_text(model_message_payload(message)).encode("utf-8")
+    )
 
 
 def _record_request_sizes(state: LoopState, request: ModelRequest) -> None:
@@ -361,6 +455,7 @@ def create_loop_model_turn_provider(
         resident_tool_names=resident_tool_names,
         disabled_tool_names=disabled_tool_names,
         kwargs=resolved.kwargs,
+        context_window_tokens=resolved.context_window_tokens,
         stream_sink=stream_sink,
         skill_runtime=skill_runtime,
     )

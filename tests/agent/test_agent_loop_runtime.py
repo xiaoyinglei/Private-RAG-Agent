@@ -25,7 +25,7 @@ from rag.agent.skills.catalog import SkillCatalog
 from rag.agent.skills.loader import scan_and_load_skills
 from rag.agent.skills.runtime import SkillRuntime
 from rag.agent.streaming.events import EventType, StreamEvent, text_delta
-from rag.agent.tools.executor import ToolExecutor
+from rag.agent.tools.executor import ToolExecutionRecord, ToolExecutor
 from rag.agent.tools.integrations.skills import create_invoke_skill_tool
 from rag.agent.tools.permissions import ToolExecutionContext
 from rag.agent.tools.selection import (
@@ -104,6 +104,7 @@ class _SinkAwareProvider:
 class _Checkpoint:
     durable: bool = True
     snapshots: list[tuple[str, LoopState]] = field(default_factory=list)
+    execution_records: list[ToolExecutionRecord] = field(default_factory=list)
 
     async def save_snapshot(
         self,
@@ -112,6 +113,12 @@ class _Checkpoint:
         reason: str,
     ) -> None:
         self.snapshots.append((reason, deepcopy(state)))
+
+    async def write_execution_record(
+        self,
+        record: ToolExecutionRecord,
+    ) -> None:
+        self.execution_records.append(record)
 
 
 @dataclass
@@ -253,6 +260,11 @@ async def test_model_tool_result_next_turn_and_finish() -> None:
     assert result["tool_results"][0].structured_content == {"text": "hello"}
     assert result["canonical_transcript"][-1].role == "tool"
     assert any(reason == "tool_results_recorded" for reason, _ in checkpoint.snapshots)
+    assert [record.status.value for record in checkpoint.execution_records] == [
+        "prepared",
+        "started",
+        "completed",
+    ]
 
 
 @pytest.mark.anyio

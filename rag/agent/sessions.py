@@ -48,7 +48,7 @@ class TurnStateError(RuntimeError):
 class RuntimeBinding(BaseModel):
     """Persisted, secret-free inputs needed to rebuild one product runtime."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="ignore")
 
     agent_type: str = "generic"
     model_alias: str | None = None
@@ -58,7 +58,6 @@ class RuntimeBinding(BaseModel):
     embedding_model_alias: str | None = None
     reranker_model_alias: str | None = None
     vector_backend: str = "milvus"
-    vector_dsn: str | None = None
     vector_namespace: str | None = None
     vector_collection_prefix: str | None = None
 
@@ -102,6 +101,10 @@ class SessionStore:
         if self._path is not None:
             self._connection.execute("PRAGMA journal_mode = WAL")
         self._create_schema()
+
+    @property
+    def path(self) -> Path | None:
+        return self._path
 
     def close(self) -> None:
         with self._lock:
@@ -157,6 +160,58 @@ class SessionStore:
         if row is None:
             raise TurnNotFoundError(f"Turn not found: {turn_id}")
         return _turn_record(row)
+
+    def initialize_session_runtime(
+        self,
+        session_id: str,
+        runtime: RuntimeBinding,
+    ) -> SessionRecord:
+        """Finalize runtime metadata before the Session's first Turn."""
+
+        now = time.time()
+        with self._lock:
+            self._connection.execute("BEGIN IMMEDIATE")
+            try:
+                session = self._connection.execute(
+                    """
+                    SELECT session_id
+                    FROM agent_sessions
+                    WHERE session_id = ?
+                    """,
+                    (session_id,),
+                ).fetchone()
+                if session is None:
+                    raise SessionNotFoundError(
+                        f"Session not found: {session_id}"
+                    )
+                turn_count = int(
+                    self._connection.execute(
+                        """
+                        SELECT COUNT(*)
+                        FROM agent_turns
+                        WHERE session_id = ?
+                        """,
+                        (session_id,),
+                    ).fetchone()[0]
+                )
+                if turn_count:
+                    raise TurnStateError(
+                        f"Session {session_id} runtime is frozen after its "
+                        "first Turn"
+                    )
+                self._connection.execute(
+                    """
+                    UPDATE agent_sessions
+                    SET runtime_json = ?, updated_at = ?
+                    WHERE session_id = ?
+                    """,
+                    (runtime.model_dump_json(), now, session_id),
+                )
+                self._connection.commit()
+            except Exception:
+                self._connection.rollback()
+                raise
+        return self.get_session(session_id)
 
     def begin_turn(
         self,
@@ -362,6 +417,197 @@ class SessionStore:
                 (session_id,),
             ).fetchall()
         return tuple(_message_from_json(str(row["payload_json"])) for row in rows)
+
+    def history_before_turn(self, turn_id: str) -> tuple[ModelMessage, ...]:
+        turn = self.get_turn(turn_id)
+        with self._lock:
+            rows = self._connection.execute(
+                """
+                SELECT event.payload_json
+                FROM agent_session_events AS event
+                JOIN agent_turns AS item ON item.turn_id = event.turn_id
+                WHERE event.session_id = ? AND item.ordinal < ?
+                ORDER BY item.ordinal, event.event_index
+                """,
+                (turn.session_id, turn.ordinal),
+            ).fetchall()
+        return tuple(_message_from_json(str(row["payload_json"])) for row in rows)
+
+    def turn_history(self, turn_id: str) -> tuple[ModelMessage, ...]:
+        self.get_turn(turn_id)
+        with self._lock:
+            rows = self._connection.execute(
+                """
+                SELECT payload_json
+                FROM agent_session_events
+                WHERE turn_id = ?
+                ORDER BY event_index
+                """,
+                (turn_id,),
+            ).fetchall()
+        return tuple(
+            _message_from_json(str(row["payload_json"])) for row in rows
+        )
+
+    def mark_paused(self, turn_id: str) -> TurnRecord:
+        return self._mark_recoverable(turn_id, TurnStatus.PAUSED)
+
+    def mark_interrupted(self, turn_id: str) -> TurnRecord:
+        return self._mark_recoverable(turn_id, TurnStatus.INTERRUPTED)
+
+    def claim_for_resume(
+        self,
+        turn_id: str,
+        *,
+        lease_owner: str,
+        lease_seconds: float = 300.0,
+        now: float | None = None,
+    ) -> TurnRecord:
+        if not lease_owner:
+            raise ValueError("lease_owner must be non-empty")
+        if lease_seconds <= 0:
+            raise ValueError("lease_seconds must be positive")
+        claimed_at = time.time() if now is None else now
+        with self._lock:
+            self._connection.execute("BEGIN IMMEDIATE")
+            try:
+                row = self._connection.execute(
+                    """
+                    SELECT status, lease_owner, lease_expires_at
+                    FROM agent_turns
+                    WHERE turn_id = ?
+                    """,
+                    (turn_id,),
+                ).fetchone()
+                if row is None:
+                    raise TurnNotFoundError(f"Turn not found: {turn_id}")
+                current = TurnStatus(str(row["status"]))
+                if current in {TurnStatus.COMPLETED, TurnStatus.FAILED}:
+                    raise TurnStateError(
+                        f"Turn {turn_id} is {current.value} and cannot resume"
+                    )
+                expires_at = cast(float | None, row["lease_expires_at"])
+                current_owner = cast(str | None, row["lease_owner"])
+                if (
+                    current is TurnStatus.RUNNING
+                    and current_owner is not None
+                    and expires_at is not None
+                    and expires_at > claimed_at
+                ):
+                    raise TurnStateError(
+                        f"Turn {turn_id} is still running under an active lease"
+                    )
+                self._connection.execute(
+                    """
+                    UPDATE agent_turns
+                    SET status = ?, lease_owner = ?, lease_expires_at = ?,
+                        updated_at = ?
+                    WHERE turn_id = ?
+                    """,
+                    (
+                        TurnStatus.RUNNING.value,
+                        lease_owner,
+                        claimed_at + lease_seconds,
+                        claimed_at,
+                        turn_id,
+                    ),
+                )
+                self._connection.commit()
+            except Exception:
+                self._connection.rollback()
+                raise
+        return self.get_turn(turn_id)
+
+    def renew_lease(
+        self,
+        turn_id: str,
+        *,
+        lease_owner: str,
+        lease_seconds: float = 300.0,
+        now: float | None = None,
+    ) -> TurnRecord:
+        if not lease_owner:
+            raise ValueError("lease_owner must be non-empty")
+        if lease_seconds <= 0:
+            raise ValueError("lease_seconds must be positive")
+        renewed_at = time.time() if now is None else now
+        with self._lock:
+            self._connection.execute("BEGIN IMMEDIATE")
+            try:
+                row = self._connection.execute(
+                    """
+                    SELECT status, lease_owner
+                    FROM agent_turns
+                    WHERE turn_id = ?
+                    """,
+                    (turn_id,),
+                ).fetchone()
+                if row is None:
+                    raise TurnNotFoundError(f"Turn not found: {turn_id}")
+                status = TurnStatus(str(row["status"]))
+                if status is not TurnStatus.RUNNING:
+                    raise TurnStateError(
+                        f"Turn {turn_id} is {status.value}; expected running"
+                    )
+                current_owner = cast(str | None, row["lease_owner"])
+                if current_owner != lease_owner:
+                    raise TurnStateError(
+                        f"Turn {turn_id} is owned by another worker"
+                    )
+                self._connection.execute(
+                    """
+                    UPDATE agent_turns
+                    SET lease_expires_at = ?, updated_at = ?
+                    WHERE turn_id = ?
+                    """,
+                    (renewed_at + lease_seconds, renewed_at, turn_id),
+                )
+                self._connection.commit()
+            except Exception:
+                self._connection.rollback()
+                raise
+        return self.get_turn(turn_id)
+
+    def _mark_recoverable(
+        self,
+        turn_id: str,
+        status: TurnStatus,
+    ) -> TurnRecord:
+        if status not in {TurnStatus.PAUSED, TurnStatus.INTERRUPTED}:
+            raise ValueError("recoverable status must be paused or interrupted")
+        now = time.time()
+        with self._lock:
+            self._connection.execute("BEGIN IMMEDIATE")
+            try:
+                row = self._connection.execute(
+                    """
+                    SELECT status
+                    FROM agent_turns
+                    WHERE turn_id = ?
+                    """,
+                    (turn_id,),
+                ).fetchone()
+                if row is None:
+                    raise TurnNotFoundError(f"Turn not found: {turn_id}")
+                current = TurnStatus(str(row["status"]))
+                if current is not TurnStatus.RUNNING:
+                    raise TurnStateError(
+                        f"Turn {turn_id} is {current.value}; expected running"
+                    )
+                self._connection.execute(
+                    """
+                    UPDATE agent_turns
+                    SET status = ?, lease_owner = NULL,
+                        lease_expires_at = NULL, updated_at = ?
+                    WHERE turn_id = ?
+                    """,
+                    (status.value, now, turn_id),
+                )
+                self._connection.commit()
+            except Exception:
+                self._connection.rollback()
+                raise
+        return self.get_turn(turn_id)
 
     def mark_terminal(self, turn_id: str, status: TurnStatus) -> TurnRecord:
         if status not in {TurnStatus.COMPLETED, TurnStatus.FAILED}:

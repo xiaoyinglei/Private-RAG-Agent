@@ -27,9 +27,16 @@ class AgentResult:
     citations: tuple[Any, ...]
     usage: AgentUsage
     diagnostics: tuple[Any, ...]
-    run_id: str
+    session_id: str
+    turn_id: str
     thread_id: str
     raw: object | None
+
+    @property
+    def run_id(self) -> str:
+        """Deprecated compatibility alias for the per-execution Turn ID."""
+
+        return self.turn_id
 
     @classmethod
     def from_internal(
@@ -78,7 +85,8 @@ class AgentResult:
                 usage_source=_usage_source(usages),
             ),
             diagnostics=tuple(getattr(result, "runtime_diagnostics", ()) or ()),
-            run_id=str(getattr(result, "run_id", "")),
+            session_id=str(getattr(result, "session_id", "")),
+            turn_id=str(getattr(result, "run_id", "")),
             thread_id=str(getattr(result, "thread_id", "")),
             raw=result,
         )
