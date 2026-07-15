@@ -5,6 +5,7 @@ import os
 import subprocess
 import sys
 import textwrap
+import zipfile
 from pathlib import Path
 
 
@@ -58,3 +59,39 @@ def test_built_wheel_loads_bundled_qwen35_model_outside_repo(
     assert ".whl" in payload["agent_runtime_file"]
     assert ".whl" in payload["registry_file"]
     assert payload["model"] == "mlx-community/Qwen3.5-9B-4bit"
+
+    unpacked = tmp_path / "site-packages"
+    with zipfile.ZipFile(wheel) as archive:
+        archive.extractall(unpacked)
+    decoy_config = unpacked / "configs" / "models.yaml"
+    decoy_config.parent.mkdir()
+    decoy_config.write_text(
+        textwrap.dedent(
+            """
+            models:
+              decoy:
+                capability: chat
+                provider: decoy
+                protocol: openai_compatible
+                model: decoy/model
+            defaults:
+              primary_model: decoy
+            """
+        ),
+        encoding="utf-8",
+    )
+    env["PYTHONPATH"] = str(unpacked)
+
+    installed = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=run_dir,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert installed.returncode == 0, installed.stdout + installed.stderr
+    installed_payload = json.loads(installed.stdout.strip())
+    assert installed_payload["agent_runtime_file"].startswith(str(unpacked))
+    assert installed_payload["registry_file"].startswith(str(unpacked))
+    assert installed_payload["model"] == "mlx-community/Qwen3.5-9B-4bit"

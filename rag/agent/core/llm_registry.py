@@ -119,17 +119,17 @@ class ModelRegistry:
         if json_text:
             return AgentModelsConfig.model_validate(json.loads(json_text))
 
-        # 3. 源码仓库中的 models.yaml（不依赖进程 cwd）
-        if cls._BUNDLED_CONFIG_PATH.is_file():
-            return cls._load_yaml_file(cls._BUNDLED_CONFIG_PATH)
-
-        # 4. wheel 中 force-included 的 models.yaml
+        # 3. wheel 中 force-included 的 models.yaml
         resource = files(cls._BUNDLED_CONFIG_PACKAGE)
         for part in cls._BUNDLED_CONFIG_RESOURCE:
             resource = resource.joinpath(part)
         if resource.is_file():
             with as_file(resource) as resource_path:
                 return cls._load_yaml_file(resource_path)
+
+        # 4. 源码仓库中的 models.yaml（不依赖进程 cwd）
+        if cls._BUNDLED_CONFIG_PATH.is_file():
+            return cls._load_yaml_file(cls._BUNDLED_CONFIG_PATH)
 
         raise FileNotFoundError(
             "No agent model config found. Set RAG_AGENT_MODELS_PATH, "

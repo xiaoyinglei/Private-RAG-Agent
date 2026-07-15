@@ -4,7 +4,7 @@
 
 **Goal:** Make the built wheel resolve its bundled model catalog outside the repository and make Qwen3.5 file tasks serialize with one leading system message.
 
-**Architecture:** Keep `configs/models.yaml` as the single authored catalog, force-include it as a `rag.agent` wheel resource, and let `ModelRegistry` use the repository-relative source file or packaged resource through its existing YAML loader. Normalize only the OpenAI-compatible wire message sequence: fold leading system/context into one system, preserve later context as user events, and reject later canonical system messages.
+**Architecture:** Keep `configs/models.yaml` as the single authored catalog, force-include it as a `rag.agent` wheel resource, and let `ModelRegistry` prefer that resource in installed distributions before falling back to the repository-relative source file through its existing YAML loader. Normalize only the OpenAI-compatible wire message sequence: fold leading system/context into one system, preserve later context as user events, and reject later canonical system messages.
 
 **Tech Stack:** Python 3.12, Hatchling, importlib.resources, Pydantic, pytest, MLX-LM, OpenAI-compatible chat wire.
 
@@ -92,7 +92,7 @@ MLX provider, and `expected_model_contains: Qwen3.5-9B-4bit`.
 
 - [ ] **Step 3: Resolve source or packaged config without CWD dependence**
 
-Set the source path from `Path(__file__).resolve().parents[3]`, then use:
+After environment overrides, prefer the packaged resource:
 
 ```python
 resource = files("rag.agent").joinpath("_data").joinpath("models.yaml")
@@ -100,8 +100,10 @@ with as_file(resource) as resource_path:
     return cls._load_yaml_file(resource_path)
 ```
 
-Keep environment path and JSON overrides ahead of both bundled paths and retain
-fail-loud behavior when no source or packaged resource exists.
+If it is absent, use the source path from
+`Path(__file__).resolve().parents[3]`. Keep environment path and JSON overrides
+ahead of both bundled paths and retain fail-loud behavior when neither bundled
+source exists.
 
 - [ ] **Step 4: Run the focused tests and verify GREEN**
 

@@ -25,12 +25,13 @@ working directory, and make OpenAI-compatible file tasks work with
 ### Packaged model catalog
 
 Hatch force-includes the repository catalog at
-`rag/agent/_data/models.yaml` inside the wheel. `ModelRegistry` first checks the
-source path derived from `llm_registry.py`'s location, never the process CWD. If
-it is absent, as it is in a built wheel, it opens the packaged resource with
-`importlib.resources.as_file()` and reuses the existing YAML loader. This keeps
-one authored source and one parsing path and prevents an unrelated working
-directory from shadowing the bundled catalog.
+`rag/agent/_data/models.yaml` inside the wheel. After explicit environment
+overrides, `ModelRegistry` prefers that packaged resource and opens it with
+`importlib.resources.as_file()`. A source checkout, where that resource does not
+exist, falls back to the repository path derived from `llm_registry.py`'s
+location, never the process CWD. This keeps one authored source and one parsing
+path and prevents an unrelated installed `configs/models.yaml` from shadowing
+the bundled catalog.
 
 ### OpenAI-compatible context serialization
 
