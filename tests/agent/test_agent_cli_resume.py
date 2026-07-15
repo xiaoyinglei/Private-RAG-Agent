@@ -59,6 +59,26 @@ def test_build_resume_response_denies_pending_tool_ids() -> None:
     assert response.denied_tool_call_ids == ["tc_one"]
 
 
+def test_build_resume_response_uses_scoped_approval_id() -> None:
+    request = HumanInputRequest(
+        request_id="hir_network",
+        kind="tool_approval",
+        question="approve network?",
+        tool_calls=[
+            ToolCallSummary(
+                tool_call_id="tc_command",
+                approval_id="tc_command::network",
+                tool_name="run_command",
+                args_preview="command: curl https://example.com",
+            )
+        ],
+    )
+
+    response = _build_resume_response(request, "allow_once")
+
+    assert response.approved_tool_call_ids == ["tc_command::network"]
+
+
 def test_build_resume_response_rejects_unknown_decision() -> None:
     request = HumanInputRequest(
         request_id="hir_test",

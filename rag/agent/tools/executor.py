@@ -37,6 +37,8 @@ from rag.agent.tools.tool import (
     json_schema_output,
 )
 
+_NETWORK_APPROVAL_SUFFIX = "::network"
+
 
 class ExecutionBoundary(StrEnum):
     DIRECT = "direct"
@@ -280,6 +282,20 @@ class ToolExecutor:
         record_sink: RecordSink | None,
         started_at: float,
     ) -> _PreparedExecution | ToolExecution:
+        if call.tool_call_id.endswith(_NETWORK_APPROVAL_SUFFIX):
+            return await self._finish(
+                call=call,
+                result=_error_result(
+                    call,
+                    code="invalid_tool_call_id",
+                    message=(
+                        "tool call ID uses a reserved approval scope suffix"
+                    ),
+                    retryable=False,
+                ),
+                record=None,
+                started_at=started_at,
+            )
         tool = self._tools.get(call.tool_name)
         if tool is None:
             return await self._finish(
@@ -476,54 +492,44 @@ class ToolExecutor:
                 decision=decision.decision,
             )
         if decision.decision is UseToolDecision.ASK:
-            try:
-                approved = self._approval_resolver(
-                    call,
-                    tool,
-                    arguments,
-                    resolved,
-                    context,
-                    decision,
-                )
-                if inspect.isawaitable(approved):
-                    approved = await approved
-                if approved not in (True, False, None):
-                    raise TypeError("approval resolver must return bool or None")
-            except Exception:
-                return await self._finish(
-                    call=call,
-                    result=_error_result(
-                        call,
-                        code="approval_failed",
-                        message="tool approval resolution failed closed",
-                        retryable=True,
-                    ),
-                    record=None,
-                    started_at=started_at,
-                    resolved=resolved,
-                    boundary=boundary,
-                    decision=decision.decision,
-                )
-            if approved is not True:
-                denied = approved is False
-                return await self._finish(
-                    call=call,
-                    result=_error_result(
-                        call,
-                        code="tool_denied" if denied else "approval_required",
-                        message=(
-                            "tool call was denied"
-                            if denied
-                            else decision.reason
-                        ),
-                        retryable=not denied,
-                    ),
-                    record=None,
-                    started_at=started_at,
-                    resolved=resolved,
-                    boundary=boundary,
-                    decision=decision.decision,
-                )
+            approval_result = await self._require_approval(
+                call=call,
+                tool=tool,
+                arguments=arguments,
+                resolved=resolved,
+                context=context,
+                decision=decision,
+                boundary=boundary,
+                started_at=started_at,
+            )
+            if approval_result is not None:
+                return approval_result
+
+        if (
+            ToolEffect.NETWORK in resolved.effects
+            and ToolEffect.EXECUTE_PROCESS in resolved.effects
+            and not (
+                decision.decision is UseToolDecision.ASK
+                and decision.approval_scope == "network"
+            )
+        ):
+            network_decision = CanUseToolResult(
+                UseToolDecision.ASK,
+                "approval required for network access",
+                approval_scope="network",
+            )
+            approval_result = await self._require_approval(
+                call=call,
+                tool=tool,
+                arguments=arguments,
+                resolved=resolved,
+                context=context,
+                decision=network_decision,
+                boundary=boundary,
+                started_at=started_at,
+            )
+            if approval_result is not None:
+                return approval_result
 
         execution_record = replace(
             record or ToolExecutionRecord.prepare(call, tool),
@@ -542,6 +548,66 @@ class ToolExecutor:
             record=execution_record,
             record_sink=record_sink,
             started_at=started_at,
+        )
+
+    async def _require_approval(
+        self,
+        *,
+        call: ToolCall,
+        tool: Tool,
+        arguments: Mapping[str, JsonValue],
+        resolved: ResolvedToolUse,
+        context: ToolExecutionContext,
+        decision: CanUseToolResult,
+        boundary: ExecutionBoundary,
+        started_at: float,
+    ) -> ToolExecution | None:
+        try:
+            approved = self._approval_resolver(
+                call,
+                tool,
+                arguments,
+                resolved,
+                context,
+                decision,
+            )
+            if inspect.isawaitable(approved):
+                approved = await approved
+            if approved not in (True, False, None):
+                raise TypeError("approval resolver must return bool or None")
+        except Exception:
+            return await self._finish(
+                call=call,
+                result=_error_result(
+                    call,
+                    code="approval_failed",
+                    message="tool approval resolution failed closed",
+                    retryable=True,
+                    metadata=_approval_metadata(call, resolved, decision),
+                ),
+                record=None,
+                started_at=started_at,
+                resolved=resolved,
+                boundary=boundary,
+                decision=decision.decision,
+            )
+        if approved is True:
+            return None
+        denied = approved is False
+        return await self._finish(
+            call=call,
+            result=_error_result(
+                call,
+                code="tool_denied" if denied else "approval_required",
+                message=("tool call was denied" if denied else decision.reason),
+                retryable=not denied,
+                metadata=_approval_metadata(call, resolved, decision),
+            ),
+            record=None,
+            started_at=started_at,
+            resolved=resolved,
+            boundary=boundary,
+            decision=decision.decision,
         )
 
     async def _invoke(self, prepared: _PreparedExecution) -> ToolExecution:
@@ -806,10 +872,15 @@ def _resolve_external_approval(
     context: ToolExecutionContext,
     decision: CanUseToolResult,
 ) -> bool | None:
-    del tool, arguments, resolved, decision
-    if call.tool_call_id in context.denied_tool_call_ids:
+    del tool, arguments, resolved
+    approval_id = (
+        _network_approval_id(call.tool_call_id)
+        if decision.approval_scope == "network"
+        else call.tool_call_id
+    )
+    if approval_id in context.denied_tool_call_ids:
         return False
-    if call.tool_call_id in context.approved_tool_call_ids:
+    if approval_id in context.approved_tool_call_ids:
         return True
     return None
 
@@ -1062,6 +1133,7 @@ def _error_result(
     code: str,
     message: str,
     retryable: bool,
+    metadata: Mapping[str, JsonValue] | None = None,
 ) -> ToolResult:
     safe_message = " ".join(message.split())[:512]
     return ToolResult(
@@ -1074,7 +1146,35 @@ def _error_result(
         error_code=code,
         error_message=safe_message,
         retryable=retryable,
+        metadata={} if metadata is None else metadata,
     )
+
+
+def _approval_metadata(
+    call: ToolCall,
+    resolved: ResolvedToolUse,
+    decision: CanUseToolResult,
+) -> Mapping[str, JsonValue]:
+    approval_id = (
+        _network_approval_id(call.tool_call_id)
+        if decision.approval_scope == "network"
+        else call.tool_call_id
+    )
+    metadata: dict[str, JsonValue] = {
+        "approval_id": approval_id,
+        "approval_scope": decision.approval_scope,
+        "network_requested": ToolEffect.NETWORK in resolved.effects,
+    }
+    for target in resolved.targets:
+        if target.kind == "cwd_path":
+            metadata["cwd"] = target.value
+        elif target.kind == "execution_mode":
+            metadata["execution_mode"] = target.value
+    return metadata
+
+
+def _network_approval_id(tool_call_id: str) -> str:
+    return f"{tool_call_id}{_NETWORK_APPROVAL_SUFFIX}"
 
 
 def _model_visible_size(output: NormalizedToolOutput) -> int:

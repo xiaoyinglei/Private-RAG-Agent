@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 import ast
+import shlex
+import shutil
+import socket
+import tempfile
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -12,9 +16,10 @@ from rag.agent.tools.builtins import (
     create_resident_coding_tools,
 )
 from rag.agent.tools.builtins import search as search_module
+from rag.agent.tools.builtins import shell as shell_module
 from rag.agent.tools.executor import ToolExecution, ToolExecutor
 from rag.agent.tools.permissions import ToolExecutionContext
-from rag.agent.tools.tool import Tool, ToolCall, ToolCallOrigin
+from rag.agent.tools.tool import Tool, ToolCall, ToolCallOrigin, ToolEffect
 from rag.agent.workspace import WorkspaceRuntime, open_workspace
 
 
@@ -104,6 +109,24 @@ def test_resident_coding_tool_baseline_is_exact_and_ordered(tmp_path: Path) -> N
             isinstance(schema, Mapping) and schema.get("description")
             for schema in properties.values()
         )
+
+
+def test_run_command_declares_requested_network_as_dynamic_effect(
+    tmp_path: Path,
+) -> None:
+    workspace = open_workspace(tmp_path, create=True)
+    command = _tools_by_name(workspace)["run_command"]
+
+    resolved = command.resolve_use(
+        {
+            "command": "curl https://example.com",
+            "working_dir": ".",
+            "timeout_seconds": 1,
+            "network": True,
+        }
+    )
+
+    assert ToolEffect.NETWORK in resolved.effects
 
 
 @pytest.mark.anyio
@@ -395,6 +418,290 @@ async def test_run_command_returns_bounded_structured_process_output(
     assert execution.result.structured_content["stderr"] == "warning"
     assert execution.result.structured_content["exit_code"] == 0
     assert execution.result.structured_content["timed_out"] is False
+    assert execution.result.structured_content["execution_mode"] == "restricted_sandbox"
+    assert execution.result.structured_content["network_enabled"] is False
+
+
+@pytest.mark.anyio
+async def test_run_command_does_not_inherit_host_environment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "host-secret-must-not-cross-boundary")
+    monkeypatch.setenv("GROQ_API_KEY", "host-secret-must-not-cross-boundary")
+    monkeypatch.setenv("SSH_AUTH_SOCK", "/private/tmp/host-agent.sock")
+    monkeypatch.setenv("DOCKER_HOST", "unix:///var/run/docker.sock")
+    monkeypatch.setenv("DATABASE_PASSWORD", "host-password")
+    workspace = open_workspace(tmp_path, create=True)
+    tools = _tools_by_name(workspace)
+
+    execution = await _execute(
+        tools["run_command"],
+        {
+            "command": (
+                "printf '%s|%s|%s|%s|%s' "
+                '"${OPENAI_API_KEY-unset}" '
+                '"${GROQ_API_KEY-unset}" '
+                '"${SSH_AUTH_SOCK-unset}" '
+                '"${DOCKER_HOST-unset}" '
+                '"${DATABASE_PASSWORD-unset}"'
+            ),
+            "working_dir": ".",
+            "timeout_seconds": 1,
+        },
+        workspace=workspace,
+    )
+
+    assert execution.result.structured_content is not None
+    assert execution.result.structured_content["stdout"] == (
+        "unset|unset|unset|unset|unset"
+    )
+
+
+@pytest.mark.anyio
+async def test_run_command_rejects_environment_injection(tmp_path: Path) -> None:
+    workspace = open_workspace(tmp_path, create=True)
+    tools = _tools_by_name(workspace)
+
+    execution = await _execute(
+        tools["run_command"],
+        {
+            "command": "printf safe",
+            "working_dir": ".",
+            "timeout_seconds": 1,
+            "env": {"API_TOKEN": "must-not-enter-command"},
+        },
+        workspace=workspace,
+    )
+
+    assert execution.result.error_code == "invalid_arguments"
+
+
+@pytest.mark.anyio
+@pytest.mark.skipif(
+    shutil.which("sandbox-exec") is None,
+    reason="Seatbelt sandbox-exec is not available on this platform",
+)
+async def test_run_command_cannot_read_outside_workspace(
+    tmp_path: Path,
+) -> None:
+    workspace = open_workspace(tmp_path / "workspace", create=True)
+    outside = tmp_path / "outside-secret.txt"
+    outside.write_text("must stay outside", encoding="utf-8")
+    tools = _tools_by_name(workspace)
+
+    execution = await _execute(
+        tools["run_command"],
+        {
+            "command": f"cat {shlex.quote(str(outside))} >/dev/null",
+            "working_dir": ".",
+            "timeout_seconds": 1,
+        },
+        workspace=workspace,
+    )
+
+    assert execution.result.structured_content is not None
+    assert execution.result.structured_content["exit_code"] != 0
+    assert "Operation not permitted" in execution.result.structured_content["stderr"]
+
+
+@pytest.mark.anyio
+@pytest.mark.skipif(
+    shutil.which("sandbox-exec") is None,
+    reason="Seatbelt sandbox-exec is not available on this platform",
+)
+async def test_run_command_cannot_list_host_home(tmp_path: Path) -> None:
+    workspace = open_workspace(tmp_path, create=True)
+    command = _tools_by_name(workspace)["run_command"]
+
+    execution = await _execute(
+        command,
+        {
+            "command": f"ls {shlex.quote(str(Path.home()))} >/dev/null",
+            "working_dir": ".",
+            "timeout_seconds": 1,
+        },
+        workspace=workspace,
+    )
+
+    assert execution.result.structured_content is not None
+    assert execution.result.structured_content["exit_code"] != 0
+    assert "Operation not permitted" in execution.result.structured_content["stderr"]
+
+
+@pytest.mark.anyio
+@pytest.mark.skipif(
+    shutil.which("sandbox-exec") is None,
+    reason="Seatbelt sandbox-exec is not available on this platform",
+)
+async def test_run_command_cannot_follow_workspace_symlink_outside(
+    tmp_path: Path,
+) -> None:
+    workspace = open_workspace(tmp_path / "workspace", create=True)
+    outside = tmp_path / "outside-secret.txt"
+    outside.write_text("must stay outside", encoding="utf-8")
+    (workspace.root / "outside-link").symlink_to(outside)
+    command = _tools_by_name(workspace)["run_command"]
+
+    execution = await _execute(
+        command,
+        {
+            "command": "cat outside-link >/dev/null",
+            "working_dir": ".",
+            "timeout_seconds": 1,
+        },
+        workspace=workspace,
+    )
+
+    assert execution.result.structured_content is not None
+    assert execution.result.structured_content["exit_code"] != 0
+    assert "Operation not permitted" in execution.result.structured_content["stderr"]
+
+
+@pytest.mark.anyio
+@pytest.mark.skipif(
+    shutil.which("sandbox-exec") is None,
+    reason="Seatbelt sandbox-exec is not available on this platform",
+)
+async def test_run_command_uses_and_removes_private_command_temp(
+    tmp_path: Path,
+) -> None:
+    workspace = open_workspace(tmp_path, create=True)
+    command = _tools_by_name(workspace)["run_command"]
+
+    raw = await command.run(
+        {
+            "command": "printf '%s' \"$TMPDIR\"; touch \"$TMPDIR/probe\"",
+            "working_dir": ".",
+            "timeout_seconds": 1,
+        }
+    )
+
+    temp_path = Path(raw.stdout)
+    assert temp_path.parent == workspace.scratch
+    assert temp_path.name.startswith("run-command-")
+    assert temp_path.exists() is False
+
+
+@pytest.mark.anyio
+@pytest.mark.skipif(
+    shutil.which("sandbox-exec") is None,
+    reason="Seatbelt sandbox-exec is not available on this platform",
+)
+async def test_run_command_network_flag_controls_ip_network_only(
+    tmp_path: Path,
+) -> None:
+    workspace = open_workspace(tmp_path, create=True)
+    command = _tools_by_name(workspace)["run_command"]
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen()
+    port = listener.getsockname()[1]
+    probe = f"/usr/bin/nc -z -w 1 127.0.0.1 {port}"
+    try:
+        blocked = await command.run(
+            {
+                "command": probe,
+                "working_dir": ".",
+                "timeout_seconds": 2,
+            }
+        )
+        allowed = await command.run(
+            {
+                "command": probe,
+                "working_dir": ".",
+                "timeout_seconds": 2,
+                "network": True,
+            }
+        )
+    finally:
+        listener.close()
+
+    assert blocked.exit_code != 0
+    assert blocked.network_enabled is False
+    assert allowed.exit_code == 0, allowed.stderr
+    assert allowed.network_enabled is True
+
+
+@pytest.mark.anyio
+@pytest.mark.skipif(
+    shutil.which("sandbox-exec") is None,
+    reason="Seatbelt sandbox-exec is not available on this platform",
+)
+async def test_run_command_network_approval_does_not_enable_unix_sockets(
+) -> None:
+    with tempfile.TemporaryDirectory(prefix="run-command-test-", dir="/tmp") as root:
+        workspace = open_workspace(root, create=True)
+        command = _tools_by_name(workspace)["run_command"]
+        socket_path = workspace.root / "service.sock"
+        listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        listener.bind(str(socket_path))
+        listener.listen()
+        python_code = (
+            "import socket; "
+            "client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM); "
+            f"client.connect({str(socket_path)!r})"
+        )
+        try:
+            result = await command.run(
+                {
+                    "command": (
+                        "/Library/Developer/CommandLineTools/usr/bin/python3 "
+                        f"-c {shlex.quote(python_code)}"
+                    ),
+                    "working_dir": ".",
+                    "timeout_seconds": 2,
+                    "network": True,
+                }
+            )
+        finally:
+            listener.close()
+
+    assert result.exit_code != 0
+    assert "Operation not permitted" in result.stderr
+
+
+def test_run_command_network_profile_limits_unix_sockets_to_dns(
+    tmp_path: Path,
+) -> None:
+    profile = shell_module._build_command_sandbox_profile(
+        workspace_root=tmp_path / "workspace",
+        temporary_root=tmp_path / "temporary",
+        allow_network=True,
+    )
+
+    assert '(allow network-outbound (remote ip "*:*"))' in profile
+    assert 'literal "/private/var/run/mDNSResponder"' in profile
+    assert "docker.sock" not in profile
+    assert "com.apple.SecurityServer" not in profile
+
+
+@pytest.mark.anyio
+async def test_run_command_fails_closed_when_sandbox_is_unavailable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = open_workspace(tmp_path, create=True)
+    sentinel = workspace.root / "must-not-exist.txt"
+    monkeypatch.setattr(
+        shell_module,
+        "_SANDBOX_EXEC_PATH",
+        str(tmp_path / "missing-sandbox-exec"),
+    )
+    tools = _tools_by_name(workspace)
+
+    execution = await _execute(
+        tools["run_command"],
+        {
+            "command": f"touch {shlex.quote(str(sentinel))}",
+            "working_dir": ".",
+            "timeout_seconds": 1,
+        },
+        workspace=workspace,
+    )
+
+    assert execution.result.error_code == "sandbox_unavailable"
+    assert sentinel.exists() is False
 
 
 def test_search_builtin_has_no_embedding_or_retrieval_import_dependency() -> None:

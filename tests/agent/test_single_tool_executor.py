@@ -564,6 +564,97 @@ def test_can_use_tool_is_a_pure_effect_decision(
 
 
 @pytest.mark.anyio
+async def test_network_effect_requires_separate_approval_from_execution(
+    tmp_path: Path,
+) -> None:
+    runner_calls = 0
+
+    async def runner(_arguments: Mapping[str, Any]) -> object:
+        nonlocal runner_calls
+        runner_calls += 1
+        return {"value": "ok"}
+
+    tool = _tool(
+        run=runner,
+        static_effects=frozenset(
+            {ToolEffect.EXECUTE_PROCESS, ToolEffect.NETWORK}
+        ),
+    )
+    call = _call()
+    executor = ToolExecutor({"demo": tool})
+
+    execution_approval = await executor.execute(
+        call,
+        context=_context(workspace_root=tmp_path),
+    )
+    assert execution_approval.result.error_code == "approval_required"
+    assert execution_approval.result.metadata["approval_scope"] == "tool"
+    assert execution_approval.result.metadata["approval_id"] == call.tool_call_id
+    assert runner_calls == 0
+
+    network_approval = await executor.execute(
+        call,
+        context=_context(
+            workspace_root=tmp_path,
+            approved=frozenset({call.tool_call_id}),
+        ),
+    )
+    assert network_approval.result.error_code == "approval_required"
+    assert network_approval.result.metadata["approval_scope"] == "network"
+    network_approval_id = str(
+        network_approval.result.metadata["approval_id"]
+    )
+    assert network_approval_id != call.tool_call_id
+    assert runner_calls == 0
+
+    denied = await executor.execute(
+        call,
+        context=_context(
+            workspace_root=tmp_path,
+            approved=frozenset({call.tool_call_id}),
+            denied=frozenset({network_approval_id}),
+        ),
+    )
+    assert denied.result.error_code == "tool_denied"
+    assert denied.result.metadata["approval_scope"] == "network"
+    assert runner_calls == 0
+
+    completed = await executor.execute(
+        call,
+        context=_context(
+            workspace_root=tmp_path,
+            approved=frozenset(
+                {call.tool_call_id, network_approval_id}
+            ),
+        ),
+    )
+    assert completed.result.is_error is False
+    assert runner_calls == 1
+
+
+@pytest.mark.anyio
+async def test_network_approval_id_cannot_collide_with_raw_tool_call_id() -> None:
+    runner_calls = 0
+
+    def runner(_arguments: Mapping[str, Any]) -> object:
+        nonlocal runner_calls
+        runner_calls += 1
+        return {"value": "must not run"}
+
+    executor = ToolExecutor({"demo": _tool(run=runner)})
+
+    execution = await executor.execute(
+        _call(call_id="call_other::network"),
+        context=_context(
+            approved=frozenset({"call_other::network"}),
+        ),
+    )
+
+    assert execution.result.error_code == "invalid_tool_call_id"
+    assert runner_calls == 0
+
+
+@pytest.mark.anyio
 async def test_runner_normalizer_output_validator_and_externalizer_failures_trace_once() -> None:
     async def runner_failure(_arguments: Mapping[str, Any]) -> object:
         raise RuntimeError("secret runner detail")

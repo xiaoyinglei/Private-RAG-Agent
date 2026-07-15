@@ -1479,7 +1479,10 @@ def _response_for_resume_action(
             raise ValueError(
                 "A tool approval Turn supports allow_once, deny, or abort"
             )
-        tool_call_ids = [item.tool_call_id for item in request.tool_calls]
+        tool_call_ids = [
+            item.approval_id or item.tool_call_id
+            for item in request.tool_calls
+        ]
         return (
             HumanInputResponse(
                 request_id=request.request_id,

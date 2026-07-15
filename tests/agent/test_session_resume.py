@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import shlex
+import shutil
 from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import replace
@@ -24,6 +26,7 @@ from rag.agent.sessions import (
     SessionStore,
     TurnStatus,
 )
+from rag.agent.tools.builtins.shell import create_run_command_tool
 from rag.agent.tools.executor import ExecutionStatus, ToolExecutionRecord
 from rag.agent.tools.registry import ToolRegistry
 from rag.agent.tools.tool import (
@@ -78,6 +81,25 @@ class _FinishProvider:
                 content=self.answer,
             ),
         )
+
+
+class _CommandProvider:
+    def __init__(self, plan: ToolCallPlan) -> None:
+        self.plan = plan
+        self.observed: list[LoopState] = []
+
+    async def next_turn(
+        self,
+        state: LoopState,
+        *,
+        definition: AgentRuntimePolicy,
+        budget_remaining: int,
+    ) -> ModelTurnDraft:
+        del definition, budget_remaining
+        self.observed.append(deepcopy(state))
+        if state["tool_results"]:
+            return ModelTurnDraft(action="finish", final_answer="command done")
+        return ModelTurnDraft(action="execute", tool_calls=(self.plan,))
 
 
 def _definition() -> AgentRuntimePolicy:
@@ -349,6 +371,7 @@ async def test_resume_tool_approval_maps_action_to_pending_calls(
         tool_calls=[
             ToolCallSummary(
                 tool_call_id="call_write",
+                approval_id="call_write::network",
                 tool_name="write_file",
                 args_preview="path='result.txt'",
             )
@@ -376,7 +399,89 @@ async def test_resume_tool_approval_maps_action_to_pending_calls(
         user_input=None,
     )
 
-    assert provider.observed[0]["approved_tool_call_ids"] == ["call_write"]
+    assert provider.observed[0]["approved_tool_call_ids"] == [
+        "call_write::network"
+    ]
+
+
+@pytest.mark.anyio
+@pytest.mark.skipif(
+    shutil.which("sandbox-exec") is None,
+    reason="Seatbelt sandbox-exec is not available on this platform",
+)
+async def test_run_command_network_uses_two_checkpointed_approvals(
+    tmp_path,
+) -> None:
+    store = SessionStore(tmp_path / "agent.sqlite")
+    checkpointer = MemorySaver(serde=agent_checkpoint_serde())
+    workspace = open_workspace(tmp_path)
+    sentinel = workspace.root / "approved-command.txt"
+    command = f"printf executed > {shlex.quote(str(sentinel))}"
+    plan = ToolCallPlan.create(
+        "run_command",
+        {
+            "command": command,
+            "working_dir": ".",
+            "timeout_seconds": 2,
+            "network": True,
+        },
+    )
+    definition = AgentRuntimePolicy.test_factory(
+        system_prompt="Run the approved command.",
+        allowed_tools=["run_command"],
+        max_iterations=4,
+    )
+
+    def service(provider: _CommandProvider) -> AgentService:
+        registry = ToolRegistry()
+        registry.register(create_run_command_tool(workspace))
+        return _service(
+            tmp_path,
+            store=store,
+            checkpointer=checkpointer,
+            provider=provider,
+            registry=registry,
+            definition=definition,
+        )
+
+    first = await service(_CommandProvider(plan)).chat(
+        AgentRunRequest(task="Run the command with network enabled.")
+    )
+
+    assert first.status == "paused"
+    assert sentinel.exists() is False
+    assert first.human_input_request is not None
+    tool_approval = first.human_input_request
+    assert tool_approval.context["approval_scope"] == "tool"
+    assert tool_approval.tool_calls[0].approval_id == plan.tool_call_id
+    assert command in tool_approval.tool_calls[0].args_preview
+
+    second = await service(_CommandProvider(plan)).resume_turn(
+        turn_id=first.run_id,
+        action="allow_once",
+    )
+
+    assert second.status == "paused"
+    assert sentinel.exists() is False
+    assert second.human_input_request is not None
+    network_approval = second.human_input_request
+    assert network_approval.context["approval_scope"] == "network"
+    assert network_approval.tool_calls[0].approval_id == (
+        f"{plan.tool_call_id}::network"
+    )
+
+    final_provider = _CommandProvider(plan)
+    final = await service(final_provider).resume_turn(
+        turn_id=first.run_id,
+        action="allow_once",
+    )
+
+    assert final.status == "done"
+    assert sentinel.read_text(encoding="utf-8") == "executed"
+    assert final_provider.observed[-1]["approved_tool_call_ids"] == [
+        plan.tool_call_id,
+        f"{plan.tool_call_id}::network",
+    ]
 
 
 @pytest.mark.anyio

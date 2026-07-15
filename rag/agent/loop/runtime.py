@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 from collections.abc import AsyncGenerator, Awaitable, Mapping, Sequence
@@ -1248,21 +1249,90 @@ def _approval_request(
     call: ToolCall,
 ) -> HumanInputRequest:
     reason = result.error_message or "Tool execution requires approval."
+    approval_id = result.metadata.get("approval_id")
+    if not isinstance(approval_id, str) or not approval_id:
+        approval_id = result.tool_call_id
+    approval_scope = result.metadata.get("approval_scope")
+    if approval_scope not in {"tool", "network"}:
+        approval_scope = "tool"
+    cwd = result.metadata.get("cwd")
+    execution_mode = result.metadata.get("execution_mode")
+    network_requested = result.metadata.get("network_requested") is True
+    args_preview = _tool_input_preview(call.arguments)
+    question = f"Allow {result.tool_name} to run once? {reason}"
+    if result.tool_name == "run_command":
+        args_preview = _run_command_approval_preview(
+            call.arguments,
+            cwd=cwd if isinstance(cwd, str) else None,
+            execution_mode=(
+                execution_mode
+                if isinstance(execution_mode, str)
+                else "restricted_sandbox"
+            ),
+            network_requested=network_requested,
+        )
+        if approval_scope == "network":
+            question = (
+                "Allow network access for this run_command invocation? "
+                f"{reason}"
+            )
+        else:
+            question = (
+                "Allow run_command to execute once in restricted_sandbox "
+                f"mode? {reason}"
+            )
+            if network_requested:
+                question += " Network access is not included in this approval."
     return HumanInputRequest(
         request_id=f"hir_{uuid4().hex[:12]}",
         kind="tool_approval",
-        question=f"Allow {result.tool_name} to run once? {reason}",
+        question=question,
         tool_calls=[
             ToolCallSummary(
                 tool_call_id=result.tool_call_id,
+                approval_id=approval_id,
                 tool_name=result.tool_name,
-                args_preview=_tool_input_preview(call.arguments),
+                args_preview=args_preview,
                 risk_level="medium",
                 reason=reason,
             )
         ],
-        context={"tool_call_id": result.tool_call_id},
+        context={
+            "tool_call_id": result.tool_call_id,
+            "approval_id": approval_id,
+            "approval_scope": approval_scope,
+            "cwd": cwd,
+            "network_requested": network_requested,
+            "execution_mode": execution_mode,
+        },
         options=["allow_once", "deny"],
+    )
+
+
+def _run_command_approval_preview(
+    arguments: Mapping[str, object],
+    *,
+    cwd: str | None,
+    execution_mode: str,
+    network_requested: bool,
+) -> str:
+    command = arguments.get("command")
+    raw_command = command if isinstance(command, str) else str(command)
+    command_text = json.dumps(raw_command, ensure_ascii=False)
+    cwd_text = json.dumps(
+        cwd or str(arguments.get("working_dir", ".")),
+        ensure_ascii=False,
+    )
+    network_text = (
+        "requested (separate approval required)"
+        if network_requested
+        else "disabled"
+    )
+    return (
+        f"command: {command_text}\n"
+        f"cwd: {cwd_text}\n"
+        f"network: {network_text}\n"
+        f"execution mode: {execution_mode}"
     )
 
 
@@ -1370,6 +1440,7 @@ def _stream_human_input_required(
             "tool_calls": [
                 {
                     "tool_call_id": item.tool_call_id,
+                    "approval_id": item.approval_id,
                     "tool_name": item.tool_name,
                     "input_preview": item.args_preview,
                     "reason": item.reason,

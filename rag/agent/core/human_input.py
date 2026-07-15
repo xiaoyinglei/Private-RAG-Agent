@@ -13,6 +13,7 @@ class ToolCallSummary(BaseModel):
     """面向用户的工具摘要，不暴露完整 ToolCallPlan。"""
 
     tool_call_id: str
+    approval_id: str | None = None
     tool_name: str
     args_preview: str  # 如 "query='公积金政策', top_k=8"
     risk_level: str = "low"  # "low" | "medium" | "high"

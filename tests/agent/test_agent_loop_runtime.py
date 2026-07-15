@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import AsyncIterable, Mapping
 from copy import deepcopy
 from dataclasses import dataclass, field
@@ -12,7 +13,12 @@ from rag.agent.core.context import AgentRunConfig, RunRegistry
 from rag.agent.core.definition import AgentRuntimePolicy
 from rag.agent.core.finalization import FinishCandidateBuilder
 from rag.agent.core.turn_contracts import ToolCallPlan
-from rag.agent.loop.runtime import AgentLoop, LoopEventSink, ModelTurnEnvelope
+from rag.agent.loop.runtime import (
+    AgentLoop,
+    LoopEventSink,
+    ModelTurnEnvelope,
+    _approval_request,
+)
 from rag.agent.loop.state import (
     LoopState,
     LoopTransition,
@@ -45,6 +51,7 @@ from rag.agent.tools.tool import (
     ToolContentBlock,
     ToolDefinition,
     ToolEffect,
+    ToolResult,
     json_schema_input,
 )
 from rag.providers.llm_gateway import LLMToolCallValidationError
@@ -305,6 +312,57 @@ async def test_approval_pause_is_a_checkpointed_human_input_event() -> None:
         if reason == "tool_pause"
     ]
     assert approval_snapshots[-1]["status"] == "paused"
+
+
+def test_run_command_approval_shows_full_security_context(tmp_path: Path) -> None:
+    command = (
+        "printf '\x1b[2J'\npython -c \"print('"
+        + ("x" * 300)
+        + "')\""
+    )
+    call = ToolCall(
+        tool_call_id="call_command",
+        tool_name="run_command",
+        arguments={
+            "command": command,
+            "working_dir": ".",
+            "timeout_seconds": 120.0,
+            "network": True,
+        },
+        origin=ToolCallOrigin(
+            request_id="request_command",
+            toolset_revision="tools_v1",
+            exposed_tool_names=("run_command",),
+        ),
+    )
+    result = ToolResult(
+        tool_call_id=call.tool_call_id,
+        tool_name=call.tool_name,
+        is_error=True,
+        error_code="approval_required",
+        error_message="approval required for network access",
+        retryable=True,
+        metadata={
+            "approval_id": "call_command::network",
+            "approval_scope": "network",
+            "cwd": str(tmp_path),
+            "network_requested": True,
+            "execution_mode": "restricted_sandbox",
+        },
+    )
+
+    request = _approval_request(result, call)
+
+    summary = request.tool_calls[0]
+    assert summary.approval_id == "call_command::network"
+    assert json.dumps(command, ensure_ascii=False) in summary.args_preview
+    assert "\x1b" not in summary.args_preview
+    assert "\\u001b" in summary.args_preview
+    assert f"cwd: {json.dumps(str(tmp_path))}" in summary.args_preview
+    assert "network: requested (separate approval required)" in summary.args_preview
+    assert "execution mode: restricted_sandbox" in summary.args_preview
+    assert request.context["approval_scope"] == "network"
+    assert "network access" in request.question
 
 
 @pytest.mark.anyio

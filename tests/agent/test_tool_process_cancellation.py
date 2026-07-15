@@ -4,7 +4,6 @@ import asyncio
 import os
 import shlex
 import signal
-import sys
 from pathlib import Path
 
 import pytest
@@ -61,7 +60,8 @@ def _spawn_tree_command(
     )
     return (
         f"echo $$ > {shlex.quote(str(pgid_file))}; "
-        f"exec {shlex.quote(sys.executable)} -c {shlex.quote(parent_code)}"
+        "exec /Library/Developer/CommandLineTools/usr/bin/python3 "
+        f"-c {shlex.quote(parent_code)}"
     )
 
 

@@ -426,11 +426,11 @@ def _handle_pause(
         print(f"  请输入: {', '.join(options)} (或 a=允许, n=拒绝, q=退出)")
 
     approved = (
-        [tc.tool_call_id for tc in req.tool_calls]
+        [tc.approval_id or tc.tool_call_id for tc in req.tool_calls]
         if choice == "allow_once" else []
     )
     denied = (
-        [tc.tool_call_id for tc in req.tool_calls]
+        [tc.approval_id or tc.tool_call_id for tc in req.tool_calls]
         if choice == "deny" else []
     )
 
@@ -447,7 +447,7 @@ def _build_resume_response(request: object, decision: str) -> HumanInputResponse
 
     r = cast(HumanInputRequest, request)
     tool_call_ids = [
-        tool_call.tool_call_id
+        tool_call.approval_id or tool_call.tool_call_id
         for tool_call in r.tool_calls
     ]
     allowed = set(r.options)
