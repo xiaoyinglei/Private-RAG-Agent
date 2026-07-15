@@ -30,6 +30,9 @@ class EventType(Enum):
     # ── 上下文管理 ────────────────────────────────────────
     COMPACT_LAYER = "compact_layer"  # 单层压缩完成
 
+    # ── 计划状态 ──────────────────────────────────────────
+    PLAN_UPDATED = "plan_updated"  # update_plan 已写入 canonical PlanState
+
     # ── 会话控制 ──────────────────────────────────────────
     TURN_START = "turn_start"  # 一轮开始
     TURN_END = "turn_end"  # 一轮结束

@@ -7,7 +7,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from agent_runtime.models import ModelControlPlane
 
@@ -160,21 +160,19 @@ def build_agent_service(
         if isinstance(runtime, WorkspaceRuntime)
         else create_temp_workspace()
     )
-    plan_revision = 0
-
-    def update_plan(arguments: Mapping[str, object]) -> dict[str, object]:
-        nonlocal plan_revision
+    def acknowledge_plan_update(
+        arguments: Mapping[str, object],
+    ) -> dict[str, object]:
         del arguments
-        plan_revision += 1
         return {
             "accepted": True,
-            "revision": plan_revision,
-            "message": "Plan updated.",
+            "revision": 0,
+            "message": "Plan update accepted for runtime persistence.",
         }
 
     resident_tools = create_resident_coding_tools(
         workspace,
-        plan_updater=cast(Any, update_plan),
+        plan_updater=acknowledge_plan_update,
     )
 
     async def search_knowledge(arguments: Mapping[str, object]) -> object:

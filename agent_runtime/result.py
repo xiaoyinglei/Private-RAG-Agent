@@ -31,6 +31,8 @@ class AgentResult:
     turn_id: str
     thread_id: str
     raw: object | None
+    plan: Any | None = None
+    plan_events: tuple[Any, ...] = ()
 
     @property
     def run_id(self) -> str:
@@ -89,6 +91,8 @@ class AgentResult:
             turn_id=str(getattr(result, "run_id", "")),
             thread_id=str(getattr(result, "thread_id", "")),
             raw=result,
+            plan=getattr(result, "plan", None),
+            plan_events=tuple(getattr(result, "plan_events", ()) or ()),
         )
 
 

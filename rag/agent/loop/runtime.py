@@ -48,9 +48,16 @@ from rag.agent.loop.state import (
 )
 from rag.agent.loop.stop_hooks import StopHookOutcome, StopHookRunner
 from rag.agent.memory.compactor import LoopCompactionResult
-from rag.agent.planning import MAX_PLAN_EVENTS, PlanEvent, PlanTracker
+from rag.agent.planning import (
+    MAX_PLAN_EVENTS,
+    AgentPlan,
+    PlanEvent,
+    PlanStep,
+    PlanTracker,
+)
 from rag.agent.streaming.events import StreamEvent
 from rag.agent.streaming.sink import StreamEventSink
+from rag.agent.tools.builtins.planning import UpdatePlanInput
 from rag.agent.tools.executor import ToolExecutionRecord, ToolExecutor
 from rag.agent.tools.permissions import ToolExecutionContext
 from rag.agent.tools.selection import FIND_TOOLS_NAME, reduce_tool_activation
@@ -665,6 +672,27 @@ class AgentLoop:
             if item.tool_call_id in blocked_ids
         ]
 
+        observable_results = [
+            result
+            for result in new_results
+            if result.tool_name != "update_plan"
+        ]
+        batch = self._observation_extractor.extract(
+            observable_results,
+            seen_tool_call_ids=list(self._observed_tool_call_ids),
+        )
+        self._observed_tool_call_ids.update(
+            observation.tool_call_id
+            for observation in batch.structured_observations
+        )
+        self._merge_observations(state, batch)
+        self._record_plan_observations(state, batch)
+
+        new_results, plan_updates = self._apply_update_plan_results(
+            state,
+            calls=calls,
+            results=new_results,
+        )
         self._apply_activation_results(state, new_results)
         state["tool_results"] = _merge_keyed(
             state["tool_results"],
@@ -696,13 +724,15 @@ class AgentLoop:
                     )
                 )
 
-        batch = self._observation_extractor.extract(
-            new_results,
-            seen_tool_call_ids=list(self._observed_tool_call_ids),
-        )
-        self._observed_tool_call_ids.update(observation.tool_call_id for observation in batch.structured_observations)
-        self._merge_observations(state, batch)
-        self._record_plan_observations(state, batch)
+        for plan, event in plan_updates:
+            await self._emit_stream(
+                _stream_plan_updated(
+                    plan=plan,
+                    event=event,
+                    run_id=run_id,
+                    turn=turn,
+                )
+            )
 
         if approval_execution is not None:
             approval_call = next(
@@ -762,6 +792,57 @@ class AgentLoop:
         self._record_metrics(state, new_results)
 
         return False
+
+    def _apply_update_plan_results(
+        self,
+        state: LoopState,
+        *,
+        calls: Sequence[ToolCall],
+        results: Sequence[ToolResult],
+    ) -> tuple[list[ToolResult], list[tuple[AgentPlan, PlanEvent]]]:
+        calls_by_id = {call.tool_call_id: call for call in calls}
+        canonical_results: list[ToolResult] = []
+        plan_updates: list[tuple[AgentPlan, PlanEvent]] = []
+        for result in results:
+            if result.tool_name != "update_plan" or result.is_error:
+                canonical_results.append(result)
+                continue
+            call = calls_by_id[result.tool_call_id]
+            submitted = UpdatePlanInput.model_validate(call.arguments)
+            current = state["plan_state"].agent_plan
+            if current is None:
+                current, events = self._plan_tracker.initialize_task(
+                    task=state["task"]
+                )
+                self._append_plan_events(state, events)
+            steps = [
+                PlanStep(
+                    step_id=f"step_{index:03d}",
+                    title=item.step,
+                    status=item.status,
+                )
+                for index, item in enumerate(submitted.plan, start=1)
+            ]
+            updated, events = self._plan_tracker.replace_from_tool(
+                current,
+                steps=steps,
+                summary=submitted.explanation,
+            )
+            state["plan_state"].agent_plan = updated
+            self._append_plan_events(state, events)
+            event = events[-1]
+            plan_updates.append((updated, event))
+            canonical_results.append(
+                replace(
+                    result,
+                    structured_content={
+                        "accepted": True,
+                        "revision": updated.revision,
+                        "message": "Plan updated and persisted.",
+                    },
+                )
+            )
+        return canonical_results, plan_updates
 
     def _canonical_call(
         self,
@@ -1098,10 +1179,15 @@ class AgentLoop:
         plan = state["plan_state"].agent_plan
         if plan is None:
             return
+        work_calls = [
+            call for call in turn.tool_calls if call.tool_name != "update_plan"
+        ]
+        if not work_calls:
+            return
         updated, events = self._plan_tracker.record_decision_progress(
             plan,
-            tool_call_ids=[call.tool_call_id for call in turn.tool_calls],
-            tool_names=[call.tool_name for call in turn.tool_calls],
+            tool_call_ids=[call.tool_call_id for call in work_calls],
+            tool_names=[call.tool_name for call in work_calls],
         )
         state["plan_state"].agent_plan = updated
         state["plan_state"].plan_events = [*state["plan_state"].plan_events, *events][-MAX_PLAN_EVENTS:]
@@ -1464,6 +1550,27 @@ def _stream_tool_use_result(*, tool_name: str, tool_id: str, result: str, run_id
             "tool_name": tool_name,
             "tool_id": tool_id,
             "result": result,
+        },
+    )
+
+
+def _stream_plan_updated(
+    *,
+    plan: AgentPlan,
+    event: PlanEvent,
+    run_id: str,
+    turn: int,
+) -> Any:
+    from rag.agent.streaming.events import EventType, StreamEvent, next_seq
+
+    return StreamEvent(
+        type=EventType.PLAN_UPDATED,
+        run_id=run_id,
+        turn=turn,
+        seq=next_seq(),
+        data={
+            "plan": plan.model_dump(mode="json"),
+            "event": event.model_dump(mode="json"),
         },
     )
 

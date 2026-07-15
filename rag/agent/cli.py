@@ -224,6 +224,29 @@ def _format_tool_summary(result: AgentRunResult) -> str:
     return "\n".join(lines)
 
 
+def _format_plan_summary(result: AgentRunResult) -> str:
+    plan = result.plan
+    if plan is None or not any(
+        event.event_type == "llm_update" for event in result.plan_events
+    ):
+        return ""
+    icons = {
+        "pending": "○",
+        "in_progress": "→",
+        "completed": "✓",
+        "blocked": "!",
+        "skipped": "-",
+    }
+    lines = ["", "─" * 40, f"计划 (revision {plan.revision}):"]
+    if plan.summary:
+        lines.append(f"  {plan.summary}")
+    lines.extend(
+        f"  {icons.get(step.status, '?')} {step.title}"
+        for step in plan.steps
+    )
+    return "\n".join(lines)
+
+
 def _failure_title(stop_reason: str | None) -> str:
     if stop_reason == "model_provider_failed":
         return "错误: 模型调用失败 (model_provider_failed)"
@@ -303,6 +326,10 @@ def _display_result(result: AgentRunResult, *, verbose: bool) -> None:
 
     if result.final_answer:
         print(f"\n{result.final_answer}")
+
+    plan_summary = _format_plan_summary(result)
+    if plan_summary:
+        print(plan_summary)
 
     if result.tool_results:
         print(_format_tool_summary(result))

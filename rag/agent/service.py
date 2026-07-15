@@ -62,6 +62,7 @@ from rag.agent.loop.stop_hooks import StopHookRunner, build_stop_hooks
 from rag.agent.memory.compactor import LoopContextCompactor, MessageCompactor
 from rag.agent.memory.models import MemoryPolicy
 from rag.agent.memory.store import WorkspaceMemoryStore
+from rag.agent.planning import AgentPlan, PlanEvent
 from rag.agent.sessions import (
     RuntimeBinding,
     SessionRecord,
@@ -181,6 +182,8 @@ class AgentRunResult(BaseModel):
     runtime_diagnostics: list[RuntimeDiagnostic] = Field(default_factory=list)
     tool_call_metrics: object | None = None
     latency_profile: AgentLatencyProfile | None = None
+    plan: AgentPlan | None = None
+    plan_events: list[PlanEvent] = Field(default_factory=list)
 
     @classmethod
     def from_state(
@@ -258,6 +261,8 @@ class AgentRunResult(BaseModel):
             runtime_diagnostics=list(state["runtime_diagnostics"]),
             tool_call_metrics=state.get("tool_call_metrics"),
             latency_profile=state.get("latency_profile"),
+            plan=state["plan_state"].agent_plan,
+            plan_events=list(state["plan_state"].plan_events),
         )
 
 
