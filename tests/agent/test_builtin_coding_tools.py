@@ -396,6 +396,7 @@ async def test_update_plan_uses_the_injected_state_callback(tmp_path: Path) -> N
 
 
 @pytest.mark.anyio
+@pytest.mark.usefixtures("fake_sandbox_exec")
 async def test_run_command_returns_bounded_structured_process_output(
     tmp_path: Path,
 ) -> None:
@@ -423,6 +424,7 @@ async def test_run_command_returns_bounded_structured_process_output(
 
 
 @pytest.mark.anyio
+@pytest.mark.usefixtures("fake_sandbox_exec")
 async def test_run_command_does_not_inherit_host_environment(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
