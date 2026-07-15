@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import replace
 
 import pytest
 from langgraph.checkpoint.memory import MemorySaver
@@ -20,7 +21,12 @@ from rag.agent.core.messages import ToolCall as ModelToolCall
 from rag.agent.core.model_request import build_tool_manifest
 from rag.agent.core.turn_contracts import ToolCallPlan
 from rag.agent.loop.state import LoopPause, create_loop_state
-from rag.agent.tools.executor import ExecutionStatus, ToolExecutionRecord
+from rag.agent.tools.executor import (
+    ExecutionStatus,
+    ToolExecutionRecord,
+    ToolExecutor,
+)
+from rag.agent.tools.permissions import ToolExecutionContext
 from rag.agent.tools.tool import (
     CancellationMode,
     InterruptBehavior,
@@ -137,6 +143,36 @@ async def test_save_load_uses_canonical_codec_and_origin() -> None:
 
 
 @pytest.mark.anyio
+async def test_durable_checkpoint_syncs_only_current_turn_history() -> None:
+    state, _call = _state("checkpoint-session-history")
+    state["run_config"] = replace(
+        state["run_config"],
+        session_id="session-a",
+    )
+    state["canonical_transcript"] = [
+        ModelMessage(role="assistant", content="prior turn"),
+        ModelMessage(role="user", content="current turn"),
+    ]
+    state["turn_transcript"] = [
+        ModelMessage(role="user", content="current turn"),
+    ]
+    synced: list[tuple[ModelMessage, ...]] = []
+    store = LangGraphCheckpointStore(
+        MemorySaver(serde=agent_checkpoint_serde()),
+        run_config=state["run_config"],
+        snapshot_sink=lambda snapshot: synced.append(
+            tuple(snapshot["turn_transcript"])
+        ),
+    )
+
+    await store.save_snapshot(state, reason="turn_progress")
+
+    assert synced == [
+        (ModelMessage(role="user", content="current turn"),)
+    ]
+
+
+@pytest.mark.anyio
 async def test_save_load_deepcopies_assistant_tool_call_arguments() -> None:
     state, _call = _state("checkpoint-transcript-tool-call")
     state["canonical_transcript"] = [
@@ -245,3 +281,50 @@ async def test_running_non_idempotent_record_requires_reconciliation() -> None:
         restored["tool_execution_records"][call.tool_call_id].status
         is ExecutionStatus.UNKNOWN
     )
+
+
+@pytest.mark.anyio
+async def test_crash_after_durable_started_never_calls_or_replays_runner() -> None:
+    state, call = _state("checkpoint-crash-after-started")
+    saver = MemorySaver(serde=agent_checkpoint_serde())
+    store = LangGraphCheckpointStore(
+        saver,
+        run_config=state["run_config"],
+    )
+    await store.save_snapshot(state, reason="pending_tool")
+    runner_calls = 0
+
+    async def runner(_arguments: Mapping[str, JsonValue]) -> object:
+        nonlocal runner_calls
+        runner_calls += 1
+        return {}
+
+    async def crash_after_persist(record: ToolExecutionRecord) -> None:
+        await store.write_execution_record(record)
+        if record.status is ExecutionStatus.STARTED:
+            raise RuntimeError("simulated process loss")
+
+    executor = ToolExecutor(
+        {"remote_write": replace(_tool(), run=runner)}
+    )
+
+    with pytest.raises(RuntimeError, match="simulated process loss"):
+        await executor.execute(
+            call,
+            context=ToolExecutionContext(),
+            record_sink=crash_after_persist,
+        )
+
+    assert runner_calls == 0
+    recovered = await LangGraphCheckpointStore(
+        saver,
+        run_config=state["run_config"],
+    ).load_for_resume()
+    assert recovered is not None
+    record = recovered["tool_execution_records"][call.tool_call_id]
+    assert record.status is ExecutionStatus.OUTCOME_UNKNOWN
+    assert record.requires_reconciliation is True
+    assert recovered["approval_request"].options == [
+        "mark_completed",
+        "mark_failed",
+    ]

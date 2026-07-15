@@ -17,6 +17,7 @@ from rag.agent.cli import (
     _CLIToolEventDisplay,
     _display_result,
 )
+from rag.agent.planning import AgentPlan, PlanEvent, PlanStep
 from rag.agent.service import AgentRunRequest, AgentRunResult
 from rag.agent.streaming.events import tool_use_start
 from rag.agent.tools.builtins import RESIDENT_CODING_TOOL_NAMES
@@ -131,6 +132,50 @@ def test_cli_shows_called_tool_names_without_verbose(
     )
 
     assert "✓ search_text" in capsys.readouterr().out
+
+
+def test_cli_shows_the_persisted_update_plan_without_verbose(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    plan = AgentPlan(
+        objective="Ship durable plans.",
+        revision=3,
+        active_step_id="step_verify",
+        steps=[
+            PlanStep(
+                step_id="step_store",
+                title="Store the plan",
+                status="completed",
+            ),
+            PlanStep(
+                step_id="step_verify",
+                title="Verify CLI exposure",
+                status="in_progress",
+            ),
+        ],
+    )
+    event = PlanEvent(
+        event_id="plan_event_cli",
+        event_type="llm_update",
+        plan_revision=plan.revision,
+        message="Applied update_plan tool update.",
+    )
+
+    _display_result(
+        AgentRunResult(
+            run_id="visible-plan",
+            thread_id="visible-plan",
+            status="paused",
+            plan=plan,
+            plan_events=[event],
+        ),
+        verbose=False,
+    )
+
+    output = capsys.readouterr().out
+    assert "计划 (revision 3)" in output
+    assert "✓ Store the plan" in output
+    assert "→ Verify CLI exposure" in output
 
 
 @pytest.mark.anyio

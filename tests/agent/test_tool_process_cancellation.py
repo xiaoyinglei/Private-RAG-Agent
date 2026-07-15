@@ -92,6 +92,7 @@ def test_process_group_probe_treats_eperm_as_still_exiting(
 
 
 @pytest.mark.anyio
+@pytest.mark.usefixtures("fake_sandbox_exec")
 async def test_command_input_timeout_kills_the_complete_process_group(
     tmp_path: Path,
 ) -> None:
@@ -131,6 +132,7 @@ async def test_command_input_timeout_kills_the_complete_process_group(
 
 
 @pytest.mark.anyio
+@pytest.mark.usefixtures("fake_sandbox_exec")
 async def test_executor_timeout_kills_and_reaps_the_command_process_group(
     tmp_path: Path,
 ) -> None:
@@ -170,6 +172,7 @@ async def test_executor_timeout_kills_and_reaps_the_command_process_group(
 
 
 @pytest.mark.anyio
+@pytest.mark.usefixtures("fake_sandbox_exec")
 async def test_user_cancellation_kills_the_command_process_group(
     tmp_path: Path,
 ) -> None:

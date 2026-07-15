@@ -9,7 +9,12 @@ from types import SimpleNamespace
 import pytest
 from openai.types.chat import ChatCompletion
 
-from rag.agent.core.messages import ModelMessage, StopReason, ToolUseResult
+from rag.agent.core.messages import (
+    ModelMessage,
+    StopReason,
+    ToolUseResult,
+    context_event_message,
+)
 from rag.agent.core.model_request import (
     ContextBlock,
     ModelSettings,
@@ -150,12 +155,67 @@ def test_openai_wire_preserves_canonical_message_and_tool_order() -> None:
         "type": "function",
         "function": {"name": "mcp__zeta__lookup"},
     }
-    assert [message["role"] for message in payload["messages"]] == [
-        "system",
+    messages = payload["messages"]
+    assert [message["role"] for message in messages] == [
         "system",
         "user",
         "assistant",
     ]
+    assert "Be precise." in messages[0]["content"]
+    assert "frozen_run_context" in messages[0]["content"]
+    assert sum(message["role"] == "system" for message in messages) == 1
+
+
+def test_openai_wire_serializes_later_context_as_user_event() -> None:
+    context = build_stable_context(
+        instructions=("Be precise.",),
+        initial_user_task="Inspect the repository.",
+        transcript=(
+            ModelMessage(role="assistant", content="I will inspect it."),
+            context_event_message(
+                "runtime_diagnostic",
+                {"detail": "retry with the published schema"},
+            ),
+        ),
+    )
+    request = build_model_request(
+        request_id="req-later-context",
+        context=context,
+        selected_tools=(),
+        settings=ModelSettings(model="gpt-compatible"),
+    )
+
+    payload = _thaw(serialize_openai_request(request).payload)
+    messages = payload["messages"]
+
+    assert [message["role"] for message in messages] == [
+        "system",
+        "user",
+        "assistant",
+        "user",
+    ]
+    assert "runtime_diagnostic" in messages[-1]["content"]
+    assert sum(message["role"] == "system" for message in messages) == 1
+
+
+def test_openai_wire_rejects_non_leading_system_message() -> None:
+    context = build_stable_context(
+        instructions=("Be precise.",),
+        initial_user_task="Inspect the repository.",
+        transcript=(
+            ModelMessage(role="assistant", content="I will inspect it."),
+            ModelMessage(role="system", content="Late system override."),
+        ),
+    )
+    request = build_model_request(
+        request_id="req-later-system",
+        context=context,
+        selected_tools=(),
+        settings=ModelSettings(model="gpt-compatible"),
+    )
+
+    with pytest.raises(ValueError, match="non-leading system"):
+        serialize_openai_request(request)
 
 
 def test_openai_wire_hash_is_final_serialized_hash_and_cache_options_are_gated() -> None:

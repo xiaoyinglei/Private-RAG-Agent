@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -18,6 +19,7 @@ from rag.agent.core.llm_providers import (
 )
 from rag.agent.core.llm_registry import ResolvedModel
 from rag.agent.core.messages import (
+    ModelMessage,
     StopReason,
     ToolUseResult,
     tool_result_message,
@@ -176,6 +178,7 @@ def _provider(
     names: tuple[str, ...] = ("vector_search", "read_file"),
     supports_native_tools: bool = True,
     skill_runtime: object | None = None,
+    context_window_tokens: int = 32_768,
 ) -> LLMLoopModelTurnProvider:
     snapshot = {name: _tool(name) for name in names}
     return LLMLoopModelTurnProvider(
@@ -185,6 +188,7 @@ def _provider(
         supports_native_tools=supports_native_tools,
         registry_snapshot=snapshot,
         resident_tool_names=names,
+        context_window_tokens=context_window_tokens,
         skill_runtime=skill_runtime,  # type: ignore[arg-type]
     )
 
@@ -232,6 +236,45 @@ def test_turn_parser_prefers_actual_calls_over_finish_label() -> None:
         final_answer="Enough evidence.",
     )
     assert execute == ModelTurnDraft(action="execute", tool_calls=(call,))
+
+
+@pytest.mark.anyio
+async def test_long_session_projects_model_context_without_mutating_history() -> None:
+    gateway = _RecordingGateway()
+    provider = _provider(
+        gateway,
+        names=(),
+        context_window_tokens=512,
+    )
+    state = _state("long-session-projection")
+    state["run_config"] = replace(
+        state["run_config"],
+        max_context_tokens=512,
+    )
+    transcript = [
+        ModelMessage(
+            role="assistant" if index % 2 else "user",
+            content=f"message-{index}: " + ("x" * 180),
+        )
+        for index in range(30)
+    ]
+    state["canonical_transcript"] = list(transcript)
+
+    envelope = await provider.next_turn(
+        state,
+        definition=_definition(),
+        budget_remaining=10_000,
+    )
+
+    request = gateway.calls[0]["request"]
+    assert state["canonical_transcript"] == transcript
+    assert len(request.messages) < len(transcript) + 2
+    assert any(
+        "context_compaction" in message.content
+        for message in request.messages
+    )
+    assert any("message-29" in message.content for message in request.messages)
+    assert envelope.context_revision is not None
 
 
 @pytest.mark.anyio

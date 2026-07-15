@@ -613,7 +613,7 @@ async def test_gateway_adapts_one_canonical_request_to_openai_wire() -> None:
     assert result.usage.cache_read_input_tokens == 5
     assert result.usage.usage_source == "provider"
     assert result.provider_wire_hash.startswith("wire_")
-    assert result.serializer_revision == "openai-compatible-chat-v1"
+    assert result.serializer_revision == "openai-compatible-chat-v2"
     assert result.wire_kind == "openai"
     assert [item["function"]["name"] for item in generator.calls[0]["tools"]] == [
         "list_files",

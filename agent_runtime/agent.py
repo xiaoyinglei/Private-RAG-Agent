@@ -8,6 +8,7 @@ from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from uuid import UUID, uuid4
 
 from agent_runtime.models import ModelControlPlane, ModelSpec
 from agent_runtime.result import AgentResult
@@ -59,6 +60,8 @@ class Agent:
         self.vector_namespace = vector_namespace
         self.vector_collection_prefix = vector_collection_prefix
         self._model_control_plane: ModelControlPlane | None = None
+        self._session_store: Any | None = None
+        self._checkpointer: Any | None = None
 
     def models(self) -> list[ModelSpec]:
         return self._get_model_control_plane().list_models()
@@ -126,12 +129,13 @@ class Agent:
             allow_discovery_tools=allow_discovery_tools,
         )
         async with self._open_product_runtime() as service:
-            effective_run_id = run_id or f"run_{id(service):x}"
-            raw = await service.run(
+            turn_id = _public_turn_id(run_id)
+            raw = await service.chat(
                 AgentRunRequest(
                     task=task,
-                    run_id=effective_run_id,
-                    thread_id=effective_run_id,
+                    session_id=None,
+                    run_id=turn_id,
+                    thread_id=turn_id,
                     llm_budget_total=max_tokens_total,
                     input_files=list(files or ()),
                     workspace_path=(
@@ -151,10 +155,155 @@ class Agent:
                 files=tuple(files or ()),
             )
 
+    def chat(
+        self,
+        message: str,
+        *,
+        session_id: str | None = None,
+        files: list[str] | tuple[str, ...] | None = None,
+        max_tokens_total: int | None = None,
+        allow_write_tools: bool = False,
+        allow_execute_tools: bool = False,
+    ) -> AgentResult:
+        return asyncio.run(
+            self.achat(
+                message,
+                session_id=session_id,
+                files=files,
+                max_tokens_total=max_tokens_total,
+                allow_write_tools=allow_write_tools,
+                allow_execute_tools=allow_execute_tools,
+            )
+        )
+
+    async def achat(
+        self,
+        message: str,
+        *,
+        session_id: str | None = None,
+        files: list[str] | tuple[str, ...] | None = None,
+        max_tokens_total: int | None = None,
+        allow_write_tools: bool = False,
+        allow_execute_tools: bool = False,
+    ) -> AgentResult:
+        from rag.agent.service import AgentRunRequest
+
+        turn_id = str(uuid4())
+        runtime_agent = (
+            self
+            if session_id is None
+            else self._agent_for_session(session_id)
+        )
+        async with runtime_agent._open_product_runtime() as service:
+            raw = await service.chat(
+                AgentRunRequest(
+                    task=message,
+                    session_id=session_id,
+                    run_id=turn_id,
+                    thread_id=turn_id,
+                    llm_budget_total=max_tokens_total,
+                    input_files=list(files or ()),
+                    workspace_path=(
+                        None
+                        if runtime_agent.workspace_path is None
+                        else str(runtime_agent.workspace_path)
+                    ),
+                    allow_write_tools=allow_write_tools,
+                    allow_execute_tools=allow_execute_tools,
+                )
+            )
+            return AgentResult.from_internal(
+                raw,
+                files=tuple(files or ()),
+            )
+
+    def resume(
+        self,
+        turn_id: str,
+        action: str,
+        *,
+        user_input: str | None = None,
+    ) -> AgentResult:
+        return asyncio.run(
+            self.aresume(
+                turn_id,
+                action,
+                user_input=user_input,
+            )
+        )
+
+    async def aresume(
+        self,
+        turn_id: str,
+        action: str,
+        *,
+        user_input: str | None = None,
+    ) -> AgentResult:
+        runtime_agent = self._agent_for_turn(turn_id)
+        async with runtime_agent._open_product_runtime() as service:
+            raw = await service.resume_turn(
+                turn_id=turn_id,
+                action=action,
+                user_input=user_input,
+            )
+            return AgentResult.from_internal(raw)
+
+    def _agent_for_session(self, session_id: str) -> Agent:
+        """Load durable metadata before assembling any product runtime."""
+
+        from rag.agent.sessions import SessionBusyError
+
+        session = self._get_session_store().get_session(session_id)
+        if session.active_turn_id is not None:
+            raise SessionBusyError(
+                f"Session {session_id} already has active Turn "
+                f"{session.active_turn_id}"
+            )
+        return self._agent_for_binding(session.runtime)
+
+    def _agent_for_turn(self, turn_id: str) -> Agent:
+        from rag.agent.sessions import TurnStateError, TurnStatus
+
+        turn = self._get_session_store().get_turn(turn_id)
+        if turn.status in {TurnStatus.COMPLETED, TurnStatus.FAILED}:
+            raise TurnStateError(
+                f"Turn {turn_id} is {turn.status.value} and cannot resume"
+            )
+        if (
+            turn.status is TurnStatus.RUNNING
+            and turn.lease_owner is not None
+            and turn.lease_expires_at is not None
+            and turn.lease_expires_at > time.time()
+        ):
+            raise TurnStateError(
+                f"Turn {turn_id} is still running under an active lease"
+            )
+        return self._agent_for_binding(turn.runtime)
+
+    def _agent_for_binding(self, binding: Any) -> Agent:
+        restored = Agent(
+            model=binding.model_alias,
+            agent_type=binding.agent_type,
+            checkpoint_db=self.checkpoint_db,
+            workspace_path=binding.workspace_path,
+            knowledge=binding.knowledge,
+            rag_storage_root=Path(binding.rag_storage_root),
+            embedding_model=binding.embedding_model_alias,
+            reranker_model=binding.reranker_model_alias,
+            vector_backend=binding.vector_backend,
+            vector_dsn=self.vector_dsn,
+            vector_namespace=binding.vector_namespace,
+            vector_collection_prefix=binding.vector_collection_prefix,
+        )
+        restored._session_store = self._get_session_store()
+        restored._checkpointer = self._get_checkpointer()
+        return restored
+
     async def stream(
         self,
         task: str,
         *,
+        session_id: str | None = None,
         files: list[str] | tuple[str, ...] | None = None,
         run_id: str | None = None,
         max_tokens_total: int | None = None,
@@ -176,18 +325,24 @@ class Agent:
             disabled_tools=disabled_tools,
             allow_discovery_tools=allow_discovery_tools,
         )
-        async with self._open_product_runtime() as service:
-            effective_run_id = run_id or f"run_{id(service):x}"
+        runtime_agent = (
+            self
+            if session_id is None
+            else self._agent_for_session(session_id)
+        )
+        async with runtime_agent._open_product_runtime() as service:
+            effective_run_id = _public_turn_id(run_id)
             request = AgentRunRequest(
                 task=task,
+                session_id=session_id,
                 run_id=effective_run_id,
                 thread_id=effective_run_id,
                 llm_budget_total=max_tokens_total,
                 input_files=list(files or ()),
                 workspace_path=(
                     None
-                    if self.workspace_path is None
-                    else str(self.workspace_path)
+                    if runtime_agent.workspace_path is None
+                    else str(runtime_agent.workspace_path)
                 ),
                 tools=None if tools is None else tuple(tools),
                 disabled_tools=tuple(disabled_tools or ()),
@@ -195,7 +350,7 @@ class Agent:
                 allow_execute_tools=allow_execute_tools,
                 allow_discovery_tools=effective_discovery,
             )
-            async for event in service.run_streaming(request):
+            async for event in service.chat_streaming(request):
                 yield event
 
     @asynccontextmanager
@@ -398,6 +553,7 @@ class Agent:
         service = build_agent_service(
             workspace,
             checkpoint_db=self.checkpoint_db,
+            checkpointer=self._get_checkpointer(),
             agent_type=self.agent_type,
             model_alias=self.model,
             model_control_plane=model_control_plane,
@@ -409,8 +565,47 @@ class Agent:
             skill_runtime=skill_runtime,
             stream_sink=stream_sink,
             startup_ms=(time.perf_counter() - startup_started_at) * 1000,
+            session_store=self._get_session_store(),
+            runtime_binding=self._runtime_binding(),
         )
         return service, provider
+
+    def _get_session_store(self) -> Any:
+        if self._session_store is None:
+            from rag.agent.sessions import SessionStore
+
+            self._session_store = SessionStore(self.checkpoint_db)
+        return self._session_store
+
+    def _get_checkpointer(self) -> Any:
+        if self._checkpointer is None:
+            from rag.agent.core.checkpointing import create_agent_checkpointer
+
+            self._checkpointer = create_agent_checkpointer(self.checkpoint_db)
+        return self._checkpointer
+
+    def _runtime_binding(self) -> Any:
+        from rag.agent.sessions import RuntimeBinding
+
+        model_alias = self.model
+        if self._model_control_plane is not None:
+            model_alias = self._model_control_plane.current_model().id
+        return RuntimeBinding(
+            agent_type=self.agent_type,
+            model_alias=model_alias,
+            workspace_path=(
+                None
+                if self.workspace_path is None
+                else str(self.workspace_path)
+            ),
+            knowledge=self.knowledge,
+            rag_storage_root=str(self.rag_storage_root),
+            embedding_model_alias=self.embedding_model,
+            reranker_model_alias=self.reranker_model,
+            vector_backend=self.vector_backend,
+            vector_namespace=self.vector_namespace,
+            vector_collection_prefix=self.vector_collection_prefix,
+        )
 
     def _get_model_control_plane(self) -> ModelControlPlane:
         if self._model_control_plane is None:
@@ -452,6 +647,20 @@ def _effective_discovery_option(
     if tools is not None or disabled_tools is not None:
         return False
     return None
+
+
+def _public_turn_id(run_id: str | None) -> str:
+    if run_id is None:
+        return str(uuid4())
+    warnings.warn(
+        "run_id is deprecated; it is interpreted as the UUID Turn ID",
+        DeprecationWarning,
+        stacklevel=3,
+    )
+    try:
+        return str(UUID(run_id))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("run_id must be a UUID Turn ID") from exc
 
 
 async def _close_owned_sync_resource(

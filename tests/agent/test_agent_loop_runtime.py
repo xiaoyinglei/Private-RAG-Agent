@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import AsyncIterable, Mapping
 from copy import deepcopy
 from dataclasses import dataclass, field
@@ -12,7 +13,12 @@ from rag.agent.core.context import AgentRunConfig, RunRegistry
 from rag.agent.core.definition import AgentRuntimePolicy
 from rag.agent.core.finalization import FinishCandidateBuilder
 from rag.agent.core.turn_contracts import ToolCallPlan
-from rag.agent.loop.runtime import AgentLoop, LoopEventSink, ModelTurnEnvelope
+from rag.agent.loop.runtime import (
+    AgentLoop,
+    LoopEventSink,
+    ModelTurnEnvelope,
+    _approval_request,
+)
 from rag.agent.loop.state import (
     LoopState,
     LoopTransition,
@@ -25,7 +31,7 @@ from rag.agent.skills.catalog import SkillCatalog
 from rag.agent.skills.loader import scan_and_load_skills
 from rag.agent.skills.runtime import SkillRuntime
 from rag.agent.streaming.events import EventType, StreamEvent, text_delta
-from rag.agent.tools.executor import ToolExecutor
+from rag.agent.tools.executor import ToolExecutionRecord, ToolExecutor
 from rag.agent.tools.integrations.skills import create_invoke_skill_tool
 from rag.agent.tools.permissions import ToolExecutionContext
 from rag.agent.tools.selection import (
@@ -45,6 +51,7 @@ from rag.agent.tools.tool import (
     ToolContentBlock,
     ToolDefinition,
     ToolEffect,
+    ToolResult,
     json_schema_input,
 )
 from rag.providers.llm_gateway import LLMToolCallValidationError
@@ -104,6 +111,7 @@ class _SinkAwareProvider:
 class _Checkpoint:
     durable: bool = True
     snapshots: list[tuple[str, LoopState]] = field(default_factory=list)
+    execution_records: list[ToolExecutionRecord] = field(default_factory=list)
 
     async def save_snapshot(
         self,
@@ -112,6 +120,12 @@ class _Checkpoint:
         reason: str,
     ) -> None:
         self.snapshots.append((reason, deepcopy(state)))
+
+    async def write_execution_record(
+        self,
+        record: ToolExecutionRecord,
+    ) -> None:
+        self.execution_records.append(record)
 
 
 @dataclass
@@ -253,6 +267,11 @@ async def test_model_tool_result_next_turn_and_finish() -> None:
     assert result["tool_results"][0].structured_content == {"text": "hello"}
     assert result["canonical_transcript"][-1].role == "tool"
     assert any(reason == "tool_results_recorded" for reason, _ in checkpoint.snapshots)
+    assert [record.status.value for record in checkpoint.execution_records] == [
+        "prepared",
+        "started",
+        "completed",
+    ]
 
 
 @pytest.mark.anyio
@@ -293,6 +312,57 @@ async def test_approval_pause_is_a_checkpointed_human_input_event() -> None:
         if reason == "tool_pause"
     ]
     assert approval_snapshots[-1]["status"] == "paused"
+
+
+def test_run_command_approval_shows_full_security_context(tmp_path: Path) -> None:
+    command = (
+        "printf '\x1b[2J'\npython -c \"print('"
+        + ("x" * 300)
+        + "')\""
+    )
+    call = ToolCall(
+        tool_call_id="call_command",
+        tool_name="run_command",
+        arguments={
+            "command": command,
+            "working_dir": ".",
+            "timeout_seconds": 120.0,
+            "network": True,
+        },
+        origin=ToolCallOrigin(
+            request_id="request_command",
+            toolset_revision="tools_v1",
+            exposed_tool_names=("run_command",),
+        ),
+    )
+    result = ToolResult(
+        tool_call_id=call.tool_call_id,
+        tool_name=call.tool_name,
+        is_error=True,
+        error_code="approval_required",
+        error_message="approval required for network access",
+        retryable=True,
+        metadata={
+            "approval_id": "call_command::network",
+            "approval_scope": "network",
+            "cwd": str(tmp_path),
+            "network_requested": True,
+            "execution_mode": "restricted_sandbox",
+        },
+    )
+
+    request = _approval_request(result, call)
+
+    summary = request.tool_calls[0]
+    assert summary.approval_id == "call_command::network"
+    assert json.dumps(command, ensure_ascii=False) in summary.args_preview
+    assert "\x1b" not in summary.args_preview
+    assert "\\u001b" in summary.args_preview
+    assert f"cwd: {json.dumps(str(tmp_path))}" in summary.args_preview
+    assert "network: requested (separate approval required)" in summary.args_preview
+    assert "execution mode: restricted_sandbox" in summary.args_preview
+    assert request.context["approval_scope"] == "network"
+    assert "network access" in request.question
 
 
 @pytest.mark.anyio

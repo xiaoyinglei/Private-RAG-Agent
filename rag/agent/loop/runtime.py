@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 from collections.abc import AsyncGenerator, Awaitable, Mapping, Sequence
@@ -47,9 +48,16 @@ from rag.agent.loop.state import (
 )
 from rag.agent.loop.stop_hooks import StopHookOutcome, StopHookRunner
 from rag.agent.memory.compactor import LoopCompactionResult
-from rag.agent.planning import MAX_PLAN_EVENTS, PlanEvent, PlanTracker
+from rag.agent.planning import (
+    MAX_PLAN_EVENTS,
+    AgentPlan,
+    PlanEvent,
+    PlanStep,
+    PlanTracker,
+)
 from rag.agent.streaming.events import StreamEvent
 from rag.agent.streaming.sink import StreamEventSink
+from rag.agent.tools.builtins.planning import UpdatePlanInput
 from rag.agent.tools.executor import ToolExecutionRecord, ToolExecutor
 from rag.agent.tools.permissions import ToolExecutionContext
 from rag.agent.tools.selection import FIND_TOOLS_NAME, reduce_tool_activation
@@ -83,6 +91,23 @@ def _add_model_latency(state: LoopState, latency_ms: float) -> None:
     state["latency_profile"] = profile.model_copy(
         update={"model_latency_ms": profile.model_latency_ms + latency_ms}
     )
+
+
+def _append_canonical_messages(
+    state: LoopState,
+    messages: Sequence[ModelMessage],
+) -> None:
+    if not messages:
+        return
+    state["canonical_transcript"] = [
+        *state.get("canonical_transcript", []),
+        *messages,
+    ]
+    if state["run_config"].session_id is not None:
+        state["turn_transcript"] = [
+            *state.get("turn_transcript", []),
+            *messages,
+        ]
 
 
 class ModelTurnEnvelope(BaseModel):
@@ -392,10 +417,7 @@ class AgentLoop:
                 envelope.model_call_record,
             ]
         if envelope.assistant_message is not None:
-            state["canonical_transcript"] = [
-                *state.get("canonical_transcript", []),
-                envelope.assistant_message,
-            ]
+            _append_canonical_messages(state, (envelope.assistant_message,))
         if envelope.context_revision is not None:
             state["context_revision"] = envelope.context_revision
         if request is None:
@@ -555,13 +577,15 @@ class AgentLoop:
             }
             if exc.failed_generation:
                 feedback["failed_generation"] = exc.failed_generation
-            state["canonical_transcript"] = [
-                *state.get("canonical_transcript", []),
-                context_event_message(
-                    "model_tool_call_rejected",
-                    feedback,
+            _append_canonical_messages(
+                state,
+                (
+                    context_event_message(
+                        "model_tool_call_rejected",
+                        feedback,
+                    ),
                 ),
-            ]
+            )
         await self._emit_stream(_stream_recovery(
             strategy="model_retry",
             detail=f"attempt={retries}, error={str(exc)[:200]}",
@@ -607,6 +631,7 @@ class AgentLoop:
             calls,
             context=context,
             records=state["tool_execution_records"],
+            record_sink=self._checkpoint_store.write_execution_record,
         )
         for execution in executions:
             if execution.record is not None:
@@ -647,15 +672,36 @@ class AgentLoop:
             if item.tool_call_id in blocked_ids
         ]
 
+        observable_results = [
+            result
+            for result in new_results
+            if result.tool_name != "update_plan"
+        ]
+        batch = self._observation_extractor.extract(
+            observable_results,
+            seen_tool_call_ids=list(self._observed_tool_call_ids),
+        )
+        self._observed_tool_call_ids.update(
+            observation.tool_call_id
+            for observation in batch.structured_observations
+        )
+        self._merge_observations(state, batch)
+        self._record_plan_observations(state, batch)
+
+        new_results, plan_updates = self._apply_update_plan_results(
+            state,
+            calls=calls,
+            results=new_results,
+        )
         self._apply_activation_results(state, new_results)
         state["tool_results"] = _merge_keyed(
             state["tool_results"],
             new_results,
         )
-        state["canonical_transcript"] = [
-            *state.get("canonical_transcript", []),
-            *(tool_result_message(result) for result in new_results),
-        ]
+        _append_canonical_messages(
+            state,
+            tuple(tool_result_message(result) for result in new_results),
+        )
 
         for tool_result in new_results:
             if tool_result.is_error:
@@ -678,13 +724,15 @@ class AgentLoop:
                     )
                 )
 
-        batch = self._observation_extractor.extract(
-            new_results,
-            seen_tool_call_ids=list(self._observed_tool_call_ids),
-        )
-        self._observed_tool_call_ids.update(observation.tool_call_id for observation in batch.structured_observations)
-        self._merge_observations(state, batch)
-        self._record_plan_observations(state, batch)
+        for plan, event in plan_updates:
+            await self._emit_stream(
+                _stream_plan_updated(
+                    plan=plan,
+                    event=event,
+                    run_id=run_id,
+                    turn=turn,
+                )
+            )
 
         if approval_execution is not None:
             approval_call = next(
@@ -744,6 +792,57 @@ class AgentLoop:
         self._record_metrics(state, new_results)
 
         return False
+
+    def _apply_update_plan_results(
+        self,
+        state: LoopState,
+        *,
+        calls: Sequence[ToolCall],
+        results: Sequence[ToolResult],
+    ) -> tuple[list[ToolResult], list[tuple[AgentPlan, PlanEvent]]]:
+        calls_by_id = {call.tool_call_id: call for call in calls}
+        canonical_results: list[ToolResult] = []
+        plan_updates: list[tuple[AgentPlan, PlanEvent]] = []
+        for result in results:
+            if result.tool_name != "update_plan" or result.is_error:
+                canonical_results.append(result)
+                continue
+            call = calls_by_id[result.tool_call_id]
+            submitted = UpdatePlanInput.model_validate(call.arguments)
+            current = state["plan_state"].agent_plan
+            if current is None:
+                current, events = self._plan_tracker.initialize_task(
+                    task=state["task"]
+                )
+                self._append_plan_events(state, events)
+            steps = [
+                PlanStep(
+                    step_id=f"step_{index:03d}",
+                    title=item.step,
+                    status=item.status,
+                )
+                for index, item in enumerate(submitted.plan, start=1)
+            ]
+            updated, events = self._plan_tracker.replace_from_tool(
+                current,
+                steps=steps,
+                summary=submitted.explanation,
+            )
+            state["plan_state"].agent_plan = updated
+            self._append_plan_events(state, events)
+            event = events[-1]
+            plan_updates.append((updated, event))
+            canonical_results.append(
+                replace(
+                    result,
+                    structured_content={
+                        "accepted": True,
+                        "revision": updated.revision,
+                        "message": "Plan updated and persisted.",
+                    },
+                )
+            )
+        return canonical_results, plan_updates
 
     def _canonical_call(
         self,
@@ -1080,10 +1179,15 @@ class AgentLoop:
         plan = state["plan_state"].agent_plan
         if plan is None:
             return
+        work_calls = [
+            call for call in turn.tool_calls if call.tool_name != "update_plan"
+        ]
+        if not work_calls:
+            return
         updated, events = self._plan_tracker.record_decision_progress(
             plan,
-            tool_call_ids=[call.tool_call_id for call in turn.tool_calls],
-            tool_names=[call.tool_name for call in turn.tool_calls],
+            tool_call_ids=[call.tool_call_id for call in work_calls],
+            tool_names=[call.tool_name for call in work_calls],
         )
         state["plan_state"].agent_plan = updated
         state["plan_state"].plan_events = [*state["plan_state"].plan_events, *events][-MAX_PLAN_EVENTS:]
@@ -1231,21 +1335,90 @@ def _approval_request(
     call: ToolCall,
 ) -> HumanInputRequest:
     reason = result.error_message or "Tool execution requires approval."
+    approval_id = result.metadata.get("approval_id")
+    if not isinstance(approval_id, str) or not approval_id:
+        approval_id = result.tool_call_id
+    approval_scope = result.metadata.get("approval_scope")
+    if approval_scope not in {"tool", "network"}:
+        approval_scope = "tool"
+    cwd = result.metadata.get("cwd")
+    execution_mode = result.metadata.get("execution_mode")
+    network_requested = result.metadata.get("network_requested") is True
+    args_preview = _tool_input_preview(call.arguments)
+    question = f"Allow {result.tool_name} to run once? {reason}"
+    if result.tool_name == "run_command":
+        args_preview = _run_command_approval_preview(
+            call.arguments,
+            cwd=cwd if isinstance(cwd, str) else None,
+            execution_mode=(
+                execution_mode
+                if isinstance(execution_mode, str)
+                else "restricted_sandbox"
+            ),
+            network_requested=network_requested,
+        )
+        if approval_scope == "network":
+            question = (
+                "Allow network access for this run_command invocation? "
+                f"{reason}"
+            )
+        else:
+            question = (
+                "Allow run_command to execute once in restricted_sandbox "
+                f"mode? {reason}"
+            )
+            if network_requested:
+                question += " Network access is not included in this approval."
     return HumanInputRequest(
         request_id=f"hir_{uuid4().hex[:12]}",
         kind="tool_approval",
-        question=f"Allow {result.tool_name} to run once? {reason}",
+        question=question,
         tool_calls=[
             ToolCallSummary(
                 tool_call_id=result.tool_call_id,
+                approval_id=approval_id,
                 tool_name=result.tool_name,
-                args_preview=_tool_input_preview(call.arguments),
+                args_preview=args_preview,
                 risk_level="medium",
                 reason=reason,
             )
         ],
-        context={"tool_call_id": result.tool_call_id},
+        context={
+            "tool_call_id": result.tool_call_id,
+            "approval_id": approval_id,
+            "approval_scope": approval_scope,
+            "cwd": cwd,
+            "network_requested": network_requested,
+            "execution_mode": execution_mode,
+        },
         options=["allow_once", "deny"],
+    )
+
+
+def _run_command_approval_preview(
+    arguments: Mapping[str, object],
+    *,
+    cwd: str | None,
+    execution_mode: str,
+    network_requested: bool,
+) -> str:
+    command = arguments.get("command")
+    raw_command = command if isinstance(command, str) else str(command)
+    command_text = json.dumps(raw_command, ensure_ascii=False)
+    cwd_text = json.dumps(
+        cwd or str(arguments.get("working_dir", ".")),
+        ensure_ascii=False,
+    )
+    network_text = (
+        "requested (separate approval required)"
+        if network_requested
+        else "disabled"
+    )
+    return (
+        f"command: {command_text}\n"
+        f"cwd: {cwd_text}\n"
+        f"network: {network_text}\n"
+        f"execution mode: {execution_mode}"
     )
 
 
@@ -1268,7 +1441,7 @@ def _reconciliation_request(
                 None if record is None else record.status.value
             ),
         },
-        options=["mark_completed", "mark_failed", "retry_new_operation"],
+        options=["mark_completed", "mark_failed"],
     )
 
 
@@ -1353,6 +1526,7 @@ def _stream_human_input_required(
             "tool_calls": [
                 {
                     "tool_call_id": item.tool_call_id,
+                    "approval_id": item.approval_id,
                     "tool_name": item.tool_name,
                     "input_preview": item.args_preview,
                     "reason": item.reason,
@@ -1376,6 +1550,27 @@ def _stream_tool_use_result(*, tool_name: str, tool_id: str, result: str, run_id
             "tool_name": tool_name,
             "tool_id": tool_id,
             "result": result,
+        },
+    )
+
+
+def _stream_plan_updated(
+    *,
+    plan: AgentPlan,
+    event: PlanEvent,
+    run_id: str,
+    turn: int,
+) -> Any:
+    from rag.agent.streaming.events import EventType, StreamEvent, next_seq
+
+    return StreamEvent(
+        type=EventType.PLAN_UPDATED,
+        run_id=run_id,
+        turn=turn,
+        seq=next_seq(),
+        data={
+            "plan": plan.model_dump(mode="json"),
+            "event": event.model_dump(mode="json"),
         },
     )
 

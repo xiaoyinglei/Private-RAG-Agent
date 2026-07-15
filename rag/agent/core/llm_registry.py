@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass
+from importlib.resources import as_file, files
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -59,7 +60,11 @@ class ModelRegistry:
     加载顺序：RAG_AGENT_MODELS_PATH(YAML) > RAG_AGENT_MODELS(JSON) > models.yaml 内置默认
     """
 
-    _BUNDLED_CONFIG_PATH = Path("configs/models.yaml")
+    _BUNDLED_CONFIG_PATH = (
+        Path(__file__).resolve().parents[3] / "configs" / "models.yaml"
+    )
+    _BUNDLED_CONFIG_PACKAGE = "rag.agent"
+    _BUNDLED_CONFIG_RESOURCE = ("_data", "models.yaml")
 
     def __init__(self, config: AgentModelsConfig) -> None:
         self._config = config
@@ -114,13 +119,21 @@ class ModelRegistry:
         if json_text:
             return AgentModelsConfig.model_validate(json.loads(json_text))
 
-        # 3. 内置 models.yaml（相对于 rag/agent/models.yaml）
+        # 3. wheel 中 force-included 的 models.yaml
+        resource = files(cls._BUNDLED_CONFIG_PACKAGE)
+        for part in cls._BUNDLED_CONFIG_RESOURCE:
+            resource = resource.joinpath(part)
+        if resource.is_file():
+            with as_file(resource) as resource_path:
+                return cls._load_yaml_file(resource_path)
+
+        # 4. 源码仓库中的 models.yaml（不依赖进程 cwd）
         if cls._BUNDLED_CONFIG_PATH.is_file():
             return cls._load_yaml_file(cls._BUNDLED_CONFIG_PATH)
 
         raise FileNotFoundError(
             "No agent model config found. Set RAG_AGENT_MODELS_PATH, "
-            "RAG_AGENT_MODELS, or ensure rag/agent/models.yaml exists."
+            "RAG_AGENT_MODELS, or install a distribution with bundled models.yaml."
         )
 
     @staticmethod

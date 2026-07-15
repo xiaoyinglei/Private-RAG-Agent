@@ -90,6 +90,7 @@ def test_exact_answer_assertion_rejects_substring_false_positive() -> None:
 
 
 @pytest.mark.anyio
+@pytest.mark.usefixtures("fake_sandbox_exec")
 async def test_fake_delivery_matrix_proves_public_runtime_invariants() -> None:
     module = _load_smoke_module()
 

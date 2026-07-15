@@ -59,6 +59,9 @@ rag = "rag.cli:app"
 [tool.hatch.build.targets.wheel]
 packages = ["agent_runtime", "rag"]
 
+[tool.hatch.build.targets.wheel.force-include]
+"configs/models.yaml" = "rag/agent/_data/models.yaml"
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]

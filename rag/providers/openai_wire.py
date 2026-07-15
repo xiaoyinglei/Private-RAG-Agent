@@ -23,7 +23,7 @@ from rag.agent.core.model_request import (
 from rag.agent.tools.tool import JsonValue, json_schema_output
 from rag.schema.llm import LLMUsage, normalize_llm_usage
 
-OPENAI_WIRE_REVISION = "openai-compatible-chat-v1"
+OPENAI_WIRE_REVISION = "openai-compatible-chat-v2"
 _RESERVED_PAYLOAD_FIELDS = frozenset(
     {
         "model",
@@ -68,7 +68,7 @@ def serialize_openai_request(
     supported = _supported_parameter_names(supported_cache_parameters)
     payload: dict[str, JsonValue] = {
         "model": request.settings.model,
-        "messages": tuple(_message_payload(message) for message in request.messages),
+        "messages": _message_payloads(request.messages),
         "max_completion_tokens": request.settings.max_output_tokens,
         "temperature": float(request.settings.temperature),
         "parallel_tool_calls": request.settings.parallel_tool_calls,
@@ -232,12 +232,46 @@ def parse_openai_usage(response: object) -> LLMUsage | None:
     )
 
 
+def _message_payloads(
+    messages: Sequence[ModelMessage],
+) -> tuple[Mapping[str, JsonValue], ...]:
+    payloads: list[Mapping[str, JsonValue]] = []
+    leading_system_content: list[str] = []
+    conversation_started = False
+    for raw_message in messages:
+        message = snapshot_model_message(raw_message)
+        if not conversation_started and message.role in {"system", "context"}:
+            leading_system_content.append(message.content)
+            continue
+        if not conversation_started:
+            if leading_system_content:
+                payloads.append(
+                    {
+                        "role": "system",
+                        "content": "\n\n".join(leading_system_content),
+                    }
+                )
+            conversation_started = True
+        if message.role == "system":
+            raise ValueError("non-leading system message is not supported")
+        if message.role == "context":
+            payloads.append({"role": "user", "content": message.content})
+            continue
+        payloads.append(_message_payload(message))
+    if not conversation_started and leading_system_content:
+        payloads.append(
+            {
+                "role": "system",
+                "content": "\n\n".join(leading_system_content),
+            }
+        )
+    return tuple(payloads)
+
+
 def _message_payload(message: ModelMessage) -> Mapping[str, JsonValue]:
     message = snapshot_model_message(message)
     if message.role in {"system", "user"}:
         return {"role": message.role, "content": message.content}
-    if message.role == "context":
-        return {"role": "system", "content": message.content}
     if message.role == "assistant":
         payload: dict[str, JsonValue] = {
             "role": "assistant",

@@ -2,7 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import sqlite3
-from collections.abc import AsyncIterator, Iterator, Mapping, Sequence
+from collections.abc import (
+    AsyncIterator,
+    Awaitable,
+    Callable,
+    Iterator,
+    Mapping,
+    Sequence,
+)
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -477,6 +484,11 @@ class CheckpointStore(Protocol):
         reason: str,
     ) -> None: ...
 
+    async def write_execution_record(
+        self,
+        record: ToolExecutionRecord,
+    ) -> None: ...
+
     async def apply_human_response(
         self,
         response: HumanInputResponse,
@@ -494,10 +506,14 @@ class LangGraphCheckpointStore:
         *,
         run_config: AgentRunConfig,
         compatibility_config: GoalCompatibilityConfig | None = None,
+        snapshot_sink: (
+            Callable[[LoopState], None | Awaitable[None]] | None
+        ) = None,
     ) -> None:
         self._checkpointer = checkpointer
         self._run_config = run_config
         self._compatibility_config = compatibility_config or GoalCompatibilityConfig()
+        self._snapshot_sink = snapshot_sink
         self._state: LoopState | None = None
         self._lock = asyncio.Lock()
 
@@ -536,7 +552,11 @@ class LangGraphCheckpointStore:
             record
             for record in state["tool_execution_records"].values()
             if not record.idempotent
-            and record.status in {ExecutionStatus.RUNNING, ExecutionStatus.UNKNOWN}
+            and record.status
+            in {
+                ExecutionStatus.STARTED,
+                ExecutionStatus.OUTCOME_UNKNOWN,
+            }
         ]
         if not ambiguous:
             return state
@@ -544,7 +564,7 @@ class LangGraphCheckpointStore:
         for record in ambiguous:
             state["tool_execution_records"][record.tool_call_id] = replace(
                 record,
-                status=ExecutionStatus.UNKNOWN,
+                status=ExecutionStatus.OUTCOME_UNKNOWN,
                 requires_reconciliation=True,
             )
         request = self.reconciliation_request(ambiguous[0])
@@ -674,7 +694,6 @@ class LangGraphCheckpointStore:
             options=[
                 "mark_completed",
                 "mark_failed",
-                "retry_new_operation",
             ],
         )
 
@@ -757,6 +776,16 @@ class LangGraphCheckpointStore:
         except Exception as exc:
             raise CheckpointPersistenceError(f"failed to persist loop checkpoint: {exc}") from exc
         self._state = snapshot
+        if self._snapshot_sink is not None:
+            restored = _decode_canonical_state(deepcopy(snapshot))
+            try:
+                emitted = self._snapshot_sink(restored)
+                if emitted is not None:
+                    await emitted
+            except Exception as exc:
+                raise CheckpointPersistenceError(
+                    f"checkpoint persisted but canonical history sync failed: {exc}"
+                ) from exc
 
     def _restore_checkpoint_tuple(
         self,
@@ -795,10 +824,15 @@ def _encode_canonical_state(state: LoopState) -> LoopState:
     )
     paused = dependent if state.get("status") == "paused" else ()
     pending = () if paused else dependent
+    transcript = (
+        state["turn_transcript"]
+        if state["run_config"].session_id is not None
+        else state["canonical_transcript"]
+    )
     checkpoint = CanonicalToolCheckpoint(
         context_revision=state.get("context_revision", "context_pending"),
         prompt_revision=state.get("prompt_revision", "prompt_pending"),
-        transcript=tuple(state.get("canonical_transcript", ())),
+        transcript=tuple(transcript),
         manifest=manifest,
         tool_calls=calls,
         pending_tool_calls=pending,
@@ -821,6 +855,7 @@ def _encode_canonical_state(state: LoopState) -> LoopState:
         },
     )
     state["canonical_transcript"] = []
+    state["turn_transcript"] = []
     state["canonical_tool_calls"] = {}
     state["model_call_records"] = []
     state["tool_manifest"] = None
@@ -842,8 +877,8 @@ def _encode_canonical_state(state: LoopState) -> LoopState:
             ]
         }
     )
-    if state.get("last_model_turn") is not None:
-        turn = state["last_model_turn"]
+    turn = state.get("last_model_turn")
+    if turn is not None:
         state["last_model_turn"] = turn.model_copy(
             update={
                 "tool_calls": tuple(
@@ -880,6 +915,8 @@ def _decode_canonical_state(state: LoopState) -> LoopState:
     state["context_revision"] = checkpoint.context_revision
     state["prompt_revision"] = checkpoint.prompt_revision
     state["canonical_transcript"] = list(checkpoint.transcript)
+    if state["run_config"].session_id is not None:
+        state["turn_transcript"] = list(checkpoint.transcript)
     state["tool_manifest"] = checkpoint.manifest
     state["provider_serializer_revision"] = (
         checkpoint.manifest.provider_serializer_revision
@@ -1070,6 +1107,16 @@ def _encode_execution_record(
 def _decode_execution_record(
     raw: Mapping[str, object],
 ) -> ToolExecutionRecord:
+    raw_status = _checkpoint_string(
+        raw.get("status"),
+        field_name="execution_record.status",
+    )
+    status = ExecutionStatus(
+        {
+            "running": ExecutionStatus.STARTED.value,
+            "unknown": ExecutionStatus.OUTCOME_UNKNOWN.value,
+        }.get(raw_status, raw_status)
+    )
     return ToolExecutionRecord(
         tool_call_id=_checkpoint_string(
             raw.get("tool_call_id"),
@@ -1091,13 +1138,11 @@ def _decode_execution_record(
             raw.get("idempotent"),
             field_name="execution_record.idempotent",
         ),
-        status=ExecutionStatus(
-            _checkpoint_string(
-                raw.get("status"),
-                field_name="execution_record.status",
-            )
+        status=status,
+        attempt_count=_checkpoint_int(
+            raw.get("attempt_count", 0),
+            field_name="execution_record.attempt_count",
         ),
-        attempt_count=int(raw.get("attempt_count", 0)),
         error_code=cast(str | None, raw.get("error_code")),
         requires_reconciliation=_checkpoint_bool(
             raw.get("requires_reconciliation", False),
@@ -1847,17 +1892,6 @@ def _apply_tool_reconciliation(
             status=ExecutionStatus.FAILED,
             requires_reconciliation=False,
         )
-    if response.decision == "retry_new_operation":
-        from uuid import uuid4
-
-        return replace(
-            record,
-            operation_id=f"op_{uuid4().hex}",
-            status=ExecutionStatus.PREPARED,
-            attempt_count=0,
-            error_code=None,
-            requires_reconciliation=False,
-        )
     raise ValueError(
         f"unsupported tool reconciliation decision: {response.decision}"
     )
@@ -1875,6 +1909,7 @@ def _normalize_loaded_state(state: LoopState) -> LoopState:
 
     state.setdefault("deferred_tool_state", DeferredToolState())
     state.setdefault("canonical_transcript", [])
+    state.setdefault("turn_transcript", [])
     state.setdefault("canonical_tool_calls", {})
     state.setdefault("model_call_records", [])
     state.setdefault("tool_manifest", None)

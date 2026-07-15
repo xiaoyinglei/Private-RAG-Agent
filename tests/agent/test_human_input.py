@@ -85,7 +85,6 @@ class TestHumanInputRequest:
             options=[
                 "mark_completed",
                 "mark_failed",
-                "retry_new_operation",
             ],
         )
 
@@ -132,7 +131,7 @@ class TestHumanInputResponse:
 
     @pytest.mark.parametrize(
         "decision",
-        ["mark_completed", "mark_failed", "retry_new_operation"],
+        ["mark_completed", "mark_failed"],
     )
     def test_tool_reconciliation_decisions(self, decision: str) -> None:
         response = HumanInputResponse(
@@ -141,3 +140,10 @@ class TestHumanInputResponse:
         )
 
         assert response.decision == decision
+
+    def test_unknown_outcome_replay_decision_is_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            HumanInputResponse(
+                request_id="hir_reconcile",
+                decision="retry_new_operation",
+            )

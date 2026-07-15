@@ -9,6 +9,7 @@ from langgraph.checkpoint.memory import MemorySaver
 from rag.agent.core.checkpointing import agent_checkpoint_serde
 from rag.agent.core.definition import AgentRuntimePolicy
 from rag.agent.core.human_input import (
+    HumanInputRequest,
     HumanInputRequestIdMismatchError,
     HumanInputResponse,
 )
@@ -120,6 +121,11 @@ def _definition() -> AgentRuntimePolicy:
     )
 
 
+def _approval_id(request: HumanInputRequest) -> str:
+    summary = request.tool_calls[0]
+    return summary.approval_id or summary.tool_call_id
+
+
 def _service(
     calls: list[str],
     *,
@@ -127,9 +133,7 @@ def _service(
     execution_revision: str = "remote-v1",
 ) -> AgentService:
     registry = ToolRegistry()
-    registry.register(
-        _tool(calls, execution_revision=execution_revision)
-    )
+    registry.register(_tool(calls, execution_revision=execution_revision))
     return AgentService(
         definition=_definition(),
         tool_registry=registry,
@@ -162,7 +166,7 @@ async def _pause(
 async def test_default_checkpointer_resumes_on_same_service_without_replay() -> None:
     calls: list[str] = []
     service = _service(calls)
-    call, paused = await _pause(
+    _call, paused = await _pause(
         service,
         run_id="resume-default",
         value="once",
@@ -173,7 +177,7 @@ async def test_default_checkpointer_resumes_on_same_service_without_replay() -> 
         response=HumanInputResponse(
             request_id=paused.human_input_request.request_id,
             decision="allow_once",
-            approved_tool_call_ids=[call.tool_call_id],
+            approved_tool_call_ids=[_approval_id(paused.human_input_request)],
         ),
     )
 
@@ -210,7 +214,7 @@ async def test_resume_latency_is_cumulative_across_approval_pause() -> None:
         response=HumanInputResponse(
             request_id=paused.human_input_request.request_id,
             decision="allow_once",
-            approved_tool_call_ids=[call.tool_call_id],
+            approved_tool_call_ids=[_approval_id(paused.human_input_request)],
         ),
     )
 
@@ -218,8 +222,7 @@ async def test_resume_latency_is_cumulative_across_approval_pause() -> None:
     assert resumed.latency_profile is not None
     assert resumed.latency_profile.total_ms >= paused.latency_profile.total_ms
     assert resumed.latency_profile.total_ms >= (
-        resumed.latency_profile.model_latency_ms
-        + resumed.latency_profile.tool_latency_ms
+        resumed.latency_profile.model_latency_ms + resumed.latency_profile.tool_latency_ms
     )
 
 
@@ -228,23 +231,21 @@ async def test_resume_uses_same_codec_across_service_boundary() -> None:
     checkpointer = MemorySaver(serde=agent_checkpoint_serde())
     calls: list[str] = []
     first = _service(calls, checkpointer=checkpointer)
-    call, paused = await _pause(
+    _call, paused = await _pause(
         first,
         run_id="resume-cross-service",
         value="persisted",
     )
 
     second = _service(calls, checkpointer=checkpointer)
-    pending = second.pending_human_input_request(
-        run_id="resume-cross-service"
-    )
+    pending = second.pending_human_input_request(run_id="resume-cross-service")
     assert pending.request_id == paused.human_input_request.request_id
     resumed = await second.resume(
         run_id="resume-cross-service",
         response=HumanInputResponse(
             request_id=pending.request_id,
             decision="allow_once",
-            approved_tool_call_ids=[call.tool_call_id],
+            approved_tool_call_ids=[_approval_id(pending)],
         ),
     )
 

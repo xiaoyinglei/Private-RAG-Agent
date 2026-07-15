@@ -8,7 +8,8 @@ import sys
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
+from typing import TYPE_CHECKING, Annotated, Any, cast
+from uuid import uuid4
 
 import typer
 
@@ -223,6 +224,29 @@ def _format_tool_summary(result: AgentRunResult) -> str:
     return "\n".join(lines)
 
 
+def _format_plan_summary(result: AgentRunResult) -> str:
+    plan = result.plan
+    if plan is None or not any(
+        event.event_type == "llm_update" for event in result.plan_events
+    ):
+        return ""
+    icons = {
+        "pending": "○",
+        "in_progress": "→",
+        "completed": "✓",
+        "blocked": "!",
+        "skipped": "-",
+    }
+    lines = ["", "─" * 40, f"计划 (revision {plan.revision}):"]
+    if plan.summary:
+        lines.append(f"  {plan.summary}")
+    lines.extend(
+        f"  {icons.get(step.status, '?')} {step.title}"
+        for step in plan.steps
+    )
+    return "\n".join(lines)
+
+
 def _failure_title(stop_reason: str | None) -> str:
     if stop_reason == "model_provider_failed":
         return "错误: 模型调用失败 (model_provider_failed)"
@@ -303,6 +327,10 @@ def _display_result(result: AgentRunResult, *, verbose: bool) -> None:
     if result.final_answer:
         print(f"\n{result.final_answer}")
 
+    plan_summary = _format_plan_summary(result)
+    if plan_summary:
+        print(plan_summary)
+
     if result.tool_results:
         print(_format_tool_summary(result))
 
@@ -341,27 +369,35 @@ def _display_agent_result(result: AgentResult, *, verbose: bool) -> None:
 
     if isinstance(result.raw, AgentRunResult):
         _display_result(result.raw, verbose=verbose)
-        return
+    else:
+        if result.status == "failed":
+            _display_failure(
+                stop_reason=None,
+                diagnostics=result.diagnostics,
+                verbose=verbose,
+            )
+        elif result.diagnostics:
+            degraded = sum(
+                1
+                for diagnostic in result.diagnostics
+                if getattr(diagnostic, "degraded", False)
+            )
+            if degraded:
+                print(
+                    f"\n警告: Agent 以降级模式运行（{degraded} 项诊断）"
+                )
+            if verbose:
+                for diagnostic in result.diagnostics:
+                    _print_diagnostic(diagnostic)
 
-    if result.status == "failed":
-        _display_failure(
-            stop_reason=None,
-            diagnostics=result.diagnostics,
-            verbose=verbose,
-        )
-    elif result.diagnostics:
-        degraded = sum(1 for diagnostic in result.diagnostics if getattr(diagnostic, "degraded", False))
-        if degraded:
-            print(f"\n警告: Agent 以降级模式运行（{degraded} 项诊断）")
-        if verbose:
-            for diagnostic in result.diagnostics:
-                _print_diagnostic(diagnostic)
+        if result.answer:
+            print(f"\n{result.answer}")
 
-    if result.answer:
-        print(f"\n{result.answer}")
+        if verbose and result.tool_calls:
+            print(_format_public_tool_summary(result.tool_calls))
 
-    if verbose and result.tool_calls:
-        print(_format_public_tool_summary(result.tool_calls))
+    print(f"\nSession: {result.session_id}")
+    print(f"Turn: {result.turn_id}")
 
     if verbose:
         print(f"状态: {result.status}")
@@ -374,10 +410,14 @@ def _format_public_tool_summary(tool_calls: Sequence[str]) -> str:
     return "\n".join(lines)
 
 
-def _handle_pause(result: AgentRunResult, run_id: str) -> HumanInputResponse | None:
+def _handle_pause(
+    result: AgentRunResult,
+    turn_id: str,
+) -> HumanInputResponse | None:
     from rag.agent.core.human_input import HumanInputRequest, HumanInputResponse
 
     """展示暂停信息，获取用户决策。返回 None 表示退出。"""
+    del turn_id
     req = result.human_input_request
     if req is None:
         return None
@@ -397,7 +437,7 @@ def _handle_pause(result: AgentRunResult, run_id: str) -> HumanInputResponse | N
 
     while True:
         choice = input("> ").strip()
-        if choice in {"allow_once", "deny", "continue", "abort"}:
+        if choice in options:
             break
         if choice in {"a", "y", "yes"}:
             choice = "allow_once"
@@ -413,17 +453,17 @@ def _handle_pause(result: AgentRunResult, run_id: str) -> HumanInputResponse | N
         print(f"  请输入: {', '.join(options)} (或 a=允许, n=拒绝, q=退出)")
 
     approved = (
-        [tc.tool_call_id for tc in req.tool_calls]
+        [tc.approval_id or tc.tool_call_id for tc in req.tool_calls]
         if choice == "allow_once" else []
     )
     denied = (
-        [tc.tool_call_id for tc in req.tool_calls]
+        [tc.approval_id or tc.tool_call_id for tc in req.tool_calls]
         if choice == "deny" else []
     )
 
     return HumanInputResponse(
         request_id=req.request_id,
-        decision=cast(Literal["allow_once", "deny", "continue", "abort"], choice),
+        decision=cast(Any, choice),
         approved_tool_call_ids=approved,
         denied_tool_call_ids=denied,
     )
@@ -434,12 +474,19 @@ def _build_resume_response(request: object, decision: str) -> HumanInputResponse
 
     r = cast(HumanInputRequest, request)
     tool_call_ids = [
-        tool_call.tool_call_id
+        tool_call.approval_id or tool_call.tool_call_id
         for tool_call in r.tool_calls
     ]
+    allowed = set(r.options)
+    if not allowed and r.kind == "tool_approval":
+        allowed = {"allow_once", "deny", "abort"}
+    if decision not in allowed:
+        raise ValueError(
+            f"unsupported decision {decision!r} for {r.kind} request"
+        )
     return HumanInputResponse(
         request_id=r.request_id,
-        decision=cast(Literal["allow_once", "deny", "continue", "abort"], decision),
+        decision=cast(Any, decision),
         approved_tool_call_ids=tool_call_ids if decision == "allow_once" else [],
         denied_tool_call_ids=tool_call_ids if decision == "deny" else [],
     )
@@ -515,7 +562,7 @@ async def _run_facade_command(
     *,
     task: str,
     files: Sequence[str],
-    run_id: str,
+    turn_id: str,
     max_tokens_total: int | None,
     interactive_approval: bool,
     tools: Sequence[str] | None = None,
@@ -540,11 +587,12 @@ async def _run_facade_command(
     async with facade._open_product_runtime(
         stream_sink=_CLIToolEventDisplay(),
     ) as service:
-        raw = await service.run(
+        raw = await service.chat(
             AgentRunRequest(
                 task=task,
-                run_id=run_id,
-                thread_id=run_id,
+                session_id=None,
+                run_id=turn_id,
+                thread_id=turn_id,
                 llm_budget_total=max_tokens_total,
                 input_files=list(files),
                 workspace_path=(
@@ -560,12 +608,13 @@ async def _run_facade_command(
             )
         )
         while raw.status == "paused" and interactive_approval:
-            response = _handle_pause(raw, run_id)
+            response = _handle_pause(raw, raw.run_id)
             if response is None:
                 break
-            raw = await service.resume(
-                run_id=run_id,
-                response=response,
+            raw = await service.resume_turn(
+                turn_id=raw.run_id,
+                action=response.decision,
+                user_input=response.user_message,
             )
         return AgentResult.from_internal(raw, files=tuple(files))
 
@@ -573,29 +622,26 @@ async def _run_facade_command(
 async def _resume_facade_command(
     facade: Any,
     *,
-    run_id: str,
-    decision: str,
-) -> AgentRunResult:
-    async with facade._open_product_runtime(
-        stream_sink=_CLIToolEventDisplay(),
-    ) as service:
-        request = await service.apending_human_input_request(run_id=run_id)
-        response = _build_resume_response(request, decision)
-        result: AgentRunResult = await service.resume(
-            run_id=run_id,
-            response=response,
-            workspace_path=(
-                None
-                if facade.workspace_path is None
-                else str(facade.workspace_path)
-            ),
-        )
-        return result
+    turn_id: str,
+    action: str,
+    user_input: str | None = None,
+) -> AgentResult:
+    return cast(
+        "AgentResult",
+        await facade.aresume(
+            turn_id,
+            action,
+            user_input=user_input,
+        ),
+    )
 
 
 def _print_startup_banner(model_alias: str, *, agent_type: str) -> None:
     print(f"Agent 就绪 (agent: {agent_type}, 模型: {model_alias})")
-    print("输入查询，或 /exit 退出，/verbose 切换详细输出，/model 查看/切换模型")
+    print(
+        "输入查询，或 /exit 退出，/verbose 切换详细输出，"
+        "/model 查看模型（首条消息前可切换）"
+    )
     print()
 
 
@@ -605,13 +651,19 @@ async def _chat_facade_session(
     agent_type: str,
     requested_model: str | None,
     budget: int | None,
+    session_id: str | None = None,
 ) -> None:
     from rag.agent.service import AgentRunRequest
 
-    async with facade._open_product_runtime(
+    runtime_facade = (
+        facade
+        if session_id is None
+        else facade._agent_for_session(session_id)
+    )
+    async with runtime_facade._open_product_runtime(
         stream_sink=_CLIToolEventDisplay(),
     ) as service:
-        run_id = f"chat_{id(service):x}"
+        current_session_id = session_id
         verbose = False
         _print_startup_banner(
             _service_model_alias(service, requested_model),
@@ -635,30 +687,33 @@ async def _chat_facade_session(
                 _handle_model_slash_command(
                     query,
                     control_plane=_service_model_control_plane(service),
+                    allow_switch=current_session_id is None,
                 )
                 continue
 
-            result = await service.run(
+            result = await service.chat(
                 AgentRunRequest(
                     task=query,
-                    run_id=run_id,
-                    thread_id=run_id,
+                    session_id=current_session_id,
+                    run_id=str(uuid4()),
                     llm_budget_total=budget,
                     workspace_path=(
                         None
-                        if facade.workspace_path is None
-                        else str(facade.workspace_path)
+                        if runtime_facade.workspace_path is None
+                        else str(runtime_facade.workspace_path)
                     ),
                 )
             )
+            current_session_id = result.session_id
             while result.status == "paused":
-                response = _handle_pause(result, run_id)
+                response = _handle_pause(result, result.run_id)
                 if response is None:
                     print("已取消。")
                     break
-                result = await service.resume(
-                    run_id=run_id,
-                    response=response,
+                result = await service.resume_turn(
+                    turn_id=result.run_id,
+                    action=response.decision,
+                    user_input=response.user_message,
                 )
             _display_result(result, verbose=verbose)
 
@@ -676,12 +731,22 @@ def _handle_model_slash_command(
     query: str,
     *,
     control_plane: ModelControlPlane | None,
+    allow_switch: bool = True,
 ) -> None:
     if control_plane is None:
         print("模型控制平面不可用。")
         return
     parts = query.split()
     action = parts[1] if len(parts) > 1 else "current"
+    switch_requested = action in {"switch", "use"} or (
+        len(parts) == 2 and action not in {"current", "list"}
+    )
+    if switch_requested and not allow_switch:
+        print(
+            "Session 已创建，模型绑定已冻结；"
+            "请新建 Session 并在首条消息前切换模型。"
+        )
+        return
     try:
         if action == "list":
             for line in format_model_rows(
@@ -759,6 +824,13 @@ def model_switch(
 
 @agent_app.command(name="chat")
 def agent_chat(
+    session_id: Annotated[
+        str | None,
+        typer.Option(
+            "--session-id",
+            help="继续一个持久化 Session；省略则创建新 Session。",
+        ),
+    ] = None,
     storage_root: Annotated[
         Path, typer.Option("--storage-root", help="RAG 存储根目录", hidden=True)
     ] = Path(".rag"),
@@ -831,6 +903,7 @@ def agent_chat(
             agent_type=agent,
             requested_model=model,
             budget=budget,
+            session_id=session_id,
         )
     )
 
@@ -854,8 +927,13 @@ def agent_run(
     verbose: Annotated[
         bool, typer.Option("--verbose", "-v", help="详细输出")
     ] = False,
-    run_id: Annotated[
-        str | None, typer.Option("--run-id", help="指定 run_id，便于后续 resume")
+    turn_id: Annotated[
+        str | None,
+        typer.Option(
+            "--turn-id",
+            "--run-id",
+            help="指定 UUID Turn ID；--run-id 仅作兼容别名。",
+        ),
     ] = None,
     checkpoint_db: Annotated[
         Path,
@@ -960,7 +1038,7 @@ def agent_run(
         vector_namespace=vector_namespace,
         vector_collection_prefix=vector_collection_prefix,
     )
-    effective_run_id = run_id or f"run_{id(facade):x}"
+    effective_turn_id = turn_id or str(uuid4())
     interactive_approval = (
         not non_interactive and _is_interactive_terminal()
     )
@@ -969,7 +1047,7 @@ def agent_run(
             facade,
             task=task,
             files=input_files or [],
-            run_id=effective_run_id,
+            turn_id=effective_turn_id,
             max_tokens_total=budget,
             interactive_approval=interactive_approval,
             tools=tool_names,
@@ -988,20 +1066,10 @@ def agent_run(
         resume_args = [
             "agent",
             "resume",
-            effective_run_id,
-            "--agent",
-            agent,
+            result.turn_id,
             "--checkpoint-db",
             str(checkpoint_db),
         ]
-        if model is not None:
-            resume_args.extend(("--model", model))
-        for source in knowledge or ():
-            resume_args.extend(("--knowledge", source))
-        if raw_result is not None and raw_result.workspace_path:
-            resume_args.extend(
-                ("--workspace-path", raw_result.workspace_path)
-            )
         print(f"   {shlex.join(resume_args)}")
 
         if raw_result is not None and raw_result.needs_user_input:
@@ -1015,96 +1083,53 @@ def agent_run(
 
 @agent_app.command(name="resume")
 def agent_resume(
-    run_id: Annotated[str, typer.Argument(help="要恢复的 run_id/thread_id")],
-    storage_root: Annotated[
-        Path, typer.Option("--storage-root", help="RAG 存储根目录", hidden=True)
-    ] = Path(".rag"),
-    agent: Annotated[
-        str,
-        typer.Option(
-            "--agent",
-            help="恢复时使用的根 Agent，必须与原 run 一致。",
-        ),
-    ] = "generic",
+    turn_id: Annotated[str, typer.Argument(help="要恢复的 UUID Turn ID")],
     checkpoint_db: Annotated[
         Path,
         typer.Option("--checkpoint-db", help="SQLite checkpoint 文件"),
-    ] = Path(".rag/agent_checkpoints.sqlite"),
-    decision: Annotated[
+    ] = DEFAULT_CHECKPOINT_PATH,
+    action: Annotated[
         str,
-        typer.Option("--decision", help="allow_once | deny | continue | abort"),
-    ] = "allow_once",
+        typer.Option(
+            "--action",
+            "--decision",
+            help=(
+                "allow_once | deny | continue | mark_completed | "
+                "mark_failed | abort"
+            ),
+        ),
+    ] = "continue",
+    user_input: Annotated[
+        str | None,
+        typer.Option("--input", help="clarification/choice 恢复时的用户输入"),
+    ] = None,
     verbose: Annotated[
         bool, typer.Option("--verbose", "-v", help="详细输出")
     ] = False,
-    model: Annotated[
-        str | None,
-        typer.Option("--model", help="主生成模型别名，对应 configs/models.yaml 中 capability=chat 的条目"),
-    ] = None,
-    knowledge: Annotated[
-        list[str] | None,
-        typer.Option("--knowledge", help="恢复原 run 显式启用的知识库，可多次指定"),
-    ] = None,
-    embedding_model: Annotated[
-        str | None,
-        typer.Option(
-            "--embedding-model",
-            help="Embedding 模型别名，对应 configs/models.yaml 中 capability=embedding 的条目",
-            hidden=True,
-        ),
-    ] = None,
-    reranker_model: Annotated[
-        str | None,
-        typer.Option(
-            "--reranker-model",
-            help="Reranker 模型别名，对应 configs/models.yaml 中 capability=reranker 的条目",
-            hidden=True,
-        ),
-    ] = None,
-    vector_backend: Annotated[
-        str,
-        typer.Option("--vector-backend", help="Vector backend: milvus or sqlite.", hidden=True),
-    ] = DEFAULT_VECTOR_BACKEND,
     vector_dsn: Annotated[
         str | None,
-        typer.Option("--vector-dsn", help="Vector backend DSN.", hidden=True),
-    ] = None,
-    vector_namespace: Annotated[
-        str | None,
-        typer.Option("--vector-namespace", help="Vector namespace/database.", hidden=True),
-    ] = None,
-    vector_collection_prefix: Annotated[
-        str | None,
-        typer.Option("--vector-collection-prefix", help="Milvus collection prefix used at ingest time.", hidden=True),
-    ] = None,
-    workspace_path: Annotated[
-        str | None,
-        typer.Option("--workspace-path", help="Workspace 路径，恢复 PrimitiveOps runner 所需"),
+        typer.Option(
+            "--vector-dsn",
+            help="恢复知识库时从当前进程注入的敏感 DSN。",
+            hidden=True,
+        ),
     ] = None,
 ) -> None:
-    """从 SQLite checkpoint 恢复暂停的 Agent 运行。"""
+    """先读取持久化 Turn 元数据，再恢复未完成的 Turn。"""
     facade = _create_agent_facade(
-        model=model,
-        agent_type=agent,
         checkpoint_db=checkpoint_db,
-        workspace_path=workspace_path or Path.cwd(),
-        model_session_path=DEFAULT_MODEL_SESSION_PATH,
-        knowledge=tuple(knowledge or ()),
-        rag_storage_root=storage_root,
-        embedding_model=embedding_model,
-        reranker_model=reranker_model,
-        vector_backend=vector_backend,
         vector_dsn=vector_dsn,
-        vector_namespace=vector_namespace,
-        vector_collection_prefix=vector_collection_prefix,
     )
     result = asyncio.run(
         _resume_facade_command(
             facade,
-            run_id=run_id,
-            decision=decision,
+            turn_id=turn_id,
+            action=action,
+            user_input=user_input,
         )
     )
-    _display_result(result, verbose=verbose)
+    _display_agent_result(result, verbose=verbose)
+    if result.status == "paused":
+        raise typer.Exit(code=2)
     if result.status == "failed":
         raise typer.Exit(code=1)

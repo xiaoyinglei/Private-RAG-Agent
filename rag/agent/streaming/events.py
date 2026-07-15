@@ -30,6 +30,9 @@ class EventType(Enum):
     # ── 上下文管理 ────────────────────────────────────────
     COMPACT_LAYER = "compact_layer"  # 单层压缩完成
 
+    # ── 计划状态 ──────────────────────────────────────────
+    PLAN_UPDATED = "plan_updated"  # update_plan 已写入 canonical PlanState
+
     # ── 会话控制 ──────────────────────────────────────────
     TURN_START = "turn_start"  # 一轮开始
     TURN_END = "turn_end"  # 一轮结束
@@ -48,6 +51,7 @@ class StreamEvent:
 
     type: EventType
     run_id: str = ""
+    session_id: str = ""
     turn: int = 0
     seq: int = 0
     timestamp_ms: int = 0
@@ -58,6 +62,12 @@ class StreamEvent:
     def __post_init__(self) -> None:
         if self.timestamp_ms == 0:
             object.__setattr__(self, "timestamp_ms", _now_ms())
+
+    @property
+    def turn_id(self) -> str:
+        """Public Session/Turn name for the legacy event run identifier."""
+
+        return self.run_id
 
 
 def _now_ms() -> int:

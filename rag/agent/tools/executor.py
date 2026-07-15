@@ -37,6 +37,8 @@ from rag.agent.tools.tool import (
     json_schema_output,
 )
 
+_NETWORK_APPROVAL_SUFFIX = "::network"
+
 
 class ExecutionBoundary(StrEnum):
     DIRECT = "direct"
@@ -46,10 +48,15 @@ class ExecutionBoundary(StrEnum):
 
 class ExecutionStatus(StrEnum):
     PREPARED = "prepared"
-    RUNNING = "running"
+    STARTED = "started"
     COMPLETED = "completed"
     FAILED = "failed"
-    UNKNOWN = "unknown"
+    OUTCOME_UNKNOWN = "outcome_unknown"
+
+    # Source compatibility for checkpoints and callers created before the
+    # durable prepared/started boundary was made explicit.
+    RUNNING = "started"
+    UNKNOWN = "outcome_unknown"
 
 
 @dataclass(frozen=True, slots=True)
@@ -128,6 +135,10 @@ type Externalizer = Callable[
     tuple[NormalizedToolOutput, bool],
 ]
 type TraceSink = Callable[[ToolExecutionTrace], None | Awaitable[None]]
+type RecordSink = Callable[
+    [ToolExecutionRecord],
+    None | Awaitable[None],
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -139,6 +150,7 @@ class _PreparedExecution:
     boundary: ExecutionBoundary
     decision: CanUseToolResult
     record: ToolExecutionRecord
+    record_sink: RecordSink | None
     started_at: float
 
 
@@ -196,6 +208,7 @@ class ToolExecutor:
         *,
         context: ToolExecutionContext,
         record: ToolExecutionRecord | None = None,
+        record_sink: RecordSink | None = None,
     ) -> ToolExecution:
         trace_count = len(self._traces)
         started_at = time.monotonic()
@@ -204,6 +217,7 @@ class ToolExecutor:
                 call,
                 context=context,
                 record=record,
+                record_sink=record_sink,
                 started_at=started_at,
             )
             if isinstance(prepared, ToolExecution):
@@ -230,6 +244,7 @@ class ToolExecutor:
         *,
         context: ToolExecutionContext,
         records: Mapping[str, ToolExecutionRecord] | None = None,
+        record_sink: RecordSink | None = None,
     ) -> tuple[ToolExecution, ...]:
         prior_records = records or {}
         completed: dict[int, ToolExecution] = {}
@@ -239,6 +254,7 @@ class ToolExecutor:
                 call,
                 context=context,
                 record=prior_records.get(call.tool_call_id),
+                record_sink=record_sink,
                 started_at=time.monotonic(),
             )
             if isinstance(item, ToolExecution):
@@ -263,8 +279,23 @@ class ToolExecutor:
         *,
         context: ToolExecutionContext,
         record: ToolExecutionRecord | None,
+        record_sink: RecordSink | None,
         started_at: float,
     ) -> _PreparedExecution | ToolExecution:
+        if call.tool_call_id.endswith(_NETWORK_APPROVAL_SUFFIX):
+            return await self._finish(
+                call=call,
+                result=_error_result(
+                    call,
+                    code="invalid_tool_call_id",
+                    message=(
+                        "tool call ID uses a reserved approval scope suffix"
+                    ),
+                    retryable=False,
+                ),
+                record=None,
+                started_at=started_at,
+            )
         tool = self._tools.get(call.tool_name)
         if tool is None:
             return await self._finish(
@@ -296,13 +327,24 @@ class ToolExecutor:
             if (
                 record is not None
                 and record_error == "tool_reconciliation_required"
-                and record.status is ExecutionStatus.RUNNING
+                and record.status is ExecutionStatus.STARTED
             ):
                 record = replace(
                     record,
-                    status=ExecutionStatus.UNKNOWN,
+                    status=ExecutionStatus.OUTCOME_UNKNOWN,
                     error_code="interrupted_outcome_unknown",
                     requires_reconciliation=True,
+                )
+            if record is not None and record_error in {
+                "execution_already_completed",
+                "execution_already_failed",
+            }:
+                return await self._finish(
+                    call=call,
+                    result=_recorded_outcome_result(call, record),
+                    record=record,
+                    record_sink=record_sink,
+                    started_at=started_at,
                 )
             return await self._finish(
                 call=call,
@@ -317,6 +359,7 @@ class ToolExecutor:
                     retryable=False,
                 ),
                 record=record,
+                record_sink=record_sink,
                 started_at=started_at,
             )
 
@@ -449,63 +492,52 @@ class ToolExecutor:
                 decision=decision.decision,
             )
         if decision.decision is UseToolDecision.ASK:
-            try:
-                approved = self._approval_resolver(
-                    call,
-                    tool,
-                    arguments,
-                    resolved,
-                    context,
-                    decision,
-                )
-                if inspect.isawaitable(approved):
-                    approved = await approved
-                if approved not in (True, False, None):
-                    raise TypeError("approval resolver must return bool or None")
-            except Exception:
-                return await self._finish(
-                    call=call,
-                    result=_error_result(
-                        call,
-                        code="approval_failed",
-                        message="tool approval resolution failed closed",
-                        retryable=True,
-                    ),
-                    record=None,
-                    started_at=started_at,
-                    resolved=resolved,
-                    boundary=boundary,
-                    decision=decision.decision,
-                )
-            if approved is not True:
-                denied = approved is False
-                return await self._finish(
-                    call=call,
-                    result=_error_result(
-                        call,
-                        code="tool_denied" if denied else "approval_required",
-                        message=(
-                            "tool call was denied"
-                            if denied
-                            else decision.reason
-                        ),
-                        retryable=not denied,
-                    ),
-                    record=None,
-                    started_at=started_at,
-                    resolved=resolved,
-                    boundary=boundary,
-                    decision=decision.decision,
-                )
+            approval_result = await self._require_approval(
+                call=call,
+                tool=tool,
+                arguments=arguments,
+                resolved=resolved,
+                context=context,
+                decision=decision,
+                boundary=boundary,
+                started_at=started_at,
+            )
+            if approval_result is not None:
+                return approval_result
 
-        execution_record = record or ToolExecutionRecord.prepare(call, tool)
+        if (
+            ToolEffect.NETWORK in resolved.effects
+            and ToolEffect.EXECUTE_PROCESS in resolved.effects
+            and not (
+                decision.decision is UseToolDecision.ASK
+                and decision.approval_scope == "network"
+            )
+        ):
+            network_decision = CanUseToolResult(
+                UseToolDecision.ASK,
+                "approval required for network access",
+                approval_scope="network",
+            )
+            approval_result = await self._require_approval(
+                call=call,
+                tool=tool,
+                arguments=arguments,
+                resolved=resolved,
+                context=context,
+                decision=network_decision,
+                boundary=boundary,
+                started_at=started_at,
+            )
+            if approval_result is not None:
+                return approval_result
+
         execution_record = replace(
-            execution_record,
-            status=ExecutionStatus.RUNNING,
-            attempt_count=execution_record.attempt_count + 1,
+            record or ToolExecutionRecord.prepare(call, tool),
+            status=ExecutionStatus.PREPARED,
             error_code=None,
             requires_reconciliation=False,
         )
+        await _emit_record(record_sink, execution_record)
         return _PreparedExecution(
             call=call,
             tool=tool,
@@ -514,10 +546,80 @@ class ToolExecutor:
             boundary=boundary,
             decision=decision,
             record=execution_record,
+            record_sink=record_sink,
             started_at=started_at,
         )
 
+    async def _require_approval(
+        self,
+        *,
+        call: ToolCall,
+        tool: Tool,
+        arguments: Mapping[str, JsonValue],
+        resolved: ResolvedToolUse,
+        context: ToolExecutionContext,
+        decision: CanUseToolResult,
+        boundary: ExecutionBoundary,
+        started_at: float,
+    ) -> ToolExecution | None:
+        try:
+            approved = self._approval_resolver(
+                call,
+                tool,
+                arguments,
+                resolved,
+                context,
+                decision,
+            )
+            if inspect.isawaitable(approved):
+                approved = await approved
+            if approved not in (True, False, None):
+                raise TypeError("approval resolver must return bool or None")
+        except Exception:
+            return await self._finish(
+                call=call,
+                result=_error_result(
+                    call,
+                    code="approval_failed",
+                    message="tool approval resolution failed closed",
+                    retryable=True,
+                    metadata=_approval_metadata(call, resolved, decision),
+                ),
+                record=None,
+                started_at=started_at,
+                resolved=resolved,
+                boundary=boundary,
+                decision=decision.decision,
+            )
+        if approved is True:
+            return None
+        denied = approved is False
+        return await self._finish(
+            call=call,
+            result=_error_result(
+                call,
+                code="tool_denied" if denied else "approval_required",
+                message=("tool call was denied" if denied else decision.reason),
+                retryable=not denied,
+                metadata=_approval_metadata(call, resolved, decision),
+            ),
+            record=None,
+            started_at=started_at,
+            resolved=resolved,
+            boundary=boundary,
+            decision=decision.decision,
+        )
+
     async def _invoke(self, prepared: _PreparedExecution) -> ToolExecution:
+        started_record = replace(
+            prepared.record,
+            status=ExecutionStatus.STARTED,
+            attempt_count=prepared.record.attempt_count + 1,
+            error_code=None,
+            requires_reconciliation=False,
+        )
+        await _emit_record(prepared.record_sink, started_record)
+        prepared = replace(prepared, record=started_record)
         try:
             raw = await _run_with_timeout(
                 prepared.tool,
@@ -544,7 +646,7 @@ class ToolExecutor:
             requires_reconciliation = not prepared.tool.idempotent
             record = replace(
                 prepared.record,
-                status=ExecutionStatus.UNKNOWN,
+                status=ExecutionStatus.OUTCOME_UNKNOWN,
                 error_code="timeout_outcome_unknown",
                 requires_reconciliation=requires_reconciliation,
             )
@@ -563,7 +665,7 @@ class ToolExecutor:
             requires_reconciliation = not prepared.tool.idempotent
             record = replace(
                 prepared.record,
-                status=ExecutionStatus.UNKNOWN,
+                status=ExecutionStatus.OUTCOME_UNKNOWN,
                 error_code="cancelled_outcome_unknown",
                 requires_reconciliation=requires_reconciliation,
             )
@@ -709,6 +811,7 @@ class ToolExecutor:
         call: ToolCall,
         result: ToolResult,
         record: ToolExecutionRecord | None,
+        record_sink: RecordSink | None = None,
         started_at: float | None = None,
         resolved: ResolvedToolUse | None = None,
         boundary: ExecutionBoundary | None = None,
@@ -720,6 +823,9 @@ class ToolExecutor:
             resolved = prepared.resolved
             boundary = prepared.boundary
             decision = prepared.decision.decision
+            record_sink = prepared.record_sink
+        if record is not None:
+            await _emit_record(record_sink, record)
         trace = ToolExecutionTrace(
             tool_call_id=call.tool_call_id,
             tool_name=call.tool_name,
@@ -766,10 +872,15 @@ def _resolve_external_approval(
     context: ToolExecutionContext,
     decision: CanUseToolResult,
 ) -> bool | None:
-    del tool, arguments, resolved, decision
-    if call.tool_call_id in context.denied_tool_call_ids:
+    del tool, arguments, resolved
+    approval_id = (
+        _network_approval_id(call.tool_call_id)
+        if decision.approval_scope == "network"
+        else call.tool_call_id
+    )
+    if approval_id in context.denied_tool_call_ids:
         return False
-    if call.tool_call_id in context.approved_tool_call_ids:
+    if approval_id in context.approved_tool_call_ids:
         return True
     return None
 
@@ -942,14 +1053,60 @@ def _record_error(
     ):
         return "execution_record_mismatch"
     if (
-        record.status is ExecutionStatus.UNKNOWN
+        record.status is ExecutionStatus.OUTCOME_UNKNOWN
         and record.requires_reconciliation
     ) or (
-        record.status is ExecutionStatus.RUNNING
+        record.status is ExecutionStatus.STARTED
         and not record.idempotent
     ):
         return "tool_reconciliation_required"
+    if record.status is ExecutionStatus.COMPLETED:
+        return "execution_already_completed"
+    if record.status is ExecutionStatus.FAILED:
+        return "execution_already_failed"
     return None
+
+
+async def _emit_record(
+    sink: RecordSink | None,
+    record: ToolExecutionRecord,
+) -> None:
+    if sink is None:
+        return
+    emitted = sink(record)
+    if inspect.isawaitable(emitted):
+        await emitted
+
+
+def _recorded_outcome_result(
+    call: ToolCall,
+    record: ToolExecutionRecord,
+) -> ToolResult:
+    completed = record.status is ExecutionStatus.COMPLETED
+    text = (
+        "The tool outcome was reconciled as completed; the operation was not "
+        "replayed."
+        if completed
+        else "The tool outcome was reconciled as failed; the operation was not replayed."
+    )
+    return ToolResult(
+        tool_call_id=call.tool_call_id,
+        tool_name=call.tool_name,
+        content=(ToolContentBlock(type="text", data={"text": text}),),
+        structured_content={
+            "operation_id": record.operation_id,
+            "status": record.status.value,
+            "reconciled": True,
+        },
+        is_error=not completed,
+        error_code=(None if completed else record.error_code or "reconciled_failed"),
+        error_message=(None if completed else text),
+        retryable=False,
+        metadata={
+            "operation_id": record.operation_id,
+            "reconciled": True,
+        },
+    )
 
 
 def _arguments_digest(arguments: Mapping[str, JsonValue]) -> str:
@@ -976,6 +1133,7 @@ def _error_result(
     code: str,
     message: str,
     retryable: bool,
+    metadata: Mapping[str, JsonValue] | None = None,
 ) -> ToolResult:
     safe_message = " ".join(message.split())[:512]
     return ToolResult(
@@ -988,7 +1146,35 @@ def _error_result(
         error_code=code,
         error_message=safe_message,
         retryable=retryable,
+        metadata={} if metadata is None else metadata,
     )
+
+
+def _approval_metadata(
+    call: ToolCall,
+    resolved: ResolvedToolUse,
+    decision: CanUseToolResult,
+) -> Mapping[str, JsonValue]:
+    approval_id = (
+        _network_approval_id(call.tool_call_id)
+        if decision.approval_scope == "network"
+        else call.tool_call_id
+    )
+    metadata: dict[str, JsonValue] = {
+        "approval_id": approval_id,
+        "approval_scope": decision.approval_scope,
+        "network_requested": ToolEffect.NETWORK in resolved.effects,
+    }
+    for target in resolved.targets:
+        if target.kind == "cwd_path":
+            metadata["cwd"] = target.value
+        elif target.kind == "execution_mode":
+            metadata["execution_mode"] = target.value
+    return metadata
+
+
+def _network_approval_id(tool_call_id: str) -> str:
+    return f"{tool_call_id}{_NETWORK_APPROVAL_SUFFIX}"
 
 
 def _model_visible_size(output: NormalizedToolOutput) -> int:

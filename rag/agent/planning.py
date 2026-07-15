@@ -254,6 +254,51 @@ class PlanTracker:
             allowed_tool_names=allowed_tool_names,
         )
 
+    def replace_from_tool(
+        self,
+        plan: AgentPlan,
+        *,
+        steps: Sequence[PlanStep],
+        summary: str | None,
+    ) -> tuple[AgentPlan, list[PlanEvent]]:
+        """Persist the complete visible plan submitted through update_plan."""
+
+        warnings: list[str] = []
+        if len(steps) > self.max_steps:
+            warnings.append("steps_truncated")
+        bounded_steps = list(steps[: self.max_steps])
+        active_step_id = next(
+            (
+                step.step_id
+                for status in ("in_progress", "pending")
+                for step in bounded_steps
+                if step.status == status
+            ),
+            None,
+        )
+        updated = AgentPlan(
+            objective=plan.objective,
+            status=(
+                "complete"
+                if bounded_steps
+                and all(step.status == "completed" for step in bounded_steps)
+                else "active"
+            ),
+            revision=plan.revision + 1,
+            active_step_id=active_step_id,
+            steps=bounded_steps,
+            summary=summary,
+        )
+        return updated, [
+            self._event(
+                "llm_update",
+                updated,
+                message="Applied update_plan tool update.",
+                related_step_id=updated.active_step_id,
+                warnings=warnings,
+            )
+        ]
+
     def record_decision_progress(
         self,
         plan: AgentPlan,

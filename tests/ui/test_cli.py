@@ -6,6 +6,7 @@ from pathlib import Path
 from pytest import MonkeyPatch
 from typer.testing import CliRunner
 
+import rag.agent.cli as agent_cli
 import rag.cli as cli
 from rag import StorageConfig
 from rag.agent.cli import agent_app
@@ -209,8 +210,10 @@ def test_assembly_profile_cli_surface_is_removed() -> None:
     assert "--profile" not in agent_chat_output
     assert "--profile" not in agent_resume_output
 
-    for output in (agent_run_output, agent_chat_output, agent_resume_output):
+    for output in (agent_run_output, agent_chat_output):
         assert "--model" in output
+    assert "--model" not in agent_resume_output
+    for output in (agent_run_output, agent_chat_output, agent_resume_output):
         assert "--storage-root" not in output
         assert "--embedding-model" not in output
         assert "--reranker-model" not in output
@@ -238,6 +241,22 @@ def test_agent_cli_is_the_top_level_agent_entrypoint() -> None:
     assert "resume" in root_output
     assert "model" in root_output
     assert "--agent" in _plain_help(run_help.output)
+
+
+def test_chat_model_switch_fails_after_session_has_started(capsys) -> None:
+    class UnexpectedControlPlane:
+        def switch_model(self, model_id: str, *, requested_by: str):
+            raise AssertionError(
+                f"must not switch {model_id!r} for {requested_by!r}"
+            )
+
+    agent_cli._handle_model_slash_command(
+        "/model switch qwen3_5_9b_mlx_4bit",
+        control_plane=UnexpectedControlPlane(),
+        allow_switch=False,
+    )
+
+    assert "Session 已创建" in capsys.readouterr().out
 
 
 def test_rag_cli_no_longer_exposes_agent_or_analyze_task() -> None:
@@ -332,11 +351,15 @@ def test_agent_run_help_exposes_explicit_agent_selector() -> None:
     assert "generic" in output
 
 
-def test_agent_resume_help_exposes_agent_selector_for_checkpoint_restore() -> None:
+def test_agent_resume_help_uses_persisted_runtime_metadata() -> None:
     result = runner.invoke(agent_app, ["resume", "--help"], env={"COLUMNS": "240"})
 
     assert result.exit_code == 0
-    assert "--agent" in _plain_help(result.output)
+    output = _plain_help(result.output)
+    assert "--agent" not in output
+    assert "--model" not in output
+    assert "--checkpoint-db" in output
+    assert "Turn ID" in output
 
 
 def test_cli_benchmark_help_defaults_to_new_milvus_backend() -> None:

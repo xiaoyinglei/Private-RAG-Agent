@@ -5,6 +5,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
+from typing import Literal
 
 from rag.agent.tools.tool import JsonValue, ResolvedToolUse, Tool, ToolEffect
 
@@ -21,12 +22,15 @@ class UseToolDecision(StrEnum):
 class CanUseToolResult:
     decision: UseToolDecision
     reason: str
+    approval_scope: Literal["tool", "network"] = "tool"
 
     def __post_init__(self) -> None:
         if not isinstance(self.decision, UseToolDecision):
             raise TypeError("decision must be a UseToolDecision")
         if not isinstance(self.reason, str) or not self.reason:
             raise ValueError("reason must be a non-empty string")
+        if self.approval_scope not in {"tool", "network"}:
+            raise ValueError("approval_scope must be tool or network")
 
 
 @dataclass(frozen=True, slots=True)
@@ -110,14 +114,31 @@ def can_use_tool(
         and not context.allow_execute_tools
     ):
         approval_reasons.append("process execution")
-    if ToolEffect.NETWORK in resolved.effects:
-        approval_reasons.append("network access")
     if ToolEffect.DESTRUCTIVE in resolved.effects:
         approval_reasons.append("destructive operation")
+    separate_network_approval = (
+        ToolEffect.NETWORK in resolved.effects
+        and ToolEffect.EXECUTE_PROCESS in resolved.effects
+    )
+    if (
+        ToolEffect.NETWORK in resolved.effects
+        and not separate_network_approval
+    ):
+        approval_reasons.append("network access")
     if approval_reasons:
+        reason = "approval required for " + ", ".join(approval_reasons)
+        if separate_network_approval:
+            reason += "; network access requires a separate approval"
         return CanUseToolResult(
             UseToolDecision.ASK,
-            "approval required for " + ", ".join(approval_reasons),
+            reason,
+            approval_scope="tool",
+        )
+    if separate_network_approval:
+        return CanUseToolResult(
+            UseToolDecision.ASK,
+            "approval required for network access",
+            approval_scope="network",
         )
     return CanUseToolResult(UseToolDecision.ALLOW, "resolved effects are allowed")
 

@@ -62,6 +62,7 @@ class AgentRunConfig:
     thread_id: str
     max_depth: int
     access_policy: AccessPolicy
+    session_id: str | None = None
     llm_budget_total: int | None = None
     max_turns: int | None = None
     agent_type: str | None = None

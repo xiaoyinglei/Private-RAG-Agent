@@ -234,6 +234,67 @@ async def test_executor_uses_the_exact_success_order() -> None:
 
 
 @pytest.mark.anyio
+async def test_execution_record_is_prepared_then_started_before_runner() -> None:
+    events: list[str] = []
+
+    async def record_sink(record: ToolExecutionRecord) -> None:
+        events.append(f"record:{record.status.value}")
+
+    async def runner(_arguments: Mapping[str, Any]) -> object:
+        events.append("runner")
+        return {"value": "done"}
+
+    executor = ToolExecutor(
+        {"demo": _tool(run=runner, idempotent=False)}
+    )
+
+    execution = await executor.execute(
+        _call(),
+        context=_context(),
+        record_sink=record_sink,
+    )
+
+    assert events == [
+        "record:prepared",
+        "record:started",
+        "runner",
+        "record:completed",
+    ]
+    assert execution.record is not None
+    assert execution.record.status is ExecutionStatus.COMPLETED
+
+
+@pytest.mark.anyio
+async def test_started_record_must_be_durable_before_runner_is_called() -> None:
+    runner_calls = 0
+    statuses: list[ExecutionStatus] = []
+
+    async def record_sink(record: ToolExecutionRecord) -> None:
+        statuses.append(record.status)
+        if record.status is ExecutionStatus.STARTED:
+            raise RuntimeError("durability unavailable")
+
+    async def runner(_arguments: Mapping[str, Any]) -> object:
+        nonlocal runner_calls
+        runner_calls += 1
+        return {"value": "must not run"}
+
+    executor = ToolExecutor(
+        {"demo": _tool(run=runner, idempotent=False)}
+    )
+
+    with pytest.raises(RuntimeError, match="durability unavailable"):
+        await executor.execute(
+            _call(),
+            context=_context(),
+            record_sink=record_sink,
+        )
+
+    assert statuses == [ExecutionStatus.PREPARED, ExecutionStatus.STARTED]
+    assert runner_calls == 0
+
+
+@pytest.mark.anyio
 async def test_unknown_tool_never_reaches_permission() -> None:
     permission_calls = 0
 
@@ -500,6 +561,97 @@ def test_can_use_tool_is_a_pure_effect_decision(
 
     assert result.decision is decision
     assert result.reason
+
+
+@pytest.mark.anyio
+async def test_network_effect_requires_separate_approval_from_execution(
+    tmp_path: Path,
+) -> None:
+    runner_calls = 0
+
+    async def runner(_arguments: Mapping[str, Any]) -> object:
+        nonlocal runner_calls
+        runner_calls += 1
+        return {"value": "ok"}
+
+    tool = _tool(
+        run=runner,
+        static_effects=frozenset(
+            {ToolEffect.EXECUTE_PROCESS, ToolEffect.NETWORK}
+        ),
+    )
+    call = _call()
+    executor = ToolExecutor({"demo": tool})
+
+    execution_approval = await executor.execute(
+        call,
+        context=_context(workspace_root=tmp_path),
+    )
+    assert execution_approval.result.error_code == "approval_required"
+    assert execution_approval.result.metadata["approval_scope"] == "tool"
+    assert execution_approval.result.metadata["approval_id"] == call.tool_call_id
+    assert runner_calls == 0
+
+    network_approval = await executor.execute(
+        call,
+        context=_context(
+            workspace_root=tmp_path,
+            approved=frozenset({call.tool_call_id}),
+        ),
+    )
+    assert network_approval.result.error_code == "approval_required"
+    assert network_approval.result.metadata["approval_scope"] == "network"
+    network_approval_id = str(
+        network_approval.result.metadata["approval_id"]
+    )
+    assert network_approval_id != call.tool_call_id
+    assert runner_calls == 0
+
+    denied = await executor.execute(
+        call,
+        context=_context(
+            workspace_root=tmp_path,
+            approved=frozenset({call.tool_call_id}),
+            denied=frozenset({network_approval_id}),
+        ),
+    )
+    assert denied.result.error_code == "tool_denied"
+    assert denied.result.metadata["approval_scope"] == "network"
+    assert runner_calls == 0
+
+    completed = await executor.execute(
+        call,
+        context=_context(
+            workspace_root=tmp_path,
+            approved=frozenset(
+                {call.tool_call_id, network_approval_id}
+            ),
+        ),
+    )
+    assert completed.result.is_error is False
+    assert runner_calls == 1
+
+
+@pytest.mark.anyio
+async def test_network_approval_id_cannot_collide_with_raw_tool_call_id() -> None:
+    runner_calls = 0
+
+    def runner(_arguments: Mapping[str, Any]) -> object:
+        nonlocal runner_calls
+        runner_calls += 1
+        return {"value": "must not run"}
+
+    executor = ToolExecutor({"demo": _tool(run=runner)})
+
+    execution = await executor.execute(
+        _call(call_id="call_other::network"),
+        context=_context(
+            approved=frozenset({"call_other::network"}),
+        ),
+    )
+
+    assert execution.result.error_code == "invalid_tool_call_id"
+    assert runner_calls == 0
 
 
 @pytest.mark.anyio
@@ -918,6 +1070,46 @@ async def test_non_idempotent_running_record_is_reconciled_before_retry() -> Non
     assert execution.record.requires_reconciliation is True
     assert runner_calls == 0
     _assert_one_trace(executor, "call_1", "tool_reconciliation_required")
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("status", "is_error"),
+    [
+        (ExecutionStatus.COMPLETED, False),
+        (ExecutionStatus.FAILED, True),
+    ],
+)
+async def test_reconciled_non_idempotent_outcome_is_never_replayed(
+    status: ExecutionStatus,
+    is_error: bool,
+) -> None:
+    runner_calls = 0
+
+    async def runner(_arguments: Mapping[str, Any]) -> object:
+        nonlocal runner_calls
+        runner_calls += 1
+        return {"value": "must not run"}
+
+    tool = _tool(run=runner, idempotent=False)
+    call = _call()
+    record = replace(
+        ToolExecutionRecord.prepare(call, tool),
+        status=status,
+        attempt_count=1,
+        error_code=(None if status is ExecutionStatus.COMPLETED else "operator_failed"),
+    )
+
+    execution = await ToolExecutor({"demo": tool}).execute(
+        call,
+        context=_context(),
+        record=record,
+    )
+
+    assert runner_calls == 0
+    assert execution.result.is_error is is_error
+    assert execution.result.metadata["reconciled"] is True
+    assert execution.record == record
 
 
 def _concurrency_tools(

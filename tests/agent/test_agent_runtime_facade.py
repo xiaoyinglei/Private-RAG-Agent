@@ -7,6 +7,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
+from uuid import uuid4
 
 import pytest
 from typer.testing import CliRunner
@@ -20,6 +21,7 @@ from rag.agent import cli as agent_cli
 from rag.agent.cli import agent_app
 from rag.agent.core.runtime_diagnostics import AgentLatencyProfile
 from rag.agent.service import AgentRunResult
+from rag.agent.sessions import RuntimeBinding, SessionStore
 from rag.agent.tools.executor import ToolExecutor
 from rag.agent.tools.integrations.knowledge import KnowledgeSearchInput
 from rag.agent.tools.permissions import ToolExecutionContext
@@ -48,11 +50,12 @@ def test_agent_facade_run_maps_public_request_to_internal_service(
         raise AssertionError("Agent() without knowledge must not initialize RAG")
 
     class _Service:
-        async def run(self, request: Any) -> AgentRunResult:
+        async def chat(self, request: Any) -> AgentRunResult:
             requests.append(request)
             return AgentRunResult(
                 run_id=request.run_id,
                 thread_id=request.thread_id,
+                session_id=request.session_id or str(uuid4()),
                 status="done",
                 final_answer="facade answer",
             )
@@ -71,10 +74,11 @@ def test_agent_facade_run_maps_public_request_to_internal_service(
         ),
     )
 
+    turn_id = str(uuid4())
     result = Agent(model="qwen3_14b_mlx_4bit").run(
         "summarize",
         files=["README.md"],
-        run_id="sdk-run",
+        run_id=turn_id,
         max_tokens_total=1234,
     )
 
@@ -82,12 +86,15 @@ def test_agent_facade_run_maps_public_request_to_internal_service(
     assert result.status == "done"
     assert result.files == ("README.md",)
     assert isinstance(built[0]["model_control_plane"], ModelControlPlane)
+    assert isinstance(built[0]["session_store"], SessionStore)
+    assert isinstance(built[0]["runtime_binding"], RuntimeBinding)
     assert isinstance(built[0]["startup_ms"], float)
     assert built[0]["startup_ms"] >= 0
     assert built == [
         {
             "runtime": None,
             "checkpoint_db": None,
+            "checkpointer": built[0]["checkpointer"],
             "agent_type": "generic",
             "model_alias": "qwen3_14b_mlx_4bit",
             "model_control_plane": built[0]["model_control_plane"],
@@ -99,13 +106,15 @@ def test_agent_facade_run_maps_public_request_to_internal_service(
             "skill_runtime": None,
             "stream_sink": None,
             "startup_ms": built[0]["startup_ms"],
+            "session_store": built[0]["session_store"],
+            "runtime_binding": built[0]["runtime_binding"],
         }
     ]
     assert len(requests) == 1
     request = requests[0]
     assert request.task == "summarize"
-    assert request.run_id == "sdk-run"
-    assert request.thread_id == "sdk-run"
+    assert request.run_id == turn_id
+    assert request.thread_id == turn_id
     assert request.llm_budget_total == 1234
     assert request.input_files == ["README.md"]
     assert request.tools is None
@@ -121,11 +130,12 @@ def test_agent_facade_run_passes_explicit_single_runtime_options(
     requests: list[Any] = []
 
     class _Service:
-        async def run(self, request: Any) -> AgentRunResult:
+        async def chat(self, request: Any) -> AgentRunResult:
             requests.append(request)
             return AgentRunResult(
                 run_id=request.run_id,
                 thread_id=request.thread_id,
+                session_id=request.session_id or str(uuid4()),
                 status="done",
                 final_answer="configured tools",
             )
@@ -135,7 +145,6 @@ def test_agent_facade_run_passes_explicit_single_runtime_options(
     with pytest.warns(DeprecationWarning, match="tool selection options"):
         Agent().run(
             "Find AgentService in this repository.",
-            run_id="sdk-tools",
             tools=["search_text", "read_file", "run_command"],
             disabled_tools=["read_file"],
             allow_execute_tools=True,
@@ -158,11 +167,12 @@ def test_agent_facade_binds_public_workspace_to_builder_and_request(
     requests: list[Any] = []
 
     class _Service:
-        async def run(self, request: Any) -> AgentRunResult:
+        async def chat(self, request: Any) -> AgentRunResult:
             requests.append(request)
             return AgentRunResult(
                 run_id=request.run_id,
                 thread_id=request.thread_id,
+                session_id=request.session_id or str(uuid4()),
                 status="done",
                 final_answer="workspace bound",
                 workspace_path=request.workspace_path,
@@ -176,7 +186,6 @@ def test_agent_facade_binds_public_workspace_to_builder_and_request(
 
     result = Agent(workspace_path=tmp_path / "workspace").run(
         "Inspect this workspace.",
-        run_id="workspace-run",
     )
 
     assert result.answer == "workspace bound"
@@ -277,10 +286,11 @@ def test_agent_facade_registers_knowledge_runner_lazily(monkeypatch: pytest.Monk
         raise AssertionError("Knowledge provider must initialize RAG only when the tool is called")
 
     class _Service:
-        async def run(self, request: Any) -> AgentRunResult:
+        async def chat(self, request: Any) -> AgentRunResult:
             return AgentRunResult(
                 run_id=request.run_id,
                 thread_id=request.thread_id,
+                session_id=request.session_id or str(uuid4()),
                 status="done",
                 final_answer="knowledge runner registered",
             )
@@ -294,7 +304,6 @@ def test_agent_facade_registers_knowledge_runner_lazily(monkeypatch: pytest.Monk
 
     result = Agent(model="qwen3_14b_mlx_4bit", knowledge=["company_docs"]).run(
         "lookup policy",
-        run_id="knowledge-run",
     )
 
     assert result.answer == "knowledge runner registered"
@@ -307,10 +316,11 @@ def test_agent_facade_closes_service_after_run(monkeypatch: pytest.MonkeyPatch) 
     closed: list[bool] = []
 
     class _Service:
-        async def run(self, request: Any) -> AgentRunResult:
+        async def chat(self, request: Any) -> AgentRunResult:
             return AgentRunResult(
                 run_id=request.run_id,
                 thread_id=request.thread_id,
+                session_id=request.session_id or str(uuid4()),
                 status="done",
                 final_answer="closed",
             )
@@ -320,7 +330,7 @@ def test_agent_facade_closes_service_after_run(monkeypatch: pytest.MonkeyPatch) 
 
     monkeypatch.setattr(runtime_builder, "build_agent_service", lambda *_args, **_kwargs: _Service())
 
-    result = Agent(model="qwen3_14b_mlx_4bit").run("close service", run_id="close-service")
+    result = Agent(model="qwen3_14b_mlx_4bit").run("close service")
 
     assert result.answer == "closed"
     assert closed == [True]
@@ -333,7 +343,7 @@ async def test_agent_stream_explicit_close_releases_one_shot_runtime(
     closed: list[bool] = []
 
     class _Service:
-        async def run_streaming(self, request: Any):
+        async def chat_streaming(self, request: Any):
             del request
             yield "first"
             yield "second"
@@ -347,7 +357,7 @@ async def test_agent_stream_explicit_close_releases_one_shot_runtime(
         lambda *_args, **_kwargs: _Service(),
     )
 
-    stream = Agent().stream("stream task", run_id="stream-close")
+    stream = Agent().stream("stream task", run_id=str(uuid4()))
     assert await anext(stream) == "first"
     await stream.aclose()
 
@@ -361,10 +371,11 @@ async def test_agent_runtime_close_has_a_bounded_grace_period(
     close_cancelled: list[bool] = []
 
     class _Service:
-        async def run(self, request: Any) -> AgentRunResult:
+        async def chat(self, request: Any) -> AgentRunResult:
             return AgentRunResult(
                 run_id=request.run_id,
                 thread_id=request.thread_id,
+                session_id=request.session_id or str(uuid4()),
                 status="done",
                 final_answer="done",
             )
@@ -382,7 +393,7 @@ async def test_agent_runtime_close_has_a_bounded_grace_period(
         lambda *_args, **_kwargs: _Service(),
     )
 
-    result = await Agent().arun("bounded close", run_id="bounded-close")
+    result = await Agent().arun("bounded close")
 
     assert result.answer == "done"
     assert close_cancelled == [True]
@@ -475,11 +486,12 @@ def test_agent_run_cli_delegates_to_agent_facade(monkeypatch: pytest.MonkeyPatch
         @asynccontextmanager
         async def _open_product_runtime(self, **_kwargs: object):
             class _Service:
-                async def run(self, request: Any) -> AgentRunResult:
-                    calls.append(("run", {"request": request}))
+                async def chat(self, request: Any) -> AgentRunResult:
+                    calls.append(("chat", {"request": request}))
                     return AgentRunResult(
                         run_id=request.run_id,
                         thread_id=request.thread_id,
+                        session_id=str(uuid4()),
                         status="done",
                         final_answer="cli facade answer",
                     )
@@ -492,6 +504,7 @@ def test_agent_run_cli_delegates_to_agent_facade(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setattr(agent_cli, "_create_agent_facade", lambda **kwargs: _Facade(**kwargs))
     monkeypatch.setattr(runtime_builder, "build_optional_rag_runtime", fail_rag_runtime)
 
+    turn_id = str(uuid4())
     result = CliRunner().invoke(
         agent_app,
         [
@@ -501,8 +514,8 @@ def test_agent_run_cli_delegates_to_agent_facade(monkeypatch: pytest.MonkeyPatch
             "qwen3_14b_4bit",
             "--file",
             str(Path("README.md")),
-            "--run-id",
-            "cli-run",
+            "--turn-id",
+            turn_id,
         ],
         env={"COLUMNS": "240"},
     )
@@ -515,7 +528,8 @@ def test_agent_run_cli_delegates_to_agent_facade(monkeypatch: pytest.MonkeyPatch
     request = calls[1][1]["request"]
     assert request.task == "hello"
     assert request.input_files == ["README.md"]
-    assert request.run_id == "cli-run"
+    assert request.run_id == turn_id
+    assert request.session_id is None
     assert request.allow_discovery_tools is None
 
 
@@ -532,11 +546,12 @@ def test_agent_run_cli_passes_explicit_tool_surface_config(
         @asynccontextmanager
         async def _open_product_runtime(self, **_kwargs: object):
             class _Service:
-                async def run(self, request: Any) -> AgentRunResult:
-                    calls.append(("run", {"request": request}))
+                async def chat(self, request: Any) -> AgentRunResult:
+                    calls.append(("chat", {"request": request}))
                     return AgentRunResult(
                         run_id=request.run_id,
                         thread_id=request.thread_id,
+                        session_id=str(uuid4()),
                         status="done",
                         final_answer="cli tools",
                     )
@@ -545,13 +560,14 @@ def test_agent_run_cli_passes_explicit_tool_surface_config(
 
     monkeypatch.setattr(agent_cli, "_create_agent_facade", lambda **kwargs: _Facade(**kwargs))
 
+    turn_id = str(uuid4())
     result = CliRunner().invoke(
         agent_app,
         [
             "run",
             "Find AgentService in this repository.",
-            "--run-id",
-            "cli-tools",
+            "--turn-id",
+            turn_id,
             "--tool",
             "search_text",
             "--tool",
@@ -585,10 +601,11 @@ def test_noninteractive_pause_prints_complete_resume_command(
         @asynccontextmanager
         async def _open_product_runtime(self, **_kwargs: object):
             class _Service:
-                async def run(self, request: Any) -> AgentRunResult:
+                async def chat(self, request: Any) -> AgentRunResult:
                     return AgentRunResult(
                         run_id=request.run_id,
                         thread_id=request.thread_id,
+                        session_id=str(uuid4()),
                         status="paused",
                         needs_user_input="approve command",
                         workspace_path=str(workspace),
@@ -602,13 +619,14 @@ def test_noninteractive_pause_prints_complete_resume_command(
         lambda **_kwargs: _Facade(),
     )
 
+    turn_id = str(uuid4())
     result = CliRunner().invoke(
         agent_app,
         [
             "run",
             "execute task",
             "--run-id",
-            "paused-run",
+            turn_id,
             "--model",
             "test-model",
             "--knowledge",
@@ -624,17 +642,9 @@ def test_noninteractive_pause_prints_complete_resume_command(
         [
             "agent",
             "resume",
-            "paused-run",
-            "--agent",
-            "generic",
+            turn_id,
             "--checkpoint-db",
             str(checkpoint),
-            "--model",
-            "test-model",
-            "--knowledge",
-            "company docs",
-            "--workspace-path",
-            str(workspace),
         ]
     )
     assert result.exit_code == 2
