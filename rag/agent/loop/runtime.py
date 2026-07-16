@@ -719,6 +719,7 @@ class AgentLoop:
                         tool_name=tool_result.tool_name,
                         tool_id=tool_result.tool_call_id,
                         result=_tool_result_text(tool_result)[:500],
+                        details=_tool_result_event_details(tool_result),
                         run_id=run_id,
                         turn=turn,
                     )
@@ -1288,6 +1289,25 @@ def _tool_result_text(result: ToolResult) -> str:
     )
 
 
+def _tool_result_event_details(result: ToolResult) -> dict[str, Any]:
+    if result.tool_name != "apply_patch":
+        return {}
+    file_path = result.metadata.get("file_path")
+    diff = result.metadata.get("diff")
+    diff_truncated = result.metadata.get("diff_truncated")
+    if (
+        not isinstance(file_path, str)
+        or not isinstance(diff, str)
+        or type(diff_truncated) is not bool
+    ):
+        return {}
+    return {
+        "file_path": file_path,
+        "diff": diff,
+        "diff_truncated": diff_truncated,
+    }
+
+
 _SENSITIVE_ARGUMENT_PARTS = (
     "api_key",
     "authorization",
@@ -1537,20 +1557,31 @@ def _stream_human_input_required(
     )
 
 
-def _stream_tool_use_result(*, tool_name: str, tool_id: str, result: str, run_id: str, turn: int) -> Any:
+def _stream_tool_use_result(
+    *,
+    tool_name: str,
+    tool_id: str,
+    result: str,
+    details: Mapping[str, Any] | None = None,
+    run_id: str,
+    turn: int,
+) -> Any:
     from rag.agent.streaming.events import EventType, StreamEvent, next_seq
 
+    data: dict[str, Any] = {
+        "tool_name": tool_name,
+        "tool_id": tool_id,
+        "result": result,
+    }
+    if details:
+        data["details"] = dict(details)
     return StreamEvent(
         type=EventType.TOOL_USE_RESULT,
         run_id=run_id,
         turn=turn,
         seq=next_seq(),
         span_id=f"tool:{tool_id}",
-        data={
-            "tool_name": tool_name,
-            "tool_id": tool_id,
-            "result": result,
-        },
+        data=data,
     )
 
 

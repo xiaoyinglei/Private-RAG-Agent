@@ -5,8 +5,9 @@ import logging
 import os
 import shlex
 import sys
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any, cast
 from uuid import uuid4
@@ -19,19 +20,32 @@ from agent_runtime.models import (
     format_model_rows,
 )
 from rag.agent.core.llm_registry import UnknownModelAliasError
+from rag.agent.sessions import (
+    SessionNotFoundError,
+    SessionRecord,
+    SessionStore,
+    TurnRecord,
+    TurnStateError,
+)
 from rag.agent.streaming.events import EventType, StreamEvent
 
 if TYPE_CHECKING:
     from agent_runtime import AgentResult
     from rag.agent.core.definition import AgentRuntimePolicy
-    from rag.agent.core.human_input import HumanInputResponse
+    from rag.agent.core.human_input import HumanInputRequest, HumanInputResponse
     from rag.agent.core.registry import AgentRegistry
     from rag.agent.core.runtime_diagnostics import RuntimeDiagnostic
     from rag.agent.service import AgentRunResult, AgentService
 
 agent_app = typer.Typer(add_completion=False, no_args_is_help=True)
 model_app = typer.Typer(add_completion=False, no_args_is_help=True)
+session_app = typer.Typer(add_completion=False, no_args_is_help=True)
 agent_app.add_typer(model_app, name="model", help="查看和切换当前模型会话。")
+agent_app.add_typer(
+    session_app,
+    name="session",
+    help="查看、归档和删除持久化 Session。",
+)
 logger = logging.getLogger(__name__)
 
 CLI_AGENT_CHOICES = ("generic",)
@@ -41,25 +55,172 @@ DEFAULT_VECTOR_BACKEND = "milvus"
 
 
 class _CLIToolEventDisplay:
-    """Render canonical tool-start events without deriving runtime state."""
+    """Project canonical stream events into bounded terminal output."""
 
     def __init__(self) -> None:
         self._displayed_tool_ids: set[str] = set()
+        self._displayed_tool_events: set[tuple[EventType, str]] = set()
+        self._displayed_plan_revisions: set[int | str] = set()
+        self._tool_names: dict[str, str] = {}
+        self._line_open = False
+        self.answer_streamed = False
 
     async def emit(self, event: StreamEvent) -> None:
-        if event.type is not EventType.TOOL_USE_START:
-            return
-        tool_id = event.data.get("tool_id")
-        if isinstance(tool_id, str) and tool_id:
-            if tool_id in self._displayed_tool_ids:
+        if event.type is EventType.TEXT_DELTA:
+            text = event.data.get("text")
+            if not isinstance(text, str) or not text:
                 return
-            self._displayed_tool_ids.add(tool_id)
+            print(text, end="", flush=True)
+            self.answer_streamed = True
+            self._line_open = not text.endswith("\n")
+            return
+
+        if event.type is EventType.TOOL_USE_START:
+            self._render_tool_start(event)
+            return
+        if event.type is EventType.TOOL_USE_PROGRESS:
+            self._render_tool_progress(event)
+            return
+        if event.type is EventType.TOOL_USE_RESULT:
+            self._render_tool_result(event)
+            return
+        if event.type is EventType.TOOL_USE_ERROR:
+            self._render_tool_error(event)
+            return
+        if event.type is EventType.PLAN_UPDATED:
+            self._render_plan(event)
+            return
+        if event.type is EventType.RECOVERY:
+            strategy = event.data.get("strategy")
+            if not isinstance(strategy, str) or not strategy:
+                return
+            detail = event.data.get("detail")
+            suffix = f" — {detail}" if isinstance(detail, str) and detail else ""
+            self._write_line(f"↻ 恢复: {strategy}{suffix}")
+
+    def _render_tool_start(self, event: StreamEvent) -> None:
+        tool_id = event.data.get("tool_id")
+        if not isinstance(tool_id, str) or not tool_id:
+            return
+        if tool_id in self._displayed_tool_ids:
+            return
+        self._displayed_tool_ids.add(tool_id)
         tool_name = event.data.get("tool_name")
         if not isinstance(tool_name, str) or not tool_name:
             return
+        self._tool_names[tool_id] = tool_name
         preview = event.data.get("input_preview")
         suffix = f": {preview}" if isinstance(preview, str) and preview else ""
-        print(f"\n→ {tool_name}{suffix}")
+        self._write_line(f"→ {tool_name}{suffix}")
+
+    def _render_tool_progress(self, event: StreamEvent) -> None:
+        tool_id = event.data.get("tool_id")
+        progress = event.data.get("progress")
+        if not isinstance(tool_id, str) or not isinstance(progress, str):
+            return
+        tool_name = self._tool_names.get(tool_id, "tool")
+        percent = event.data.get("percent")
+        percent_text = (
+            f" ({percent:g}%)" if isinstance(percent, (int, float)) else ""
+        )
+        self._write_line(f"… {tool_name}: {progress}{percent_text}")
+
+    def _render_tool_result(self, event: StreamEvent) -> None:
+        tool_id = event.data.get("tool_id")
+        if not isinstance(tool_id, str) or not tool_id:
+            return
+        marker = (EventType.TOOL_USE_RESULT, tool_id)
+        if marker in self._displayed_tool_events:
+            return
+        self._displayed_tool_events.add(marker)
+        event_name = event.data.get("tool_name")
+        tool_name = (
+            event_name
+            if isinstance(event_name, str) and event_name
+            else self._tool_names.get(tool_id, "tool")
+        )
+        result = event.data.get("result")
+        suffix = f": {_bounded_cli_text(str(result))}" if result is not None else ""
+        self._write_line(f"✓ {tool_name}{suffix}")
+        details = event.data.get("details")
+        if not isinstance(details, Mapping):
+            return
+        diff = details.get("diff")
+        if isinstance(diff, str) and diff:
+            self._write_block(diff)
+
+    def _render_tool_error(self, event: StreamEvent) -> None:
+        tool_id = event.data.get("tool_id")
+        if not isinstance(tool_id, str) or not tool_id:
+            return
+        marker = (EventType.TOOL_USE_ERROR, tool_id)
+        if marker in self._displayed_tool_events:
+            return
+        self._displayed_tool_events.add(marker)
+        error = event.data.get("error")
+        suffix = (
+            f": {_bounded_cli_text(error)}"
+            if isinstance(error, str) and error
+            else ""
+        )
+        self._write_line(f"✗ {self._tool_names.get(tool_id, 'tool')}{suffix}")
+
+    def _render_plan(self, event: StreamEvent) -> None:
+        plan = event.data.get("plan")
+        if not isinstance(plan, Mapping):
+            return
+        revision = plan.get("revision")
+        if not isinstance(revision, (int, str)):
+            return
+        if revision in self._displayed_plan_revisions:
+            return
+        self._displayed_plan_revisions.add(revision)
+        self._write_line(f"计划 (revision {revision})")
+        steps = plan.get("steps")
+        if not isinstance(steps, Sequence) or isinstance(steps, (str, bytes)):
+            return
+        symbols = {
+            "completed": "✓",
+            "in_progress": "→",
+            "failed": "✗",
+        }
+        for step in steps:
+            if not isinstance(step, Mapping):
+                continue
+            title = step.get("title")
+            if not isinstance(title, str) or not title:
+                continue
+            status = step.get("status")
+            symbol = symbols.get(status, "○") if isinstance(status, str) else "○"
+            self._write_line(f"  {symbol} {title}")
+
+    def _write_line(self, value: str) -> None:
+        if self._line_open:
+            print()
+        print(value, flush=True)
+        self._line_open = False
+
+    def _write_block(self, value: str) -> None:
+        if self._line_open:
+            print()
+        print(value.rstrip("\n"), flush=True)
+        self._line_open = False
+
+    def begin_turn(self) -> None:
+        self.finish()
+        self.answer_streamed = False
+
+    def finish(self) -> None:
+        if self._line_open:
+            print(flush=True)
+            self._line_open = False
+
+
+def _bounded_cli_text(value: str, *, limit: int = 180) -> str:
+    compact = " ".join(value.split())
+    if len(compact) <= limit:
+        return compact
+    return f"{compact[: limit - 1]}…"
 
 
 @dataclass(frozen=True)
@@ -306,7 +467,12 @@ def _display_failure(
                 _print_diagnostic(diagnostic)
 
 
-def _display_result(result: AgentRunResult, *, verbose: bool) -> None:
+def _display_result(
+    result: AgentRunResult,
+    *,
+    verbose: bool,
+    answer_streamed: bool = False,
+) -> None:
     """干净输出 AgentRunResult。"""
     if result.status == "failed":
         _display_failure(
@@ -324,7 +490,7 @@ def _display_result(result: AgentRunResult, *, verbose: bool) -> None:
             for diagnostic in result.runtime_diagnostics:
                 _print_diagnostic(diagnostic)
 
-    if result.final_answer:
+    if result.final_answer and not answer_streamed:
         print(f"\n{result.final_answer}")
 
     plan_summary = _format_plan_summary(result)
@@ -364,11 +530,20 @@ def _display_result(result: AgentRunResult, *, verbose: bool) -> None:
         print(f"停止原因: {result.stop_reason}")
 
 
-def _display_agent_result(result: AgentResult, *, verbose: bool) -> None:
+def _display_agent_result(
+    result: AgentResult,
+    *,
+    verbose: bool,
+    answer_streamed: bool = False,
+) -> None:
     from rag.agent.service import AgentRunResult
 
     if isinstance(result.raw, AgentRunResult):
-        _display_result(result.raw, verbose=verbose)
+        _display_result(
+            result.raw,
+            verbose=verbose,
+            answer_streamed=answer_streamed,
+        )
     else:
         if result.status == "failed":
             _display_failure(
@@ -390,7 +565,7 @@ def _display_agent_result(result: AgentResult, *, verbose: bool) -> None:
                 for diagnostic in result.diagnostics:
                     _print_diagnostic(diagnostic)
 
-        if result.answer:
+        if result.answer and not answer_streamed:
             print(f"\n{result.answer}")
 
         if verbose and result.tool_calls:
@@ -492,6 +667,53 @@ def _build_resume_response(request: object, decision: str) -> HumanInputResponse
     )
 
 
+def _display_pending_recovery(
+    request: HumanInputRequest | None,
+    *,
+    turn_id: str,
+    checkpoint_db: Path,
+) -> None:
+    print(f"\n⏸  待恢复 Turn: {turn_id}")
+    if request is None:
+        print("   未检测到待处理的人机请求；可继续中断执行。")
+        options = ["continue", "abort"]
+    else:
+        print(f"   请求: {request.question}")
+        for tool_call in request.tool_calls:
+            risk_mark = {
+                "high": "🔴",
+                "medium": "🟡",
+                "low": "🟢",
+            }.get(tool_call.risk_level, "")
+            print(
+                f"   {risk_mark} {tool_call.tool_name}: "
+                f"{tool_call.args_preview}"
+            )
+            if tool_call.reason:
+                print(f"      原因: {tool_call.reason}")
+        options = list(request.options)
+        if not options:
+            options = (
+                ["allow_once", "deny", "abort"]
+                if request.kind in {"tool_approval", "tool_reconciliation"}
+                else ["continue", "abort"]
+            )
+    print("   可用恢复命令:")
+    for option in options:
+        command = [
+            "agent",
+            "resume",
+            turn_id,
+            "--action",
+            option,
+            "--checkpoint-db",
+            str(checkpoint_db),
+        ]
+        print(f"     {shlex.join(command)}")
+    if request is not None and request.kind in {"choice", "clarification"}:
+        print("   需要文本时，在 continue 命令后添加 --input '<text>'。")
+
+
 def _close_agent_service(service: object) -> None:
     close_method = getattr(service, "aclose", None)
     if callable(close_method):
@@ -570,6 +792,7 @@ async def _run_facade_command(
     allow_write_tools: bool = False,
     allow_execute_tools: bool = False,
     allow_discovery_tools: bool | None = None,
+    event_display: _CLIToolEventDisplay | None = None,
 ) -> AgentResult:
     """Run and optionally approve on one service, event loop, and ToolCall."""
 
@@ -584,39 +807,44 @@ async def _run_facade_command(
         ),
         allow_discovery_tools=allow_discovery_tools,
     )
-    async with facade._open_product_runtime(
-        stream_sink=_CLIToolEventDisplay(),
-    ) as service:
-        raw = await service.chat(
-            AgentRunRequest(
-                task=task,
-                session_id=None,
-                run_id=turn_id,
-                thread_id=turn_id,
-                llm_budget_total=max_tokens_total,
-                input_files=list(files),
-                workspace_path=(
-                    None
-                    if facade.workspace_path is None
-                    else str(facade.workspace_path)
-                ),
-                tools=None if tools is None else tuple(tools),
-                disabled_tools=tuple(disabled_tools or ()),
-                allow_write_tools=allow_write_tools,
-                allow_execute_tools=allow_execute_tools,
-                allow_discovery_tools=effective_discovery,
+    display = event_display or _CLIToolEventDisplay()
+    try:
+        async with facade._open_product_runtime(stream_sink=display) as service:
+            display.begin_turn()
+            raw = await service.chat(
+                AgentRunRequest(
+                    task=task,
+                    session_id=None,
+                    run_id=turn_id,
+                    thread_id=turn_id,
+                    llm_budget_total=max_tokens_total,
+                    input_files=list(files),
+                    workspace_path=(
+                        None
+                        if facade.workspace_path is None
+                        else str(facade.workspace_path)
+                    ),
+                    tools=None if tools is None else tuple(tools),
+                    disabled_tools=tuple(disabled_tools or ()),
+                    allow_write_tools=allow_write_tools,
+                    allow_execute_tools=allow_execute_tools,
+                    allow_discovery_tools=effective_discovery,
+                )
             )
-        )
-        while raw.status == "paused" and interactive_approval:
-            response = _handle_pause(raw, raw.run_id)
-            if response is None:
-                break
-            raw = await service.resume_turn(
-                turn_id=raw.run_id,
-                action=response.decision,
-                user_input=response.user_message,
-            )
-        return AgentResult.from_internal(raw, files=tuple(files))
+            while raw.status == "paused" and interactive_approval:
+                display.finish()
+                response = _handle_pause(raw, raw.run_id)
+                if response is None:
+                    break
+                display.begin_turn()
+                raw = await service.resume_turn(
+                    turn_id=raw.run_id,
+                    action=response.decision,
+                    user_input=response.user_message,
+                )
+            return AgentResult.from_internal(raw, files=tuple(files))
+    finally:
+        display.finish()
 
 
 async def _resume_facade_command(
@@ -625,24 +853,68 @@ async def _resume_facade_command(
     turn_id: str,
     action: str,
     user_input: str | None = None,
+    event_display: _CLIToolEventDisplay | None = None,
 ) -> AgentResult:
-    return cast(
-        "AgentResult",
-        await facade.aresume(
-            turn_id,
-            action,
-            user_input=user_input,
-        ),
-    )
+    from agent_runtime.result import AgentResult
+
+    display = event_display or _CLIToolEventDisplay()
+    runtime_facade = facade._agent_for_turn(turn_id)
+    display.begin_turn()
+    try:
+        async with runtime_facade._open_product_runtime(
+            stream_sink=display,
+        ) as service:
+            raw = await service.resume_turn(
+                turn_id=turn_id,
+                action=action,
+                user_input=user_input,
+            )
+            return AgentResult.from_internal(raw)
+    finally:
+        display.finish()
+
+
+async def _pending_resume_request(
+    facade: Any,
+    *,
+    turn_id: str,
+    event_display: _CLIToolEventDisplay | None = None,
+) -> HumanInputRequest | None:
+    from rag.agent.core.human_input import HumanInputRequest
+
+    display = event_display or _CLIToolEventDisplay()
+    runtime_facade = facade._agent_for_turn(turn_id)
+    display.begin_turn()
+    try:
+        async with runtime_facade._open_product_runtime(
+            stream_sink=display,
+        ) as service:
+            try:
+                return cast(
+                    HumanInputRequest,
+                    await service.apending_human_input_request(run_id=turn_id),
+                )
+            except KeyError:
+                return None
+    finally:
+        display.finish()
 
 
 def _print_startup_banner(model_alias: str, *, agent_type: str) -> None:
     print(f"Agent 就绪 (agent: {agent_type}, 模型: {model_alias})")
-    print(
-        "输入查询，或 /exit 退出，/verbose 切换详细输出，"
-        "/model 查看模型（首条消息前可切换）"
-    )
+    print("输入查询，或输入 /help 查看交互命令。")
     print()
+
+
+def _print_chat_help() -> None:
+    print("交互命令:")
+    print("  /help              显示本帮助")
+    print("  /status            显示当前 Session、模型和工作区")
+    print("  /sessions          列出当前工作区最近 Session")
+    print("  /new, /clear       下一条消息开始新 Session")
+    print("  /model [current|list|switch <id>]")
+    print("  /verbose           切换详细输出")
+    print("  /exit              退出")
 
 
 async def _chat_facade_session(
@@ -660,14 +932,31 @@ async def _chat_facade_session(
         if session_id is None
         else facade._agent_for_session(session_id)
     )
+    event_display = _CLIToolEventDisplay()
     async with runtime_facade._open_product_runtime(
-        stream_sink=_CLIToolEventDisplay(),
+        stream_sink=event_display,
     ) as service:
         current_session_id = session_id
         verbose = False
         _print_startup_banner(
             _service_model_alias(service, requested_model),
             agent_type=agent_type,
+        )
+        checkpoint_value = getattr(
+            runtime_facade,
+            "checkpoint_db",
+            DEFAULT_CHECKPOINT_PATH,
+        )
+        chat_checkpoint_db = (
+            DEFAULT_CHECKPOINT_PATH
+            if checkpoint_value is None
+            else Path(checkpoint_value)
+        )
+        workspace_value = getattr(runtime_facade, "workspace_path", None)
+        chat_workspace = (
+            Path.cwd()
+            if workspace_value is None
+            else Path(workspace_value).expanduser().resolve()
         )
         while True:
             try:
@@ -679,6 +968,34 @@ async def _chat_facade_session(
                 continue
             if query == "/exit":
                 return
+            if query == "/help":
+                _print_chat_help()
+                continue
+            if query == "/status":
+                print(f"Session: {current_session_id or '(new)'}")
+                print(f"模型: {_service_model_alias(service, requested_model)}")
+                print(f"工作区: {chat_workspace}")
+                print(f"详细输出: {'开' if verbose else '关'}")
+                continue
+            if query == "/sessions":
+                store = SessionStore(chat_checkpoint_db)
+                try:
+                    sessions = store.list_sessions(
+                        workspace_path=chat_workspace,
+                        limit=10,
+                    )
+                    _print_session_rows(
+                        store,
+                        sessions,
+                        current_session_id=current_session_id,
+                    )
+                finally:
+                    store.close()
+                continue
+            if query in {"/new", "/clear"}:
+                current_session_id = None
+                print("已开始新的 Session；下一条消息将使用空历史。")
+                continue
             if query == "/verbose":
                 verbose = not verbose
                 print(f"详细输出: {'开' if verbose else '关'}")
@@ -690,7 +1007,11 @@ async def _chat_facade_session(
                     allow_switch=current_session_id is None,
                 )
                 continue
+            if query.startswith("/"):
+                print(f"未知命令: {query.split()[0]}；输入 /help 查看可用命令。")
+                continue
 
+            event_display.begin_turn()
             result = await service.chat(
                 AgentRunRequest(
                     task=query,
@@ -706,16 +1027,23 @@ async def _chat_facade_session(
             )
             current_session_id = result.session_id
             while result.status == "paused":
+                event_display.finish()
                 response = _handle_pause(result, result.run_id)
                 if response is None:
                     print("已取消。")
                     break
+                event_display.begin_turn()
                 result = await service.resume_turn(
                     turn_id=result.run_id,
                     action=response.decision,
                     user_input=response.user_message,
                 )
-            _display_result(result, verbose=verbose)
+            event_display.finish()
+            _display_result(
+                result,
+                verbose=verbose,
+                answer_streamed=event_display.answer_streamed,
+            )
 
 
 def _print_current_model(control_plane: ModelControlPlane) -> None:
@@ -822,6 +1150,264 @@ def model_switch(
     print(f"已切换模型: {spec.id}")
 
 
+def _format_session_time(value: float) -> str:
+    return datetime.fromtimestamp(value).astimezone().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _session_state(store: SessionStore, session: SessionRecord) -> str:
+    if session.archived_at is not None:
+        return "archived"
+    if session.active_turn_id is None:
+        return "ready"
+    return store.get_turn(session.active_turn_id).status.value
+
+
+def _print_session_rows(
+    store: SessionStore,
+    sessions: Sequence[SessionRecord],
+    *,
+    current_session_id: str | None = None,
+) -> None:
+    if not sessions:
+        print("没有匹配的 Session。")
+        return
+    print("  SESSION ID                            STATUS       UPDATED              WORKSPACE")
+    for session in sessions:
+        marker = "*" if session.session_id == current_session_id else " "
+        workspace = session.runtime.workspace_path or "-"
+        print(
+            f"{marker} {session.session_id}  "
+            f"{_session_state(store, session):<11}  "
+            f"{_format_session_time(session.updated_at)}  "
+            f"{workspace}"
+        )
+
+
+def _latest_cli_session(
+    checkpoint_db: Path,
+    *,
+    workspace_path: Path | None,
+) -> SessionRecord | None:
+    store = SessionStore(checkpoint_db)
+    try:
+        return store.latest_session(workspace_path=workspace_path)
+    finally:
+        store.close()
+
+
+def _latest_cli_turn(
+    checkpoint_db: Path,
+    *,
+    workspace_path: Path | None,
+) -> TurnRecord | None:
+    store = SessionStore(checkpoint_db)
+    try:
+        return store.latest_resumable_turn(workspace_path=workspace_path)
+    finally:
+        store.close()
+
+
+async def _delete_checkpoint_threads(
+    checkpoint_db: Path,
+    turn_ids: Sequence[str],
+) -> None:
+    if not turn_ids:
+        return
+    from rag.agent.core.checkpointing import (
+        aclose_agent_checkpointer,
+        create_agent_checkpointer,
+    )
+
+    checkpointer = create_agent_checkpointer(checkpoint_db)
+    try:
+        for turn_id in turn_ids:
+            await checkpointer.adelete_thread(turn_id)
+    finally:
+        await aclose_agent_checkpointer(checkpointer)
+
+
+@session_app.command(name="list")
+def agent_session_list(
+    checkpoint_db: Annotated[
+        Path,
+        typer.Option("--checkpoint-db", help="SQLite checkpoint 文件"),
+    ] = DEFAULT_CHECKPOINT_PATH,
+    archived: Annotated[
+        bool,
+        typer.Option("--archived", help="仅显示当前工作区已归档 Session"),
+    ] = False,
+    all_sessions: Annotated[
+        bool,
+        typer.Option("--all", help="显示所有工作区，包含已归档 Session"),
+    ] = False,
+    limit: Annotated[
+        int,
+        typer.Option("--limit", min=1, max=200, help="最多显示数量"),
+    ] = 20,
+) -> None:
+    """列出持久化 Session；默认只显示当前工作区未归档项。"""
+    if archived and all_sessions:
+        raise typer.BadParameter("--archived 与 --all 不能同时使用")
+    store = SessionStore(checkpoint_db)
+    try:
+        sessions = store.list_sessions(
+            workspace_path=None if all_sessions else Path.cwd(),
+            include_archived=archived or all_sessions,
+            archived_only=archived,
+            limit=limit,
+        )
+        _print_session_rows(store, sessions)
+    finally:
+        store.close()
+
+
+@session_app.command(name="show")
+def agent_session_show(
+    session_id: Annotated[str, typer.Argument(help="Session ID")],
+    checkpoint_db: Annotated[
+        Path,
+        typer.Option("--checkpoint-db", help="SQLite checkpoint 文件"),
+    ] = DEFAULT_CHECKPOINT_PATH,
+) -> None:
+    """显示 Session 绑定、Turn 状态和可执行的下一步。"""
+    store = SessionStore(checkpoint_db)
+    try:
+        try:
+            session = store.get_session(session_id)
+            turns = store.list_turns(session_id)
+        except SessionNotFoundError as exc:
+            raise typer.BadParameter(str(exc)) from exc
+        print(f"Session: {session.session_id}")
+        print(f"状态: {_session_state(store, session)}")
+        print(f"工作区: {session.runtime.workspace_path or '-'}")
+        print(f"模型: {session.runtime.model_alias or '-'}")
+        print(f"创建: {_format_session_time(session.created_at)}")
+        print(f"更新: {_format_session_time(session.updated_at)}")
+        print("Turns:")
+        if not turns:
+            print("  (无)")
+        for turn in turns:
+            print(
+                f"  #{turn.ordinal} {turn.turn_id} {turn.status.value}  "
+                f"{_bounded_cli_text(turn.user_message, limit=80)}"
+            )
+        if session.active_turn_id is not None:
+            print(
+                "下一步: "
+                + shlex.join(
+                    [
+                        "agent",
+                        "resume",
+                        session.active_turn_id,
+                        "--checkpoint-db",
+                        str(checkpoint_db),
+                    ]
+                )
+            )
+        elif session.archived_at is not None:
+            print(
+                "下一步: "
+                + shlex.join(
+                    [
+                        "agent",
+                        "session",
+                        "unarchive",
+                        session.session_id,
+                        "--checkpoint-db",
+                        str(checkpoint_db),
+                    ]
+                )
+            )
+        else:
+            print(
+                "下一步: "
+                + shlex.join(
+                    [
+                        "agent",
+                        "chat",
+                        "--session-id",
+                        session.session_id,
+                        "--checkpoint-db",
+                        str(checkpoint_db),
+                    ]
+                )
+            )
+    finally:
+        store.close()
+
+
+@session_app.command(name="archive")
+def agent_session_archive(
+    session_id: Annotated[str, typer.Argument(help="Session ID")],
+    checkpoint_db: Annotated[
+        Path,
+        typer.Option("--checkpoint-db", help="SQLite checkpoint 文件"),
+    ] = DEFAULT_CHECKPOINT_PATH,
+) -> None:
+    """归档一个没有活动 Turn 的 Session。"""
+    store = SessionStore(checkpoint_db)
+    try:
+        try:
+            session = store.archive_session(session_id)
+        except (SessionNotFoundError, TurnStateError) as exc:
+            raise typer.BadParameter(str(exc)) from exc
+    finally:
+        store.close()
+    print(f"已归档 Session: {session.session_id}")
+
+
+@session_app.command(name="unarchive")
+def agent_session_unarchive(
+    session_id: Annotated[str, typer.Argument(help="Session ID")],
+    checkpoint_db: Annotated[
+        Path,
+        typer.Option("--checkpoint-db", help="SQLite checkpoint 文件"),
+    ] = DEFAULT_CHECKPOINT_PATH,
+) -> None:
+    """恢复一个已归档 Session。"""
+    store = SessionStore(checkpoint_db)
+    try:
+        try:
+            session = store.unarchive_session(session_id)
+        except SessionNotFoundError as exc:
+            raise typer.BadParameter(str(exc)) from exc
+    finally:
+        store.close()
+    print(f"已恢复 Session: {session.session_id}")
+
+
+@session_app.command(name="delete")
+def agent_session_delete(
+    session_id: Annotated[str, typer.Argument(help="Session ID")],
+    checkpoint_db: Annotated[
+        Path,
+        typer.Option("--checkpoint-db", help="SQLite checkpoint 文件"),
+    ] = DEFAULT_CHECKPOINT_PATH,
+    yes: Annotated[
+        bool,
+        typer.Option("--yes", help="确认永久删除 Session、Turns 和 checkpoints"),
+    ] = False,
+    force: Annotated[
+        bool,
+        typer.Option("--force", help="允许删除含未终止 Turn 的 Session"),
+    ] = False,
+) -> None:
+    """永久删除 Session 及其现有 checkpoint 数据。"""
+    if not yes:
+        print("未删除：这是永久操作，请显式传入 --yes。")
+        raise typer.Exit(code=2)
+    store = SessionStore(checkpoint_db)
+    try:
+        try:
+            turn_ids = store.delete_session(session_id, force=force)
+        except (SessionNotFoundError, TurnStateError) as exc:
+            raise typer.BadParameter(str(exc)) from exc
+    finally:
+        store.close()
+    asyncio.run(_delete_checkpoint_threads(checkpoint_db, turn_ids))
+    print(f"已删除 Session: {session_id} ({len(turn_ids)} Turns)")
+
+
 @agent_app.command(name="chat")
 def agent_chat(
     session_id: Annotated[
@@ -831,6 +1417,14 @@ def agent_chat(
             help="继续一个持久化 Session；省略则创建新 Session。",
         ),
     ] = None,
+    last: Annotated[
+        bool,
+        typer.Option("--last", help="继续当前工作区最近的 Session"),
+    ] = False,
+    checkpoint_db: Annotated[
+        Path,
+        typer.Option("--checkpoint-db", help="SQLite checkpoint 文件"),
+    ] = DEFAULT_CHECKPOINT_PATH,
     storage_root: Annotated[
         Path, typer.Option("--storage-root", help="RAG 存储根目录", hidden=True)
     ] = Path(".rag"),
@@ -883,10 +1477,26 @@ def agent_chat(
     ] = None,
 ) -> None:
     """交互式 Agent 对话。暂停时支持工具审批。"""
+    if session_id is not None and last:
+        raise typer.BadParameter("--session-id 与 --last 不能同时使用")
+    effective_session_id = session_id
+    if last:
+        latest = _latest_cli_session(
+            checkpoint_db,
+            workspace_path=Path.cwd(),
+        )
+        if latest is None:
+            raise typer.BadParameter("当前工作区没有可继续的 Session")
+        if latest.active_turn_id is not None:
+            raise typer.BadParameter(
+                f"最近 Session 有未完成 Turn {latest.active_turn_id}；"
+                "请使用 agent resume --last"
+            )
+        effective_session_id = latest.session_id
     facade = _create_agent_facade(
         model=model,
         agent_type=agent,
-        checkpoint_db=DEFAULT_CHECKPOINT_PATH,
+        checkpoint_db=checkpoint_db,
         workspace_path=Path.cwd(),
         model_session_path=DEFAULT_MODEL_SESSION_PATH,
         rag_storage_root=storage_root,
@@ -903,7 +1513,7 @@ def agent_chat(
             agent_type=agent,
             requested_model=model,
             budget=budget,
-            session_id=session_id,
+            session_id=effective_session_id,
         )
     )
 
@@ -1042,6 +1652,7 @@ def agent_run(
     interactive_approval = (
         not non_interactive and _is_interactive_terminal()
     )
+    event_display = _CLIToolEventDisplay()
     result = asyncio.run(
         _run_facade_command(
             facade,
@@ -1055,9 +1666,14 @@ def agent_run(
             allow_write_tools=allow_write_tools,
             allow_execute_tools=allow_execute_tools,
             allow_discovery_tools=allow_discovery_tools,
+            event_display=event_display,
         )
     )
-    _display_agent_result(result, verbose=verbose)
+    _display_agent_result(
+        result,
+        verbose=verbose,
+        answer_streamed=event_display.answer_streamed,
+    )
 
     raw_result = result.raw if isinstance(result.raw, AgentRunResult) else None
     if result.status == "paused":
@@ -1083,13 +1699,24 @@ def agent_run(
 
 @agent_app.command(name="resume")
 def agent_resume(
-    turn_id: Annotated[str, typer.Argument(help="要恢复的 UUID Turn ID")],
+    turn_id: Annotated[
+        str | None,
+        typer.Argument(help="要恢复的 UUID Turn ID"),
+    ] = None,
+    last: Annotated[
+        bool,
+        typer.Option("--last", help="恢复最近的可恢复 Turn"),
+    ] = False,
+    all_workspaces: Annotated[
+        bool,
+        typer.Option("--all", help="--last 搜索所有工作区"),
+    ] = False,
     checkpoint_db: Annotated[
         Path,
         typer.Option("--checkpoint-db", help="SQLite checkpoint 文件"),
     ] = DEFAULT_CHECKPOINT_PATH,
     action: Annotated[
-        str,
+        str | None,
         typer.Option(
             "--action",
             "--decision",
@@ -1098,7 +1725,7 @@ def agent_resume(
                 "mark_failed | abort"
             ),
         ),
-    ] = "continue",
+    ] = None,
     user_input: Annotated[
         str | None,
         typer.Option("--input", help="clarification/choice 恢复时的用户输入"),
@@ -1116,19 +1743,58 @@ def agent_resume(
     ] = None,
 ) -> None:
     """先读取持久化 Turn 元数据，再恢复未完成的 Turn。"""
+    if turn_id is not None and last:
+        raise typer.BadParameter("Turn ID 与 --last 不能同时使用")
+    if all_workspaces and not last:
+        raise typer.BadParameter("--all 只能与 --last 一起使用")
+    effective_turn_id = turn_id
+    if last:
+        latest = _latest_cli_turn(
+            checkpoint_db,
+            workspace_path=None if all_workspaces else Path.cwd(),
+        )
+        if latest is None:
+            scope = "所有工作区" if all_workspaces else "当前工作区"
+            raise typer.BadParameter(f"{scope}没有可恢复 Turn")
+        effective_turn_id = latest.turn_id
+    if effective_turn_id is None:
+        print("请提供 Turn ID，或使用 --last 恢复最近 Turn。")
+        raise typer.Exit(code=2)
+    if action is None and user_input is not None:
+        raise typer.BadParameter("--input 需要同时指定 --action")
     facade = _create_agent_facade(
         checkpoint_db=checkpoint_db,
         vector_dsn=vector_dsn,
     )
+    event_display = _CLIToolEventDisplay()
+    if action is None:
+        pending = asyncio.run(
+            _pending_resume_request(
+                facade,
+                turn_id=effective_turn_id,
+                event_display=event_display,
+            )
+        )
+        _display_pending_recovery(
+            pending,
+            turn_id=effective_turn_id,
+            checkpoint_db=checkpoint_db,
+        )
+        raise typer.Exit(code=2)
     result = asyncio.run(
         _resume_facade_command(
             facade,
-            turn_id=turn_id,
+            turn_id=effective_turn_id,
             action=action,
             user_input=user_input,
+            event_display=event_display,
         )
     )
-    _display_agent_result(result, verbose=verbose)
+    _display_agent_result(
+        result,
+        verbose=verbose,
+        answer_streamed=event_display.answer_streamed,
+    )
     if result.status == "paused":
         raise typer.Exit(code=2)
     if result.status == "failed":
