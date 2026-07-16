@@ -162,8 +162,13 @@ def run_smoke() -> CLISmokeResult:
             }
         )
 
-        root_help = runner.invoke(agent_app, ["--help"])
-        resume_help = runner.invoke(agent_app, ["resume", "--help"])
+        help_env = {"COLUMNS": "240", "NO_COLOR": "1"}
+        root_help = runner.invoke(agent_app, ["--help"], env=help_env)
+        resume_help = runner.invoke(
+            agent_app,
+            ["resume", "--help"],
+            env=help_env,
+        )
         checks["command_surface"] = (
             root_help.exit_code == 0
             and "session" in root_help.output
