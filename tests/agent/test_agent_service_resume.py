@@ -254,6 +254,49 @@ async def test_resume_uses_same_codec_across_service_boundary() -> None:
 
 
 @pytest.mark.anyio
+async def test_resume_preserves_request_max_turns_across_service_boundary() -> None:
+    checkpointer = MemorySaver(serde=agent_checkpoint_serde())
+    calls: list[str] = []
+    call = ToolCallPlan.create("remote_write", {"value": "bounded"})
+    registry = ToolRegistry()
+    registry.register(_tool(calls))
+    first = AgentService(
+        definition=_definition(),
+        tool_registry=registry,
+        model_turn_provider=_SlowToolCallingProvider(call),
+        checkpointer=checkpointer,
+    )
+
+    paused = await first.run(
+        AgentRunRequest(
+            task="Use one model turn, then write.",
+            run_id="resume-max-turns",
+            thread_id="resume-max-turns",
+            max_turns=1,
+        )
+    )
+
+    assert paused.status == "paused"
+    assert paused.iteration == 1
+    second = _service(calls, checkpointer=checkpointer)
+    resumed = await second.resume(
+        run_id="resume-max-turns",
+        response=HumanInputResponse(
+            request_id=paused.human_input_request.request_id,
+            decision="allow_once",
+            approved_tool_call_ids=[
+                _approval_id(paused.human_input_request)
+            ],
+        ),
+    )
+
+    assert calls == ["bounded"]
+    assert resumed.status == "failed"
+    assert resumed.stop_reason == "max_turns"
+    assert resumed.iteration == 1
+
+
+@pytest.mark.anyio
 async def test_changed_pending_tool_definition_requires_reconciliation() -> None:
     checkpointer = MemorySaver(serde=agent_checkpoint_serde())
     calls: list[str] = []

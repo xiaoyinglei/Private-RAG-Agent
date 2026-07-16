@@ -1,19 +1,22 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
+import asyncio
+from collections.abc import Callable, Mapping
 from pathlib import Path
 
 import pytest
 from pydantic import BaseModel
 
 from rag.agent.core.context import RunRegistry
-from rag.agent.core.definition import AgentRuntimePolicy
+from rag.agent.core.definition import AgentRuntimePolicy, ToolPolicy
+from rag.agent.core.human_input import HumanInputResponse
 from rag.agent.core.model_request import ModelCallRecord
 from rag.agent.core.output_models import ValidatedFinalOutput
 from rag.agent.core.turn_contracts import ToolCallPlan
 from rag.agent.loop.runtime import ModelTurnEnvelope
 from rag.agent.loop.state import LoopState, ModelTurnDraft
 from rag.agent.service import AgentRunRequest, AgentRunResult, AgentService
+from rag.agent.tools.builtins.shell import create_run_command_tool
 from rag.agent.tools.registry import ToolRegistry
 from rag.agent.tools.selection import ToolConfigurationError
 from rag.agent.tools.tool import (
@@ -29,6 +32,7 @@ from rag.agent.tools.tool import (
     ToolTarget,
     json_schema_input,
 )
+from rag.agent.workspace import open_workspace
 from rag.schema.llm import LLMUsage
 
 
@@ -113,6 +117,7 @@ def _tool(
     calls: list[str] | None = None,
     *,
     write: bool = False,
+    runner: Callable[[Mapping[str, JsonValue]], object] | None = None,
 ) -> Tool:
     schema: Mapping[str, JsonValue] = {
         "type": "object",
@@ -147,7 +152,7 @@ def _tool(
             input_schema=schema,
         ),
         validate_input=json_schema_input(schema),
-        run=run,
+        run=runner or run,
         normalize_output=normalize,
         output_schema=None,
         static_effects=effects,
@@ -180,6 +185,7 @@ def _definition(
     names: tuple[str, ...],
     *,
     output_model: type[BaseModel] | None = None,
+    tool_policy: ToolPolicy | None = None,
 ) -> AgentRuntimePolicy:
     return AgentRuntimePolicy.test_factory(
         agent_type="service_test",
@@ -187,6 +193,7 @@ def _definition(
         allowed_tools=list(names),
         output_model=output_model,
         max_iterations=4,
+        tool_policy=tool_policy,
     )
 
 
@@ -209,6 +216,67 @@ def test_initial_state_creates_runtime_handles_and_manifest() -> None:
     assert state["tool_manifest"] is not None
     assert state["tool_manifest"].resident_tool_names == ("read_file",)
     RunRegistry.remove("service-state")
+
+
+@pytest.mark.parametrize("max_turns", [0, -1, True])
+def test_run_request_rejects_invalid_max_turns(max_turns: object) -> None:
+    with pytest.raises(ValueError, match="max_turns"):
+        AgentRunRequest(
+            task="Answer.",
+            max_turns=max_turns,  # type: ignore[arg-type]
+        )
+
+
+@pytest.mark.anyio
+async def test_service_enforces_request_max_turns() -> None:
+    calls: list[str] = []
+
+    class _ExecuteThenFinishProvider:
+        def __init__(self) -> None:
+            self.model_calls = 0
+
+        async def next_turn(
+            self,
+            state: LoopState,
+            *,
+            definition: AgentRuntimePolicy,
+            budget_remaining: int,
+        ) -> ModelTurnDraft:
+            del state, definition, budget_remaining
+            self.model_calls += 1
+            if self.model_calls == 1:
+                return ModelTurnDraft(
+                    action="execute",
+                    tool_calls=(
+                        ToolCallPlan.create("echo", {"value": "once"}),
+                    ),
+                )
+            return ModelTurnDraft(
+                action="finish",
+                final_answer="must not be reached",
+            )
+
+    provider = _ExecuteThenFinishProvider()
+    service = AgentService(
+        definition=_definition(("echo",)),
+        tool_registry=_registry(_tool("echo", calls)),
+        model_turn_provider=provider,
+    )
+
+    result = await service.run(
+        AgentRunRequest(
+            task="Use one model turn.",
+            run_id="service-max-turns",
+            thread_id="service-max-turns",
+            max_turns=1,
+        )
+    )
+
+    assert result.status == "failed"
+    assert result.stop_reason == "max_turns"
+    assert result.iteration == 1
+    assert provider.model_calls == 1
+    assert calls == ["once"]
 
 
 @pytest.mark.anyio
@@ -282,6 +350,185 @@ async def test_public_explicit_names_replace_defaults_and_disabled_wins() -> Non
     assert state["explicit_tool_names"] == ["second"]
     assert state["disabled_tool_names"] == ["first"]
     RunRegistry.remove("service-options")
+
+
+def test_tool_policy_denials_are_removed_from_the_model_tool_surface() -> None:
+    service = AgentService(
+        definition=_definition(
+            ("first", "second"),
+            tool_policy=ToolPolicy(
+                deny_tools=frozenset({"first", "not-installed-here"})
+            ),
+        ),
+        tool_registry=_registry(_tool("first"), _tool("second")),
+        model_turn_provider=_FinishProvider(),
+    )
+
+    state = service.initial_state(
+        AgentRunRequest(
+            task="Answer.",
+            run_id="service-policy-deny",
+            thread_id="service-policy-deny",
+        )
+    )
+
+    assert state["resident_tool_names"] == ["second"]
+    assert state["disabled_tool_names"] == ["first"]
+    assert state["tool_manifest"] is not None
+    assert state["tool_manifest"].resident_tool_names == ("second",)
+    RunRegistry.remove("service-policy-deny")
+
+
+@pytest.mark.anyio
+async def test_tool_policy_preserves_each_forced_confirmation_across_resume() -> None:
+    calls: list[str] = []
+    names = ("one", "two")
+    service = AgentService(
+        definition=_definition(
+            names,
+            tool_policy=ToolPolicy(
+                require_confirmation_for=frozenset(names)
+            ),
+        ),
+        tool_registry=_registry(*(_tool(name, calls) for name in names)),
+        model_turn_provider=_FinishProvider(),
+    )
+
+    first_pause = await service.run(
+        AgentRunRequest(
+            task="Confirm each call.",
+            run_id="service-policy-confirm",
+            thread_id="service-policy-confirm",
+            pending_tool_calls=[
+                ToolCallPlan.create(name, {"value": name})
+                for name in names
+            ],
+        )
+    )
+
+    assert first_pause.status == "paused"
+    assert first_pause.human_input_request is not None
+    assert [
+        item["tool_name"]
+        for item in first_pause.pending_tool_calls_summary
+    ] == ["one", "two"]
+    assert calls == []
+    first_summary = first_pause.human_input_request.tool_calls[0]
+    first_approval_id = (
+        first_summary.approval_id or first_summary.tool_call_id
+    )
+
+    second_pause = await service.resume(
+        run_id="service-policy-confirm",
+        response=HumanInputResponse(
+            request_id=first_pause.human_input_request.request_id,
+            decision="allow_once",
+            approved_tool_call_ids=[first_approval_id],
+        ),
+    )
+
+    assert second_pause.status == "paused"
+    assert second_pause.human_input_request is not None
+    assert [
+        item["tool_name"]
+        for item in second_pause.pending_tool_calls_summary
+    ] == ["two"]
+    assert calls == ["one"]
+    second_summary = second_pause.human_input_request.tool_calls[0]
+    second_approval_id = (
+        second_summary.approval_id or second_summary.tool_call_id
+    )
+    assert second_approval_id != first_approval_id
+
+    completed = await service.resume(
+        run_id="service-policy-confirm",
+        response=HumanInputResponse(
+            request_id=second_pause.human_input_request.request_id,
+            decision="allow_once",
+            approved_tool_call_ids=[second_approval_id],
+        ),
+    )
+
+    assert completed.status == "done"
+    assert calls == ["one", "two"]
+    assert all(not result.is_error for result in completed.tool_results)
+
+
+@pytest.mark.anyio
+async def test_tool_policy_auto_approves_builtin_restricted_sandbox_call(
+    tmp_path: Path,
+) -> None:
+    workspace = open_workspace(tmp_path / "workspace", create=True)
+    tool = create_run_command_tool(workspace)
+    service = AgentService(
+        definition=_definition(
+            ("run_command",),
+            tool_policy=ToolPolicy(auto_approve_sandboxed=True),
+        ),
+        tool_registry=_registry(tool),
+        model_turn_provider=_FinishProvider(),
+        workspace=workspace,
+    )
+
+    result = await service.run(
+        AgentRunRequest(
+            task="Run in the sandbox.",
+            run_id="service-policy-sandbox",
+            thread_id="service-policy-sandbox",
+            pending_tool_calls=[
+                ToolCallPlan.create(
+                    "run_command",
+                    {"command": "printf sandboxed"},
+                )
+            ],
+        )
+    )
+
+    assert result.status == "done"
+    assert len(result.tool_results) == 1
+    assert result.tool_results[0].error_code != "approval_required"
+
+
+@pytest.mark.anyio
+async def test_tool_policy_caps_safe_parallel_calls() -> None:
+    active = 0
+    maximum = 0
+
+    def build(name: str) -> Tool:
+        async def runner(arguments: Mapping[str, JsonValue]) -> object:
+            nonlocal active, maximum
+            active += 1
+            maximum = max(maximum, active)
+            await asyncio.sleep(0.02)
+            active -= 1
+            return {"text": f"ran:{arguments['value']}"}
+
+        return _tool(name, runner=runner)
+
+    names = ("one", "two", "three")
+    service = AgentService(
+        definition=_definition(
+            names,
+            tool_policy=ToolPolicy(max_parallel_calls=2),
+        ),
+        tool_registry=_registry(*(build(name) for name in names)),
+        model_turn_provider=_FinishProvider(),
+    )
+
+    result = await service.run(
+        AgentRunRequest(
+            task="Run safely.",
+            run_id="service-policy-parallel",
+            thread_id="service-policy-parallel",
+            pending_tool_calls=[
+                ToolCallPlan.create(name, {"value": name})
+                for name in names
+            ],
+        )
+    )
+
+    assert result.status == "done"
+    assert maximum == 2
 
 
 def test_unknown_public_tool_fails_before_model_call() -> None:

@@ -104,6 +104,22 @@ uv run agent run \
   "运行测试并修复失败项"
 ```
 
+需要限制模型回合数时，CLI 和 Python SDK 使用同一公开参数；该上限不会覆盖
+Agent 定义中更小的安全上限：
+
+```bash
+uv run agent run "只检查这一个问题" --max-turns 6
+```
+
+```python
+from agent_runtime import Agent
+
+result = Agent().run("只检查这一个问题", max_turns=6)
+```
+
+达到请求上限会以 `stop_reason=max_turns` 结束，不会再发起下一次模型调用；已经由
+最后一个允许回合发出的工具调用仍会先通过正常执行与 checkpoint 链路收敛。
+
 在交互式终端里，写入或执行类调用会先保存 pending checkpoint，然后在当前命令、同一 runtime 和同一 `ToolCall` 上询问审批并继续。`--non-interactive` 或非 TTY 环境不会等待输入：命令保存暂停状态、输出 `agent resume` 命令并以退出码 2 结束。
 
 长对话使用 Session。省略 `--session-id` 会创建新 Session；重新启动进程后传回同一个 Session ID，即可从持久化 canonical history 继续聊天，并为新消息创建新的 Turn：
@@ -430,6 +446,13 @@ OpenAI-compatible 序列化是唯一 wire 关口。所有前置 `system` 和 `co
 `Tool` 是唯一生产工具值，包含输入 schema/validator、runner、输出归一化/schema、effects/targets、execution revision、幂等性、并发性、取消模式、超时和模型可见输出上限。`ToolRegistry` 只负责确定性装配并 freeze；`select_tools()` 是唯一模型可见性函数；`ToolExecutor` 是唯一 validation-to-result 执行入口。
 
 一次调用依次经过 origin/schema 校验、参数校验、动态 effect/target 解析、不可绕过的 hard guard、执行边界选择、allow/ask/deny 权限判定、外部审批、prepared/started 记录、runner、输出校验与有界 externalization。provider、CLI、SDK、Skill、MCP 和 subagent 都不能绕开这条链路。
+
+`ToolPolicy` 直接投影到这条既有链路：`deny_tools` 同时从模型工具面移除工具并在
+执行前再次拒绝；`require_confirmation_for` 可让无副作用工具也进入现有审批流程；
+`auto_approve_sandboxed` 只匹配受信的内置 `run_command` 沙箱契约、进程执行
+effect 和 `execution_mode=restricted_sandbox`，不会跳过 destructive 或独立网络审批；
+`max_parallel_calls` 限制现有安全、无冲突批次的并发数。
+这些字段不会创建第二套 Registry、Executor 或审批系统。
 
 ### L1：事实层
 

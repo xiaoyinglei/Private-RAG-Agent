@@ -99,6 +99,17 @@ class TestAgentRunConfig:
         assert cfg.llm_budget_total == 5000
         assert isinstance(cfg.tool_policy, ToolPolicy)
 
+    @pytest.mark.parametrize("max_turns", [0, -1, True])
+    def test_config_rejects_invalid_max_turns(self, max_turns: object) -> None:
+        with pytest.raises((TypeError, ValueError)):
+            AgentRunConfig(
+                run_id="invalid-turn-limit",
+                thread_id="invalid-turn-limit",
+                max_depth=1,
+                access_policy=AccessPolicy.default(),
+                max_turns=max_turns,  # type: ignore[arg-type]
+            )
+
 
 class TestDeriveChildConfig:
     def test_derive_child_config_inherits_parent_runtime_scope(self) -> None:
@@ -297,6 +308,33 @@ class TestAgentRuntimePolicy:
         assert "kg_upsert" in tp.require_confirmation_for
         assert "web_search" in tp.deny_tools
         assert tp.max_parallel_calls == 2
+
+    @pytest.mark.parametrize("value", [0, -1, True])
+    def test_tool_policy_rejects_invalid_parallel_limit(
+        self,
+        value: object,
+    ) -> None:
+        with pytest.raises((TypeError, ValueError)):
+            ToolPolicy(max_parallel_calls=value)  # type: ignore[arg-type]
+
+    @pytest.mark.parametrize(
+        ("field_name", "value"),
+        [
+            ("require_confirmation_for", frozenset({""})),
+            ("deny_tools", frozenset({1})),
+        ],
+    )
+    def test_tool_policy_rejects_invalid_tool_names(
+        self,
+        field_name: str,
+        value: object,
+    ) -> None:
+        with pytest.raises((TypeError, ValueError)):
+            ToolPolicy(**{field_name: value})
+
+    def test_tool_policy_rejects_non_boolean_sandbox_approval(self) -> None:
+        with pytest.raises(TypeError, match="auto_approve_sandboxed"):
+            ToolPolicy(auto_approve_sandboxed=1)  # type: ignore[arg-type]
 
     def test_model_selection_defaults(self) -> None:
         ms = ModelSelectionPolicy()

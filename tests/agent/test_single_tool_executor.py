@@ -13,6 +13,7 @@ from typing import Any
 
 import pytest
 
+from rag.agent.tools.builtins.shell import create_run_command_tool
 from rag.agent.tools.executor import (
     ExecutionBoundary,
     ExecutionStatus,
@@ -40,6 +41,7 @@ from rag.agent.tools.tool import (
     ToolTarget,
     ToolValidationError,
 )
+from rag.agent.workspace import open_workspace
 
 
 def _origin(*exposed_names: str) -> ToolCallOrigin:
@@ -87,6 +89,7 @@ def _tool(
     idempotent: bool = True,
     concurrency_safe: bool = True,
     max_model_output_bytes: int = 4096,
+    execution_revision: str = "1",
 ) -> Tool:
     return Tool(
         definition=ToolDefinition(
@@ -106,7 +109,7 @@ def _tool(
         static_effects=static_effects,
         resolve_use=resolve_use
         or (lambda _arguments: ResolvedToolUse(effects=frozenset(), targets=())),
-        execution_revision="1",
+        execution_revision=execution_revision,
         idempotent=idempotent,
         concurrency_safe=concurrency_safe,
         cancellation_mode=cancellation_mode,
@@ -124,6 +127,10 @@ def _context(
     allow_write: bool = False,
     allow_execute: bool = False,
     deny_effects: frozenset[ToolEffect] = frozenset(),
+    max_parallel_calls: int = 4,
+    require_confirmation_for: frozenset[str] = frozenset(),
+    denied_tool_names: frozenset[str] = frozenset(),
+    auto_approve_sandboxed: bool = False,
 ) -> ToolExecutionContext:
     return ToolExecutionContext(
         workspace_root=workspace_root,
@@ -133,6 +140,10 @@ def _context(
         allow_write_tools=allow_write,
         allow_execute_tools=allow_execute,
         deny_effects=deny_effects,
+        max_parallel_calls=max_parallel_calls,
+        require_confirmation_for=require_confirmation_for,
+        denied_tool_names=denied_tool_names,
+        auto_approve_sandboxed=auto_approve_sandboxed,
     )
 
 
@@ -561,6 +572,165 @@ def test_can_use_tool_is_a_pure_effect_decision(
 
     assert result.decision is decision
     assert result.reason
+
+
+def test_tool_name_policy_denies_before_forced_confirmation() -> None:
+    tool = _tool("blocked")
+    resolved = ResolvedToolUse(effects=frozenset(), targets=())
+
+    result = can_use_tool(
+        tool,
+        {"value": "ok"},
+        resolved,
+        _context(
+            denied_tool_names=frozenset({"blocked"}),
+            require_confirmation_for=frozenset({"blocked"}),
+        ),
+    )
+
+    assert result.decision is UseToolDecision.DENY
+    assert "blocked" in result.reason
+
+
+def test_tool_name_policy_can_force_confirmation_for_safe_tool() -> None:
+    tool = _tool("confirm_me")
+    resolved = ResolvedToolUse(effects=frozenset(), targets=())
+
+    result = can_use_tool(
+        tool,
+        {"value": "ok"},
+        resolved,
+        _context(
+            require_confirmation_for=frozenset({"confirm_me"}),
+        ),
+    )
+
+    assert result.decision is UseToolDecision.ASK
+    assert "confirmation" in result.reason
+
+
+def test_sandbox_auto_approval_requires_process_execution() -> None:
+    tool = _tool(
+        "sandboxed_network",
+        static_effects=frozenset({ToolEffect.NETWORK}),
+    )
+    resolved = ResolvedToolUse(
+        effects=frozenset({ToolEffect.NETWORK}),
+        targets=(
+            ToolTarget(
+                kind="execution_mode",
+                value="restricted_sandbox",
+            ),
+        ),
+    )
+
+    result = can_use_tool(
+        tool,
+        {"value": "ok"},
+        resolved,
+        _context(auto_approve_sandboxed=True),
+    )
+
+    assert result.decision is UseToolDecision.ASK
+    assert "network" in result.reason
+
+
+@pytest.mark.parametrize(
+    ("name", "execution_revision", "effects"),
+    [
+        pytest.param(
+            "spoofed",
+            "1",
+            frozenset({ToolEffect.EXECUTE_PROCESS}),
+            id="unverified-tool",
+        ),
+        pytest.param(
+            "run_command",
+            "builtin-run-command-v2-restricted-sandbox",
+            frozenset(
+                {ToolEffect.EXECUTE_PROCESS, ToolEffect.DESTRUCTIVE}
+            ),
+            id="destructive-effect",
+        ),
+    ],
+)
+def test_sandbox_auto_approval_rejects_unverified_or_destructive_calls(
+    name: str,
+    execution_revision: str,
+    effects: frozenset[ToolEffect],
+) -> None:
+    tool = _tool(
+        name,
+        static_effects=effects,
+        cancellation_mode=CancellationMode.MANAGED_PROCESS,
+        execution_revision=execution_revision,
+    )
+    resolved = ResolvedToolUse(
+        effects=effects,
+        targets=(
+            ToolTarget(
+                kind="execution_mode",
+                value="restricted_sandbox",
+            ),
+        ),
+    )
+
+    result = can_use_tool(
+        tool,
+        {"value": "ok"},
+        resolved,
+        _context(auto_approve_sandboxed=True),
+    )
+
+    assert result.decision is UseToolDecision.ASK
+
+
+def test_sandbox_auto_approval_allows_primary_sandbox_effects(
+    tmp_path: Path,
+) -> None:
+    workspace = open_workspace(tmp_path / "workspace", create=True)
+    tool = create_run_command_tool(workspace)
+    arguments = tool.validate_input({"command": "printf ok"})
+    dynamic = tool.resolve_use(arguments)
+    resolved = ResolvedToolUse(
+        effects=tool.static_effects | dynamic.effects,
+        targets=dynamic.targets,
+    )
+
+    result = can_use_tool(
+        tool,
+        arguments,
+        resolved,
+        _context(
+            workspace_root=workspace.root,
+            auto_approve_sandboxed=True,
+        ),
+    )
+
+    assert result.decision is UseToolDecision.ALLOW
+
+
+@pytest.mark.anyio
+async def test_sandbox_auto_approval_keeps_network_approval_separate(
+    tmp_path: Path,
+) -> None:
+    workspace = open_workspace(tmp_path / "workspace", create=True)
+    tool = create_run_command_tool(workspace)
+    call = _call(
+        "run_command",
+        arguments={"command": "printf ok", "network": True},
+    )
+
+    execution = await ToolExecutor({"run_command": tool}).execute(
+        call,
+        context=_context(
+            workspace_root=workspace.root,
+            auto_approve_sandboxed=True,
+        ),
+    )
+
+    assert execution.result.error_code == "approval_required"
+    assert execution.result.metadata["approval_scope"] == "network"
 
 
 @pytest.mark.anyio
@@ -1197,6 +1367,39 @@ async def test_batch_parallelism_requires_safe_non_conflicting_tools(
     if expected_parallelism == 1:
         assert events == ["start:one", "end:one", "start:two", "end:two"]
     assert len(executor.traces) == 2
+
+
+@pytest.mark.anyio
+async def test_batch_parallelism_respects_policy_limit() -> None:
+    active = 0
+    maximum = 0
+
+    def build(name: str) -> Tool:
+        async def runner(_arguments: Mapping[str, Any]) -> object:
+            nonlocal active, maximum
+            active += 1
+            maximum = max(maximum, active)
+            await asyncio.sleep(0.02)
+            active -= 1
+            return {"value": name}
+
+        return _tool(name, run=runner, concurrency_safe=True)
+
+    tools = {name: build(name) for name in ("one", "two", "three")}
+    executions = await ToolExecutor(tools).execute_batch(
+        tuple(
+            _call(name, call_id=f"call_{name}")
+            for name in ("one", "two", "three")
+        ),
+        context=_context(max_parallel_calls=2),
+    )
+
+    assert maximum == 2
+    assert tuple(item.result.tool_call_id for item in executions) == (
+        "call_one",
+        "call_two",
+        "call_three",
+    )
 
 
 @pytest.mark.anyio

@@ -271,10 +271,6 @@ class AgentLoop:
                     checkpoint_reason="budget_exhausted",
                 )
                 return state
-            await self._emit_stream(
-                _stream_turn_start(run_id=state["run_config"].run_id, turn=state["iteration"] + 1)
-            )
-
             # Execute any pending tool calls first
             if state["pending_tool_calls"]:
                 if await self._execute_pending_tools(state):
@@ -282,16 +278,35 @@ class AgentLoop:
                 continue
 
             # Guard rails
-            if state["iteration"] >= self._definition.max_iterations:
-                await self._fail(state, stop_reason="max_iterations",
-                    error="Max turns reached.", transition_reason="max_iterations",
-                    checkpoint_reason="max_iterations")
+            request_max_turns = state["run_config"].max_turns
+            max_turns = self._definition.max_iterations
+            stop_reason: LoopTransitionReason = "max_iterations"
+            if (
+                request_max_turns is not None
+                and request_max_turns <= max_turns
+            ):
+                max_turns = request_max_turns
+                stop_reason = "max_turns"
+            if state["iteration"] >= max_turns:
+                await self._fail(
+                    state,
+                    stop_reason=stop_reason,
+                    error="Max turns reached.",
+                    transition_reason=stop_reason,
+                    checkpoint_reason=stop_reason,
+                )
                 return state
 
             if not await self._compact(state):
                 return state
 
-            
+            await self._emit_stream(
+                _stream_turn_start(
+                    run_id=state["run_config"].run_id,
+                    turn=state["iteration"] + 1,
+                )
+            )
+
             # Model turn — call the LLM, handle errors, return (turn | None)
             state["iteration"] += 1
             turn, retries = await self._model_turn(
@@ -646,14 +661,18 @@ class AgentLoop:
                     execution.record.tool_call_id
                 ] = execution.record
 
-        approval_execution = next(
-            (
-                execution
-                for execution in executions
-                if execution.result.error_code == "approval_required"
-            ),
-            None,
+        approval_executions = tuple(
+            execution
+            for execution in executions
+            if execution.result.error_code == "approval_required"
         )
+        approval_execution = (
+            approval_executions[0] if approval_executions else None
+        )
+        approval_ids = {
+            execution.result.tool_call_id
+            for execution in approval_executions
+        }
         results_by_id = {
             result.tool_call_id: result
             for result in circuit_results
@@ -662,7 +681,7 @@ class AgentLoop:
             {
                 execution.result.tool_call_id: execution.result
                 for execution in executions
-                if execution is not approval_execution
+                if execution.result.tool_call_id not in approval_ids
             }
         )
         new_results = [
@@ -679,11 +698,9 @@ class AgentLoop:
             ),
             None,
         )
-        pending_ids = {
-            execution.result.tool_call_id
-            for execution in (approval_execution, reconciliation_execution)
-            if execution is not None
-        }
+        pending_ids = set(approval_ids)
+        if reconciliation_execution is not None:
+            pending_ids.add(reconciliation_execution.result.tool_call_id)
         state["pending_tool_calls"] = [
             PendingToolCall(plan=item.plan, status="pending")
             for item in pending

@@ -787,6 +787,7 @@ async def _run_facade_command(
     turn_id: str,
     max_tokens_total: int | None,
     interactive_approval: bool,
+    max_turns: int | None = None,
     tools: Sequence[str] | None = None,
     disabled_tools: Sequence[str] | None = None,
     allow_write_tools: bool = False,
@@ -817,6 +818,7 @@ async def _run_facade_command(
                     session_id=None,
                     run_id=turn_id,
                     thread_id=turn_id,
+                    max_turns=max_turns,
                     llm_budget_total=max_tokens_total,
                     input_files=list(files),
                     workspace_path=(
@@ -923,6 +925,7 @@ async def _chat_facade_session(
     agent_type: str,
     requested_model: str | None,
     budget: int | None,
+    max_turns: int | None = None,
     session_id: str | None = None,
 ) -> None:
     from rag.agent.service import AgentRunRequest
@@ -1017,6 +1020,7 @@ async def _chat_facade_session(
                     task=query,
                     session_id=current_session_id,
                     run_id=str(uuid4()),
+                    max_turns=max_turns,
                     llm_budget_total=budget,
                     workspace_path=(
                         None
@@ -1443,6 +1447,10 @@ def agent_chat(
         int | None,
         typer.Option("--budget", min=1, help="本次 Agent 运行的 LLM/工具预算上限"),
     ] = None,
+    max_turns: Annotated[
+        int | None,
+        typer.Option("--max-turns", min=1, help="每条消息允许的最大模型回合数"),
+    ] = None,
     embedding_model: Annotated[
         str | None,
         typer.Option(
@@ -1513,6 +1521,7 @@ def agent_chat(
             agent_type=agent,
             requested_model=model,
             budget=budget,
+            max_turns=max_turns,
             session_id=effective_session_id,
         )
     )
@@ -1552,6 +1561,10 @@ def agent_run(
     budget: Annotated[
         int | None,
         typer.Option("--max-tokens-total", "--budget", min=1, help="本次 Agent 运行的 LLM/工具预算上限", hidden=True),
+    ] = None,
+    max_turns: Annotated[
+        int | None,
+        typer.Option("--max-turns", min=1, help="本次运行允许的最大模型回合数"),
     ] = None,
     model: Annotated[
         str | None,
@@ -1661,6 +1674,7 @@ def agent_run(
             turn_id=effective_turn_id,
             max_tokens_total=budget,
             interactive_approval=interactive_approval,
+            max_turns=max_turns,
             tools=tool_names,
             disabled_tools=disabled_tool_names,
             allow_write_tools=allow_write_tools,

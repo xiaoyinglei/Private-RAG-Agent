@@ -74,6 +74,7 @@ async def test_builtin_subagent_runner_uses_derived_child_config() -> None:
             delegation_id="delegation-1",
             agent_type=child.agent_type,
             prompt="Child task",
+            max_turns=2,
             llm_budget_total=2400,
         ),
         parent_state={"run_config": parent},
@@ -86,9 +87,23 @@ async def test_builtin_subagent_runner_uses_derived_child_config() -> None:
     assert child_config.parent_run_id == parent.run_id
     assert child_config.source_scope == ("doc-1",)
     assert child_config.max_depth == 1
+    assert child_config.max_turns == 2
     assert child_config.llm_budget_total == 2400
     with pytest.raises(KeyError):
         RunRegistry.get(result.run_id)
+
+
+@pytest.mark.parametrize("max_turns", [0, -1, True])
+def test_delegation_request_rejects_invalid_max_turns(
+    max_turns: object,
+) -> None:
+    with pytest.raises(ValueError, match="max_turns"):
+        AgentDelegationRequest(
+            delegation_id="delegation-invalid-turns",
+            agent_type="child",
+            prompt="Child task",
+            max_turns=max_turns,  # type: ignore[arg-type]
+        )
 
 
 @pytest.mark.anyio

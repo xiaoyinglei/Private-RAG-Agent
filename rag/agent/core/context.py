@@ -74,6 +74,14 @@ class AgentRunConfig:
     tool_policy: ToolPolicy = field(default_factory=ToolPolicy)
     memory_policy: MemoryPolicy = field(default_factory=MemoryPolicy)
 
+    def __post_init__(self) -> None:
+        if self.max_turns is None:
+            return
+        if type(self.max_turns) is not int:
+            raise TypeError("max_turns must be an integer")
+        if self.max_turns < 1:
+            raise ValueError("max_turns must be positive")
+
 
 def derive_child_config(parent: AgentRunConfig, child_def: AgentRuntimePolicy) -> AgentRunConfig:
     if parent.max_depth <= 0:

@@ -154,12 +154,18 @@ class _NoCompaction:
         return LoopCompactionResult(changed=False)
 
 
-def _config(run_id: str, *, budget: int | None = 20_000) -> AgentRunConfig:
+def _config(
+    run_id: str,
+    *,
+    budget: int | None = 20_000,
+    max_turns: int | None = None,
+) -> AgentRunConfig:
     RunRegistry.remove(run_id)
     return AgentRunConfig(
         run_id=run_id,
         thread_id=run_id,
         llm_budget_total=budget,
+        max_turns=max_turns,
         max_depth=1,
         access_policy=AccessPolicy.default(),
     )
@@ -513,6 +519,89 @@ async def test_loop_passes_remaining_budget_to_provider() -> None:
 
     assert provider.seen_budget_remaining == [65]
     RunRegistry.remove(config.run_id)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("request_max_turns", "definition_max_iterations", "expected_reason"),
+    [
+        pytest.param(1, 5, "max_turns", id="request-limit"),
+        pytest.param(5, 1, "max_iterations", id="definition-limit"),
+    ],
+)
+async def test_effective_turn_limit_stops_before_another_model_turn(
+    request_max_turns: int,
+    definition_max_iterations: int,
+    expected_reason: str,
+) -> None:
+    calls: list[str] = []
+    first_call = ToolCallPlan.create("echo", {"value": "once"})
+    provider = _SequenceProvider(
+        [
+            ModelTurnDraft(action="execute", tool_calls=(first_call,)),
+            ModelTurnDraft(action="finish", final_answer="too late"),
+        ]
+    )
+    state = create_loop_state(
+        task="Use one turn only.",
+        run_config=_config(
+            f"loop-{expected_reason}",
+            max_turns=request_max_turns,
+        ),
+    )
+    state["resident_tool_names"] = ["echo"]
+
+    result = await _loop(
+        provider=provider,
+        tools=(
+            _tool(
+                "echo",
+                lambda arguments: calls.append(str(arguments["value"]))
+                or arguments["value"],
+            ),
+        ),
+        definition=_definition(
+            ("echo",),
+            max_iterations=definition_max_iterations,
+        ),
+    ).run(state)
+
+    assert calls == ["once"]
+    assert len(provider.seen_states) == 1
+    assert result["iteration"] == 1
+    assert result["status"] == "failed"
+    assert result["terminal"] is not None
+    assert result["terminal"].stop_reason == expected_reason
+
+
+@pytest.mark.anyio
+async def test_max_turns_stream_does_not_announce_an_unstarted_turn() -> None:
+    call = ToolCallPlan.create("echo", {"value": "once"})
+    provider = _SequenceProvider(
+        [ModelTurnDraft(action="execute", tool_calls=(call,))]
+    )
+    state = create_loop_state(
+        task="Emit only real model turns.",
+        run_config=_config("loop-max-turn-events", max_turns=1),
+    )
+    state["resident_tool_names"] = ["echo"]
+
+    events = await _collect(
+        _loop(
+            provider=provider,
+            tools=(_tool("echo", lambda arguments: arguments["value"]),),
+            definition=_definition(("echo",), max_iterations=5),
+        ).run_streaming(state)
+    )
+
+    assert [
+        event.turn
+        for event in events
+        if event.type is EventType.TURN_START
+    ] == [1]
+    assert state["status"] == "failed"
+    assert state["terminal"] is not None
+    assert state["terminal"].stop_reason == "max_turns"
 
 
 @pytest.mark.anyio

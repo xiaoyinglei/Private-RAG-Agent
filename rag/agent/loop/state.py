@@ -47,6 +47,7 @@ LoopTransitionReason = Literal[
     "finished",
     "failed",
     "max_iterations",
+    "max_turns",
 ]
 
 

@@ -7,7 +7,13 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Literal
 
-from rag.agent.tools.tool import JsonValue, ResolvedToolUse, Tool, ToolEffect
+from rag.agent.tools.tool import (
+    CancellationMode,
+    JsonValue,
+    ResolvedToolUse,
+    Tool,
+    ToolEffect,
+)
 
 
 class UseToolDecision(StrEnum):
@@ -45,15 +51,29 @@ class ToolExecutionContext:
     denied_tool_call_ids: frozenset[str] = frozenset()
     active_skill_ids: frozenset[str] = frozenset()
     deny_effects: frozenset[ToolEffect] = frozenset()
+    max_parallel_calls: int = 4
+    require_confirmation_for: frozenset[str] = frozenset()
+    denied_tool_names: frozenset[str] = frozenset()
+    auto_approve_sandboxed: bool = False
 
     def __post_init__(self) -> None:
-        for name in ("allow_write_tools", "allow_execute_tools"):
+        for name in (
+            "allow_write_tools",
+            "allow_execute_tools",
+            "auto_approve_sandboxed",
+        ):
             if type(getattr(self, name)) is not bool:
                 raise TypeError(f"{name} must be a bool")
+        if type(self.max_parallel_calls) is not int:
+            raise TypeError("max_parallel_calls must be an integer")
+        if self.max_parallel_calls < 1:
+            raise ValueError("max_parallel_calls must be positive")
         for name in (
             "approved_tool_call_ids",
             "denied_tool_call_ids",
             "active_skill_ids",
+            "require_confirmation_for",
+            "denied_tool_names",
         ):
             values = frozenset(getattr(self, name))
             if any(not isinstance(value, str) or not value for value in values):
@@ -94,13 +114,42 @@ def can_use_tool(
 ) -> CanUseToolResult:
     """Return allow/ask/deny from resolved facts without performing approval."""
 
-    del tool, args
+    del args
+    tool_name = tool.definition.name
+    if tool_name in context.denied_tool_names:
+        return CanUseToolResult(
+            UseToolDecision.DENY,
+            f"tool blocked by runtime policy: {tool_name}",
+        )
     denied = resolved.effects & context.deny_effects
     if denied:
         names = ", ".join(sorted(effect.value for effect in denied))
         return CanUseToolResult(
             UseToolDecision.DENY,
             f"effects denied by runtime policy: {names}",
+        )
+    if tool_name in context.require_confirmation_for:
+        return CanUseToolResult(
+            UseToolDecision.ASK,
+            f"runtime policy requires confirmation for tool: {tool_name}",
+        )
+    if (
+        context.auto_approve_sandboxed
+        and tool.definition.name == "run_command"
+        and tool.execution_revision
+        == "builtin-run-command-v2-restricted-sandbox"
+        and tool.cancellation_mode is CancellationMode.MANAGED_PROCESS
+        and ToolEffect.EXECUTE_PROCESS in resolved.effects
+        and ToolEffect.DESTRUCTIVE not in resolved.effects
+        and any(
+            target.kind == "execution_mode"
+            and target.value == "restricted_sandbox"
+            for target in resolved.targets
+        )
+    ):
+        return CanUseToolResult(
+            UseToolDecision.ALLOW,
+            "restricted sandbox execution is pre-approved by runtime policy",
         )
 
     approval_reasons: list[str] = []
