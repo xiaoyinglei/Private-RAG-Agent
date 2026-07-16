@@ -5,7 +5,6 @@ from uuid import uuid4
 
 import pytest
 
-from agent_runtime import AgentResult
 from rag.agent import cli
 from rag.agent.cli import _build_resume_response
 from rag.agent.core.human_input import HumanInputRequest, ToolCallSummary
@@ -97,26 +96,37 @@ def test_agent_resume_closes_service_after_result(
     closed: list[bool] = []
     facade_options: list[dict[str, object]] = []
 
-    class _Facade:
-        async def aresume(
+    class _Service:
+        async def resume_turn(
             self,
+            *,
             turn_id: str,
             action: str,
-            *,
             user_input: str | None,
-        ) -> AgentResult:
+        ) -> AgentRunResult:
             assert action == "allow_once"
             assert user_input is None
-            closed.append(True)
-            return AgentResult.from_internal(
-                AgentRunResult(
-                    run_id=turn_id,
-                    thread_id=turn_id,
-                    session_id=str(uuid4()),
-                    status="done",
-                    final_answer="resumed",
-                )
+            return AgentRunResult(
+                run_id=turn_id,
+                thread_id=turn_id,
+                session_id=str(uuid4()),
+                status="done",
+                final_answer="resumed",
             )
+
+    class _RuntimeFacade:
+        @asynccontextmanager
+        async def _open_product_runtime(self, **kwargs: object):
+            assert isinstance(kwargs.get("stream_sink"), cli._CLIToolEventDisplay)
+            try:
+                yield _Service()
+            finally:
+                closed.append(True)
+
+    class _Facade:
+        def _agent_for_turn(self, turn_id: str) -> _RuntimeFacade:
+            assert turn_id
+            return _RuntimeFacade()
 
     def create_facade(**kwargs: object) -> _Facade:
         facade_options.append(kwargs)
@@ -182,6 +192,7 @@ async def test_inline_approval_resumes_on_the_same_runtime(
         ],
     )
     calls: list[str] = []
+    displays: list[object] = []
 
     class _Service:
         async def chat(self, run_request: object) -> AgentRunResult:
@@ -216,8 +227,9 @@ async def test_inline_approval_resumes_on_the_same_runtime(
         workspace_path = tmp_path
 
         @asynccontextmanager
-        async def _open_product_runtime(self, **_kwargs: object):
+        async def _open_product_runtime(self, **kwargs: object):
             calls.append("open")
+            displays.append(kwargs.get("stream_sink"))
             try:
                 yield _Service()
             finally:
@@ -232,6 +244,7 @@ async def test_inline_approval_resumes_on_the_same_runtime(
         ),
     )
 
+    display = cli._CLIToolEventDisplay()
     result = await cli._run_facade_command(
         _Facade(),
         task="run tests",
@@ -239,7 +252,9 @@ async def test_inline_approval_resumes_on_the_same_runtime(
         turn_id=str(uuid4()),
         max_tokens_total=None,
         interactive_approval=True,
+        event_display=display,
     )
 
     assert result.answer == "continued"
     assert calls == ["open", "chat", "resume", "close"]
+    assert displays == [display]

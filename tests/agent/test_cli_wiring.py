@@ -142,6 +142,23 @@ def test_cli_shows_called_tool_names_without_verbose(
     assert "✓ search_text" in capsys.readouterr().out
 
 
+def test_cli_does_not_repeat_an_answer_that_was_already_streamed(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _display_result(
+        AgentRunResult(
+            run_id="streamed-answer",
+            thread_id="streamed-answer",
+            status="done",
+            final_answer="already visible",
+        ),
+        verbose=False,
+        answer_streamed=True,
+    )
+
+    assert "already visible" not in capsys.readouterr().out
+
+
 def test_cli_shows_the_persisted_update_plan_without_verbose(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -229,6 +246,10 @@ async def test_cli_streams_text_deltas_without_inserting_newlines(
 
     assert capsys.readouterr().out == "hello world"
     assert display.answer_streamed is True
+
+    display.begin_turn()
+
+    assert display.answer_streamed is False
 
 
 @pytest.mark.anyio

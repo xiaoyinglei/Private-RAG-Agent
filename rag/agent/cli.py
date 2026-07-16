@@ -152,7 +152,7 @@ class _CLIToolEventDisplay:
             if not isinstance(title, str) or not title:
                 continue
             status = step.get("status")
-            symbol = symbols.get(status, "○")
+            symbol = symbols.get(status, "○") if isinstance(status, str) else "○"
             self._write_line(f"  {symbol} {title}")
 
     def _write_line(self, value: str) -> None:
@@ -160,6 +160,15 @@ class _CLIToolEventDisplay:
             print()
         print(value, flush=True)
         self._line_open = False
+
+    def begin_turn(self) -> None:
+        self.finish()
+        self.answer_streamed = False
+
+    def finish(self) -> None:
+        if self._line_open:
+            print(flush=True)
+            self._line_open = False
 
 
 def _bounded_cli_text(value: str, *, limit: int = 180) -> str:
@@ -413,7 +422,12 @@ def _display_failure(
                 _print_diagnostic(diagnostic)
 
 
-def _display_result(result: AgentRunResult, *, verbose: bool) -> None:
+def _display_result(
+    result: AgentRunResult,
+    *,
+    verbose: bool,
+    answer_streamed: bool = False,
+) -> None:
     """干净输出 AgentRunResult。"""
     if result.status == "failed":
         _display_failure(
@@ -431,7 +445,7 @@ def _display_result(result: AgentRunResult, *, verbose: bool) -> None:
             for diagnostic in result.runtime_diagnostics:
                 _print_diagnostic(diagnostic)
 
-    if result.final_answer:
+    if result.final_answer and not answer_streamed:
         print(f"\n{result.final_answer}")
 
     plan_summary = _format_plan_summary(result)
@@ -471,11 +485,20 @@ def _display_result(result: AgentRunResult, *, verbose: bool) -> None:
         print(f"停止原因: {result.stop_reason}")
 
 
-def _display_agent_result(result: AgentResult, *, verbose: bool) -> None:
+def _display_agent_result(
+    result: AgentResult,
+    *,
+    verbose: bool,
+    answer_streamed: bool = False,
+) -> None:
     from rag.agent.service import AgentRunResult
 
     if isinstance(result.raw, AgentRunResult):
-        _display_result(result.raw, verbose=verbose)
+        _display_result(
+            result.raw,
+            verbose=verbose,
+            answer_streamed=answer_streamed,
+        )
     else:
         if result.status == "failed":
             _display_failure(
@@ -497,7 +520,7 @@ def _display_agent_result(result: AgentResult, *, verbose: bool) -> None:
                 for diagnostic in result.diagnostics:
                     _print_diagnostic(diagnostic)
 
-        if result.answer:
+        if result.answer and not answer_streamed:
             print(f"\n{result.answer}")
 
         if verbose and result.tool_calls:
@@ -677,6 +700,7 @@ async def _run_facade_command(
     allow_write_tools: bool = False,
     allow_execute_tools: bool = False,
     allow_discovery_tools: bool | None = None,
+    event_display: _CLIToolEventDisplay | None = None,
 ) -> AgentResult:
     """Run and optionally approve on one service, event loop, and ToolCall."""
 
@@ -691,39 +715,44 @@ async def _run_facade_command(
         ),
         allow_discovery_tools=allow_discovery_tools,
     )
-    async with facade._open_product_runtime(
-        stream_sink=_CLIToolEventDisplay(),
-    ) as service:
-        raw = await service.chat(
-            AgentRunRequest(
-                task=task,
-                session_id=None,
-                run_id=turn_id,
-                thread_id=turn_id,
-                llm_budget_total=max_tokens_total,
-                input_files=list(files),
-                workspace_path=(
-                    None
-                    if facade.workspace_path is None
-                    else str(facade.workspace_path)
-                ),
-                tools=None if tools is None else tuple(tools),
-                disabled_tools=tuple(disabled_tools or ()),
-                allow_write_tools=allow_write_tools,
-                allow_execute_tools=allow_execute_tools,
-                allow_discovery_tools=effective_discovery,
+    display = event_display or _CLIToolEventDisplay()
+    try:
+        async with facade._open_product_runtime(stream_sink=display) as service:
+            display.begin_turn()
+            raw = await service.chat(
+                AgentRunRequest(
+                    task=task,
+                    session_id=None,
+                    run_id=turn_id,
+                    thread_id=turn_id,
+                    llm_budget_total=max_tokens_total,
+                    input_files=list(files),
+                    workspace_path=(
+                        None
+                        if facade.workspace_path is None
+                        else str(facade.workspace_path)
+                    ),
+                    tools=None if tools is None else tuple(tools),
+                    disabled_tools=tuple(disabled_tools or ()),
+                    allow_write_tools=allow_write_tools,
+                    allow_execute_tools=allow_execute_tools,
+                    allow_discovery_tools=effective_discovery,
+                )
             )
-        )
-        while raw.status == "paused" and interactive_approval:
-            response = _handle_pause(raw, raw.run_id)
-            if response is None:
-                break
-            raw = await service.resume_turn(
-                turn_id=raw.run_id,
-                action=response.decision,
-                user_input=response.user_message,
-            )
-        return AgentResult.from_internal(raw, files=tuple(files))
+            while raw.status == "paused" and interactive_approval:
+                display.finish()
+                response = _handle_pause(raw, raw.run_id)
+                if response is None:
+                    break
+                display.begin_turn()
+                raw = await service.resume_turn(
+                    turn_id=raw.run_id,
+                    action=response.decision,
+                    user_input=response.user_message,
+                )
+            return AgentResult.from_internal(raw, files=tuple(files))
+    finally:
+        display.finish()
 
 
 async def _resume_facade_command(
@@ -732,15 +761,25 @@ async def _resume_facade_command(
     turn_id: str,
     action: str,
     user_input: str | None = None,
+    event_display: _CLIToolEventDisplay | None = None,
 ) -> AgentResult:
-    return cast(
-        "AgentResult",
-        await facade.aresume(
-            turn_id,
-            action,
-            user_input=user_input,
-        ),
-    )
+    from agent_runtime.result import AgentResult
+
+    display = event_display or _CLIToolEventDisplay()
+    runtime_facade = facade._agent_for_turn(turn_id)
+    display.begin_turn()
+    try:
+        async with runtime_facade._open_product_runtime(
+            stream_sink=display,
+        ) as service:
+            raw = await service.resume_turn(
+                turn_id=turn_id,
+                action=action,
+                user_input=user_input,
+            )
+            return AgentResult.from_internal(raw)
+    finally:
+        display.finish()
 
 
 def _print_startup_banner(model_alias: str, *, agent_type: str) -> None:
@@ -767,8 +806,9 @@ async def _chat_facade_session(
         if session_id is None
         else facade._agent_for_session(session_id)
     )
+    event_display = _CLIToolEventDisplay()
     async with runtime_facade._open_product_runtime(
-        stream_sink=_CLIToolEventDisplay(),
+        stream_sink=event_display,
     ) as service:
         current_session_id = session_id
         verbose = False
@@ -798,6 +838,7 @@ async def _chat_facade_session(
                 )
                 continue
 
+            event_display.begin_turn()
             result = await service.chat(
                 AgentRunRequest(
                     task=query,
@@ -813,16 +854,23 @@ async def _chat_facade_session(
             )
             current_session_id = result.session_id
             while result.status == "paused":
+                event_display.finish()
                 response = _handle_pause(result, result.run_id)
                 if response is None:
                     print("已取消。")
                     break
+                event_display.begin_turn()
                 result = await service.resume_turn(
                     turn_id=result.run_id,
                     action=response.decision,
                     user_input=response.user_message,
                 )
-            _display_result(result, verbose=verbose)
+            event_display.finish()
+            _display_result(
+                result,
+                verbose=verbose,
+                answer_streamed=event_display.answer_streamed,
+            )
 
 
 def _print_current_model(control_plane: ModelControlPlane) -> None:
@@ -1149,6 +1197,7 @@ def agent_run(
     interactive_approval = (
         not non_interactive and _is_interactive_terminal()
     )
+    event_display = _CLIToolEventDisplay()
     result = asyncio.run(
         _run_facade_command(
             facade,
@@ -1162,9 +1211,14 @@ def agent_run(
             allow_write_tools=allow_write_tools,
             allow_execute_tools=allow_execute_tools,
             allow_discovery_tools=allow_discovery_tools,
+            event_display=event_display,
         )
     )
-    _display_agent_result(result, verbose=verbose)
+    _display_agent_result(
+        result,
+        verbose=verbose,
+        answer_streamed=event_display.answer_streamed,
+    )
 
     raw_result = result.raw if isinstance(result.raw, AgentRunResult) else None
     if result.status == "paused":
@@ -1227,15 +1281,21 @@ def agent_resume(
         checkpoint_db=checkpoint_db,
         vector_dsn=vector_dsn,
     )
+    event_display = _CLIToolEventDisplay()
     result = asyncio.run(
         _resume_facade_command(
             facade,
             turn_id=turn_id,
             action=action,
             user_input=user_input,
+            event_display=event_display,
         )
     )
-    _display_agent_result(result, verbose=verbose)
+    _display_agent_result(
+        result,
+        verbose=verbose,
+        answer_streamed=event_display.answer_streamed,
+    )
     if result.status == "paused":
         raise typer.Exit(code=2)
     if result.status == "failed":
