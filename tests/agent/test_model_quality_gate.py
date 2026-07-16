@@ -432,6 +432,7 @@ def test_provider_failure_is_inconclusive_not_a_model_quality_score() -> None:
         ("failed", "tool_error", True),
         ("failed", "invalid_model_turn", False),
         ("failed", "max_iterations", False),
+        ("failed", "repeated_tool_failure", False),
         ("done", "accepted", False),
     ],
 )

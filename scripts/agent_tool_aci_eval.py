@@ -483,7 +483,11 @@ async def _measure_delivery_evidence() -> Any:
     results = await module.run_matrix(
         model="fake",
         fake_model=True,
-        only={"cache_usage", "missing_file_recovery"},
+        only={
+            "cache_usage",
+            "missing_file_recovery",
+            "repeated_failure_circuit",
+        },
     )
     failed = [result for result in results if not result.passed]
     if failed:

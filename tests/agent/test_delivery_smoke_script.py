@@ -33,6 +33,7 @@ def test_delivery_cases_cover_the_locked_public_matrix() -> None:
         "patch_fixture",
         "echo_hello",
         "missing_file_recovery",
+        "repeated_failure_circuit",
         "hidden_mcp_disabled",
         "hidden_mcp_discovery",
         "approval_resume",
@@ -54,6 +55,10 @@ def test_delivery_cases_cover_the_locked_public_matrix() -> None:
     assert cases["echo_hello"].expected_tools == ("run_command",)
     assert cases["missing_file_recovery"].expected_tool_errors == (
         "read_file:runner_failed",
+    )
+    assert cases["repeated_failure_circuit"].expected_tool_errors == (
+        "read_file:runner_failed",
+        "read_file:repeated_tool_failure",
     )
     assert cases["hidden_mcp_disabled"].allow_discovery_tools is False
     assert cases["hidden_mcp_disabled"].expected_answer_exact == (
@@ -97,7 +102,7 @@ async def test_fake_delivery_matrix_proves_public_runtime_invariants() -> None:
     results = await module.run_matrix(model="fake", fake_model=True)
     by_name = {result.name: result for result in results}
 
-    assert len(results) == 11
+    assert len(results) == 12
     assert all(result.passed for result in results), {
         result.name: result.error for result in results if not result.passed
     }
@@ -124,6 +129,19 @@ async def test_fake_delivery_matrix_proves_public_runtime_invariants() -> None:
     assert missing.status == "done"
     assert missing.tool_errors == (
         "read_file:runner_failed: tool runner failed",
+    )
+
+    circuit = by_name["repeated_failure_circuit"]
+    assert circuit.status == "done"
+    assert circuit.tools == ("read_file", "read_file", "read_file")
+    assert sum("runner_failed" in error for error in circuit.tool_errors) == 2
+    assert any(
+        "repeated_tool_failure" in error
+        for error in circuit.tool_errors
+    )
+    assert any(
+        diagnostic.startswith("repeated_tool_failure:")
+        for diagnostic in circuit.diagnostics
     )
 
     hidden_off = by_name["hidden_mcp_disabled"]
@@ -153,6 +171,9 @@ async def test_fake_delivery_matrix_proves_public_runtime_invariants() -> None:
     assert cache.provider_wire_hashes[0].startswith("wire_")
     assert cache.schema_bytes == direct.schema_bytes
     assert cache.toolset_revisions == direct.toolset_revisions
+    evidence = module.delivery_metric_evidence(results)
+    assert evidence.recovery_successes == 2
+    assert evidence.recovery_cases == 2
 
     for name, wire_kind in (
         ("mlx_local_envelope", "mlx"),
