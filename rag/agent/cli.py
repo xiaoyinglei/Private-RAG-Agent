@@ -5,7 +5,7 @@ import logging
 import os
 import shlex
 import sys
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any, cast
@@ -41,25 +41,132 @@ DEFAULT_VECTOR_BACKEND = "milvus"
 
 
 class _CLIToolEventDisplay:
-    """Render canonical tool-start events without deriving runtime state."""
+    """Project canonical stream events into bounded terminal output."""
 
     def __init__(self) -> None:
         self._displayed_tool_ids: set[str] = set()
+        self._displayed_tool_events: set[tuple[EventType, str]] = set()
+        self._displayed_plan_revisions: set[int | str] = set()
+        self._tool_names: dict[str, str] = {}
+        self._line_open = False
+        self.answer_streamed = False
 
     async def emit(self, event: StreamEvent) -> None:
-        if event.type is not EventType.TOOL_USE_START:
-            return
-        tool_id = event.data.get("tool_id")
-        if isinstance(tool_id, str) and tool_id:
-            if tool_id in self._displayed_tool_ids:
+        if event.type is EventType.TEXT_DELTA:
+            text = event.data.get("text")
+            if not isinstance(text, str) or not text:
                 return
-            self._displayed_tool_ids.add(tool_id)
+            print(text, end="", flush=True)
+            self.answer_streamed = True
+            self._line_open = not text.endswith("\n")
+            return
+
+        if event.type is EventType.TOOL_USE_START:
+            self._render_tool_start(event)
+            return
+        if event.type is EventType.TOOL_USE_PROGRESS:
+            self._render_tool_progress(event)
+            return
+        if event.type is EventType.TOOL_USE_RESULT:
+            self._render_tool_result(event)
+            return
+        if event.type is EventType.PLAN_UPDATED:
+            self._render_plan(event)
+            return
+        if event.type is EventType.RECOVERY:
+            strategy = event.data.get("strategy")
+            if not isinstance(strategy, str) or not strategy:
+                return
+            detail = event.data.get("detail")
+            suffix = f" — {detail}" if isinstance(detail, str) and detail else ""
+            self._write_line(f"↻ 恢复: {strategy}{suffix}")
+
+    def _render_tool_start(self, event: StreamEvent) -> None:
+        tool_id = event.data.get("tool_id")
+        if not isinstance(tool_id, str) or not tool_id:
+            return
+        if tool_id in self._displayed_tool_ids:
+            return
+        self._displayed_tool_ids.add(tool_id)
         tool_name = event.data.get("tool_name")
         if not isinstance(tool_name, str) or not tool_name:
             return
+        self._tool_names[tool_id] = tool_name
         preview = event.data.get("input_preview")
         suffix = f": {preview}" if isinstance(preview, str) and preview else ""
-        print(f"\n→ {tool_name}{suffix}")
+        self._write_line(f"→ {tool_name}{suffix}")
+
+    def _render_tool_progress(self, event: StreamEvent) -> None:
+        tool_id = event.data.get("tool_id")
+        progress = event.data.get("progress")
+        if not isinstance(tool_id, str) or not isinstance(progress, str):
+            return
+        tool_name = self._tool_names.get(tool_id, "tool")
+        percent = event.data.get("percent")
+        percent_text = (
+            f" ({percent:g}%)" if isinstance(percent, (int, float)) else ""
+        )
+        self._write_line(f"… {tool_name}: {progress}{percent_text}")
+
+    def _render_tool_result(self, event: StreamEvent) -> None:
+        tool_id = event.data.get("tool_id")
+        if not isinstance(tool_id, str) or not tool_id:
+            return
+        marker = (EventType.TOOL_USE_RESULT, tool_id)
+        if marker in self._displayed_tool_events:
+            return
+        self._displayed_tool_events.add(marker)
+        event_name = event.data.get("tool_name")
+        tool_name = (
+            event_name
+            if isinstance(event_name, str) and event_name
+            else self._tool_names.get(tool_id, "tool")
+        )
+        result = event.data.get("result")
+        suffix = f": {_bounded_cli_text(str(result))}" if result is not None else ""
+        self._write_line(f"✓ {tool_name}{suffix}")
+
+    def _render_plan(self, event: StreamEvent) -> None:
+        plan = event.data.get("plan")
+        if not isinstance(plan, Mapping):
+            return
+        revision = plan.get("revision")
+        if not isinstance(revision, (int, str)):
+            return
+        if revision in self._displayed_plan_revisions:
+            return
+        self._displayed_plan_revisions.add(revision)
+        self._write_line(f"计划 (revision {revision})")
+        steps = plan.get("steps")
+        if not isinstance(steps, Sequence) or isinstance(steps, (str, bytes)):
+            return
+        symbols = {
+            "completed": "✓",
+            "in_progress": "→",
+            "failed": "✗",
+        }
+        for step in steps:
+            if not isinstance(step, Mapping):
+                continue
+            title = step.get("title")
+            if not isinstance(title, str) or not title:
+                continue
+            status = step.get("status")
+            symbol = symbols.get(status, "○")
+            self._write_line(f"  {symbol} {title}")
+
+    def _write_line(self, value: str) -> None:
+        if self._line_open:
+            print()
+        print(value, flush=True)
+        self._line_open = False
+
+
+def _bounded_cli_text(value: str, *, limit: int = 180) -> str:
+    compact = " ".join(value.split())
+    if len(compact) <= limit:
+        return compact
+    return f"{compact[: limit - 1]}…"
 
 
 @dataclass(frozen=True)

@@ -19,7 +19,15 @@ from rag.agent.cli import (
 )
 from rag.agent.planning import AgentPlan, PlanEvent, PlanStep
 from rag.agent.service import AgentRunRequest, AgentRunResult
-from rag.agent.streaming.events import tool_use_start
+from rag.agent.streaming.events import (
+    EventType,
+    StreamEvent,
+    recovery_event,
+    text_delta,
+    tool_use_progress,
+    tool_use_result,
+    tool_use_start,
+)
 from rag.agent.tools.builtins import RESIDENT_CODING_TOOL_NAMES
 from rag.agent.tools.integrations.knowledge import KnowledgeSearchOutput
 from rag.agent.tools.integrations.mcp import (
@@ -208,6 +216,77 @@ async def test_cli_displays_one_start_for_resumed_tool_call(
     await display.emit(event)
 
     assert capsys.readouterr().out.count("→ apply_patch") == 1
+
+
+@pytest.mark.anyio
+async def test_cli_streams_text_deltas_without_inserting_newlines(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    display = _CLIToolEventDisplay()
+
+    await display.emit(text_delta("hello"))
+    await display.emit(text_delta(" world"))
+
+    assert capsys.readouterr().out == "hello world"
+    assert display.answer_streamed is True
+
+
+@pytest.mark.anyio
+async def test_cli_displays_correlated_tool_lifecycle_once(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    display = _CLIToolEventDisplay()
+    start = tool_use_start(
+        "read_file",
+        "call_read",
+        input_preview="path='src/service.py'",
+    )
+    result = tool_use_result(
+        "read_file",
+        "call_read",
+        {"path": "src/service.py", "size_bytes": 420},
+    )
+
+    await display.emit(start)
+    await display.emit(tool_use_progress("call_read", "reading", percent=50))
+    await display.emit(result)
+    await display.emit(result)
+
+    output = capsys.readouterr().out
+    assert "→ read_file: path='src/service.py'" in output
+    assert "… read_file: reading (50%)" in output
+    assert "✓ read_file:" in output
+    assert "size_bytes" in output
+    assert output.count("✓ read_file:") == 1
+
+
+@pytest.mark.anyio
+async def test_cli_displays_plan_and_recovery_events(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    display = _CLIToolEventDisplay()
+    plan_event = StreamEvent(
+        type=EventType.PLAN_UPDATED,
+        data={
+            "plan": {
+                "revision": 2,
+                "steps": [
+                    {"title": "Inspect source", "status": "completed"},
+                    {"title": "Wire CLI", "status": "in_progress"},
+                ],
+            }
+        },
+    )
+
+    await display.emit(plan_event)
+    await display.emit(plan_event)
+    await display.emit(recovery_event("model_retry", "attempt 2 of 3"))
+
+    output = capsys.readouterr().out
+    assert output.count("计划 (revision 2)") == 1
+    assert "✓ Inspect source" in output
+    assert "→ Wire CLI" in output
+    assert "↻ 恢复: model_retry — attempt 2 of 3" in output
 
 
 def test_builder_passes_canonical_events_to_cli_display() -> None:
