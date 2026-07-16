@@ -510,6 +510,8 @@ Session history 保真保存 user / assistant / tool 事件；模型上下文由
 
 `LoopState` 将 plan、memory、deferred tools、finish、Skill 和 file manifest 拆成有界 typed sub-state；tool ledger、plan events、stop-hook feedback、diagnostics 和大结果都有数量或字节上限。循环在 budget exhausted、max iterations、context compaction failure、非法 model turn 和 stop-hook failure 等路径上明确终止，不用无限重试掩盖问题。
 
+工具失败循环直接复用 checkpoint 中的 canonical call/result 历史：按“工具名 + 规范化参数”识别相同调用，不可重试失败会在下一次调用前熔断，可重试失败允许一次真实重试。熔断会写入 canonical `repeated_tool_failure` 结果并发出现有 recovery 事件，模型可以改参数或换工具恢复；在收到恢复指引后仍只重复已打开的调用，循环以 `repeated_tool_failure` 终止。该语义在 checkpoint 恢复后仍成立，不需要第二套状态或执行器。
+
 同一状态通过三个消费面暴露：CLI 负责人类可读结果和审批，`StreamEvent` 提供 text/tool/plan/compact/recovery/budget 生命周期，`AgentResult` 提供 answer、status、Session/Turn ID、tool calls、citations、usage、diagnostics 和 plan。provider usage 与 tokenizer estimate 会标明来源，未返回的 cache 数据不会被猜测。
 
 ### RAG 层：Summary-First, Grounding-Later

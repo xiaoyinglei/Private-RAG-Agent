@@ -153,6 +153,21 @@ def build_cases() -> tuple[SmokeCase, ...]:
             tools=("read_file",),
         ),
         SmokeCase(
+            name="repeated_failure_circuit",
+            task=(
+                "Try missing.txt until the runtime circuit opens, then answer "
+                "circuit_open."
+            ),
+            expected_answer_exact="circuit_open",
+            expected_tools=("read_file", "read_file", "read_file"),
+            expected_initial_tools=("read_file",),
+            expected_tool_errors=(
+                "read_file:runner_failed",
+                "read_file:repeated_tool_failure",
+            ),
+            tools=("read_file",),
+        ),
+        SmokeCase(
             name="hidden_mcp_disabled",
             task=(
                 "Without calling a tool, output exactly hidden_disabled and no "
@@ -268,6 +283,21 @@ def _fake_turns(case: SmokeCase) -> tuple[_FakeTurn, ...]:
                 arguments={"path": "missing.txt"},
             ),
             _FakeTurn(text="file_not_found"),
+        ),
+        "repeated_failure_circuit": (
+            _FakeTurn(
+                tool_name="read_file",
+                arguments={"path": "missing.txt"},
+            ),
+            _FakeTurn(
+                tool_name="read_file",
+                arguments={"path": "missing.txt"},
+            ),
+            _FakeTurn(
+                tool_name="read_file",
+                arguments={"path": "missing.txt"},
+            ),
+            _FakeTurn(text="circuit_open"),
         ),
         "hidden_mcp_disabled": (_FakeTurn(text="hidden_disabled"),),
         "hidden_mcp_discovery": (
@@ -947,7 +977,11 @@ def delivery_metric_evidence(
     """Extract cache and recovery evidence from completed delivery cases."""
 
     by_name = {result.name: result for result in results}
-    required = {"cache_usage", "missing_file_recovery"}
+    required = {
+        "cache_usage",
+        "missing_file_recovery",
+        "repeated_failure_circuit",
+    }
     missing = required - set(by_name)
     if missing:
         names = ", ".join(sorted(missing))
@@ -955,6 +989,7 @@ def delivery_metric_evidence(
 
     cache = by_name["cache_usage"]
     recovery = by_name["missing_file_recovery"]
+    circuit = by_name["repeated_failure_circuit"]
     recovered = (
         recovery.passed
         and recovery.status == "done"
@@ -963,13 +998,21 @@ def delivery_metric_evidence(
             for error in recovery.tool_errors
         )
     )
+    circuit_recovered = (
+        circuit.passed
+        and circuit.status == "done"
+        and any(
+            error.startswith("read_file:repeated_tool_failure:")
+            for error in circuit.tool_errors
+        )
+    )
     return DeliveryMetricEvidence(
         schema_bytes=cache.schema_bytes,
         cache_read_tokens=cache.cache_read_input_tokens,
         cache_write_tokens=cache.cache_write_input_tokens,
         cache_usage_source=cache.usage_source,
-        recovery_successes=int(recovered),
-        recovery_cases=1,
+        recovery_successes=int(recovered) + int(circuit_recovered),
+        recovery_cases=2,
     )
 
 

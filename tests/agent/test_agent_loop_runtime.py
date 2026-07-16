@@ -4,14 +4,22 @@ import asyncio
 import json
 from collections.abc import AsyncIterable, Mapping
 from copy import deepcopy
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 import pytest
+from langgraph.checkpoint.memory import MemorySaver
 
+from rag.agent.core.checkpointing import (
+    CheckpointStore,
+    LangGraphCheckpointStore,
+    agent_checkpoint_serde,
+)
 from rag.agent.core.context import AgentRunConfig, RunRegistry
 from rag.agent.core.definition import AgentRuntimePolicy
 from rag.agent.core.finalization import FinishCandidateBuilder
+from rag.agent.core.human_input import HumanInputResponse
+from rag.agent.core.model_request import build_tool_manifest
 from rag.agent.core.turn_contracts import ToolCallPlan
 from rag.agent.loop.runtime import (
     AgentLoop,
@@ -31,7 +39,11 @@ from rag.agent.skills.catalog import SkillCatalog
 from rag.agent.skills.loader import scan_and_load_skills
 from rag.agent.skills.runtime import SkillRuntime
 from rag.agent.streaming.events import EventType, StreamEvent, text_delta
-from rag.agent.tools.executor import ToolExecutionRecord, ToolExecutor
+from rag.agent.tools.executor import (
+    ExecutionStatus,
+    ToolExecutionRecord,
+    ToolExecutor,
+)
 from rag.agent.tools.integrations.skills import create_invoke_skill_tool
 from rag.agent.tools.permissions import ToolExecutionContext
 from rag.agent.tools.selection import (
@@ -173,6 +185,7 @@ def _tool(
     schema: Mapping[str, JsonValue] | None = None,
     effects: frozenset[ToolEffect] = frozenset(),
     metadata: Mapping[str, JsonValue] | None = None,
+    idempotent: bool = True,
 ) -> Tool:
     input_schema = schema or {
         "type": "object",
@@ -205,7 +218,7 @@ def _tool(
             targets=(),
         ),
         execution_revision=f"{name}-v1",
-        idempotent=True,
+        idempotent=idempotent,
         concurrency_safe=True,
         cancellation_mode=CancellationMode.COOPERATIVE,
         interrupt_behavior=InterruptBehavior.CANCEL,
@@ -218,7 +231,7 @@ def _loop(
     *,
     provider: object,
     tools: tuple[Tool, ...] = (),
-    checkpoint: _Checkpoint | None = None,
+    checkpoint: CheckpointStore | None = None,
     definition: AgentRuntimePolicy | None = None,
     events: _Events | None = None,
     max_model_retries: int = 1,
@@ -635,3 +648,373 @@ async def test_find_tools_result_and_activation_are_checkpointed_atomically() ->
         any(item.tool_call_id == call.tool_call_id for item in snap["tool_results"])
         for snap in activation_snapshots
     )
+
+
+@pytest.mark.anyio
+async def test_repeated_retryable_tool_failure_is_circuited_and_can_recover() -> None:
+    attempts: list[str] = []
+
+    def flaky(arguments: Mapping[str, JsonValue]) -> str:
+        value = str(arguments["value"])
+        attempts.append(value)
+        if value == "stuck":
+            raise RuntimeError("still stuck")
+        return value
+
+    first = ToolCallPlan.create("flaky", {"value": "stuck"})
+    second = ToolCallPlan.create("flaky", {"value": "stuck"})
+    third = ToolCallPlan.create("flaky", {"value": "stuck"})
+    recovery = ToolCallPlan.create("flaky", {"value": "recovered"})
+    provider = _SequenceProvider(
+        [
+            ModelTurnDraft(action="execute", tool_calls=(second,)),
+            ModelTurnDraft(action="execute", tool_calls=(third,)),
+            ModelTurnDraft(action="execute", tool_calls=(recovery,)),
+            ModelTurnDraft(action="finish", final_answer="Recovered."),
+        ]
+    )
+    state = create_loop_state(
+        task="Recover from a repeated tool failure.",
+        run_config=_config("loop-repeated-tool-failure"),
+        pending_tool_calls=(first,),
+    )
+    state["resident_tool_names"] = ["flaky"]
+
+    events = await _collect(
+        _loop(provider=provider, tools=(_tool("flaky", flaky),)).run_streaming(
+            state
+        )
+    )
+
+    assert state["status"] == "completed"
+    assert attempts == ["stuck", "stuck", "recovered"]
+    assert [result.error_code for result in state["tool_results"]] == [
+        "runner_failed",
+        "runner_failed",
+        "repeated_tool_failure",
+        None,
+    ]
+    recovery_event = next(
+        event
+        for event in events
+        if event.type is EventType.RECOVERY
+        and event.data.get("strategy") == "tool_failure_circuit_breaker"
+    )
+    assert "flaky" in str(recovery_event.data["detail"])
+
+
+@pytest.mark.anyio
+async def test_repeated_tool_failure_circuit_uses_checkpointed_history() -> None:
+    attempts: list[str] = []
+
+    def flaky(arguments: Mapping[str, JsonValue]) -> str:
+        value = str(arguments["value"])
+        attempts.append(value)
+        if value == "stuck":
+            raise RuntimeError("still stuck")
+        return value
+
+    tool = _tool("flaky", flaky)
+    first = ToolCallPlan.create("flaky", {"value": "stuck"})
+    second = ToolCallPlan.create("flaky", {"value": "stuck"})
+    state = create_loop_state(
+        task="Pause after repeated failures.",
+        run_config=_config("loop-repeated-tool-failure-resume"),
+        pending_tool_calls=(first,),
+    )
+    state["resident_tool_names"] = ["flaky"]
+    state["tool_manifest"] = build_tool_manifest(
+        tools=(tool,),
+        resident_tool_names=("flaky",),
+        explicit_tool_names=(),
+        active_tool_names=(),
+        provider_serializer_revision=state["provider_serializer_revision"],
+    )
+    checkpoint = LangGraphCheckpointStore(
+        MemorySaver(serde=agent_checkpoint_serde()),
+        run_config=state["run_config"],
+    )
+
+    paused = await _loop(
+        provider=_SequenceProvider(
+            [
+                ModelTurnDraft(action="execute", tool_calls=(second,)),
+                ModelTurnDraft(action="pause", pause_reason="Resume later."),
+            ]
+        ),
+        tools=(tool,),
+        checkpoint=checkpoint,
+    ).run(state)
+
+    assert paused["status"] == "paused"
+    resumed = await checkpoint.load_latest()
+    assert resumed is not None
+    resumed["status"] = "running"
+    resumed["pause"] = None
+    third = ToolCallPlan.create("flaky", {"value": "stuck"})
+    recovery = ToolCallPlan.create("flaky", {"value": "recovered"})
+
+    result = await _loop(
+        provider=_SequenceProvider(
+            [
+                ModelTurnDraft(action="execute", tool_calls=(third,)),
+                ModelTurnDraft(action="execute", tool_calls=(recovery,)),
+                ModelTurnDraft(action="finish", final_answer="Recovered."),
+            ]
+        ),
+        tools=(tool,),
+    ).run(resumed)
+
+    assert result["status"] == "completed"
+    assert attempts == ["stuck", "stuck", "recovered"]
+    assert result["tool_results"][-2].error_code == "repeated_tool_failure"
+
+
+@pytest.mark.anyio
+async def test_repeating_an_open_tool_failure_circuit_fails_fast() -> None:
+    attempts = 0
+
+    def always_fails(_arguments: Mapping[str, JsonValue]) -> str:
+        nonlocal attempts
+        attempts += 1
+        raise RuntimeError("still stuck")
+
+    calls = tuple(
+        ToolCallPlan.create("flaky", {"value": "stuck"})
+        for _ in range(4)
+    )
+    state = create_loop_state(
+        task="Stop a repeated failure loop.",
+        run_config=_config("loop-repeated-tool-failure-terminal"),
+        pending_tool_calls=(calls[0],),
+    )
+    state["resident_tool_names"] = ["flaky"]
+
+    result = await _loop(
+        provider=_SequenceProvider(
+            [
+                ModelTurnDraft(action="execute", tool_calls=(calls[1],)),
+                ModelTurnDraft(action="execute", tool_calls=(calls[2],)),
+                ModelTurnDraft(action="execute", tool_calls=(calls[3],)),
+            ]
+        ),
+        tools=(_tool("flaky", always_fails),),
+    ).run(state)
+
+    assert attempts == 2
+    assert result["status"] == "failed"
+    assert result["terminal"] is not None
+    assert result["terminal"].stop_reason == "repeated_tool_failure"
+
+
+@pytest.mark.anyio
+async def test_alternating_failed_calls_do_not_evade_the_circuit() -> None:
+    attempts: list[str] = []
+
+    def flaky(arguments: Mapping[str, JsonValue]) -> str:
+        value = str(arguments["value"])
+        attempts.append(value)
+        if value != "recovered":
+            raise RuntimeError("still stuck")
+        return value
+
+    first_a = ToolCallPlan.create("flaky", {"value": "a"})
+    first_b = ToolCallPlan.create("flaky", {"value": "b"})
+    second_a = ToolCallPlan.create("flaky", {"value": "a"})
+    second_b = ToolCallPlan.create("flaky", {"value": "b"})
+    third_a = ToolCallPlan.create("flaky", {"value": "a"})
+    recovery = ToolCallPlan.create("flaky", {"value": "recovered"})
+    state = create_loop_state(
+        task="Recover without alternating failed calls forever.",
+        run_config=_config("loop-alternating-tool-failures"),
+        pending_tool_calls=(first_a,),
+    )
+    state["resident_tool_names"] = ["flaky"]
+
+    result = await _loop(
+        provider=_SequenceProvider(
+            [
+                ModelTurnDraft(action="execute", tool_calls=(first_b,)),
+                ModelTurnDraft(action="execute", tool_calls=(second_a,)),
+                ModelTurnDraft(action="execute", tool_calls=(second_b,)),
+                ModelTurnDraft(action="execute", tool_calls=(third_a,)),
+                ModelTurnDraft(action="execute", tool_calls=(recovery,)),
+                ModelTurnDraft(action="finish", final_answer="Recovered."),
+            ]
+        ),
+        tools=(_tool("flaky", flaky),),
+    ).run(state)
+
+    assert result["status"] == "completed"
+    assert attempts == ["a", "b", "a", "b", "recovered"]
+    assert result["tool_results"][-2].error_code == "repeated_tool_failure"
+
+
+@pytest.mark.anyio
+async def test_non_retryable_failure_opens_circuit_before_second_attempt() -> None:
+    attempts: list[str] = []
+
+    def runner(arguments: Mapping[str, JsonValue]) -> str:
+        value = str(arguments["value"])
+        attempts.append(value)
+        if value == "stuck":
+            raise RuntimeError("permanent failure")
+        return value
+
+    first = ToolCallPlan.create("non_retryable", {"value": "stuck"})
+    repeated = ToolCallPlan.create("non_retryable", {"value": "stuck"})
+    recovery = ToolCallPlan.create("non_retryable", {"value": "recovered"})
+    state = create_loop_state(
+        task="Do not retry a permanent failure.",
+        run_config=_config("loop-non-retryable-tool-failure"),
+        pending_tool_calls=(first,),
+    )
+    state["resident_tool_names"] = ["non_retryable"]
+
+    result = await _loop(
+        provider=_SequenceProvider(
+            [
+                ModelTurnDraft(action="execute", tool_calls=(repeated,)),
+                ModelTurnDraft(action="execute", tool_calls=(recovery,)),
+                ModelTurnDraft(action="finish", final_answer="Recovered."),
+            ]
+        ),
+        tools=(
+            _tool(
+                "non_retryable",
+                runner,
+                idempotent=False,
+            ),
+        ),
+    ).run(state)
+
+    assert result["status"] == "completed"
+    assert attempts == ["stuck", "recovered"]
+    assert result["tool_results"][-2].error_code == "repeated_tool_failure"
+
+
+@pytest.mark.anyio
+async def test_same_batch_calls_are_not_preempted_before_retry_outcome() -> None:
+    attempts = 0
+
+    def transient(_arguments: Mapping[str, JsonValue]) -> str:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise RuntimeError("transient failure")
+        return "recovered"
+
+    first = ToolCallPlan.create("transient", {"value": "same"})
+    batch = tuple(
+        ToolCallPlan.create("transient", {"value": "same"})
+        for _ in range(2)
+    )
+    state = create_loop_state(
+        task="Allow a successful batch retry.",
+        run_config=_config("loop-tool-failure-batch-retry"),
+        pending_tool_calls=(first,),
+    )
+    state["resident_tool_names"] = ["transient"]
+
+    result = await _loop(
+        provider=_SequenceProvider(
+            [
+                ModelTurnDraft(action="execute", tool_calls=batch),
+                ModelTurnDraft(action="finish", final_answer="Recovered."),
+            ]
+        ),
+        tools=(_tool("transient", transient),),
+    ).run(state)
+
+    assert result["status"] == "completed"
+    assert attempts == 3
+    assert all(
+        item.error_code != "repeated_tool_failure"
+        for item in result["tool_results"]
+    )
+
+
+@pytest.mark.anyio
+async def test_reconciled_execution_record_precedes_failure_circuit() -> None:
+    runner_calls = 0
+
+    def must_not_replay(_arguments: Mapping[str, JsonValue]) -> str:
+        nonlocal runner_calls
+        runner_calls += 1
+        return "unexpected replay"
+
+    tool = _tool("remote_write", must_not_replay, idempotent=False)
+    plan = ToolCallPlan.create("remote_write", {"value": "once"})
+    origin = ToolCallOrigin(
+        request_id="request-before-crash",
+        toolset_revision="tools-v1",
+        exposed_tool_names=("remote_write",),
+    )
+    call = ToolCall(
+        tool_call_id=plan.tool_call_id,
+        tool_name=plan.tool_name,
+        arguments=plan.arguments,
+        origin=origin,
+    )
+    state = create_loop_state(
+        task="Recover a non-idempotent tool outcome.",
+        run_config=_config("loop-reconciliation-before-circuit"),
+        pending_tool_calls=(
+            ToolCallPlan(
+                tool_call_id=plan.tool_call_id,
+                tool_name=plan.tool_name,
+                arguments=plan.arguments,
+                origin=origin,
+            ),
+        ),
+    )
+    state["resident_tool_names"] = ["remote_write"]
+    state["tool_manifest"] = build_tool_manifest(
+        tools=(tool,),
+        resident_tool_names=("remote_write",),
+        explicit_tool_names=(),
+        active_tool_names=(),
+        provider_serializer_revision=state["provider_serializer_revision"],
+    )
+    state["canonical_tool_calls"] = {call.tool_call_id: call}
+    state["tool_execution_records"][call.tool_call_id] = replace(
+        ToolExecutionRecord.prepare(call, tool),
+        status=ExecutionStatus.OUTCOME_UNKNOWN,
+        attempt_count=1,
+        error_code="interrupted_outcome_unknown",
+        requires_reconciliation=True,
+    )
+    checkpoint = LangGraphCheckpointStore(
+        MemorySaver(serde=agent_checkpoint_serde()),
+        run_config=state["run_config"],
+    )
+
+    paused = await _loop(
+        provider=_SequenceProvider([]),
+        tools=(tool,),
+        checkpoint=checkpoint,
+    ).run(state)
+
+    assert paused["status"] == "paused"
+    request = paused["approval_request"]
+    assert request is not None
+    assert request.kind == "tool_reconciliation"
+    resumed = await checkpoint.apply_human_response(
+        HumanInputResponse(
+            request_id=request.request_id,
+            decision="mark_completed",
+        )
+    )
+
+    result = await _loop(
+        provider=_SequenceProvider(
+            [ModelTurnDraft(action="finish", final_answer="Recovered.")]
+        ),
+        tools=(tool,),
+        checkpoint=checkpoint,
+    ).run(resumed)
+
+    assert result["status"] == "completed"
+    assert runner_calls == 0
+    assert result["tool_results"][-1].is_error is False
+    assert result["tool_results"][-1].metadata["reconciled"] is True

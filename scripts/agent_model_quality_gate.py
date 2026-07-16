@@ -35,7 +35,9 @@ DEFAULT_FIXTURE_PATH = ROOT / "tests" / "agent" / "fixtures" / "model_quality_ca
 DEFAULT_BASELINE_PATH = ROOT / "evals" / "model_quality" / "baseline_v1.json"
 MIN_CALIBRATION_TRIALS = 3
 THRESHOLD_METHOD = "empirical_worst_trial_v1"
-_MODEL_QUALITY_FAILURE_REASONS = frozenset({"invalid_model_turn", "max_iterations"})
+_MODEL_QUALITY_FAILURE_REASONS = frozenset(
+    {"invalid_model_turn", "max_iterations", "repeated_tool_failure"}
+)
 
 GATED_METRIC_DIRECTIONS: dict[str, Literal["min", "max"]] = {
     "task_success_rate": "min",

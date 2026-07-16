@@ -83,6 +83,9 @@ _NATIVE_TOOL_SET = frozenset({
     "find_tools",
 })
 
+_REPEATED_TOOL_FAILURE_CODE = "repeated_tool_failure"
+_MAX_RETRYABLE_IDENTICAL_FAILURES = 2
+
 
 def _add_model_latency(state: LoopState, latency_ms: float) -> None:
     profile = state.get("latency_profile")
@@ -603,7 +606,11 @@ class AgentLoop:
             self._canonical_call(state, pending_call)
             for pending_call in pending
         )
-        for call in calls:
+        executable_calls, circuit_results = _guard_repeated_tool_failures(
+            state,
+            calls,
+        )
+        for call in executable_calls:
             await self._emit_stream(
                 _stream_tool_use_start(
                     tool_name=call.tool_name,
@@ -628,7 +635,7 @@ class AgentLoop:
             ),
         )
         executions = await self._tool_executor.execute_batch(
-            calls,
+            executable_calls,
             context=context,
             records=state["tool_execution_records"],
             record_sink=self._checkpoint_store.write_execution_record,
@@ -647,10 +654,21 @@ class AgentLoop:
             ),
             None,
         )
+        results_by_id = {
+            result.tool_call_id: result
+            for result in circuit_results
+        }
+        results_by_id.update(
+            {
+                execution.result.tool_call_id: execution.result
+                for execution in executions
+                if execution is not approval_execution
+            }
+        )
         new_results = [
-            execution.result
-            for execution in executions
-            if execution is not approval_execution
+            results_by_id[call.tool_call_id]
+            for call in calls
+            if call.tool_call_id in results_by_id
         ]
         reconciliation_execution = next(
             (
@@ -661,7 +679,7 @@ class AgentLoop:
             ),
             None,
         )
-        blocked_ids = {
+        pending_ids = {
             execution.result.tool_call_id
             for execution in (approval_execution, reconciliation_execution)
             if execution is not None
@@ -669,7 +687,7 @@ class AgentLoop:
         state["pending_tool_calls"] = [
             PendingToolCall(plan=item.plan, status="pending")
             for item in pending
-            if item.tool_call_id in blocked_ids
+            if item.tool_call_id in pending_ids
         ]
 
         observable_results = [
@@ -713,6 +731,29 @@ class AgentLoop:
                         turn=turn,
                     )
                 )
+                if tool_result.error_code == _REPEATED_TOOL_FAILURE_CODE:
+                    failure_count = tool_result.metadata.get("failure_count", 0)
+                    detail = (
+                        f"tool={tool_result.tool_name}, "
+                        f"matching_failures={failure_count}"
+                    )
+                    append_loop_diagnostic(
+                        state,
+                        RuntimeDiagnostic(
+                            code=_REPEATED_TOOL_FAILURE_CODE,
+                            component="agent_loop",
+                            message=detail,
+                            severity="warning",
+                        ),
+                    )
+                    await self._emit_stream(
+                        _stream_recovery(
+                            strategy="tool_failure_circuit_breaker",
+                            detail=detail,
+                            run_id=run_id,
+                            turn=turn,
+                        )
+                    )
             else:
                 await self._emit_stream(
                     _stream_tool_use_result(
@@ -777,6 +818,7 @@ class AgentLoop:
                 "phase": "recorded",
                 "result_count": len(new_results),
                 "pending_count": len(state["pending_tool_calls"]),
+                "circuit_breaker_count": len(circuit_results),
             },
             checkpoint_reason="tool_results_recorded",
         )
@@ -791,6 +833,23 @@ class AgentLoop:
 
         # Record tool call metrics.
         self._record_metrics(state, new_results)
+
+        circuit_remained_open = not executions and any(
+            result.metadata.get("circuit_already_open") is True
+            for result in circuit_results
+        )
+        if circuit_remained_open:
+            await self._fail(
+                state,
+                stop_reason=_REPEATED_TOOL_FAILURE_CODE,
+                error=(
+                    "The model repeated an identical tool call after the "
+                    "failure circuit opened."
+                ),
+                transition_reason="failed",
+                checkpoint_reason=_REPEATED_TOOL_FAILURE_CODE,
+            )
+            return True
 
         return False
 
@@ -1237,6 +1296,79 @@ async def _remaining_llm_budget(handles: Any) -> int | None:
     if ledger is None:
         return None
     return cast(int, await ledger.remaining())
+
+
+def _guard_repeated_tool_failures(
+    state: LoopState,
+    calls: Sequence[ToolCall],
+) -> tuple[tuple[ToolCall, ...], tuple[ToolResult, ...]]:
+    executable: list[ToolCall] = []
+    blocked: list[ToolResult] = []
+    for call in calls:
+        if call.tool_call_id in state["tool_execution_records"]:
+            # Recorded calls belong to ToolExecutor's replay/reconciliation
+            # path. The circuit only correlates new model-generated attempts.
+            executable.append(call)
+            continue
+        failures = _matching_tool_failures_since_recovery(state, call)
+        if not failures:
+            executable.append(call)
+            continue
+        failure_limit = (
+            _MAX_RETRYABLE_IDENTICAL_FAILURES
+            if all(result.retryable for result in failures)
+            else 1
+        )
+        if len(failures) < failure_limit:
+            executable.append(call)
+            continue
+        already_open = any(
+            result.error_code == _REPEATED_TOOL_FAILURE_CODE
+            for result in failures
+        )
+        blocked.append(
+            ToolResult(
+                tool_call_id=call.tool_call_id,
+                tool_name=call.tool_name,
+                is_error=True,
+                error_code=_REPEATED_TOOL_FAILURE_CODE,
+                error_message=(
+                    "Repeated identical tool call blocked after "
+                    f"{len(failures)} matching failure(s) without a successful "
+                    "recovery. Change the arguments, use a different tool, or "
+                    "finish with the available evidence."
+                ),
+                retryable=False,
+                metadata={
+                    "failure_count": len(failures),
+                    "last_error_code": failures[-1].error_code or "unknown",
+                    "circuit_already_open": already_open,
+                },
+            )
+        )
+    return tuple(executable), tuple(blocked)
+
+
+def _matching_tool_failures_since_recovery(
+    state: LoopState,
+    call: ToolCall,
+) -> tuple[ToolResult, ...]:
+    failures: list[ToolResult] = []
+    for result in reversed(state["tool_results"]):
+        if not result.is_error:
+            break
+        previous_call = state["canonical_tool_calls"].get(result.tool_call_id)
+        if previous_call is not None and _same_tool_invocation(previous_call, call):
+            failures.append(result)
+    failures.reverse()
+    return tuple(failures)
+
+
+def _same_tool_invocation(left: ToolCall, right: ToolCall) -> bool:
+    return (
+        left.tool_name == right.tool_name
+        and left.arguments == right.arguments
+    )
 
 
 def _merge_keyed[T](existing: list[T], additions: list[T]) -> list[T]:
