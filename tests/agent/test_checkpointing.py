@@ -5,6 +5,7 @@ import logging
 from pathlib import Path
 
 import pytest
+from langgraph.checkpoint.base import empty_checkpoint
 
 from rag.agent.core.checkpointing import (
     aclose_agent_checkpointer,
@@ -132,6 +133,28 @@ def test_sqlite_checkpointer_constructs_without_running_event_loop(
 
     assert checkpointer is not None
     asyncio.run(aclose_agent_checkpointer(checkpointer))
+
+
+def test_sqlite_checkpointer_deletes_one_turn_thread(tmp_path: Path) -> None:
+    async def exercise() -> None:
+        checkpointer = create_agent_checkpointer(
+            tmp_path / "agent-checkpoints.sqlite"
+        )
+        config = {"configurable": {"thread_id": "turn-delete", "checkpoint_ns": ""}}
+        saved = await checkpointer.aput(
+            config,
+            empty_checkpoint(),
+            {},
+            {},
+        )
+        assert await checkpointer.aget_tuple(saved) is not None
+
+        await checkpointer.adelete_thread("turn-delete")
+
+        assert await checkpointer.aget_tuple(saved) is None
+        await aclose_agent_checkpointer(checkpointer)
+
+    asyncio.run(exercise())
 
 
 def test_live_loop_state_serde_preserves_final_tool_result() -> None:

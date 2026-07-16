@@ -68,6 +68,9 @@ class SessionRecord:
     runtime: RuntimeBinding
     history_revision: int
     active_turn_id: str | None
+    created_at: float
+    updated_at: float
+    archived_at: float | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,6 +84,8 @@ class TurnRecord:
     checkpoint_id: str
     lease_owner: str | None
     lease_expires_at: float | None
+    created_at: float
+    updated_at: float
 
 
 class SessionStore:
@@ -135,7 +140,7 @@ class SessionStore:
             row = self._connection.execute(
                 """
                 SELECT session_id, runtime_json, history_revision,
-                       active_turn_id
+                       active_turn_id, created_at, updated_at, archived_at
                 FROM agent_sessions
                 WHERE session_id = ?
                 """,
@@ -151,7 +156,7 @@ class SessionStore:
                 """
                 SELECT turn_id, session_id, ordinal, status, user_message,
                        runtime_json, checkpoint_id, lease_owner,
-                       lease_expires_at
+                       lease_expires_at, created_at, updated_at
                 FROM agent_turns
                 WHERE turn_id = ?
                 """,
@@ -160,6 +165,237 @@ class SessionStore:
         if row is None:
             raise TurnNotFoundError(f"Turn not found: {turn_id}")
         return _turn_record(row)
+
+    def list_sessions(
+        self,
+        *,
+        workspace_path: Path | str | None = None,
+        include_archived: bool = False,
+        archived_only: bool = False,
+        limit: int = 20,
+    ) -> tuple[SessionRecord, ...]:
+        if limit <= 0:
+            raise ValueError("limit must be positive")
+        predicates: list[str] = []
+        parameters: list[object] = []
+        if archived_only:
+            predicates.append("archived_at IS NOT NULL")
+        elif not include_archived:
+            predicates.append("archived_at IS NULL")
+        if workspace_path is not None:
+            predicates.append(
+                "json_extract(runtime_json, '$.workspace_path') = ?"
+            )
+            parameters.append(str(Path(workspace_path).expanduser().resolve()))
+        where = f"WHERE {' AND '.join(predicates)}" if predicates else ""
+        parameters.append(limit)
+        with self._lock:
+            rows = self._connection.execute(
+                f"""
+                SELECT session_id, runtime_json, history_revision,
+                       active_turn_id, created_at, updated_at, archived_at
+                FROM agent_sessions
+                {where}
+                ORDER BY updated_at DESC, created_at DESC, session_id DESC
+                LIMIT ?
+                """,
+                tuple(parameters),
+            ).fetchall()
+        return tuple(_session_record(row) for row in rows)
+
+    def latest_session(
+        self,
+        *,
+        workspace_path: Path | str | None = None,
+    ) -> SessionRecord | None:
+        sessions = self.list_sessions(
+            workspace_path=workspace_path,
+            limit=1,
+        )
+        return sessions[0] if sessions else None
+
+    def list_turns(self, session_id: str) -> tuple[TurnRecord, ...]:
+        self.get_session(session_id)
+        with self._lock:
+            rows = self._connection.execute(
+                """
+                SELECT turn_id, session_id, ordinal, status, user_message,
+                       runtime_json, checkpoint_id, lease_owner,
+                       lease_expires_at, created_at, updated_at
+                FROM agent_turns
+                WHERE session_id = ?
+                ORDER BY ordinal
+                """,
+                (session_id,),
+            ).fetchall()
+        return tuple(_turn_record(row) for row in rows)
+
+    def latest_resumable_turn(
+        self,
+        *,
+        workspace_path: Path | str | None = None,
+        now: float | None = None,
+    ) -> TurnRecord | None:
+        checked_at = time.time() if now is None else now
+        predicates = [
+            "session.archived_at IS NULL",
+            """
+            (
+                turn.status IN (?, ?)
+                OR (
+                    turn.status = ?
+                    AND (
+                        turn.lease_owner IS NULL
+                        OR turn.lease_expires_at IS NULL
+                        OR turn.lease_expires_at <= ?
+                    )
+                )
+            )
+            """,
+        ]
+        parameters: list[object] = [
+            TurnStatus.PAUSED.value,
+            TurnStatus.INTERRUPTED.value,
+            TurnStatus.RUNNING.value,
+            checked_at,
+        ]
+        if workspace_path is not None:
+            predicates.append(
+                "json_extract(session.runtime_json, '$.workspace_path') = ?"
+            )
+            parameters.append(str(Path(workspace_path).expanduser().resolve()))
+        with self._lock:
+            row = self._connection.execute(
+                f"""
+                SELECT turn.turn_id, turn.session_id, turn.ordinal,
+                       turn.status, turn.user_message, turn.runtime_json,
+                       turn.checkpoint_id, turn.lease_owner,
+                       turn.lease_expires_at, turn.created_at, turn.updated_at
+                FROM agent_turns AS turn
+                JOIN agent_sessions AS session
+                  ON session.session_id = turn.session_id
+                WHERE {' AND '.join(predicates)}
+                ORDER BY turn.updated_at DESC, turn.created_at DESC,
+                         turn.turn_id DESC
+                LIMIT 1
+                """,
+                tuple(parameters),
+            ).fetchone()
+        return None if row is None else _turn_record(row)
+
+    def archive_session(self, session_id: str) -> SessionRecord:
+        now = time.time()
+        with self._lock:
+            self._connection.execute("BEGIN IMMEDIATE")
+            try:
+                row = self._connection.execute(
+                    """
+                    SELECT active_turn_id
+                    FROM agent_sessions
+                    WHERE session_id = ?
+                    """,
+                    (session_id,),
+                ).fetchone()
+                if row is None:
+                    raise SessionNotFoundError(
+                        f"Session not found: {session_id}"
+                    )
+                active_turn_id = cast(str | None, row["active_turn_id"])
+                if active_turn_id is not None:
+                    raise TurnStateError(
+                        f"Session {session_id} has active Turn {active_turn_id}"
+                    )
+                self._connection.execute(
+                    """
+                    UPDATE agent_sessions
+                    SET archived_at = ?, updated_at = ?
+                    WHERE session_id = ?
+                    """,
+                    (now, now, session_id),
+                )
+                self._connection.commit()
+            except Exception:
+                self._connection.rollback()
+                raise
+        return self.get_session(session_id)
+
+    def unarchive_session(self, session_id: str) -> SessionRecord:
+        self.get_session(session_id)
+        now = time.time()
+        with self._lock, self._connection:
+            self._connection.execute(
+                """
+                UPDATE agent_sessions
+                SET archived_at = NULL, updated_at = ?
+                WHERE session_id = ?
+                """,
+                (now, session_id),
+            )
+        return self.get_session(session_id)
+
+    def delete_session(
+        self,
+        session_id: str,
+        *,
+        force: bool = False,
+    ) -> tuple[str, ...]:
+        with self._lock:
+            self._connection.execute("BEGIN IMMEDIATE")
+            try:
+                session = self._connection.execute(
+                    """
+                    SELECT session_id
+                    FROM agent_sessions
+                    WHERE session_id = ?
+                    """,
+                    (session_id,),
+                ).fetchone()
+                if session is None:
+                    raise SessionNotFoundError(
+                        f"Session not found: {session_id}"
+                    )
+                turn_rows = self._connection.execute(
+                    """
+                    SELECT turn_id, status
+                    FROM agent_turns
+                    WHERE session_id = ?
+                    ORDER BY ordinal
+                    """,
+                    (session_id,),
+                ).fetchall()
+                if not force:
+                    nonterminal = next(
+                        (
+                            row
+                            for row in turn_rows
+                            if TurnStatus(str(row["status"]))
+                            not in {TurnStatus.COMPLETED, TurnStatus.FAILED}
+                        ),
+                        None,
+                    )
+                    if nonterminal is not None:
+                        raise TurnStateError(
+                            f"Session {session_id} has nonterminal Turn "
+                            f"{nonterminal['turn_id']}"
+                        )
+                turn_ids = tuple(str(row["turn_id"]) for row in turn_rows)
+                self._connection.execute(
+                    "DELETE FROM agent_session_events WHERE session_id = ?",
+                    (session_id,),
+                )
+                self._connection.execute(
+                    "DELETE FROM agent_turns WHERE session_id = ?",
+                    (session_id,),
+                )
+                self._connection.execute(
+                    "DELETE FROM agent_sessions WHERE session_id = ?",
+                    (session_id,),
+                )
+                self._connection.commit()
+            except Exception:
+                self._connection.rollback()
+                raise
+        return turn_ids
 
     def initialize_session_runtime(
         self,
@@ -665,7 +901,8 @@ class SessionStore:
                     history_revision INTEGER NOT NULL DEFAULT 0,
                     active_turn_id TEXT,
                     created_at REAL NOT NULL,
-                    updated_at REAL NOT NULL
+                    updated_at REAL NOT NULL,
+                    archived_at REAL
                 );
 
                 CREATE TABLE IF NOT EXISTS agent_turns (
@@ -697,6 +934,16 @@ class SessionStore:
                 );
                 """
             )
+            columns = {
+                str(row["name"])
+                for row in self._connection.execute(
+                    "PRAGMA table_info(agent_sessions)"
+                ).fetchall()
+            }
+            if "archived_at" not in columns:
+                self._connection.execute(
+                    "ALTER TABLE agent_sessions ADD COLUMN archived_at REAL"
+                )
 
 
 def _uuid_text(value: str | None) -> str:
@@ -711,6 +958,9 @@ def _session_record(row: sqlite3.Row) -> SessionRecord:
         runtime=RuntimeBinding.model_validate_json(str(row["runtime_json"])),
         history_revision=int(row["history_revision"]),
         active_turn_id=cast(str | None, row["active_turn_id"]),
+        created_at=float(row["created_at"]),
+        updated_at=float(row["updated_at"]),
+        archived_at=cast(float | None, row["archived_at"]),
     )
 
 
@@ -725,6 +975,8 @@ def _turn_record(row: sqlite3.Row) -> TurnRecord:
         checkpoint_id=str(row["checkpoint_id"]),
         lease_owner=cast(str | None, row["lease_owner"]),
         lease_expires_at=cast(float | None, row["lease_expires_at"]),
+        created_at=float(row["created_at"]),
+        updated_at=float(row["updated_at"]),
     )
 
 

@@ -461,6 +461,17 @@ class LazyAsyncSqliteSaver(BaseCheckpointSaver[str]):
         ):
             yield item
 
+    def delete_thread(self, thread_id: str) -> None:
+        saver = self._sync_saver()
+        try:
+            saver.delete_thread(thread_id)
+        finally:
+            saver.conn.close()
+
+    async def adelete_thread(self, thread_id: str) -> None:
+        saver = await self._aget_saver()
+        await saver.adelete_thread(thread_id)
+
     async def aclose(self) -> None:
         if self._async_conn is not None:
             await self._async_conn.close()

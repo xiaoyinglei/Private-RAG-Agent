@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 from uuid import UUID
 
@@ -231,3 +232,147 @@ def test_running_turn_lease_can_be_renewed_by_its_owner(
             turn.turn_id,
             lease_owner="worker-b",
         )
+
+
+def test_session_store_lists_latest_and_archived_sessions_by_workspace(
+    tmp_path: Path,
+) -> None:
+    store = SessionStore(tmp_path / "agent.sqlite")
+    other_workspace = tmp_path / "other"
+    first = store.create_session(_binding(tmp_path))
+    store.create_session(_binding(other_workspace))
+    latest = store.create_session(_binding(tmp_path))
+
+    assert [
+        item.session_id for item in store.list_sessions(workspace_path=tmp_path)
+    ] == [latest.session_id, first.session_id]
+    assert store.latest_session(workspace_path=tmp_path) == latest
+
+    archived = store.archive_session(latest.session_id)
+
+    assert archived.archived_at is not None
+    assert store.latest_session(workspace_path=tmp_path) == first
+    assert [
+        item.session_id
+        for item in store.list_sessions(
+            workspace_path=tmp_path,
+            include_archived=True,
+        )
+    ] == [latest.session_id, first.session_id]
+
+    restored = store.unarchive_session(latest.session_id)
+
+    assert restored.archived_at is None
+    assert store.latest_session(workspace_path=tmp_path) == restored
+
+
+def test_session_store_finds_latest_resumable_turn(
+    tmp_path: Path,
+) -> None:
+    store = SessionStore(tmp_path / "agent.sqlite")
+    first_session = store.create_session(_binding(tmp_path))
+    first = store.begin_turn(first_session.session_id, "paused")
+    store.mark_paused(first.turn_id)
+    second_session = store.create_session(_binding(tmp_path))
+    second = store.begin_turn(
+        second_session.session_id,
+        "expired",
+        lease_owner="dead-worker",
+        lease_seconds=1.0,
+    )
+
+    assert store.latest_resumable_turn(
+        workspace_path=tmp_path,
+        now=second.lease_expires_at,
+    ) == second
+
+    store.mark_terminal(second.turn_id, TurnStatus.FAILED)
+
+    restored = store.latest_resumable_turn(workspace_path=tmp_path)
+
+    assert restored is not None
+    assert restored.turn_id == first.turn_id
+    assert restored.status is TurnStatus.PAUSED
+
+
+def test_session_store_applies_archived_filter_before_limit(
+    tmp_path: Path,
+) -> None:
+    store = SessionStore(tmp_path / "agent.sqlite")
+    archived = store.create_session(_binding(tmp_path))
+    store.archive_session(archived.session_id)
+    store.create_session(_binding(tmp_path))
+
+    assert store.list_sessions(
+        workspace_path=tmp_path,
+        archived_only=True,
+        limit=1,
+    ) == (store.get_session(archived.session_id),)
+
+
+def test_session_store_refuses_active_archive_and_delete_unless_forced(
+    tmp_path: Path,
+) -> None:
+    store = SessionStore(tmp_path / "agent.sqlite")
+    session = store.create_session(_binding(tmp_path))
+    turn = store.begin_turn(session.session_id, "active")
+
+    with pytest.raises(TurnStateError, match="active Turn"):
+        store.archive_session(session.session_id)
+    with pytest.raises(TurnStateError, match="nonterminal Turn"):
+        store.delete_session(session.session_id)
+
+    assert store.delete_session(session.session_id, force=True) == (turn.turn_id,)
+    with pytest.raises(LookupError, match="Session not found"):
+        store.get_session(session.session_id)
+
+
+def test_session_store_delete_removes_terminal_turns_and_history(
+    tmp_path: Path,
+) -> None:
+    store = SessionStore(tmp_path / "agent.sqlite")
+    session = store.create_session(_binding(tmp_path))
+    turn = store.begin_turn(session.session_id, "done")
+    store.mark_terminal(turn.turn_id, TurnStatus.COMPLETED)
+
+    assert store.list_turns(session.session_id) == (store.get_turn(turn.turn_id),)
+    assert store.delete_session(session.session_id) == (turn.turn_id,)
+
+    with pytest.raises(LookupError, match="Turn not found"):
+        store.get_turn(turn.turn_id)
+
+
+def test_session_store_migrates_legacy_session_table(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "agent.sqlite"
+    session_id = str(UUID(int=1))
+    runtime = _binding(tmp_path)
+    connection = sqlite3.connect(database)
+    connection.executescript(
+        """
+        CREATE TABLE agent_sessions (
+            session_id TEXT PRIMARY KEY,
+            runtime_json TEXT NOT NULL,
+            history_revision INTEGER NOT NULL DEFAULT 0,
+            active_turn_id TEXT,
+            created_at REAL NOT NULL,
+            updated_at REAL NOT NULL
+        );
+        """
+    )
+    connection.execute(
+        """
+        INSERT INTO agent_sessions (
+            session_id, runtime_json, history_revision,
+            active_turn_id, created_at, updated_at
+        ) VALUES (?, ?, 0, NULL, 1.0, 1.0)
+        """,
+        (session_id, runtime.model_dump_json()),
+    )
+    connection.commit()
+    connection.close()
+
+    store = SessionStore(database)
+
+    assert store.get_session(session_id).archived_at is None

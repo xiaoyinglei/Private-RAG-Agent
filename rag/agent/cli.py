@@ -7,6 +7,7 @@ import shlex
 import sys
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any, cast
 from uuid import uuid4
@@ -19,6 +20,13 @@ from agent_runtime.models import (
     format_model_rows,
 )
 from rag.agent.core.llm_registry import UnknownModelAliasError
+from rag.agent.sessions import (
+    SessionNotFoundError,
+    SessionRecord,
+    SessionStore,
+    TurnRecord,
+    TurnStateError,
+)
 from rag.agent.streaming.events import EventType, StreamEvent
 
 if TYPE_CHECKING:
@@ -31,7 +39,13 @@ if TYPE_CHECKING:
 
 agent_app = typer.Typer(add_completion=False, no_args_is_help=True)
 model_app = typer.Typer(add_completion=False, no_args_is_help=True)
+session_app = typer.Typer(add_completion=False, no_args_is_help=True)
 agent_app.add_typer(model_app, name="model", help="查看和切换当前模型会话。")
+agent_app.add_typer(
+    session_app,
+    name="session",
+    help="查看、归档和删除持久化 Session。",
+)
 logger = logging.getLogger(__name__)
 
 CLI_AGENT_CHOICES = ("generic",)
@@ -989,6 +1003,254 @@ def model_switch(
     print(f"已切换模型: {spec.id}")
 
 
+def _format_session_time(value: float) -> str:
+    return datetime.fromtimestamp(value).astimezone().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _session_state(store: SessionStore, session: SessionRecord) -> str:
+    if session.archived_at is not None:
+        return "archived"
+    if session.active_turn_id is None:
+        return "ready"
+    return store.get_turn(session.active_turn_id).status.value
+
+
+def _latest_cli_session(
+    checkpoint_db: Path,
+    *,
+    workspace_path: Path | None,
+) -> SessionRecord | None:
+    store = SessionStore(checkpoint_db)
+    try:
+        return store.latest_session(workspace_path=workspace_path)
+    finally:
+        store.close()
+
+
+def _latest_cli_turn(
+    checkpoint_db: Path,
+    *,
+    workspace_path: Path | None,
+) -> TurnRecord | None:
+    store = SessionStore(checkpoint_db)
+    try:
+        return store.latest_resumable_turn(workspace_path=workspace_path)
+    finally:
+        store.close()
+
+
+async def _delete_checkpoint_threads(
+    checkpoint_db: Path,
+    turn_ids: Sequence[str],
+) -> None:
+    if not turn_ids:
+        return
+    from rag.agent.core.checkpointing import (
+        aclose_agent_checkpointer,
+        create_agent_checkpointer,
+    )
+
+    checkpointer = create_agent_checkpointer(checkpoint_db)
+    try:
+        for turn_id in turn_ids:
+            await checkpointer.adelete_thread(turn_id)
+    finally:
+        await aclose_agent_checkpointer(checkpointer)
+
+
+@session_app.command(name="list")
+def agent_session_list(
+    checkpoint_db: Annotated[
+        Path,
+        typer.Option("--checkpoint-db", help="SQLite checkpoint 文件"),
+    ] = DEFAULT_CHECKPOINT_PATH,
+    archived: Annotated[
+        bool,
+        typer.Option("--archived", help="仅显示当前工作区已归档 Session"),
+    ] = False,
+    all_sessions: Annotated[
+        bool,
+        typer.Option("--all", help="显示所有工作区，包含已归档 Session"),
+    ] = False,
+    limit: Annotated[
+        int,
+        typer.Option("--limit", min=1, max=200, help="最多显示数量"),
+    ] = 20,
+) -> None:
+    """列出持久化 Session；默认只显示当前工作区未归档项。"""
+    if archived and all_sessions:
+        raise typer.BadParameter("--archived 与 --all 不能同时使用")
+    store = SessionStore(checkpoint_db)
+    try:
+        sessions = store.list_sessions(
+            workspace_path=None if all_sessions else Path.cwd(),
+            include_archived=archived or all_sessions,
+            archived_only=archived,
+            limit=limit,
+        )
+        if not sessions:
+            print("没有匹配的 Session。")
+            return
+        print("SESSION ID                            STATUS       UPDATED              WORKSPACE")
+        for session in sessions:
+            workspace = session.runtime.workspace_path or "-"
+            print(
+                f"{session.session_id}  "
+                f"{_session_state(store, session):<11}  "
+                f"{_format_session_time(session.updated_at)}  "
+                f"{workspace}"
+            )
+    finally:
+        store.close()
+
+
+@session_app.command(name="show")
+def agent_session_show(
+    session_id: Annotated[str, typer.Argument(help="Session ID")],
+    checkpoint_db: Annotated[
+        Path,
+        typer.Option("--checkpoint-db", help="SQLite checkpoint 文件"),
+    ] = DEFAULT_CHECKPOINT_PATH,
+) -> None:
+    """显示 Session 绑定、Turn 状态和可执行的下一步。"""
+    store = SessionStore(checkpoint_db)
+    try:
+        try:
+            session = store.get_session(session_id)
+            turns = store.list_turns(session_id)
+        except SessionNotFoundError as exc:
+            raise typer.BadParameter(str(exc)) from exc
+        print(f"Session: {session.session_id}")
+        print(f"状态: {_session_state(store, session)}")
+        print(f"工作区: {session.runtime.workspace_path or '-'}")
+        print(f"模型: {session.runtime.model_alias or '-'}")
+        print(f"创建: {_format_session_time(session.created_at)}")
+        print(f"更新: {_format_session_time(session.updated_at)}")
+        print("Turns:")
+        if not turns:
+            print("  (无)")
+        for turn in turns:
+            print(
+                f"  #{turn.ordinal} {turn.turn_id} {turn.status.value}  "
+                f"{_bounded_cli_text(turn.user_message, limit=80)}"
+            )
+        if session.active_turn_id is not None:
+            print(
+                "下一步: "
+                + shlex.join(
+                    [
+                        "agent",
+                        "resume",
+                        session.active_turn_id,
+                        "--checkpoint-db",
+                        str(checkpoint_db),
+                    ]
+                )
+            )
+        elif session.archived_at is not None:
+            print(
+                "下一步: "
+                + shlex.join(
+                    [
+                        "agent",
+                        "session",
+                        "unarchive",
+                        session.session_id,
+                        "--checkpoint-db",
+                        str(checkpoint_db),
+                    ]
+                )
+            )
+        else:
+            print(
+                "下一步: "
+                + shlex.join(
+                    [
+                        "agent",
+                        "chat",
+                        "--session-id",
+                        session.session_id,
+                        "--checkpoint-db",
+                        str(checkpoint_db),
+                    ]
+                )
+            )
+    finally:
+        store.close()
+
+
+@session_app.command(name="archive")
+def agent_session_archive(
+    session_id: Annotated[str, typer.Argument(help="Session ID")],
+    checkpoint_db: Annotated[
+        Path,
+        typer.Option("--checkpoint-db", help="SQLite checkpoint 文件"),
+    ] = DEFAULT_CHECKPOINT_PATH,
+) -> None:
+    """归档一个没有活动 Turn 的 Session。"""
+    store = SessionStore(checkpoint_db)
+    try:
+        try:
+            session = store.archive_session(session_id)
+        except (SessionNotFoundError, TurnStateError) as exc:
+            raise typer.BadParameter(str(exc)) from exc
+    finally:
+        store.close()
+    print(f"已归档 Session: {session.session_id}")
+
+
+@session_app.command(name="unarchive")
+def agent_session_unarchive(
+    session_id: Annotated[str, typer.Argument(help="Session ID")],
+    checkpoint_db: Annotated[
+        Path,
+        typer.Option("--checkpoint-db", help="SQLite checkpoint 文件"),
+    ] = DEFAULT_CHECKPOINT_PATH,
+) -> None:
+    """恢复一个已归档 Session。"""
+    store = SessionStore(checkpoint_db)
+    try:
+        try:
+            session = store.unarchive_session(session_id)
+        except SessionNotFoundError as exc:
+            raise typer.BadParameter(str(exc)) from exc
+    finally:
+        store.close()
+    print(f"已恢复 Session: {session.session_id}")
+
+
+@session_app.command(name="delete")
+def agent_session_delete(
+    session_id: Annotated[str, typer.Argument(help="Session ID")],
+    checkpoint_db: Annotated[
+        Path,
+        typer.Option("--checkpoint-db", help="SQLite checkpoint 文件"),
+    ] = DEFAULT_CHECKPOINT_PATH,
+    yes: Annotated[
+        bool,
+        typer.Option("--yes", help="确认永久删除 Session、Turns 和 checkpoints"),
+    ] = False,
+    force: Annotated[
+        bool,
+        typer.Option("--force", help="允许删除含未终止 Turn 的 Session"),
+    ] = False,
+) -> None:
+    """永久删除 Session 及其现有 checkpoint 数据。"""
+    if not yes:
+        print("未删除：这是永久操作，请显式传入 --yes。")
+        raise typer.Exit(code=2)
+    store = SessionStore(checkpoint_db)
+    try:
+        try:
+            turn_ids = store.delete_session(session_id, force=force)
+        except (SessionNotFoundError, TurnStateError) as exc:
+            raise typer.BadParameter(str(exc)) from exc
+    finally:
+        store.close()
+    asyncio.run(_delete_checkpoint_threads(checkpoint_db, turn_ids))
+    print(f"已删除 Session: {session_id} ({len(turn_ids)} Turns)")
+
+
 @agent_app.command(name="chat")
 def agent_chat(
     session_id: Annotated[
@@ -998,6 +1260,14 @@ def agent_chat(
             help="继续一个持久化 Session；省略则创建新 Session。",
         ),
     ] = None,
+    last: Annotated[
+        bool,
+        typer.Option("--last", help="继续当前工作区最近的 Session"),
+    ] = False,
+    checkpoint_db: Annotated[
+        Path,
+        typer.Option("--checkpoint-db", help="SQLite checkpoint 文件"),
+    ] = DEFAULT_CHECKPOINT_PATH,
     storage_root: Annotated[
         Path, typer.Option("--storage-root", help="RAG 存储根目录", hidden=True)
     ] = Path(".rag"),
@@ -1050,10 +1320,26 @@ def agent_chat(
     ] = None,
 ) -> None:
     """交互式 Agent 对话。暂停时支持工具审批。"""
+    if session_id is not None and last:
+        raise typer.BadParameter("--session-id 与 --last 不能同时使用")
+    effective_session_id = session_id
+    if last:
+        latest = _latest_cli_session(
+            checkpoint_db,
+            workspace_path=Path.cwd(),
+        )
+        if latest is None:
+            raise typer.BadParameter("当前工作区没有可继续的 Session")
+        if latest.active_turn_id is not None:
+            raise typer.BadParameter(
+                f"最近 Session 有未完成 Turn {latest.active_turn_id}；"
+                "请使用 agent resume --last"
+            )
+        effective_session_id = latest.session_id
     facade = _create_agent_facade(
         model=model,
         agent_type=agent,
-        checkpoint_db=DEFAULT_CHECKPOINT_PATH,
+        checkpoint_db=checkpoint_db,
         workspace_path=Path.cwd(),
         model_session_path=DEFAULT_MODEL_SESSION_PATH,
         rag_storage_root=storage_root,
@@ -1070,7 +1356,7 @@ def agent_chat(
             agent_type=agent,
             requested_model=model,
             budget=budget,
-            session_id=session_id,
+            session_id=effective_session_id,
         )
     )
 
@@ -1256,7 +1542,18 @@ def agent_run(
 
 @agent_app.command(name="resume")
 def agent_resume(
-    turn_id: Annotated[str, typer.Argument(help="要恢复的 UUID Turn ID")],
+    turn_id: Annotated[
+        str | None,
+        typer.Argument(help="要恢复的 UUID Turn ID"),
+    ] = None,
+    last: Annotated[
+        bool,
+        typer.Option("--last", help="恢复最近的可恢复 Turn"),
+    ] = False,
+    all_workspaces: Annotated[
+        bool,
+        typer.Option("--all", help="--last 搜索所有工作区"),
+    ] = False,
     checkpoint_db: Annotated[
         Path,
         typer.Option("--checkpoint-db", help="SQLite checkpoint 文件"),
@@ -1289,6 +1586,23 @@ def agent_resume(
     ] = None,
 ) -> None:
     """先读取持久化 Turn 元数据，再恢复未完成的 Turn。"""
+    if turn_id is not None and last:
+        raise typer.BadParameter("Turn ID 与 --last 不能同时使用")
+    if all_workspaces and not last:
+        raise typer.BadParameter("--all 只能与 --last 一起使用")
+    effective_turn_id = turn_id
+    if last:
+        latest = _latest_cli_turn(
+            checkpoint_db,
+            workspace_path=None if all_workspaces else Path.cwd(),
+        )
+        if latest is None:
+            scope = "所有工作区" if all_workspaces else "当前工作区"
+            raise typer.BadParameter(f"{scope}没有可恢复 Turn")
+        effective_turn_id = latest.turn_id
+    if effective_turn_id is None:
+        print("请提供 Turn ID，或使用 --last 恢复最近 Turn。")
+        raise typer.Exit(code=2)
     facade = _create_agent_facade(
         checkpoint_db=checkpoint_db,
         vector_dsn=vector_dsn,
@@ -1297,7 +1611,7 @@ def agent_resume(
     result = asyncio.run(
         _resume_facade_command(
             facade,
-            turn_id=turn_id,
+            turn_id=effective_turn_id,
             action=action,
             user_input=user_input,
             event_display=event_display,
