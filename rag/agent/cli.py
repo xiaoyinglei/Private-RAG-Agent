@@ -84,6 +84,9 @@ class _CLIToolEventDisplay:
         if event.type is EventType.TOOL_USE_RESULT:
             self._render_tool_result(event)
             return
+        if event.type is EventType.TOOL_USE_ERROR:
+            self._render_tool_error(event)
+            return
         if event.type is EventType.PLAN_UPDATED:
             self._render_plan(event)
             return
@@ -145,6 +148,22 @@ class _CLIToolEventDisplay:
         diff = details.get("diff")
         if isinstance(diff, str) and diff:
             self._write_block(diff)
+
+    def _render_tool_error(self, event: StreamEvent) -> None:
+        tool_id = event.data.get("tool_id")
+        if not isinstance(tool_id, str) or not tool_id:
+            return
+        marker = (EventType.TOOL_USE_ERROR, tool_id)
+        if marker in self._displayed_tool_events:
+            return
+        self._displayed_tool_events.add(marker)
+        error = event.data.get("error")
+        suffix = (
+            f": {_bounded_cli_text(error)}"
+            if isinstance(error, str) and error
+            else ""
+        )
+        self._write_line(f"✗ {self._tool_names.get(tool_id, 'tool')}{suffix}")
 
     def _render_plan(self, event: StreamEvent) -> None:
         plan = event.data.get("plan")

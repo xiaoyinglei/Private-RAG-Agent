@@ -157,6 +157,21 @@ def test_sqlite_checkpointer_deletes_one_turn_thread(tmp_path: Path) -> None:
     asyncio.run(exercise())
 
 
+def test_sqlite_checkpointer_delete_is_safe_before_first_checkpoint(
+    tmp_path: Path,
+) -> None:
+    async def exercise() -> None:
+        checkpointer = create_agent_checkpointer(
+            tmp_path / "agent-checkpoints.sqlite"
+        )
+
+        await checkpointer.adelete_thread("missing-turn")
+
+        await aclose_agent_checkpointer(checkpointer)
+
+    asyncio.run(exercise())
+
+
 def test_live_loop_state_serde_preserves_final_tool_result() -> None:
     serde = agent_checkpoint_serde()
     plan = ToolCallPlan.create(

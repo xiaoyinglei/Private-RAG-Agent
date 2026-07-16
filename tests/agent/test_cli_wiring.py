@@ -24,6 +24,7 @@ from rag.agent.streaming.events import (
     StreamEvent,
     recovery_event,
     text_delta,
+    tool_use_error,
     tool_use_progress,
     tool_use_result,
     tool_use_start,
@@ -279,6 +280,22 @@ async def test_cli_displays_correlated_tool_lifecycle_once(
     assert "✓ read_file:" in output
     assert "size_bytes" in output
     assert output.count("✓ read_file:") == 1
+
+
+@pytest.mark.anyio
+async def test_cli_displays_correlated_tool_error_once(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    display = _CLIToolEventDisplay()
+    error = tool_use_error("call_read", "file not found")
+
+    await display.emit(tool_use_start("read_file", "call_read"))
+    await display.emit(error)
+    await display.emit(error)
+
+    output = capsys.readouterr().out
+    assert "✗ read_file: file not found" in output
+    assert output.count("✗ read_file:") == 1
 
 
 @pytest.mark.anyio

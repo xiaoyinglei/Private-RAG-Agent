@@ -257,6 +257,7 @@ Skill 资产访问有独立的 hard guard：`invoke_skill` 只能激活 catalog/
 ```bash
 uv run python scripts/agent_tool_aci_eval.py --fake-model --json
 uv run python scripts/agent_delivery_smoke.py --fake-model --verbose
+uv run python scripts/agent_cli_smoke.py
 ```
 
 真实门禁覆盖 Qwen3.5 和 Groq 的文件工具选择、缺失文件恢复、审批后继续、重复失败控制、参数有效性和 ACI 调用效率。基线由真实重复试验自动校准，阈值取每项指标的 empirical worst-trial envelope，不手填宽容值：
