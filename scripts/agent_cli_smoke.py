@@ -10,6 +10,8 @@ from contextlib import redirect_stdout
 from dataclasses import dataclass
 from pathlib import Path
 
+import click
+from typer.main import get_command
 from typer.testing import CliRunner
 
 from rag.agent.cli import (
@@ -162,19 +164,25 @@ def run_smoke() -> CLISmokeResult:
             }
         )
 
-        help_env = {"COLUMNS": "240", "NO_COLOR": "1"}
-        root_help = runner.invoke(agent_app, ["--help"], env=help_env)
-        resume_help = runner.invoke(
-            agent_app,
-            ["resume", "--help"],
-            env=help_env,
+        root_command = get_command(agent_app)
+        commands = (
+            root_command.commands
+            if isinstance(root_command, click.Group)
+            else {}
         )
+        resume_command = commands.get("resume")
+        resume_options = {
+            option
+            for parameter in (
+                () if resume_command is None else resume_command.params
+            )
+            if isinstance(parameter, click.Option)
+            for option in (*parameter.opts, *parameter.secondary_opts)
+        }
         checks["command_surface"] = (
-            root_help.exit_code == 0
-            and "session" in root_help.output
-            and resume_help.exit_code == 0
-            and "--last" in resume_help.output
-            and "--action" in resume_help.output
+            {"chat", "run", "resume", "model", "session"}
+            <= set(commands)
+            and {"--last", "--action"} <= resume_options
         )
 
         slash_output = io.StringIO()
