@@ -32,7 +32,7 @@ from rag.agent.streaming.events import EventType, StreamEvent
 if TYPE_CHECKING:
     from agent_runtime import AgentResult
     from rag.agent.core.definition import AgentRuntimePolicy
-    from rag.agent.core.human_input import HumanInputResponse
+    from rag.agent.core.human_input import HumanInputRequest, HumanInputResponse
     from rag.agent.core.registry import AgentRegistry
     from rag.agent.core.runtime_diagnostics import RuntimeDiagnostic
     from rag.agent.service import AgentRunResult, AgentService
@@ -648,6 +648,53 @@ def _build_resume_response(request: object, decision: str) -> HumanInputResponse
     )
 
 
+def _display_pending_recovery(
+    request: HumanInputRequest | None,
+    *,
+    turn_id: str,
+    checkpoint_db: Path,
+) -> None:
+    print(f"\n⏸  待恢复 Turn: {turn_id}")
+    if request is None:
+        print("   未检测到待处理的人机请求；可继续中断执行。")
+        options = ["continue", "abort"]
+    else:
+        print(f"   请求: {request.question}")
+        for tool_call in request.tool_calls:
+            risk_mark = {
+                "high": "🔴",
+                "medium": "🟡",
+                "low": "🟢",
+            }.get(tool_call.risk_level, "")
+            print(
+                f"   {risk_mark} {tool_call.tool_name}: "
+                f"{tool_call.args_preview}"
+            )
+            if tool_call.reason:
+                print(f"      原因: {tool_call.reason}")
+        options = list(request.options)
+        if not options:
+            options = (
+                ["allow_once", "deny", "abort"]
+                if request.kind in {"tool_approval", "tool_reconciliation"}
+                else ["continue", "abort"]
+            )
+    print("   可用恢复命令:")
+    for option in options:
+        command = [
+            "agent",
+            "resume",
+            turn_id,
+            "--action",
+            option,
+            "--checkpoint-db",
+            str(checkpoint_db),
+        ]
+        print(f"     {shlex.join(command)}")
+    if request is not None and request.kind in {"choice", "clarification"}:
+        print("   需要文本时，在 continue 命令后添加 --input '<text>'。")
+
+
 def _close_agent_service(service: object) -> None:
     close_method = getattr(service, "aclose", None)
     if callable(close_method):
@@ -808,13 +855,47 @@ async def _resume_facade_command(
         display.finish()
 
 
+async def _pending_resume_request(
+    facade: Any,
+    *,
+    turn_id: str,
+    event_display: _CLIToolEventDisplay | None = None,
+) -> HumanInputRequest | None:
+    from rag.agent.core.human_input import HumanInputRequest
+
+    display = event_display or _CLIToolEventDisplay()
+    runtime_facade = facade._agent_for_turn(turn_id)
+    display.begin_turn()
+    try:
+        async with runtime_facade._open_product_runtime(
+            stream_sink=display,
+        ) as service:
+            try:
+                return cast(
+                    HumanInputRequest,
+                    await service.apending_human_input_request(run_id=turn_id),
+                )
+            except KeyError:
+                return None
+    finally:
+        display.finish()
+
+
 def _print_startup_banner(model_alias: str, *, agent_type: str) -> None:
     print(f"Agent 就绪 (agent: {agent_type}, 模型: {model_alias})")
-    print(
-        "输入查询，或 /exit 退出，/verbose 切换详细输出，"
-        "/model 查看模型（首条消息前可切换）"
-    )
+    print("输入查询，或输入 /help 查看交互命令。")
     print()
+
+
+def _print_chat_help() -> None:
+    print("交互命令:")
+    print("  /help              显示本帮助")
+    print("  /status            显示当前 Session、模型和工作区")
+    print("  /sessions          列出当前工作区最近 Session")
+    print("  /new, /clear       下一条消息开始新 Session")
+    print("  /model [current|list|switch <id>]")
+    print("  /verbose           切换详细输出")
+    print("  /exit              退出")
 
 
 async def _chat_facade_session(
@@ -842,6 +923,22 @@ async def _chat_facade_session(
             _service_model_alias(service, requested_model),
             agent_type=agent_type,
         )
+        checkpoint_value = getattr(
+            runtime_facade,
+            "checkpoint_db",
+            DEFAULT_CHECKPOINT_PATH,
+        )
+        chat_checkpoint_db = (
+            DEFAULT_CHECKPOINT_PATH
+            if checkpoint_value is None
+            else Path(checkpoint_value)
+        )
+        workspace_value = getattr(runtime_facade, "workspace_path", None)
+        chat_workspace = (
+            Path.cwd()
+            if workspace_value is None
+            else Path(workspace_value).expanduser().resolve()
+        )
         while True:
             try:
                 query = input("> ").strip()
@@ -852,6 +949,34 @@ async def _chat_facade_session(
                 continue
             if query == "/exit":
                 return
+            if query == "/help":
+                _print_chat_help()
+                continue
+            if query == "/status":
+                print(f"Session: {current_session_id or '(new)'}")
+                print(f"模型: {_service_model_alias(service, requested_model)}")
+                print(f"工作区: {chat_workspace}")
+                print(f"详细输出: {'开' if verbose else '关'}")
+                continue
+            if query == "/sessions":
+                store = SessionStore(chat_checkpoint_db)
+                try:
+                    sessions = store.list_sessions(
+                        workspace_path=chat_workspace,
+                        limit=10,
+                    )
+                    _print_session_rows(
+                        store,
+                        sessions,
+                        current_session_id=current_session_id,
+                    )
+                finally:
+                    store.close()
+                continue
+            if query in {"/new", "/clear"}:
+                current_session_id = None
+                print("已开始新的 Session；下一条消息将使用空历史。")
+                continue
             if query == "/verbose":
                 verbose = not verbose
                 print(f"详细输出: {'开' if verbose else '关'}")
@@ -862,6 +987,9 @@ async def _chat_facade_session(
                     control_plane=_service_model_control_plane(service),
                     allow_switch=current_session_id is None,
                 )
+                continue
+            if query.startswith("/"):
+                print(f"未知命令: {query.split()[0]}；输入 /help 查看可用命令。")
                 continue
 
             event_display.begin_turn()
@@ -1015,6 +1143,27 @@ def _session_state(store: SessionStore, session: SessionRecord) -> str:
     return store.get_turn(session.active_turn_id).status.value
 
 
+def _print_session_rows(
+    store: SessionStore,
+    sessions: Sequence[SessionRecord],
+    *,
+    current_session_id: str | None = None,
+) -> None:
+    if not sessions:
+        print("没有匹配的 Session。")
+        return
+    print("  SESSION ID                            STATUS       UPDATED              WORKSPACE")
+    for session in sessions:
+        marker = "*" if session.session_id == current_session_id else " "
+        workspace = session.runtime.workspace_path or "-"
+        print(
+            f"{marker} {session.session_id}  "
+            f"{_session_state(store, session):<11}  "
+            f"{_format_session_time(session.updated_at)}  "
+            f"{workspace}"
+        )
+
+
 def _latest_cli_session(
     checkpoint_db: Path,
     *,
@@ -1088,18 +1237,7 @@ def agent_session_list(
             archived_only=archived,
             limit=limit,
         )
-        if not sessions:
-            print("没有匹配的 Session。")
-            return
-        print("SESSION ID                            STATUS       UPDATED              WORKSPACE")
-        for session in sessions:
-            workspace = session.runtime.workspace_path or "-"
-            print(
-                f"{session.session_id}  "
-                f"{_session_state(store, session):<11}  "
-                f"{_format_session_time(session.updated_at)}  "
-                f"{workspace}"
-            )
+        _print_session_rows(store, sessions)
     finally:
         store.close()
 
@@ -1559,7 +1697,7 @@ def agent_resume(
         typer.Option("--checkpoint-db", help="SQLite checkpoint 文件"),
     ] = DEFAULT_CHECKPOINT_PATH,
     action: Annotated[
-        str,
+        str | None,
         typer.Option(
             "--action",
             "--decision",
@@ -1568,7 +1706,7 @@ def agent_resume(
                 "mark_failed | abort"
             ),
         ),
-    ] = "continue",
+    ] = None,
     user_input: Annotated[
         str | None,
         typer.Option("--input", help="clarification/choice 恢复时的用户输入"),
@@ -1603,11 +1741,27 @@ def agent_resume(
     if effective_turn_id is None:
         print("请提供 Turn ID，或使用 --last 恢复最近 Turn。")
         raise typer.Exit(code=2)
+    if action is None and user_input is not None:
+        raise typer.BadParameter("--input 需要同时指定 --action")
     facade = _create_agent_facade(
         checkpoint_db=checkpoint_db,
         vector_dsn=vector_dsn,
     )
     event_display = _CLIToolEventDisplay()
+    if action is None:
+        pending = asyncio.run(
+            _pending_resume_request(
+                facade,
+                turn_id=effective_turn_id,
+                event_display=event_display,
+            )
+        )
+        _display_pending_recovery(
+            pending,
+            turn_id=effective_turn_id,
+            checkpoint_db=checkpoint_db,
+        )
+        raise typer.Exit(code=2)
     result = asyncio.run(
         _resume_facade_command(
             facade,

@@ -197,12 +197,20 @@ def test_resume_last_resolves_latest_recoverable_workspace_turn(
 
     result = runner.invoke(
         agent_cli.agent_app,
-        ["resume", "--last", "--checkpoint-db", str(database)],
+        [
+            "resume",
+            "--last",
+            "--action",
+            "continue",
+            "--checkpoint-db",
+            str(database),
+        ],
     )
 
     assert result.exit_code == 0
     assert captured["facade"] is facade
     assert captured["turn_id"] == turn.turn_id
+    assert captured["action"] == "continue"
 
 
 def test_resume_requires_turn_id_or_last() -> None:

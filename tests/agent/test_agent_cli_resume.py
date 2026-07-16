@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+from pathlib import Path
 from uuid import uuid4
 
 import pytest
+import typer
 
 from rag.agent import cli
 from rag.agent.cli import _build_resume_response
@@ -148,6 +150,108 @@ def test_agent_resume_closes_service_after_result(
             "vector_dsn": None,
         }
     ]
+
+
+def test_agent_resume_without_action_prints_pending_recovery_info(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    request = HumanInputRequest(
+        request_id="hir_pending",
+        kind="tool_approval",
+        question="Allow the command?",
+        tool_calls=[
+            ToolCallSummary(
+                tool_call_id="tc_pending",
+                tool_name="run_command",
+                args_preview="command='pytest'",
+                risk_level="medium",
+                reason="Runs local tests",
+            )
+        ],
+        options=["allow_once", "deny", "abort"],
+    )
+    resumed: list[bool] = []
+
+    class _Service:
+        async def apending_human_input_request(
+            self,
+            *,
+            run_id: str,
+        ) -> HumanInputRequest:
+            assert run_id == turn_id
+            return request
+
+        async def resume_turn(self, **_kwargs: object) -> AgentRunResult:
+            resumed.append(True)
+            raise AssertionError("inspection must not mutate the Turn")
+
+    class _RuntimeFacade:
+        @asynccontextmanager
+        async def _open_product_runtime(self, **kwargs: object):
+            assert isinstance(kwargs.get("stream_sink"), cli._CLIToolEventDisplay)
+            yield _Service()
+
+    class _Facade:
+        def _agent_for_turn(self, passed_turn_id: str) -> _RuntimeFacade:
+            assert passed_turn_id == turn_id
+            return _RuntimeFacade()
+
+    monkeypatch.setattr(cli, "_create_agent_facade", lambda **_kwargs: _Facade())
+    turn_id = str(uuid4())
+
+    with pytest.raises(typer.Exit) as exc_info:
+        cli.agent_resume(
+            turn_id=turn_id,
+            checkpoint_db=tmp_path / "agent.sqlite",
+            action=None,
+        )
+
+    output = capsys.readouterr().out
+    assert exc_info.value.exit_code == 2
+    assert "Allow the command?" in output
+    assert "run_command" in output
+    assert "Runs local tests" in output
+    assert "--action allow_once" in output
+    assert resumed == []
+
+
+def test_agent_resume_without_pending_request_offers_continue(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    turn_id = str(uuid4())
+
+    class _Service:
+        async def apending_human_input_request(self, *, run_id: str) -> None:
+            assert run_id == turn_id
+            raise KeyError("no pending human input")
+
+    class _RuntimeFacade:
+        @asynccontextmanager
+        async def _open_product_runtime(self, **_kwargs: object):
+            yield _Service()
+
+    class _Facade:
+        def _agent_for_turn(self, passed_turn_id: str) -> _RuntimeFacade:
+            assert passed_turn_id == turn_id
+            return _RuntimeFacade()
+
+    monkeypatch.setattr(cli, "_create_agent_facade", lambda **_kwargs: _Facade())
+
+    with pytest.raises(typer.Exit) as exc_info:
+        cli.agent_resume(
+            turn_id=turn_id,
+            checkpoint_db=tmp_path / "agent.sqlite",
+            action=None,
+        )
+
+    output = capsys.readouterr().out
+    assert exc_info.value.exit_code == 2
+    assert "中断执行" in output
+    assert "--action continue" in output
 
 
 def test_interactive_terminal_fails_closed_for_ci_or_non_tty(
