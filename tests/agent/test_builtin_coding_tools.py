@@ -181,6 +181,18 @@ async def test_filesystem_tools_list_read_patch_and_expose_changes_immediately(
     )
     assert patched.result.structured_content is not None
     assert patched.result.structured_content["replaced"] is True
+    assert set(patched.result.structured_content) == {
+        "file_path",
+        "replaced",
+        "occurrences",
+        "message",
+    }
+    assert patched.result.metadata["file_path"] == "src/example.py"
+    patch_diff = patched.result.metadata["diff"]
+    assert isinstance(patch_diff, str)
+    assert "-needle_one()" in patch_diff
+    assert "+fresh_symbol()" in patch_diff
+    assert patched.result.metadata["diff_truncated"] is False
     assert old_search.result.structured_content is not None
     assert old_search.result.structured_content["matches"] == ()
     assert new_search.result.structured_content is not None

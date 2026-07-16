@@ -125,6 +125,12 @@ class _CLIToolEventDisplay:
         result = event.data.get("result")
         suffix = f": {_bounded_cli_text(str(result))}" if result is not None else ""
         self._write_line(f"✓ {tool_name}{suffix}")
+        details = event.data.get("details")
+        if not isinstance(details, Mapping):
+            return
+        diff = details.get("diff")
+        if isinstance(diff, str) and diff:
+            self._write_block(diff)
 
     def _render_plan(self, event: StreamEvent) -> None:
         plan = event.data.get("plan")
@@ -159,6 +165,12 @@ class _CLIToolEventDisplay:
         if self._line_open:
             print()
         print(value, flush=True)
+        self._line_open = False
+
+    def _write_block(self, value: str) -> None:
+        if self._line_open:
+            print()
+        print(value.rstrip("\n"), flush=True)
         self._line_open = False
 
     def begin_turn(self) -> None:

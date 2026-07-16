@@ -282,6 +282,41 @@ async def test_cli_displays_correlated_tool_lifecycle_once(
 
 
 @pytest.mark.anyio
+async def test_cli_displays_patch_diff_from_existing_result_event(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    display = _CLIToolEventDisplay()
+    event = StreamEvent(
+        type=EventType.TOOL_USE_RESULT,
+        data={
+            "tool_name": "apply_patch",
+            "tool_id": "call_patch",
+            "result": {"replaced": True},
+            "details": {
+                "file_path": "src/example.py",
+                "diff": (
+                    "--- a/src/example.py\n"
+                    "+++ b/src/example.py\n"
+                    "@@ -1 +1 @@\n"
+                    "-old\n"
+                    "+new"
+                ),
+                "diff_truncated": False,
+            },
+        },
+    )
+
+    await display.emit(event)
+
+    output = capsys.readouterr().out
+    assert "✓ apply_patch:" in output
+    assert "--- a/src/example.py" in output
+    assert "+++ b/src/example.py" in output
+    assert "-old" in output
+    assert "+new" in output
+
+
+@pytest.mark.anyio
 async def test_cli_displays_plan_and_recovery_events(
     capsys: pytest.CaptureFixture[str],
 ) -> None:

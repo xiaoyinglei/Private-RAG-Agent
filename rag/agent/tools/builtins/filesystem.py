@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import difflib
 import fnmatch
 import os
 import stat
 import tempfile
 from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -25,6 +27,7 @@ from rag.agent.tools.tool import (
 from rag.agent.workspace import WorkspaceRuntime
 
 _INTERNAL_DIRECTORY = ".agent_memory"
+_MAX_PATCH_DIFF_CHARS = 12_000
 
 
 class ListFilesInput(BaseModel):
@@ -134,6 +137,13 @@ class ApplyPatchOutput(BaseModel):
     replaced: bool
     occurrences: int = Field(ge=0)
     message: str
+
+
+@dataclass(frozen=True, slots=True)
+class _ApplyPatchRunResult:
+    output: ApplyPatchOutput
+    diff: str = ""
+    diff_truncated: bool = False
 
 
 _LIST_INPUT_SCHEMA, _validate_list_input = pydantic_input(ListFilesInput)
@@ -332,31 +342,37 @@ def _read_file(
 def _apply_patch(
     workspace: WorkspaceRuntime,
     request: ApplyPatchInput,
-) -> ApplyPatchOutput:
+) -> _ApplyPatchRunResult:
     target = _checked_path(workspace, request.file_path)
     if not target.is_file():
-        return ApplyPatchOutput(
-            file_path=request.file_path,
-            replaced=False,
-            occurrences=0,
-            message="file not found",
+        return _ApplyPatchRunResult(
+            ApplyPatchOutput(
+                file_path=request.file_path,
+                replaced=False,
+                occurrences=0,
+                message="file not found",
+            )
         )
 
     current = target.read_text(encoding="utf-8")
     occurrences = current.count(request.old_string)
     if occurrences == 0:
-        return ApplyPatchOutput(
-            file_path=request.file_path,
-            replaced=False,
-            occurrences=0,
-            message="old_string not found",
+        return _ApplyPatchRunResult(
+            ApplyPatchOutput(
+                file_path=request.file_path,
+                replaced=False,
+                occurrences=0,
+                message="old_string not found",
+            )
         )
     if occurrences > 1 and not request.replace_all:
-        return ApplyPatchOutput(
-            file_path=request.file_path,
-            replaced=False,
-            occurrences=occurrences,
-            message="old_string is not unique; set replace_all=true",
+        return _ApplyPatchRunResult(
+            ApplyPatchOutput(
+                file_path=request.file_path,
+                replaced=False,
+                occurrences=occurrences,
+                message="old_string is not unique; set replace_all=true",
+            )
         )
 
     updated = (
@@ -364,12 +380,43 @@ def _apply_patch(
         if request.replace_all
         else current.replace(request.old_string, request.new_string, 1)
     )
-    _atomic_write_text(target, updated)
-    return ApplyPatchOutput(
+    diff, diff_truncated = _patch_diff(
+        current,
+        updated,
         file_path=request.file_path,
-        replaced=True,
-        occurrences=occurrences if request.replace_all else 1,
-        message="patch applied",
+    )
+    _atomic_write_text(target, updated)
+    return _ApplyPatchRunResult(
+        ApplyPatchOutput(
+            file_path=request.file_path,
+            replaced=True,
+            occurrences=occurrences if request.replace_all else 1,
+            message="patch applied",
+        ),
+        diff=diff,
+        diff_truncated=diff_truncated,
+    )
+
+
+def _patch_diff(
+    before: str,
+    after: str,
+    *,
+    file_path: str,
+) -> tuple[str, bool]:
+    lines = difflib.unified_diff(
+        before.splitlines(),
+        after.splitlines(),
+        fromfile=f"a/{file_path}",
+        tofile=f"b/{file_path}",
+        lineterm="",
+    )
+    rendered = "\n".join(lines)
+    if len(rendered) <= _MAX_PATCH_DIFF_CHARS:
+        return rendered, False
+    return (
+        f"{rendered[:_MAX_PATCH_DIFF_CHARS]}\n… diff truncated …",
+        True,
     )
 
 
@@ -435,13 +482,25 @@ def _normalize_model(
 
 
 def _normalize_apply_patch(raw: object) -> NormalizedToolOutput:
-    validated = ApplyPatchOutput.model_validate(raw)
+    execution = (
+        raw
+        if isinstance(raw, _ApplyPatchRunResult)
+        else _ApplyPatchRunResult(ApplyPatchOutput.model_validate(raw))
+    )
+    validated = ApplyPatchOutput.model_validate(execution.output)
     structured = json_schema_output(
         _PATCH_OUTPUT_SCHEMA,
         validated.model_dump(mode="json"),
     )
     if validated.replaced:
-        return NormalizedToolOutput(structured_content=structured)
+        return NormalizedToolOutput(
+            structured_content=structured,
+            metadata={
+                "file_path": validated.file_path,
+                "diff": execution.diff,
+                "diff_truncated": execution.diff_truncated,
+            },
+        )
     return NormalizedToolOutput(
         structured_content=structured,
         is_error=True,

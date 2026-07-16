@@ -172,6 +172,7 @@ def _tool(
     *,
     schema: Mapping[str, JsonValue] | None = None,
     effects: frozenset[ToolEffect] = frozenset(),
+    metadata: Mapping[str, JsonValue] | None = None,
 ) -> Tool:
     input_schema = schema or {
         "type": "object",
@@ -185,6 +186,7 @@ def _tool(
         return NormalizedToolOutput(
             content=(ToolContentBlock(type="text", data={"text": text}),),
             structured_content={"text": text},
+            metadata=metadata or {},
         )
 
     return Tool(
@@ -272,6 +274,43 @@ async def test_model_tool_result_next_turn_and_finish() -> None:
         "started",
         "completed",
     ]
+
+
+@pytest.mark.anyio
+async def test_apply_patch_result_event_exposes_only_cli_diff_details() -> None:
+    call = ToolCallPlan.create("apply_patch", {"value": "edit"})
+    provider = _SequenceProvider(
+        [
+            ModelTurnDraft(action="execute", tool_calls=(call,)),
+            ModelTurnDraft(action="finish", final_answer="Done."),
+        ]
+    )
+    state = create_loop_state(
+        task="Edit the file.",
+        run_config=_config("loop-patch-diff"),
+    )
+    state["resident_tool_names"] = ["apply_patch"]
+    tool = _tool(
+        "apply_patch",
+        lambda _arguments: "patched",
+        metadata={
+            "file_path": "src/example.py",
+            "diff": "--- a/src/example.py\n+++ b/src/example.py\n-old\n+new",
+            "diff_truncated": False,
+            "private_value": "must-not-leak",
+        },
+    )
+
+    events = await _collect(
+        _loop(provider=provider, tools=(tool,)).run_streaming(state)
+    )
+
+    result = next(event for event in events if event.type is EventType.TOOL_USE_RESULT)
+    assert result.data["details"] == {
+        "file_path": "src/example.py",
+        "diff": "--- a/src/example.py\n+++ b/src/example.py\n-old\n+new",
+        "diff_truncated": False,
+    }
 
 
 @pytest.mark.anyio
