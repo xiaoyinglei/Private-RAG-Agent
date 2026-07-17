@@ -26,9 +26,32 @@ class ToolPolicy:
     max_parallel_calls: int = 4
     require_confirmation_for: frozenset[str] = field(default_factory=frozenset)
     deny_tools: frozenset[str] = field(default_factory=frozenset)
-    # Opt-in only. Code execution is approval-gated by default even when a
-    # tool is expected to run in a sandbox.
+    # Opt-in only. The permission choke point recognizes only the canonical
+    # fail-closed run_command sandbox contract.
     auto_approve_sandboxed: bool = False
+
+    def __post_init__(self) -> None:
+        if type(self.max_parallel_calls) is not int:
+            raise TypeError("max_parallel_calls must be an integer")
+        if self.max_parallel_calls < 1:
+            raise ValueError("max_parallel_calls must be positive")
+        if type(self.auto_approve_sandboxed) is not bool:
+            raise TypeError("auto_approve_sandboxed must be a bool")
+        for field_name in ("require_confirmation_for", "deny_tools"):
+            raw_names = getattr(self, field_name)
+            if isinstance(raw_names, (str, bytes)):
+                raise TypeError(f"{field_name} must be a collection of tool names")
+            try:
+                names = frozenset(raw_names)
+            except TypeError as exc:
+                raise TypeError(
+                    f"{field_name} must be a collection of tool names"
+                ) from exc
+            if any(not isinstance(name, str) or not name for name in names):
+                raise ValueError(
+                    f"{field_name} must contain non-empty tool names"
+                )
+            object.__setattr__(self, field_name, names)
 
 
 @dataclass(frozen=True)

@@ -263,11 +263,18 @@ class ToolExecutor:
                 prepared.append((index, item))
 
         if _can_run_in_parallel(tuple(item for _, item in prepared)):
-            executions = await asyncio.gather(
-                *(self._invoke(item) for _, item in prepared)
-            )
-            for (index, _), execution in zip(prepared, executions, strict=True):
-                completed[index] = execution
+            limit = context.max_parallel_calls
+            for offset in range(0, len(prepared), limit):
+                batch = prepared[offset : offset + limit]
+                executions = await asyncio.gather(
+                    *(self._invoke(item) for _, item in batch)
+                )
+                for (index, _), execution in zip(
+                    batch,
+                    executions,
+                    strict=True,
+                ):
+                    completed[index] = execution
         else:
             for index, item in prepared:
                 completed[index] = await self._invoke(item)

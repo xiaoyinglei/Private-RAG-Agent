@@ -46,6 +46,7 @@ class SubagentInput(BaseModel):
         default=None,
         ge=1,
         le=50,
+        strict=True,
         description="Optional child-turn ceiling.",
     )
     llm_budget_total: int | None = Field(

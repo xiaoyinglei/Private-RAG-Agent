@@ -40,7 +40,7 @@ class AgentDelegationRequest(BaseModel):
     delegation_id: str
     agent_type: str
     prompt: str
-    max_turns: int | None = None
+    max_turns: int | None = Field(default=None, ge=1, strict=True)
     llm_budget_total: int | None = Field(default=None, ge=1)
 
 

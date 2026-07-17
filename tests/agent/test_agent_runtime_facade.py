@@ -79,6 +79,7 @@ def test_agent_facade_run_maps_public_request_to_internal_service(
         "summarize",
         files=["README.md"],
         run_id=turn_id,
+        max_turns=3,
         max_tokens_total=1234,
     )
 
@@ -115,6 +116,7 @@ def test_agent_facade_run_maps_public_request_to_internal_service(
     assert request.task == "summarize"
     assert request.run_id == turn_id
     assert request.thread_id == turn_id
+    assert request.max_turns == 3
     assert request.llm_budget_total == 1234
     assert request.input_files == ["README.md"]
     assert request.tools is None
@@ -157,6 +159,35 @@ def test_agent_facade_run_passes_explicit_single_runtime_options(
     assert request.allow_write_tools is False
     assert request.allow_execute_tools is True
     assert request.allow_discovery_tools is False
+
+
+@pytest.mark.anyio
+async def test_agent_facade_chat_passes_max_turns_to_each_turn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requests: list[Any] = []
+
+    class _Service:
+        async def chat(self, request: Any) -> AgentRunResult:
+            requests.append(request)
+            return AgentRunResult(
+                run_id=request.run_id,
+                thread_id=request.thread_id,
+                session_id=request.session_id or str(uuid4()),
+                status="done",
+                final_answer="bounded chat",
+            )
+
+    monkeypatch.setattr(
+        runtime_builder,
+        "build_agent_service",
+        lambda *_args, **_kwargs: _Service(),
+    )
+
+    result = await Agent().achat("Answer briefly.", max_turns=2)
+
+    assert result.answer == "bounded chat"
+    assert requests[0].max_turns == 2
 
 
 def test_agent_facade_binds_public_workspace_to_builder_and_request(
@@ -341,10 +372,11 @@ async def test_agent_stream_explicit_close_releases_one_shot_runtime(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     closed: list[bool] = []
+    requests: list[Any] = []
 
     class _Service:
         async def chat_streaming(self, request: Any):
-            del request
+            requests.append(request)
             yield "first"
             yield "second"
 
@@ -357,11 +389,16 @@ async def test_agent_stream_explicit_close_releases_one_shot_runtime(
         lambda *_args, **_kwargs: _Service(),
     )
 
-    stream = Agent().stream("stream task", run_id=str(uuid4()))
+    stream = Agent().stream(
+        "stream task",
+        run_id=str(uuid4()),
+        max_turns=4,
+    )
     assert await anext(stream) == "first"
     await stream.aclose()
 
     assert closed == [True]
+    assert requests[0].max_turns == 4
 
 
 @pytest.mark.anyio
@@ -516,6 +553,8 @@ def test_agent_run_cli_delegates_to_agent_facade(monkeypatch: pytest.MonkeyPatch
             str(Path("README.md")),
             "--turn-id",
             turn_id,
+            "--max-turns",
+            "3",
         ],
         env={"COLUMNS": "240"},
     )
@@ -530,6 +569,7 @@ def test_agent_run_cli_delegates_to_agent_facade(monkeypatch: pytest.MonkeyPatch
     assert request.input_files == ["README.md"]
     assert request.run_id == turn_id
     assert request.session_id is None
+    assert request.max_turns == 3
     assert request.allow_discovery_tools is None
 
 

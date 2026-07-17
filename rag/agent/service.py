@@ -101,7 +101,7 @@ class AgentRunRequest(BaseModel):
     session_id: str | None = None
     run_id: str | None = None
     thread_id: str | None = None
-    max_turns: int | None = None
+    max_turns: int | None = Field(default=None, gt=0, strict=True)
     max_context_tokens: int | None = Field(default=None, gt=0)
     llm_budget_total: int | None = Field(default=None, gt=0)
     max_depth: int | None = Field(default=None, ge=0)
@@ -881,13 +881,21 @@ class AgentService:
             if request.allow_discovery_tools is None
             else request.allow_discovery_tools
         )
+        policy_disabled_tools = tuple(
+            name
+            for name in self._tool_snapshot
+            if name in run_config.tool_policy.deny_tools
+        )
         options = resolve_tool_options(
             self._tool_snapshot,
             default_resident_names=self._default_resident_names(),
             configured_resident_names=self._configured_resident_tool_names,
             discoverable_names=self._discoverable_tool_names,
             tools=request.tools,
-            disabled_tools=request.disabled_tools,
+            disabled_tools=(
+                *request.disabled_tools,
+                *policy_disabled_tools,
+            ),
             allow_discovery_tools=allow_discovery_tools,
         )
         if options.uses_default_tools:
@@ -976,11 +984,16 @@ class AgentService:
             skill_runtime=self._skill_runtime,
         ).resolve(state)
         output_finalizer = self._resolve_output_finalizer(state)
+        tool_policy = state["run_config"].tool_policy
         execution_context = ToolExecutionContext(
             workspace_root=workspace.root,
             cwd=workspace.root,
             allow_write_tools=state["allow_write_tools"],
             allow_execute_tools=state["allow_execute_tools"],
+            max_parallel_calls=tool_policy.max_parallel_calls,
+            require_confirmation_for=tool_policy.require_confirmation_for,
+            denied_tool_names=tool_policy.deny_tools,
+            auto_approve_sandboxed=tool_policy.auto_approve_sandboxed,
         )
         return AgentLoop(
             definition=self._policy,
