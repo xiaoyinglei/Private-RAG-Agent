@@ -145,7 +145,7 @@ async def achat(...) -> AgentResult: ...
 def resume(
     self,
     turn_id: str,
-    action: ResumeAction,
+    action: str,
     *,
     user_input: str | None = None,
 ) -> AgentResult: ...
@@ -157,6 +157,12 @@ The historical public parameters `run_id`, `tools`, `disabled_tools`, and
 `allow_discovery_tools` are removed rather than retained as deprecated aliases.
 The active permission parameters remain because they feed the verified
 ToolPolicy behavior.
+
+`resume/aresume` deliberately keep `action: str`. Tool approval and
+reconciliation have documented built-in actions, but a `choice` pause may
+contain an arbitrary application-provided token in `AgentPause.options`. A
+closed Enum or Literal would remove that existing capability. The persisted
+pause request remains the authority for validating the supplied action.
 
 The current `models`, `current_model`, and `switch_model` methods remain.
 
@@ -221,6 +227,33 @@ not own runtime state. `_stream_turn` selects Session kind and projects the
 canonical events. It does not create an event bus, sink, queue, or alternate
 loop.
 
+Session kind crosses the unified service boundary as a required private keyword
+rather than as a public request field:
+
+```python
+async def AgentService.chat(
+    request: AgentRunRequest,
+    *,
+    session_kind: SessionKind,
+) -> AgentRunResult: ...
+
+async def AgentService.chat_streaming(
+    request: AgentRunRequest,
+    *,
+    session_kind: SessionKind,
+) -> AsyncIterator[StreamEvent]: ...
+```
+
+When `request.session_id is None`, the service creates the Session using the
+required kind. When a Session ID is present, `session_kind` must be
+CONVERSATION and the stored Session must also be CONVERSATION. Supplying an
+existing one-shot ID is rejected even if an internal caller passes ONE_SHOT.
+Resume never accepts a Session kind; it reads the Turn and its owning Session
+from durable storage. The streaming service follows the identical rules.
+
+This makes one-shot creation explicit without pre-creating a Session in the
+facade and then attempting to continue it through the Conversation-only path.
+
 The CLI calls these package-private facade helpers when it needs an event sink
 or its interactive approval driver. It no longer constructs `AgentRunRequest`,
 opens `AgentService` directly, or reads `AgentRunResult`/`AgentResult.raw`.
@@ -267,6 +300,13 @@ The public result removes:
 
 `AgentToolCall` contains a stable call ID, name, JSON arguments and structured
 output, error fields, retry/truncation flags, and latency where available.
+There is one DTO entry per `ToolResult`, in result order. At internal result
+finalization, arguments are joined by call ID from the canonical
+`state["canonical_tool_calls"]` map, not from the bounded
+`tool_call_ledger`. `arguments` is `Mapping[str, JsonValue] | None`: it is
+`None` only when a legacy checkpoint/result lacks the matching canonical call.
+Pending calls without a ToolResult are represented by `AgentPause`, not mixed
+into completed tool-call results. No new unbounded call history is introduced.
 `AgentPause` contains the request ID, pause kind, question, bounded tool
 summaries, options, and JSON context. Result-side dynamic payloads use a
 recursive `JsonValue` type, never `Any`.
@@ -347,6 +387,14 @@ dependency/configuration injection for tests and deployments. The DSN is never
 stored in RuntimeBinding, checkpoints, result DTOs, or logs. Broad historical
 fallback names such as `VECTOR_DSN` are not retained in the high-level path.
 
+The old high-level constructor accepted an arbitrary backend string. A legacy
+`vector_backend="in_memory"` is valid in the current storage layer but selects
+the same SQLite vector-repository implementation as `sqlite` for this
+path-based RAG configuration. RuntimeBinding migration therefore normalizes
+`in_memory` to canonical `sqlite`. V2 exposes only `milvus` and `sqlite`; other
+unknown legacy backend values fail migration rather than being silently
+retained.
+
 `KnowledgeSearchInput.constraints` is removed because it currently has no
 mapping to `QueryOptions` or a lower-level metadata filter. Because the schema
 forbids extras, callers that continue to send `constraints` receive validation
@@ -381,6 +429,7 @@ An object without `schema_version` is v1.
 | `embedding_model_alias` | `knowledge.embedding_model` |
 | `reranker_model_alias` | `knowledge.reranker_model` |
 | `vector_backend` | `knowledge.vector_backend` |
+| legacy `vector_backend="in_memory"` | canonical `knowledge.vector_backend="sqlite"` |
 | `vector_namespace` | `knowledge.vector_namespace` |
 | `vector_collection_prefix` | `knowledge.vector_collection_prefix` |
 | `vector_dsn` | never persisted; resolved at runtime |
@@ -399,6 +448,18 @@ Store opening performs one atomic eager migration:
 4. roll back the complete migration on any error and identify the affected
    Session or Turn;
 5. reject unknown v2 fields rather than ignoring configuration typos.
+
+The recognized v1 field set is explicit. Unknown v1 fields also fail with the
+owning row ID, except for the documented fields intentionally removed or
+mapped above. Migration is idempotent: reopening an already migrated database
+does not rewrite the canonical JSON again.
+
+A Turn binding is a historical execution snapshot and remains authoritative
+for resuming that Turn. If its normalized binding differs from the owning
+Session binding, migration preserves both values and emits one bounded warning
+through the existing logger with the Session and Turn IDs; it does not
+overwrite either side or introduce another diagnostics channel. This avoids
+changing resume behavior while making the mismatch observable.
 
 ## SQLite migration
 
@@ -539,9 +600,14 @@ Still-valid structured-file preview coverage moves to
   and `AgentRunResult.from_state`; retain `_run_request`, `chat`, streaming, and
   `resume_turn`.
 - `rag/agent/core/definition.py`: remove `agent_type`, `description`, unused MCP
-  declaration fields, unused retrieval-hint fields, `thinking`, and the
-  backward-compatible `allowed_tools` property. Keep active tool-decision and
-  ToolPolicy behavior.
+  declaration fields, unused retrieval-hint fields, and `thinking`. Replace the
+  misleading backward-compatible `allowed_tools` property with a read-only
+  computed property or private helper named `configured_tool_names` that
+  returns `(*policy.core_tool_names, *policy.deferred_tool_names)` in the exact
+  current order. It must not become a third stored tuple or constructor field.
+  First migrate and equivalence-test both canonical consumers in
+  `llm_context.py` and `service.py`; only then delete `allowed_tools`. Keep
+  active tool-decision and ToolPolicy behavior.
 - `rag/agent/core/context.py`: remove delegation-only helpers and fields proven
   behaviorless, with legacy checkpoint normalization before structural
   deletion. Keep active token budget, cancellation, memory, max-turn, and
@@ -587,6 +653,8 @@ same `_run_request`, AgentLoop, and ToolExecutor path.
   INTERRUPTED.
 - Unknown RuntimeBinding or RAG config fields fail validation.
 - Legacy binding migration is all-or-nothing.
+- A recognized legacy `in_memory` vector backend becomes canonical `sqlite`;
+  unsupported backend values fail with the owning row ID.
 - Missing or invalid configured knowledge storage produces an explicit
   provider/tool diagnostic rather than silent disablement.
 - Public callers cannot supply their own Turn ID after the compatibility
@@ -610,7 +678,11 @@ Start with failing tests for:
 - cross-kind resumable-Turn selection;
 - one-shot chat rejection at facade and service boundaries;
 - v1 RuntimeBinding migration in both Session and Turn rows;
-- secret non-persistence and rollback on an invalid row.
+- recognized `in_memory` normalization and unsupported backend rejection;
+- unknown-v1-field handling and preserved Session/Turn binding mismatches;
+- migration rollback, second-open idempotence, and secret non-persistence;
+- closing and reopening the database, then resuming a one-shot Turn using only
+  `turn_id`, with `session_id` still suppressed in the result.
 
 ### Slice 2: facade, result, and streaming
 
@@ -620,9 +692,16 @@ Start with public signature tests and failing behavior tests for:
 - exact `run/arun/chat/achat/resume/aresume` semantics;
 - `astream` and `astream_chat` lifecycle behavior;
 - event Turn naming and one-shot Session-ID suppression;
-- cancellation and canonical event ordering;
+- cancellation and canonical event ordering, including a stream generator that
+  is never started, cancellation after execution starts but before the first
+  event, and generator close during consumption;
+- no Session/Turn allocation for a never-started generator, and durable
+  INTERRUPTED state with the correct Session kind after cancellation of a
+  started stream;
 - absence of `raw`, `run_id`, `thread_id`, and public `Any`;
-- stable pause, tool-call, diagnostic, usage, evidence, and citation DTOs.
+- stable pause, tool-call, diagnostic, usage, evidence, and citation DTOs;
+- tool argument projection from canonical calls and `arguments=None` for a
+  legacy result whose matching canonical call is unavailable.
 
 ### Slice 3: knowledge and CLI
 
