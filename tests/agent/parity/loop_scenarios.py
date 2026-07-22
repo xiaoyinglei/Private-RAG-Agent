@@ -12,7 +12,7 @@ from rag.agent.core.checkpointing import (
     LangGraphCheckpointStore,
     agent_checkpoint_serde,
 )
-from rag.agent.core.context import RunRegistry
+from rag.agent.core.context import TurnRegistry
 from rag.agent.core.definition import AgentRuntimePolicy
 from rag.agent.core.finalization import FinishCandidateBuilder
 from rag.agent.core.goal_contract import GoalDeliverable, GoalSpec
@@ -164,7 +164,7 @@ async def _run_loop(
     event_recorder: _EventRecorder | None = None,
 ) -> tuple[LoopState, _RuntimeHarness]:
     if memory_store is not None:
-        RunRegistry.get(state["run_config"].run_id).memory_store = memory_store
+        TurnRegistry.get(state["run_config"].turn_id).memory_store = memory_store
     runtime = harness or _runtime_harness(state, registry)
     loop = AgentLoop(
         definition=definition,

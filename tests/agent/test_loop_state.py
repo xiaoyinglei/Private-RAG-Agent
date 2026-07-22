@@ -34,7 +34,6 @@ from rag.agent.loop.substate import (
     MemoryState,
     PlanState,
 )
-from rag.schema.runtime import AccessPolicy
 
 
 def agent_state_to_loop_state(state: AgentState) -> AgentState:
@@ -43,19 +42,16 @@ def agent_state_to_loop_state(state: AgentState) -> AgentState:
 
 def _run_config(run_id: str = "loop-state") -> AgentRunConfig:
     return AgentRunConfig(
-        run_id=run_id,
-        thread_id=run_id,
+        turn_id=run_id,
         llm_budget_total=100,
-        max_depth=2,
-        access_policy=AccessPolicy.default(),
     )
 
 
 def test_create_loop_state_populates_focused_required_channels() -> None:
-    state = create_loop_state(task="Inspect architecture", run_config=_run_config())
+    state = create_loop_state(current_message="Inspect architecture", run_config=_run_config())
 
     assert set(state) == set(LoopState.__required_keys__)
-    assert state["task"] == "Inspect architecture"
+    assert state["current_message"] == "Inspect architecture"
     assert state["status"] == "running"
     assert state["iteration"] == 0
     assert state["pending_tool_calls"] == []
@@ -86,7 +82,7 @@ def test_loop_state_factory_copies_mutable_inputs() -> None:
     pending = [ToolCallPlan.create("vector_search", {"query": "loop state"})]
     warnings = ["initial"]
     state = create_loop_state(
-        task="Inspect architecture",
+        current_message="Inspect architecture",
         run_config=_run_config(),
         pending_tool_calls=pending,
         memory_warnings=warnings,
@@ -151,7 +147,7 @@ def test_strict_model_turn_accepts_each_complete_outcome() -> None:
 
 
 def test_replace_latest_transition_does_not_grow_history() -> None:
-    state = create_loop_state(task="Inspect architecture", run_config=_run_config())
+    state = create_loop_state(current_message="Inspect architecture", run_config=_run_config())
 
     first = LoopTransition(reason="next_turn", iteration=0)
     second = LoopTransition(reason="tool_execution", iteration=1)
@@ -163,7 +159,7 @@ def test_replace_latest_transition_does_not_grow_history() -> None:
 
 
 def test_bounded_append_helpers_keep_only_recent_unique_values() -> None:
-    state = create_loop_state(task="Inspect architecture", run_config=_run_config())
+    state = create_loop_state(current_message="Inspect architecture", run_config=_run_config())
 
     for index in range(MAX_STOP_HOOK_FEEDBACK + 3):
         append_stop_hook_feedback(
@@ -192,7 +188,7 @@ def test_bounded_append_helpers_keep_only_recent_unique_values() -> None:
 
 def test_agent_state_is_a_compatibility_alias_for_loop_state() -> None:
     state = create_agent_state(
-        task="Inspect architecture",
+        current_message="Inspect architecture",
         run_config=_run_config("legacy-adapter"),
     )
 

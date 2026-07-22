@@ -11,7 +11,7 @@ from rag.agent.memory.models import (
     MemoryRef,
 )
 from rag.agent.memory.store import MemoryRefError, WorkspaceMemoryStore
-from rag.agent.primitive_ops import FileInfo, ListFilesOutput
+from rag.agent.tools.builtins.filesystem import FileEntry, ListFilesOutput
 from rag.agent.workspace import WorkspaceRuntime
 
 
@@ -28,7 +28,7 @@ def test_memory_models_serialize_schema_versions() -> None:
         summary="listed files",
     )
     externalized = ExternalizedToolOutput(
-        original_output_model="rag.agent.primitive_ops.ListFilesOutput",
+        original_output_model="rag.agent.tools.builtins.filesystem.ListFilesOutput",
         summary="listed files",
         ref=ref,
     )
@@ -37,21 +37,20 @@ def test_memory_models_serialize_schema_versions() -> None:
 
     assert dumped["schema_version"] == 1
     assert dumped["ref"]["schema_version"] == 1
-    assert dumped["original_output_model"] == "rag.agent.primitive_ops.ListFilesOutput"
+    assert dumped["original_output_model"] == ("rag.agent.tools.builtins.filesystem.ListFilesOutput")
 
 
 def test_store_writes_reads_and_tombstones_records(tmp_path: Path) -> None:
     workspace = _workspace(tmp_path)
     store = WorkspaceMemoryStore(workspace=workspace)
     output = ListFilesOutput(
-        files=[
-            FileInfo(
+        entries=[
+            FileEntry(
                 name="sales.csv",
                 path="input_files/sales.csv",
-                size=123,
-                is_dir=False,
-                modified_at=1.0,
-                capabilities=["read_file", "structured_probe"],
+                size_bytes=123,
+                is_directory=False,
+                is_symlink=False,
             )
         ]
     )
@@ -67,7 +66,7 @@ def test_store_writes_reads_and_tombstones_records(tmp_path: Path) -> None:
     assert isinstance(record, MemoryRecord)
     assert record.schema_version == 1
     assert record.status == "available"
-    assert record.original_output_model == "rag.agent.primitive_ops.ListFilesOutput"
+    assert record.original_output_model == ("rag.agent.tools.builtins.filesystem.ListFilesOutput")
     assert record.payload == output
     assert ref.path.startswith(".agent_memory/records/")
 
@@ -92,7 +91,7 @@ def test_store_preserves_compacted_record_status(tmp_path: Path) -> None:
         status="compacted",
     )
     record = MemoryRecord(
-        original_output_model="rag.agent.primitive_ops.ListFilesOutput",
+        original_output_model="rag.agent.tools.builtins.filesystem.ListFilesOutput",
         summary="compacted result",
         ref=ref,
         status="compacted",

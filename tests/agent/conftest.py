@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -40,5 +42,20 @@ def fake_sandbox_exec(
         shell_module,
         "_SANDBOX_EXEC_PATH",
         str(executable),
+    )
+    create_subprocess_exec = asyncio.create_subprocess_exec
+
+    async def execute_without_seatbelt(
+        *argv: str,
+        **kwargs: Any,
+    ) -> asyncio.subprocess.Process:
+        if len(argv) < 5 or argv[0] != str(executable) or argv[1] != "-p":
+            raise AssertionError("unexpected sandbox-exec argv")
+        return await create_subprocess_exec(*argv[3:], **kwargs)
+
+    monkeypatch.setattr(
+        shell_module.asyncio,
+        "create_subprocess_exec",
+        execute_without_seatbelt,
     )
     return executable

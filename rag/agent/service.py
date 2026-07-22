@@ -3,23 +3,24 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from collections.abc import AsyncGenerator, Mapping, Sequence
-from dataclasses import replace
+from collections.abc import AsyncGenerator, AsyncIterator, Mapping, Sequence
+from contextlib import aclosing, asynccontextmanager
 from pathlib import Path
-from typing import Any, cast
+from typing import Literal, cast
 from uuid import uuid4
 
 from langchain_core.messages import BaseMessage
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from agent_runtime.planning import AgentPlan, PlanEvent
 from rag.agent.core.checkpointing import (
     LangGraphCheckpointStore,
     aclose_agent_checkpointer,
     create_agent_checkpointer,
     reconcile_tool_manifest,
 )
-from rag.agent.core.context import AgentRunConfig, RunRegistry
+from rag.agent.core.context import AgentRunConfig, TurnRegistry
 from rag.agent.core.definition import AgentRuntimePolicy
 from rag.agent.core.finalization import FinishCandidateBuilder
 from rag.agent.core.goal_contract import GoalCompatibilityConfig, GoalSpec
@@ -34,6 +35,7 @@ from rag.agent.core.model_request import (
     ModelCallRecord,
     build_stable_context,
     build_tool_manifest,
+    split_turn_context,
 )
 from rag.agent.core.output_finalizer import (
     StructuredOutputFinalizer,
@@ -43,6 +45,7 @@ from rag.agent.core.output_models import ValidatedFinalOutput, output_model_path
 from rag.agent.core.runtime_diagnostics import (
     AgentLatencyProfile,
     RuntimeDiagnostic,
+    ToolCallMetrics,
     merge_runtime_diagnostics,
 )
 from rag.agent.core.turn_contracts import (
@@ -62,24 +65,26 @@ from rag.agent.loop.stop_hooks import StopHookRunner, build_stop_hooks
 from rag.agent.memory.compactor import LoopContextCompactor, MessageCompactor
 from rag.agent.memory.models import MemoryPolicy
 from rag.agent.memory.store import WorkspaceMemoryStore
-from rag.agent.planning import AgentPlan, PlanEvent
-from rag.agent.sessions import (
-    RuntimeBinding,
-    SessionRecord,
-    SessionStore,
-    TurnStateError,
-    TurnStatus,
-)
 from rag.agent.skills.catalog import SkillCatalog
 from rag.agent.skills.runtime import SkillRuntime
 from rag.agent.streaming.events import StreamEvent
 from rag.agent.streaming.sink import StreamEventSink
 from rag.agent.tools.builtins import RESIDENT_CODING_TOOL_NAMES
-from rag.agent.tools.executor import ToolExecutor
+from rag.agent.tools.executor import (
+    ExecutionStatus,
+    ToolExecutionRecord,
+    ToolExecutor,
+)
 from rag.agent.tools.permissions import ToolExecutionContext
 from rag.agent.tools.registry import ToolRegistry
 from rag.agent.tools.selection import resolve_tool_options, select_tools
 from rag.agent.tools.tool import JsonValue, ToolCall, ToolCallOrigin, ToolResult
+from rag.agent.turns import (
+    RuntimeBinding,
+    TurnStateError,
+    TurnStatus,
+    TurnStore,
+)
 from rag.agent.workspace import (
     WorkspaceRuntime,
     create_temp_workspace,
@@ -87,30 +92,32 @@ from rag.agent.workspace import (
     open_workspace,
 )
 from rag.schema.query import AnswerCitation, EvidenceItem
-from rag.schema.runtime import AccessPolicy
 
 logger = logging.getLogger(__name__)
 _TURN_LEASE_SECONDS = 300.0
 _TURN_LEASE_HEARTBEAT_SECONDS = 60.0
+type _ResumeDecision = Literal[
+    "allow_once",
+    "deny",
+    "mark_completed",
+    "mark_failed",
+]
 
 
 class AgentRunRequest(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
-    task: str = Field(min_length=1)
-    session_id: str | None = None
-    run_id: str | None = None
-    thread_id: str | None = None
+    message: str = Field(min_length=1)
+    previous_turn_id: str | None = None
+    turn_id: str | None = None
     max_turns: int | None = Field(default=None, gt=0, strict=True)
     max_context_tokens: int | None = Field(default=None, gt=0)
     llm_budget_total: int | None = Field(default=None, gt=0)
-    max_depth: int | None = Field(default=None, ge=0)
     pending_tool_calls: list[ToolCallPlan] = Field(default_factory=list)
     approved_tool_call_ids: list[str] = Field(default_factory=list)
     denied_tool_call_ids: list[str] = Field(default_factory=list)
     messages: list[BaseMessage] = Field(default_factory=list)
-    history_messages: list[ModelMessage] = Field(default_factory=list)
-    turn_messages: list[ModelMessage] = Field(default_factory=list)
+    conversation_history: list[ModelMessage] = Field(default_factory=list)
     input_files: list[str] = Field(default_factory=list)
     workspace_path: str | None = None
     memory_policy: MemoryPolicy | None = None
@@ -131,23 +138,12 @@ class AgentRunRequest(BaseModel):
         return tuple(value)  # type: ignore[arg-type]
 
     def to_run_config(self, definition: AgentRuntimePolicy) -> AgentRunConfig:
-        run_id = self.run_id or str(uuid4())
+        turn_id = self.turn_id or str(uuid4())
         return AgentRunConfig(
-            run_id=run_id,
-            thread_id=run_id,
-            session_id=self.session_id,
+            turn_id=turn_id,
             max_turns=self.max_turns,
-            agent_type=definition.agent_type,
             max_context_tokens=self.max_context_tokens,
             llm_budget_total=self.llm_budget_total,
-            max_depth=(
-                definition.max_depth
-                if self.max_depth is None
-                else self.max_depth
-            ),
-            access_policy=(
-                definition.access_policy_ceiling or AccessPolicy.default()
-            ),
             tool_policy=definition.tool_policy,
             memory_policy=self.memory_policy or MemoryPolicy(),
         )
@@ -156,17 +152,14 @@ class AgentRunRequest(BaseModel):
 class AgentRunResult(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
-    run_id: str
-    thread_id: str
-    session_id: str = ""
+    turn_id: str
     status: str
     final_answer: str | None = None
     final_output: BaseModel | None = None
-    output_validation_errors: list[dict[str, object]] = Field(
-        default_factory=list
-    )
+    output_validation_errors: list[dict[str, object]] = Field(default_factory=list)
     stop_reason: str | None = None
     tool_results: list[ToolResult] = Field(default_factory=list)
+    tool_call_arguments: dict[str, dict[str, JsonValue]] = Field(default_factory=dict)
     model_call_records: list[ModelCallRecord] = Field(default_factory=list)
     evidence: list[EvidenceItem] = Field(default_factory=list)
     citations: list[AnswerCitation] = Field(default_factory=list)
@@ -174,30 +167,14 @@ class AgentRunResult(BaseModel):
     groundedness_flag: bool = False
     insufficient_evidence_flag: bool = False
     needs_user_input: str | None = None
-    human_input_request: object | None = None
-    pending_tool_calls_summary: list[dict[str, object]] = Field(
-        default_factory=list
-    )
+    human_input_request: HumanInputRequest | None = None
+    pending_tool_calls_summary: list[dict[str, str]] = Field(default_factory=list)
     workspace_path: str | None = None
     runtime_diagnostics: list[RuntimeDiagnostic] = Field(default_factory=list)
-    tool_call_metrics: object | None = None
+    tool_call_metrics: ToolCallMetrics | None = None
     latency_profile: AgentLatencyProfile | None = None
     plan: AgentPlan | None = None
     plan_events: list[PlanEvent] = Field(default_factory=list)
-
-    @classmethod
-    def from_state(
-        cls,
-        state: LoopState,
-        *,
-        definition: AgentRuntimePolicy | None = None,
-        workspace_path: str | None = None,
-    ) -> AgentRunResult:
-        return cls.from_loop_result(
-            state,
-            definition=definition,
-            workspace_path=workspace_path,
-        )
 
     @classmethod
     def from_loop_result(
@@ -213,22 +190,21 @@ class AgentRunResult(BaseModel):
         evidence, citations = _result_provenance(state["tool_results"])
         is_terminal = state["status"] in {"completed", "failed"}
         return cls(
-            run_id=run_config.run_id,
-            thread_id=run_config.thread_id,
-            session_id=run_config.session_id or "",
-            status=(
-                "done" if state["status"] == "completed" else state["status"]
-            ),
+            turn_id=run_config.turn_id,
+            status=("done" if state["status"] == "completed" else state["status"]),
             final_answer=state["finish_state"].final_answer,
             final_output=_restore_final_output(
                 state["finish_state"].final_output,
                 definition=definition,
             ),
-            output_validation_errors=list(
-                state["finish_state"].output_validation_errors
-            ),
+            output_validation_errors=list(state["finish_state"].output_validation_errors),
             stop_reason=None if terminal is None else terminal.stop_reason,
             tool_results=list(state["tool_results"]),
+            tool_call_arguments={
+                result.tool_call_id: dict(call.arguments)
+                for result in state["tool_results"]
+                if (call := state["canonical_tool_calls"].get(result.tool_call_id)) is not None
+            },
             model_call_records=list(state.get("model_call_records", ())),
             evidence=evidence,
             citations=citations,
@@ -244,12 +220,8 @@ class AgentRunResult(BaseModel):
                     "insufficient_evidence_flag",
                 )
             ),
-            needs_user_input=(
-                None if is_terminal or pause is None else pause.reason
-            ),
-            human_input_request=(
-                None if is_terminal else state["approval_request"]
-            ),
+            needs_user_input=(None if is_terminal or pause is None else pause.reason),
+            human_input_request=(None if is_terminal else state["approval_request"]),
             pending_tool_calls_summary=[
                 {
                     "tool_call_id": call.tool_call_id,
@@ -259,7 +231,7 @@ class AgentRunResult(BaseModel):
             ],
             workspace_path=workspace_path,
             runtime_diagnostics=list(state["runtime_diagnostics"]),
-            tool_call_metrics=state.get("tool_call_metrics"),
+            tool_call_metrics=cast(ToolCallMetrics | None, state.get("tool_call_metrics")),
             latency_profile=state.get("latency_profile"),
             plan=state["plan_state"].agent_plan,
             plan_events=list(state["plan_state"].plan_events),
@@ -272,19 +244,14 @@ class AgentService:
     def __init__(
         self,
         *,
-        definition: AgentRuntimePolicy | None = None,
-        policy: AgentRuntimePolicy | None = None,
+        definition: AgentRuntimePolicy,
         tool_registry: ToolRegistry,
         model_turn_provider: ModelTurnProvider | None = None,
-        retrieval_hint_provider: object | None = None,
-        subagent_runner: object | None = None,
         output_finalizer: StructuredOutputFinalizer | None = None,
         model_registry: ModelResolver | None = None,
         checkpointer: BaseCheckpointSaver[str] | None = None,
         runtime_diagnostics: Sequence[RuntimeDiagnostic] = (),
-        catalog: object | None = None,
         stream_sink: StreamEventSink | None = None,
-        mcp_registry: object | None = None,
         skill_catalog: SkillCatalog | None = None,
         skill_runtime: SkillRuntime | None = None,
         strict_model_provider: bool = True,
@@ -292,49 +259,37 @@ class AgentService:
         workspace: WorkspaceRuntime | None = None,
         configured_resident_tool_names: Sequence[str] = (),
         discoverable_tool_names: Sequence[str] = (),
-        session_store: SessionStore | None = None,
+        turn_store: TurnStore | None = None,
         runtime_binding: RuntimeBinding | None = None,
     ) -> None:
-        del (
-            retrieval_hint_provider,
-            subagent_runner,
-            catalog,
-            mcp_registry,
-        )
-        if definition is not None and policy is not None:
-            raise ValueError("Provide either 'definition' or 'policy', not both")
-        effective_policy = definition or policy
-        if effective_policy is None:
-            raise ValueError("Provide either 'definition' or 'policy'")
-        self._policy: AgentRuntimePolicy = effective_policy
+        self._policy = definition
         self._tool_registry = tool_registry
         self._tool_snapshot = tool_registry.freeze()
         self._tool_executor = ToolExecutor(self._tool_snapshot)
-        self._configured_resident_tool_names = tuple(
-            configured_resident_tool_names
-        )
+        self._configured_resident_tool_names = tuple(configured_resident_tool_names)
         self._discoverable_tool_names = tuple(discoverable_tool_names)
-        self._skill_runtime = skill_runtime or (
-            None if skill_catalog is None else SkillRuntime(skill_catalog)
-        )
+        self._skill_runtime = skill_runtime or (None if skill_catalog is None else SkillRuntime(skill_catalog))
         self._model_turn_provider = model_turn_provider
         self._model_registry = model_registry
         self._strict_model_provider = strict_model_provider
         self._output_finalizer = output_finalizer
         self._checkpointer = checkpointer or create_agent_checkpointer(None)
-        self._runtime_diagnostics = tuple(
-            merge_runtime_diagnostics([], runtime_diagnostics)
-        )
+        self._runtime_diagnostics = tuple(merge_runtime_diagnostics([], runtime_diagnostics))
         self._stream_sink = stream_sink
         self._latency_profile = latency_profile or AgentLatencyProfile()
         self._workspace = workspace
-        self._workspace_by_run: dict[str, WorkspaceRuntime] = {}
-        self._session_store = session_store
-        self._runtime_binding = runtime_binding
+        self._workspace_by_turn: dict[str, WorkspaceRuntime] = {}
+        self._owns_turn_store = turn_store is None
+        self._turn_store = turn_store or TurnStore()
+        self._runtime_binding = runtime_binding or RuntimeBinding(
+            workspace_path=(None if workspace is None else str(workspace.root)),
+        )
         self._lease_owner = str(uuid4())
 
     async def aclose(self) -> None:
         await aclose_agent_checkpointer(self._checkpointer)
+        if self._owns_turn_store:
+            self._turn_store.close()
 
     def initial_state(self, request: AgentRunRequest) -> LoopState:
         return self._initial_state(
@@ -342,233 +297,103 @@ class AgentService:
             run_config=request.to_run_config(self._policy),
         )
 
-    def initial_state_from_config(
-        self,
-        *,
-        task: str,
-        run_config: AgentRunConfig,
-        pending_tool_calls: list[ToolCallPlan] | None = None,
-        approved_tool_call_ids: list[str] | None = None,
-        denied_tool_call_ids: list[str] | None = None,
-        messages: list[BaseMessage] | None = None,
-        memory_store: WorkspaceMemoryStore | None = None,
-    ) -> LoopState:
-        request = AgentRunRequest(
-            task=task,
-            run_id=run_config.run_id,
-            thread_id=run_config.thread_id,
-            pending_tool_calls=pending_tool_calls or [],
-            approved_tool_call_ids=approved_tool_call_ids or [],
-            denied_tool_call_ids=denied_tool_call_ids or [],
-            messages=messages or [],
-        )
-        return self._initial_state(
-            request,
-            run_config=run_config,
-            memory_store=memory_store,
-        )
-
     async def run(self, request: AgentRunRequest) -> AgentRunResult:
-        return await self._run_request(request, streaming=False)
+        """Execute one Turn, optionally continuing a previous Turn."""
 
-    async def chat(self, request: AgentRunRequest) -> AgentRunResult:
-        if self._session_store is None or self._runtime_binding is None:
-            raise RuntimeError("Session runtime is not configured")
-        session_id = request.session_id
-        if session_id is None:
-            session = self._session_store.create_session(
-                self._runtime_binding
-            )
-        else:
-            session = self._session_store.get_session(session_id)
-        session = self._ensure_session_workspace(
-            session,
-            requested_workspace=request.workspace_path,
-        )
-        session_id = session.session_id
-        turn = self._session_store.begin_turn(
-            session_id,
-            request.task,
-            turn_id=request.run_id,
-            lease_owner=self._lease_owner,
-            lease_seconds=_TURN_LEASE_SECONDS,
-        )
-        try:
-            effective_request = self._session_request(
-                request,
-                session_id=session_id,
-                turn_id=turn.turn_id,
-            )
+        async with self._open_turn(request) as effective_request:
             return await self._run_request(
                 effective_request,
                 streaming=False,
             )
-        except asyncio.CancelledError:
-            self._interrupt_session_turn(turn.turn_id)
-            raise
-        except Exception:
-            self._fail_session_turn(turn.turn_id)
-            raise
 
-    async def chat_streaming(
+    async def run_streaming(
         self,
         request: AgentRunRequest,
     ) -> AsyncGenerator[StreamEvent, None]:
-        if self._session_store is None or self._runtime_binding is None:
-            raise RuntimeError("Session runtime is not configured")
-        session_id = request.session_id
-        if session_id is None:
-            session = self._session_store.create_session(
-                self._runtime_binding
-            )
-        else:
-            session = self._session_store.get_session(session_id)
-        session = self._ensure_session_workspace(
-            session,
+        stream = self._stream_turn(request)
+        async with aclosing(stream) as events:
+            async for event in events:
+                yield event
+
+    async def _stream_turn(
+        self,
+        request: AgentRunRequest,
+    ) -> AsyncGenerator[StreamEvent, None]:
+        async with self._open_turn(request) as effective_request:
+            turn_id = effective_request.turn_id
+            if turn_id is None:
+                raise RuntimeError("Turn allocation did not produce a turn_id")
+            async for event in self._execute_streaming(effective_request):
+                yield event
+
+    @asynccontextmanager
+    async def _open_turn(
+        self,
+        request: AgentRunRequest,
+    ) -> AsyncIterator[AgentRunRequest]:
+        turn_id = request.turn_id or str(uuid4())
+        runtime = self._runtime_for_turn(
+            turn_id=turn_id,
+            previous_turn_id=request.previous_turn_id,
             requested_workspace=request.workspace_path,
         )
-        session_id = session.session_id
-        turn = self._session_store.begin_turn(
-            session_id,
-            request.task,
-            turn_id=request.run_id,
+        turn = self._turn_store.begin_turn(
+            request.message,
+            runtime,
+            previous_turn_id=request.previous_turn_id,
+            turn_id=turn_id,
             lease_owner=self._lease_owner,
             lease_seconds=_TURN_LEASE_SECONDS,
         )
         try:
-            effective_request = self._session_request(
-                request,
-                session_id=session_id,
-                turn_id=turn.turn_id,
-            )
-            async for event in self.run_streaming(effective_request):
-                yield replace(
-                    event,
-                    session_id=session_id,
-                    run_id=event.run_id or turn.turn_id,
+            history = self._turn_store.history_before_turn(turn.turn_id)
+            if history and history[0].role != "user":
+                raise RuntimeError(
+                    f"History for Turn {turn.turn_id} does not begin with a user message"
                 )
+            effective_request = request.model_copy(
+                update={
+                    "turn_id": turn.turn_id,
+                    "workspace_path": runtime.workspace_path,
+                    "conversation_history": list(history),
+                }
+            )
+            yield effective_request
         except (asyncio.CancelledError, GeneratorExit):
-            self._interrupt_session_turn(turn.turn_id)
+            self._interrupt_turn(turn.turn_id)
             raise
         except Exception:
-            self._fail_session_turn(turn.turn_id)
+            self._fail_turn(turn.turn_id)
             raise
 
-    def _session_request(
+    def _runtime_for_turn(
         self,
-        request: AgentRunRequest,
         *,
-        session_id: str,
         turn_id: str,
-    ) -> AgentRunRequest:
-        if self._session_store is None:
-            raise RuntimeError("Session runtime is not configured")
-        session = self._session_store.get_session(session_id)
-        history = self._session_store.history_before_turn(turn_id)
-        if history:
-            first = history[0]
-            if first.role != "user":
-                raise RuntimeError(
-                    f"Session {session_id} canonical history does not begin "
-                    "with a user message"
-                )
-            initial_task = first.content
-            canonical_history = [
-                *history[1:],
-                ModelMessage(role="user", content=request.task),
-            ]
-        else:
-            initial_task = request.task
-            canonical_history = []
-        return request.model_copy(
-            update={
-                "task": initial_task,
-                "session_id": session_id,
-                "run_id": turn_id,
-                "thread_id": turn_id,
-                "workspace_path": session.runtime.workspace_path,
-                "history_messages": canonical_history,
-                "turn_messages": [
-                    ModelMessage(role="user", content=request.task)
-                ],
-            }
-        )
-
-    def _ensure_session_workspace(
-        self,
-        session: SessionRecord,
-        *,
+        previous_turn_id: str | None,
         requested_workspace: str | None,
-    ) -> SessionRecord:
-        if self._session_store is None:
-            raise RuntimeError("Session runtime is not configured")
-        if session.runtime.workspace_path is not None:
-            return session
+    ) -> RuntimeBinding:
+        if previous_turn_id is not None:
+            return self._turn_store.get_turn(previous_turn_id).runtime
+        if self._runtime_binding.workspace_path is not None:
+            return self._runtime_binding
         if requested_workspace is not None:
             workspace = open_workspace(requested_workspace, create=True)
         elif self._workspace is not None:
             workspace = self._workspace
-        elif self._session_store.path is not None:
-            database = self._session_store.path.expanduser().resolve()
+        elif self._turn_store.path is not None:
+            database = self._turn_store.path.expanduser().resolve()
             workspace = open_workspace(
-                database.parent
-                / ".agent-workspaces"
-                / database.stem
-                / session.session_id,
+                database.parent / ".agent-workspaces" / database.stem / turn_id,
                 create=True,
             )
         else:
             workspace = create_temp_workspace()
-        runtime = session.runtime.model_copy(
-            update={"workspace_path": str(workspace.root)}
-        )
-        return self._session_store.initialize_session_runtime(
-            session.session_id,
-            runtime,
+        return self._runtime_binding.model_copy(
+            update={"workspace_path": str(workspace.root)},
         )
 
-    async def run_with_config(
-        self,
-        *,
-        task: str,
-        run_config: AgentRunConfig,
-        pending_tool_calls: list[ToolCallPlan] | None = None,
-        approved_tool_call_ids: list[str] | None = None,
-        denied_tool_call_ids: list[str] | None = None,
-        messages: list[BaseMessage] | None = None,
-        goal_spec: GoalSpec | None = None,
-        input_files: list[str] | None = None,
-        workspace_path: str | None = None,
-        tools: Sequence[str] | None = None,
-        disabled_tools: Sequence[str] = (),
-        allow_write_tools: bool = False,
-        allow_execute_tools: bool = False,
-        allow_discovery_tools: bool = False,
-    ) -> AgentRunResult:
-        request = AgentRunRequest(
-            task=task,
-            run_id=run_config.run_id,
-            thread_id=run_config.thread_id,
-            pending_tool_calls=pending_tool_calls or [],
-            approved_tool_call_ids=approved_tool_call_ids or [],
-            denied_tool_call_ids=denied_tool_call_ids or [],
-            messages=messages or [],
-            goal_spec=goal_spec,
-            input_files=input_files or [],
-            workspace_path=workspace_path,
-            tools=None if tools is None else tuple(tools),
-            disabled_tools=tuple(disabled_tools),
-            allow_write_tools=allow_write_tools,
-            allow_execute_tools=allow_execute_tools,
-            allow_discovery_tools=allow_discovery_tools,
-        )
-        return await self._run_request(
-            request,
-            streaming=False,
-            run_config=run_config,
-        )
-
-    async def run_streaming(
+    async def _execute_streaming(
         self,
         request: AgentRunRequest,
     ) -> AsyncGenerator[StreamEvent, None]:
@@ -591,14 +416,10 @@ class AgentService:
             async for event in loop.run_streaming(state):
                 yield event
         except (asyncio.CancelledError, GeneratorExit):
-            if run_config.session_id is not None:
-                self._interrupt_session_turn(run_config.run_id)
-            RunRegistry.remove(run_config.run_id)
+            TurnRegistry.remove(run_config.turn_id)
             raise
         except Exception:
-            if run_config.session_id is not None:
-                self._fail_session_turn(run_config.run_id)
-            RunRegistry.remove(run_config.run_id)
+            TurnRegistry.remove(run_config.turn_id)
             raise
         finally:
             try:
@@ -614,11 +435,11 @@ class AgentService:
                             reason="service_pause_finalized",
                         )
                     if state["status"] in {"completed", "failed"}:
-                        RunRegistry.remove(run_config.run_id)
+                        TurnRegistry.remove(run_config.turn_id)
                     if state["status"] != "running":
-                        self._sync_session_turn(state)
+                        self._sync_turn(state)
                     if workspace is not None:
-                        self._workspace_by_run[run_config.run_id] = workspace
+                        self._workspace_by_turn[run_config.turn_id] = workspace
             finally:
                 await self._stop_lease_heartbeat(lease_task)
 
@@ -660,14 +481,10 @@ class AgentService:
             )
             result_state = await loop.run(state)
         except asyncio.CancelledError:
-            if run_config.session_id is not None:
-                self._interrupt_session_turn(run_config.run_id)
-            RunRegistry.remove(run_config.run_id)
+            TurnRegistry.remove(run_config.turn_id)
             raise
         except Exception:
-            if run_config.session_id is not None:
-                self._fail_session_turn(run_config.run_id)
-            RunRegistry.remove(run_config.run_id)
+            TurnRegistry.remove(run_config.turn_id)
             raise
         self._finalize_state(
             result_state,
@@ -680,73 +497,61 @@ class AgentService:
                 reason="service_pause_finalized",
             )
         if result_state["status"] in {"completed", "failed"}:
-            RunRegistry.remove(run_config.run_id)
-        self._sync_session_turn(result_state)
-        self._workspace_by_run[run_config.run_id] = workspace
+            TurnRegistry.remove(run_config.turn_id)
+        self._sync_turn(result_state)
+        self._workspace_by_turn[run_config.turn_id] = workspace
         return AgentRunResult.from_loop_result(
             result_state,
             definition=self._policy,
             workspace_path=str(workspace.root),
         )
 
-    def _sync_session_turn(self, state: LoopState) -> None:
+    def _sync_turn(self, state: LoopState) -> None:
         run_config = state["run_config"]
-        if self._session_store is None or run_config.session_id is None:
-            return
-        self._session_store.sync_turn_messages(
-            run_config.run_id,
+        self._turn_store.sync_turn_messages(
+            run_config.turn_id,
             state["turn_transcript"],
         )
         if state["status"] == "paused":
-            self._session_store.mark_paused(run_config.run_id)
+            self._turn_store.mark_paused(run_config.turn_id)
         elif state["status"] == "completed":
-            self._session_store.mark_terminal(
-                run_config.run_id,
+            self._turn_store.mark_terminal(
+                run_config.turn_id,
                 TurnStatus.COMPLETED,
             )
         elif state["status"] == "failed":
-            self._session_store.mark_terminal(
-                run_config.run_id,
+            self._turn_store.mark_terminal(
+                run_config.turn_id,
                 TurnStatus.FAILED,
             )
 
-    def _sync_checkpoint_history(self, state: LoopState) -> None:
+    def _sync_checkpoint_turn(self, state: LoopState) -> None:
         run_config = state["run_config"]
-        if self._session_store is None or run_config.session_id is None:
-            return
-        self._session_store.sync_turn_messages(
-            run_config.run_id,
+        self._turn_store.sync_turn_messages(
+            run_config.turn_id,
             state["turn_transcript"],
         )
 
-    def _interrupt_session_turn(self, turn_id: str) -> None:
-        if self._session_store is None:
-            return
-        turn = self._session_store.get_turn(turn_id)
+    def _interrupt_turn(self, turn_id: str) -> None:
+        turn = self._turn_store.get_turn(turn_id)
         if turn.status is TurnStatus.RUNNING:
-            self._session_store.mark_interrupted(turn_id)
+            self._turn_store.mark_interrupted(turn_id)
 
-    def _fail_session_turn(self, turn_id: str) -> None:
-        if self._session_store is None:
-            return
-        turn = self._session_store.get_turn(turn_id)
+    def _fail_turn(self, turn_id: str) -> None:
+        turn = self._turn_store.get_turn(turn_id)
         if turn.status is TurnStatus.RUNNING:
-            self._session_store.mark_terminal(turn_id, TurnStatus.FAILED)
+            self._turn_store.mark_terminal(turn_id, TurnStatus.FAILED)
 
     def _start_lease_heartbeat(
         self,
         run_config: AgentRunConfig,
     ) -> asyncio.Task[None] | None:
-        if run_config.session_id is None:
-            return None
-        return self._start_turn_lease_heartbeat(run_config.run_id)
+        return self._start_turn_lease_heartbeat(run_config.turn_id)
 
     def _start_turn_lease_heartbeat(
         self,
         turn_id: str,
     ) -> asyncio.Task[None] | None:
-        if self._session_store is None:
-            return None
         owner_task = asyncio.current_task()
         heartbeat = asyncio.create_task(
             self._renew_turn_lease(turn_id),
@@ -763,18 +568,16 @@ class AgentService:
         return heartbeat
 
     async def _renew_turn_lease(self, turn_id: str) -> None:
-        if self._session_store is None:
-            return
         while True:
             await asyncio.sleep(_TURN_LEASE_HEARTBEAT_SECONDS)
             try:
-                self._session_store.renew_lease(
+                self._turn_store.renew_lease(
                     turn_id,
                     lease_owner=self._lease_owner,
                     lease_seconds=_TURN_LEASE_SECONDS,
                 )
             except TurnStateError:
-                if self._session_store.get_turn(turn_id).status is not TurnStatus.RUNNING:
+                if self._turn_store.get_turn(turn_id).status is not TurnStatus.RUNNING:
                     return
                 raise
 
@@ -823,14 +626,8 @@ class AgentService:
         checkpoint_store = LangGraphCheckpointStore(
             self._checkpointer,
             run_config=run_config,
-            compatibility_config=GoalCompatibilityConfig(
-                goal_spec=request.goal_spec
-            ),
-            snapshot_sink=(
-                self._sync_checkpoint_history
-                if run_config.session_id is not None
-                else None
-            ),
+            compatibility_config=GoalCompatibilityConfig(goal_spec=request.goal_spec),
+            snapshot_sink=self._sync_checkpoint_turn,
         )
         loop = self._build_loop(
             state=state,
@@ -856,36 +653,31 @@ class AgentService:
         memory_store: WorkspaceMemoryStore | None = None,
         file_manifest: FileManifest | None = None,
     ) -> LoopState:
-        RunRegistry.remove(run_config.run_id)
-        handles = RunRegistry.get_or_create(run_config)
+        TurnRegistry.remove(run_config.turn_id)
+        handles = TurnRegistry.get_or_create(run_config)
         if memory_store is not None:
             handles.memory_store = memory_store
         state = create_loop_state(
-            task=request.task,
+            current_message=request.message,
             run_config=run_config,
+            conversation_history=(
+                snapshot_model_message(message)
+                for message in request.conversation_history
+            ),
+            turn_transcript=(
+                ModelMessage(role="user", content=request.message),
+            ),
             pending_tool_calls=request.pending_tool_calls,
             messages=request.messages,
             runtime_diagnostics=self._runtime_diagnostics,
             file_manifest=file_manifest,
         )
-        state["canonical_transcript"] = [
-            snapshot_model_message(message)
-            for message in request.history_messages
-        ]
-        state["turn_transcript"] = [
-            snapshot_model_message(message)
-            for message in request.turn_messages
-        ]
         allow_discovery_tools = (
             bool(self._discoverable_tool_names)
             if request.allow_discovery_tools is None
             else request.allow_discovery_tools
         )
-        policy_disabled_tools = tuple(
-            name
-            for name in self._tool_snapshot
-            if name in run_config.tool_policy.deny_tools
-        )
+        policy_disabled_tools = tuple(name for name in self._tool_snapshot if name in run_config.tool_policy.deny_tools)
         options = resolve_tool_options(
             self._tool_snapshot,
             default_resident_names=self._default_resident_names(),
@@ -908,9 +700,7 @@ class AgentService:
         state["allow_write_tools"] = request.allow_write_tools
         state["allow_execute_tools"] = request.allow_execute_tools
         state["allow_discovery_tools"] = allow_discovery_tools
-        state["approved_tool_call_ids"] = list(
-            request.approved_tool_call_ids
-        )
+        state["approved_tool_call_ids"] = list(request.approved_tool_call_ids)
         state["denied_tool_call_ids"] = list(request.denied_tool_call_ids)
         selected_names = (
             *state["resident_tool_names"],
@@ -925,15 +715,16 @@ class AgentService:
             tools=selected,
             resident_tool_names=state["resident_tool_names"],
             explicit_tool_names=state["explicit_tool_names"],
-            provider_serializer_revision=state[
-                "provider_serializer_revision"
-            ],
+            provider_serializer_revision=state["provider_serializer_revision"],
+        )
+        initial_message, context_transcript = split_turn_context(
+            conversation_history=state["conversation_history"],
+            turn_transcript=state["turn_transcript"],
         )
         context = build_stable_context(
-            instructions=(
-                self._policy.system_instructions or "You are a helpful agent.",
-            ),
-            initial_user_task=request.task,
+            instructions=(self._policy.system_instructions or "You are a helpful agent.",),
+            initial_user_task=initial_message,
+            transcript=context_transcript,
         )
         state["context_revision"] = context.context_revision
         exposed_names = tuple(tool.definition.name for tool in selected)
@@ -941,7 +732,7 @@ class AgentService:
         if manifest is None:
             raise RuntimeError("initial tool manifest was not built")
         origin = ToolCallOrigin(
-            request_id=f"{run_config.run_id}:initial",
+            request_id=f"{run_config.turn_id}:initial",
             toolset_revision=manifest.toolset_revision,
             exposed_tool_names=exposed_names,
         )
@@ -1019,14 +810,10 @@ class AgentService:
 
     def _default_resident_names(self) -> tuple[str, ...]:
         installed = tuple(self._tool_snapshot)
-        baseline = tuple(
-            name for name in RESIDENT_CODING_TOOL_NAMES if name in installed
-        )
+        baseline = tuple(name for name in RESIDENT_CODING_TOOL_NAMES if name in installed)
         if baseline:
             return baseline
-        return tuple(
-            name for name in self._policy.allowed_tools if name in installed
-        )
+        return tuple(name for name in self._policy.configured_tool_names if name in installed)
 
     def _workspace_for_request(
         self,
@@ -1047,9 +834,7 @@ class AgentService:
         if self._policy.output_model is None or self._model_registry is None:
             return None
         try:
-            return create_model_structured_output_finalizer(
-                self._model_registry
-            )
+            return create_model_structured_output_finalizer(self._model_registry)
         except Exception as exc:
             state["runtime_diagnostics"].append(
                 RuntimeDiagnostic.from_exception(
@@ -1067,10 +852,7 @@ class AgentService:
         started_at: float,
         tool_trace_start: int,
     ) -> None:
-        phase_tool_latency = sum(
-            trace.duration_ms
-            for trace in self._tool_executor.traces[tool_trace_start:]
-        )
+        phase_tool_latency = sum(trace.duration_ms for trace in self._tool_executor.traces[tool_trace_start:])
         profile = state.get("latency_profile") or AgentLatencyProfile()
         tool_latency = profile.tool_latency_ms + phase_tool_latency
         total_ms = profile.total_ms + (time.perf_counter() - started_at) * 1000
@@ -1078,10 +860,7 @@ class AgentService:
             total_ms += profile.startup_ms + profile.build_service_ms
         total_ms = max(
             total_ms,
-            profile.startup_ms
-            + profile.build_service_ms
-            + profile.model_latency_ms
-            + tool_latency,
+            profile.startup_ms + profile.build_service_ms + profile.model_latency_ms + tool_latency,
         )
         state["latency_profile"] = profile.model_copy(
             update={
@@ -1097,39 +876,33 @@ class AgentService:
         action: str,
         user_input: str | None = None,
     ) -> AgentRunResult:
-        if self._session_store is None:
-            raise RuntimeError("Session runtime is not configured")
-        turn = self._session_store.get_turn(turn_id)
-        if turn.status in {TurnStatus.COMPLETED, TurnStatus.FAILED}:
-            raise TurnStateError(
-                f"Turn {turn_id} is {turn.status.value} and cannot resume"
-            )
+        turn = self._turn_store.prepare_turn_for_resume(turn_id)
         started_at = time.perf_counter()
         checkpoint_store = LangGraphCheckpointStore(
             self._checkpointer,
             run_config=self._checkpoint_lookup_config(turn_id),
-            snapshot_sink=self._sync_checkpoint_history,
+            snapshot_sink=self._sync_checkpoint_turn,
         )
         restored = await checkpoint_store.load_for_resume()
         if restored is None:
             raise KeyError(f"No checkpoint found for turn_id={turn_id}")
-        if restored["run_config"].session_id != turn.session_id:
-            raise RuntimeError(
-                f"Checkpoint for Turn {turn_id} does not belong to Session "
-                f"{turn.session_id}"
+        if restored["run_config"].turn_id != turn.turn_id:
+            raise RuntimeError(f"Checkpoint identity does not match Turn {turn_id}")
+        current_request = _resume_request(restored)
+        resolving_reconciliation = current_request is not None and current_request.kind == "tool_reconciliation"
+        if action != "abort" and not resolving_reconciliation:
+            drift_result = await self._reconcile_manifest(
+                restored,
+                checkpoint_store=checkpoint_store,
             )
-        drift_result = await self._reconcile_manifest(
-            restored,
-            checkpoint_store=checkpoint_store,
-        )
-        if drift_result is not None:
-            return drift_result
+            if drift_result is not None:
+                return drift_result
         response, abort = _response_for_resume_action(
             restored,
             action=action,
             user_input=user_input,
         )
-        self._session_store.claim_for_resume(
+        self._turn_store.claim_for_resume(
             turn_id,
             lease_owner=self._lease_owner,
             lease_seconds=_TURN_LEASE_SECONDS,
@@ -1144,17 +917,21 @@ class AgentService:
                 state["pause"] = None
                 state["approval_request"] = None
                 state["approval_response"] = None
-            self._hydrate_session_state(state, turn_id=turn_id)
+            self._hydrate_turn_state(state, turn_id=turn_id)
             if user_input is not None and not abort:
                 message = ModelMessage(role="user", content=user_input)
-                state["canonical_transcript"] = [
-                    *state["canonical_transcript"],
-                    message,
-                ]
                 state["turn_transcript"] = [
                     *state["turn_transcript"],
                     message,
                 ]
+            if resolving_reconciliation and not abort:
+                drift_result = await self._reconcile_manifest(
+                    state,
+                    checkpoint_store=checkpoint_store,
+                )
+                if drift_result is not None:
+                    self._sync_turn(state)
+                    return drift_result
             if abort:
                 state["status"] = "failed"
                 state["pause"] = None
@@ -1172,8 +949,8 @@ class AgentService:
                     state,
                     reason="user_aborted",
                 )
-                self._sync_session_turn(state)
-                RunRegistry.remove(turn_id)
+                self._sync_turn(state)
+                TurnRegistry.remove(turn_id)
                 workspace = self._workspace or create_temp_workspace()
                 return AgentRunResult.from_loop_result(
                     state,
@@ -1182,7 +959,7 @@ class AgentService:
                 )
             await checkpoint_store.save_snapshot(
                 state,
-                reason="session_resume_prepared",
+                reason="turn_resume_prepared",
             )
             workspace = self._workspace or create_temp_workspace()
             return await self._continue_resumed_state(
@@ -1192,52 +969,11 @@ class AgentService:
                 started_at=started_at,
             )
         except BaseException:
-            self._interrupt_session_turn(turn_id)
-            RunRegistry.remove(turn_id)
+            self._interrupt_turn(turn_id)
+            TurnRegistry.remove(turn_id)
             raise
         finally:
             await self._stop_lease_heartbeat(lease_task)
-
-    async def resume(
-        self,
-        *,
-        run_id: str,
-        response: HumanInputResponse,
-        workspace_path: str | None = None,
-    ) -> AgentRunResult:
-        started_at = time.perf_counter()
-        checkpoint_store = LangGraphCheckpointStore(
-            self._checkpointer,
-            run_config=self._checkpoint_lookup_config(run_id),
-            snapshot_sink=(
-                self._sync_checkpoint_history
-                if self._session_store is not None
-                else None
-            ),
-        )
-        restored = await checkpoint_store.load_for_resume()
-        if restored is None:
-            raise KeyError(f"No checkpoint found for run_id={run_id}")
-        drift_result = await self._reconcile_manifest(
-            restored,
-            checkpoint_store=checkpoint_store,
-        )
-        if drift_result is not None:
-            return drift_result
-        state = await checkpoint_store.apply_human_response(response)
-        workspace = (
-            open_workspace(workspace_path)
-            if workspace_path is not None
-            else self._workspace_by_run.get(run_id)
-            or self._workspace
-            or create_temp_workspace()
-        )
-        return await self._continue_resumed_state(
-            state,
-            checkpoint_store=checkpoint_store,
-            workspace=workspace,
-            started_at=started_at,
-        )
 
     async def _continue_resumed_state(
         self,
@@ -1248,13 +984,13 @@ class AgentService:
         started_at: float,
     ) -> AgentRunResult:
         run_config = state["run_config"]
-        run_id = run_config.run_id
-        RunRegistry.get_or_create(run_config)
+        turn_id = run_config.turn_id
+        TurnRegistry.get_or_create(run_config)
         memory_store = WorkspaceMemoryStore(
             workspace=workspace,
             policy=run_config.memory_policy,
         )
-        RunRegistry.get(run_id).memory_store = memory_store
+        TurnRegistry.get(turn_id).memory_store = memory_store
         loop = self._build_loop(
             state=state,
             checkpoint_store=checkpoint_store,
@@ -1275,55 +1011,40 @@ class AgentService:
                 reason="service_pause_finalized",
             )
         if result_state["status"] in {"completed", "failed"}:
-            RunRegistry.remove(run_id)
-        self._sync_session_turn(result_state)
-        self._workspace_by_run[run_id] = workspace
+            TurnRegistry.remove(turn_id)
+        self._sync_turn(result_state)
+        self._workspace_by_turn[turn_id] = workspace
         return AgentRunResult.from_loop_result(
             result_state,
             definition=self._policy,
             workspace_path=str(workspace.root),
         )
 
-    def _hydrate_session_state(
+    def _hydrate_turn_state(
         self,
         state: LoopState,
         *,
         turn_id: str,
     ) -> None:
-        if self._session_store is None:
-            raise RuntimeError("Session runtime is not configured")
-        turn = self._session_store.get_turn(turn_id)
-        before = self._session_store.history_before_turn(turn_id)
-        persisted_turn = self._session_store.turn_history(turn_id)
+        turn = self._turn_store.get_turn(turn_id)
+        before = self._turn_store.history_before_turn(turn_id)
+        persisted_turn = self._turn_store.turn_history(turn_id)
         checkpoint_turn = tuple(state.get("turn_transcript", ()))
         if checkpoint_turn[: len(persisted_turn)] == persisted_turn:
             current = checkpoint_turn
         elif persisted_turn[: len(checkpoint_turn)] == checkpoint_turn:
             current = persisted_turn
         else:
-            raise RuntimeError(
-                f"Checkpoint and canonical history conflict for Turn {turn_id}"
-            )
+            raise RuntimeError(f"Checkpoint and canonical history conflict for Turn {turn_id}")
         initial = ModelMessage(role="user", content=turn.user_message)
         if not current:
             current = (initial,)
         if current[0] != initial:
-            raise RuntimeError(
-                f"Canonical history for Turn {turn_id} does not begin with "
-                "its user message"
-            )
-        if before:
-            first = before[0]
-            if first.role != "user":
-                raise RuntimeError(
-                    f"Session {turn.session_id} canonical history does not "
-                    "begin with a user message"
-                )
-            state["task"] = first.content
-            state["canonical_transcript"] = [*before[1:], *current]
-        else:
-            state["task"] = turn.user_message
-            state["canonical_transcript"] = list(current[1:])
+            raise RuntimeError(f"Canonical history for Turn {turn_id} does not begin with its user message")
+        if before and before[0].role != "user":
+            raise RuntimeError(f"History for Turn {turn_id} does not begin with a user message")
+        state["current_message"] = turn.user_message
+        state["conversation_history"] = list(before)
         state["turn_transcript"] = list(current)
 
     async def _reconcile_manifest(
@@ -1335,39 +1056,33 @@ class AgentService:
         persisted = state.get("tool_manifest")
         if persisted is None:
             return None
-        resident = tuple(
-            name
-            for name in state.get("resident_tool_names", ())
-            if name in self._tool_snapshot
-        )
-        explicit = tuple(
-            name
-            for name in state.get("explicit_tool_names", ())
-            if name in self._tool_snapshot
-        )
-        active = tuple(
-            name
-            for name in state.get("active_tool_names", ())
-            if name in self._tool_snapshot
-        )
-        tools = tuple(
-            self._tool_snapshot[name]
-            for name in (*resident, *explicit, *active)
-        )
+        resident = tuple(name for name in state.get("resident_tool_names", ()) if name in self._tool_snapshot)
+        explicit = tuple(name for name in state.get("explicit_tool_names", ()) if name in self._tool_snapshot)
+        active = tuple(name for name in state.get("active_tool_names", ()) if name in self._tool_snapshot)
+        tools = tuple(self._tool_snapshot[name] for name in (*resident, *explicit, *active))
         rebuilt = build_tool_manifest(
             tools=tools,
             resident_tool_names=resident,
             explicit_tool_names=explicit,
             active_tool_names=active,
-            provider_serializer_revision=state[
-                "provider_serializer_revision"
-            ],
+            provider_serializer_revision=state["provider_serializer_revision"],
         )
         calls = state.get("canonical_tool_calls", {})
+        records = state["tool_execution_records"]
+        denied_call_ids = set(state["denied_tool_call_ids"])
         dependent = tuple(
             calls[item.tool_call_id]
             for item in state["pending_tool_calls"]
             if item.tool_call_id in calls
+            and item.tool_call_id not in denied_call_ids
+            and (
+                (record := records.get(item.tool_call_id)) is None
+                or record.status
+                not in {
+                    ExecutionStatus.COMPLETED,
+                    ExecutionStatus.FAILED,
+                }
+            )
         )
         decision = reconcile_tool_manifest(
             persisted=persisted,
@@ -1387,24 +1102,28 @@ class AgentService:
                 reason="tool_manifest_revision",
             )
             return None
+        existing_request = _resume_request(state)
+        if existing_request is not None and existing_request.kind == "tool_reconciliation":
+            return AgentRunResult.from_loop_result(
+                state,
+                definition=self._policy,
+            )
+        primary_call = decision.dependent_tool_calls[0]
+        current_tool = self._tool_snapshot.get(primary_call.tool_name)
+        if primary_call.tool_call_id not in records and current_tool is not None:
+            records[primary_call.tool_call_id] = ToolExecutionRecord.prepare(
+                primary_call,
+                current_tool,
+            )
         request = HumanInputRequest(
             request_id=f"hir_{uuid4().hex[:12]}",
             kind="tool_reconciliation",
-            question=(
-                "A pending tool definition changed; reconcile it before "
-                "execution."
-            ),
+            question=("A pending tool definition changed; reconcile it before execution."),
             context={
                 "reason": decision.reason,
                 "error_code": "tool_definition_changed",
-                "tool_call_id": (
-                    decision.dependent_tool_calls[0].tool_call_id
-                    if decision.dependent_tool_calls
-                    else ""
-                ),
-                "tool_call_ids": [
-                    call.tool_call_id for call in decision.dependent_tool_calls
-                ],
+                "tool_call_id": primary_call.tool_call_id,
+                "tool_call_ids": [call.tool_call_id for call in decision.dependent_tool_calls],
             },
             options=["mark_failed"],
         )
@@ -1431,27 +1150,23 @@ class AgentService:
     def pending_human_input_request(
         self,
         *,
-        run_id: str,
+        turn_id: str,
     ) -> HumanInputRequest:
         state = LangGraphCheckpointStore(
             self._checkpointer,
-            run_config=self._checkpoint_lookup_config(run_id),
+            run_config=self._checkpoint_lookup_config(turn_id),
         ).load_latest_sync()
-        return _pending_request(state, run_id=run_id)
+        return _pending_request(state, turn_id=turn_id)
 
     async def apending_human_input_request(
         self,
         *,
-        run_id: str,
+        turn_id: str,
     ) -> HumanInputRequest:
         checkpoint_store = LangGraphCheckpointStore(
             self._checkpointer,
-            run_config=self._checkpoint_lookup_config(run_id),
-            snapshot_sink=(
-                self._sync_checkpoint_history
-                if self._session_store is not None
-                else None
-            ),
+            run_config=self._checkpoint_lookup_config(turn_id),
+            snapshot_sink=self._sync_checkpoint_turn,
         )
         state = await checkpoint_store.load_for_resume()
         if state is not None:
@@ -1459,17 +1174,11 @@ class AgentService:
                 state,
                 checkpoint_store=checkpoint_store,
             )
-        return _pending_request(state, run_id=run_id)
+        return _pending_request(state, turn_id=turn_id)
 
-    def _checkpoint_lookup_config(self, run_id: str) -> AgentRunConfig:
+    def _checkpoint_lookup_config(self, turn_id: str) -> AgentRunConfig:
         return AgentRunConfig(
-            run_id=run_id,
-            thread_id=run_id,
-            agent_type=self._policy.agent_type,
-            max_depth=self._policy.max_depth,
-            access_policy=(
-                self._policy.access_policy_ceiling or AccessPolicy.default()
-            ),
+            turn_id=turn_id,
             tool_policy=self._policy.tool_policy,
         )
 
@@ -1482,65 +1191,50 @@ def _response_for_resume_action(
 ) -> tuple[HumanInputResponse | None, bool]:
     if action == "abort":
         return None, True
-    request = state["approval_request"]
-    if request is None and state["pause"] is not None:
-        request = state["pause"].request
+    request = _resume_request(state)
     if request is None:
         if action != "continue":
             raise ValueError(
-                "An interrupted Turn without a human-input request only "
-                "supports action='continue' or action='abort'"
+                "An interrupted Turn without a human-input request only supports action='continue' or action='abort'"
             )
         return None, False
     if request.kind == "tool_approval":
         if action not in {"allow_once", "deny"}:
-            raise ValueError(
-                "A tool approval Turn supports allow_once, deny, or abort"
-            )
-        tool_call_ids = [
-            item.approval_id or item.tool_call_id
-            for item in request.tool_calls
-        ]
+            raise ValueError("A tool approval Turn supports allow_once, deny, or abort")
+        tool_call_ids = [item.approval_id or item.tool_call_id for item in request.tool_calls]
         return (
             HumanInputResponse(
                 request_id=request.request_id,
-                decision=cast(Any, action),
-                approved_tool_call_ids=(
-                    tool_call_ids if action == "allow_once" else []
-                ),
-                denied_tool_call_ids=(
-                    tool_call_ids if action == "deny" else []
-                ),
+                decision=cast(_ResumeDecision, action),
+                approved_tool_call_ids=(tool_call_ids if action == "allow_once" else []),
+                denied_tool_call_ids=(tool_call_ids if action == "deny" else []),
                 user_message=user_input,
             ),
             False,
         )
     if request.kind == "tool_reconciliation":
-        if action not in {"mark_completed", "mark_failed"}:
-            raise ValueError(
-                "An outcome-unknown tool only supports mark_completed, "
-                "mark_failed, or abort; replay is forbidden"
-            )
+        allowed_actions = tuple(
+            option for option in request.options if option in {"mark_completed", "mark_failed"}
+        ) or ("mark_completed", "mark_failed")
+        if action not in allowed_actions:
+            choices = ", ".join(allowed_actions)
+            raise ValueError(f"A tool reconciliation Turn only supports {choices} or abort; replay is forbidden")
         return (
             HumanInputResponse(
                 request_id=request.request_id,
-                decision=cast(Any, action),
+                decision=cast(_ResumeDecision, action),
                 user_message=user_input,
             ),
             False,
         )
     if action == "continue":
-        if request.kind == "clarification" and (
-            user_input is None or not user_input.strip()
-        ):
+        if request.kind == "clarification" and (user_input is None or not user_input.strip()):
             raise ValueError("Clarification resume requires non-empty user_input")
         message = user_input
     elif action in request.options:
         message = user_input or action
     else:
-        raise ValueError(
-            f"Unsupported action {action!r} for {request.kind} request"
-        )
+        raise ValueError(f"Unsupported action {action!r} for {request.kind} request")
     return (
         HumanInputResponse(
             request_id=request.request_id,
@@ -1551,18 +1245,25 @@ def _response_for_resume_action(
     )
 
 
+def _resume_request(state: LoopState) -> HumanInputRequest | None:
+    request = state["approval_request"]
+    if request is None and state["pause"] is not None:
+        request = state["pause"].request
+    return request
+
+
 def _pending_request(
     state: LoopState | None,
     *,
-    run_id: str,
+    turn_id: str,
 ) -> HumanInputRequest:
     if state is None:
-        raise KeyError(f"No checkpoint found for run_id={run_id}")
+        raise KeyError(f"No checkpoint found for turn_id={turn_id}")
     request = state["approval_request"]
     if request is None and state["pause"] is not None:
         request = state["pause"].request
     if request is None:
-        raise KeyError(f"No pending human input request for run_id={run_id}")
+        raise KeyError(f"No pending human input request for turn_id={turn_id}")
     return request
 
 
@@ -1614,18 +1315,12 @@ def _restore_final_output(
     *,
     definition: AgentRuntimePolicy | None,
 ) -> BaseModel | None:
-    if (
-        raw_output is None
-        or definition is None
-        or definition.output_model is None
-    ):
+    if raw_output is None or definition is None or definition.output_model is None:
         return None
     envelope = ValidatedFinalOutput.model_validate(raw_output)
     expected_path = output_model_path(definition.output_model)
     if envelope.model_path != expected_path:
-        raise ValueError(
-            "Checkpoint final output model does not match configured output model"
-        )
+        raise ValueError("Checkpoint final output model does not match configured output model")
     return definition.output_model.model_validate(envelope.data)
 
 

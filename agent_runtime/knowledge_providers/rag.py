@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
-from pathlib import Path
+from dataclasses import dataclass, field
 from types import TracebackType
-from typing import Any, Self
+from typing import TYPE_CHECKING, Self
 
+from agent_runtime.knowledge import RAGKnowledgeConfig
+from rag.agent.core.runtime_diagnostics import RuntimeDiagnostic
 from rag.agent.tools.integrations.knowledge import (
     KnowledgeResult,
     KnowledgeSearchInput,
@@ -13,27 +14,24 @@ from rag.agent.tools.integrations.knowledge import (
 )
 from rag.agent.tools.permissions import ToolExecutionContext
 from rag.retrieval import QueryOptions
-from rag.storage.runtime_config import DEFAULT_VECTOR_BACKEND
+
+if TYPE_CHECKING:
+    from rag.runtime import RAGRuntime
 
 
 @dataclass
 class LazyRAGKnowledgeProvider:
-    storage_root: Path = Path(".rag")
+    config: RAGKnowledgeConfig
     model_alias: str | None = None
-    embedding_model_alias: str | None = None
-    reranker_model_alias: str | None = None
-    vector_backend: str = DEFAULT_VECTOR_BACKEND
-    vector_dsn: str | None = None
-    vector_namespace: str | None = None
-    vector_collection_prefix: str | None = None
+    vector_dsn: str | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
-        self._runtime: Any | None = None
+        self._runtime: RAGRuntime | None = None
         self._runtime_context_entered = False
-        self._diagnostics: tuple[Any, ...] = ()
+        self._diagnostics: tuple[RuntimeDiagnostic, ...] = ()
 
     @property
-    def diagnostics(self) -> tuple[Any, ...]:
+    def diagnostics(self) -> tuple[RuntimeDiagnostic, ...]:
         return self._diagnostics
 
     async def search_knowledge(
@@ -65,10 +63,7 @@ class LazyRAGKnowledgeProvider:
         return KnowledgeSearchOutput(
             results=results,
             answer_text=answer.answer_text,
-            citations=[
-                citation.citation_anchor or citation.citation_id
-                for citation in answer.citations
-            ],
+            citations=[citation.citation_anchor or citation.citation_id for citation in answer.citations],
             groundedness_flag=answer.groundedness_flag,
             insufficient_evidence=answer.insufficient_evidence_flag,
             total_found=len(results),
@@ -95,29 +90,25 @@ class LazyRAGKnowledgeProvider:
         del exc_type, exc, tb
         self.close()
 
-    def _ensure_runtime(self) -> Any:
+    def _ensure_runtime(self) -> RAGRuntime:
         if self._runtime is not None:
             return self._runtime
 
         from agent_runtime.runtime.builder import build_optional_rag_runtime
 
         runtime, diagnostics = build_optional_rag_runtime(
-            storage_root=self.storage_root,
+            config=self.config,
             model_alias=self.model_alias,
-            embedding_model_alias=self.embedding_model_alias,
-            reranker_model_alias=self.reranker_model_alias,
-            vector_backend=self.vector_backend,
             vector_dsn=self.vector_dsn,
-            vector_namespace=self.vector_namespace,
-            vector_collection_prefix=self.vector_collection_prefix,
-            explicit=True,
         )
         self._diagnostics = tuple(diagnostics)
         if runtime is None:
-            raise RuntimeError(
-                "Knowledge provider is not available. Configure --knowledge with "
-                "an indexed RAG storage root before using search_knowledge."
+            detail = (
+                "rag_knowledge_init_failed: knowledge runtime unavailable"
+                if not diagnostics
+                else f"{diagnostics[-1].code}: {diagnostics[-1].message}"
             )
+            raise RuntimeError(detail)
 
         enter_method = getattr(runtime, "__enter__", None)
         if callable(enter_method):

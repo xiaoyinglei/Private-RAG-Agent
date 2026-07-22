@@ -15,7 +15,7 @@ from rag.agent.core.checkpointing import (
     LangGraphCheckpointStore,
     agent_checkpoint_serde,
 )
-from rag.agent.core.context import AgentRunConfig, RunRegistry
+from rag.agent.core.context import AgentRunConfig, TurnRegistry
 from rag.agent.core.definition import AgentRuntimePolicy
 from rag.agent.core.finalization import FinishCandidateBuilder
 from rag.agent.core.human_input import HumanInputResponse
@@ -67,7 +67,6 @@ from rag.agent.tools.tool import (
     json_schema_input,
 )
 from rag.providers.llm_gateway import LLMToolCallValidationError
-from rag.schema.runtime import AccessPolicy
 
 
 class _SequenceProvider:
@@ -112,8 +111,8 @@ class _SinkAwareProvider:
             await emit(
                 text_delta(
                     "partial",
-                    run_id=state["run_config"].run_id,
-                    turn=state["iteration"],
+                    turn_id=state["run_config"].turn_id,
+                    iteration=state["iteration"],
                 )
             )
         return ModelTurnDraft(action="finish", final_answer="Final answer.")
@@ -160,14 +159,11 @@ def _config(
     budget: int | None = 20_000,
     max_turns: int | None = None,
 ) -> AgentRunConfig:
-    RunRegistry.remove(run_id)
+    TurnRegistry.remove(run_id)
     return AgentRunConfig(
-        run_id=run_id,
-        thread_id=run_id,
+        turn_id=run_id,
         llm_budget_total=budget,
         max_turns=max_turns,
-        max_depth=1,
-        access_policy=AccessPolicy.default(),
     )
 
 
@@ -177,7 +173,6 @@ def _definition(
     max_iterations: int = 10,
 ) -> AgentRuntimePolicy:
     return AgentRuntimePolicy.test_factory(
-        agent_type="loop_test",
         system_prompt="Use canonical tools.",
         allowed_tools=list(names),
         max_iterations=max_iterations,
@@ -274,7 +269,7 @@ async def test_model_tool_result_next_turn_and_finish() -> None:
         ]
     )
     checkpoint = _Checkpoint()
-    state = create_loop_state(task="Echo.", run_config=_config("loop-basic"))
+    state = create_loop_state(current_message="Echo.", run_config=_config("loop-basic"))
     state["resident_tool_names"] = ["echo"]
 
     result = await _loop(
@@ -286,7 +281,11 @@ async def test_model_tool_result_next_turn_and_finish() -> None:
     assert result["status"] == "completed"
     assert result["finish_state"].final_answer == "Final answer."
     assert result["tool_results"][0].structured_content == {"text": "hello"}
-    assert result["canonical_transcript"][-1].role == "tool"
+    assert [message.role for message in result["turn_transcript"][-2:]] == [
+        "tool",
+        "assistant",
+    ]
+    assert result["turn_transcript"][-1].content == "Final answer."
     assert any(reason == "tool_results_recorded" for reason, _ in checkpoint.snapshots)
     assert [record.status.value for record in checkpoint.execution_records] == [
         "prepared",
@@ -305,7 +304,7 @@ async def test_apply_patch_result_event_exposes_only_cli_diff_details() -> None:
         ]
     )
     state = create_loop_state(
-        task="Edit the file.",
+        current_message="Edit the file.",
         run_config=_config("loop-patch-diff"),
     )
     state["resident_tool_names"] = ["apply_patch"]
@@ -320,9 +319,7 @@ async def test_apply_patch_result_event_exposes_only_cli_diff_details() -> None:
         },
     )
 
-    events = await _collect(
-        _loop(provider=provider, tools=(tool,)).run_streaming(state)
-    )
+    events = await _collect(_loop(provider=provider, tools=(tool,)).run_streaming(state))
 
     result = next(event for event in events if event.type is EventType.TOOL_USE_RESULT)
     assert result.data["details"] == {
@@ -341,7 +338,7 @@ async def test_approval_pause_is_a_checkpointed_human_input_event() -> None:
     )
     call = ToolCallPlan.create("remote_lookup", {"value": "public docs"})
     state = create_loop_state(
-        task="Look this up.",
+        current_message="Look this up.",
         run_config=_config("loop-approval-event"),
         pending_tool_calls=(call,),
     )
@@ -358,26 +355,16 @@ async def test_approval_pause_is_a_checkpointed_human_input_event() -> None:
 
     assert state["status"] == "paused"
     assert state["tool_results"] == []
-    assert any(
-        event.type is EventType.HUMAN_INPUT_REQUIRED for event in events
-    )
+    assert any(event.type is EventType.HUMAN_INPUT_REQUIRED for event in events)
     assert not any(event.type is EventType.TOOL_USE_ERROR for event in events)
     start = next(event for event in events if event.type is EventType.TOOL_USE_START)
     assert "public docs" in start.data["input_preview"]
-    approval_snapshots = [
-        snapshot
-        for reason, snapshot in checkpoint.snapshots
-        if reason == "tool_pause"
-    ]
+    approval_snapshots = [snapshot for reason, snapshot in checkpoint.snapshots if reason == "tool_pause"]
     assert approval_snapshots[-1]["status"] == "paused"
 
 
 def test_run_command_approval_shows_full_security_context(tmp_path: Path) -> None:
-    command = (
-        "printf '\x1b[2J'\npython -c \"print('"
-        + ("x" * 300)
-        + "')\""
-    )
+    command = "printf '\x1b[2J'\npython -c \"print('" + ("x" * 300) + "')\""
     call = ToolCall(
         tool_call_id="call_command",
         tool_name="run_command",
@@ -433,9 +420,7 @@ async def test_skill_activation_is_checkpointed_with_tool_result(
         "---\nname: review\ndescription: Review code\n---\nReview carefully.\n",
         encoding="utf-8",
     )
-    runtime = SkillRuntime(
-        SkillCatalog(scan_and_load_skills(tmp_path, repo_root=tmp_path))
-    )
+    runtime = SkillRuntime(SkillCatalog(scan_and_load_skills(tmp_path, repo_root=tmp_path)))
     invoke_tool = create_invoke_skill_tool(runtime.invoke_skill)
     call = ToolCallPlan.create(
         "invoke_skill",
@@ -449,7 +434,7 @@ async def test_skill_activation_is_checkpointed_with_tool_result(
     )
     checkpoint = _Checkpoint()
     state = create_loop_state(
-        task="Review this.",
+        current_message="Review this.",
         run_config=_config("loop-skill-activation"),
     )
     state["resident_tool_names"] = ["invoke_skill"]
@@ -462,11 +447,7 @@ async def test_skill_activation_is_checkpointed_with_tool_result(
     ).run(state)
 
     assert "project:review" in result["skill_state"].active
-    recorded = [
-        snapshot
-        for reason, snapshot in checkpoint.snapshots
-        if reason == "tool_results_recorded"
-    ]
+    recorded = [snapshot for reason, snapshot in checkpoint.snapshots if reason == "tool_results_recorded"]
     assert recorded
     assert "project:review" in recorded[-1]["skill_state"].active
     assert recorded[-1]["tool_results"][-1].tool_name == "invoke_skill"
@@ -485,7 +466,7 @@ async def test_multiple_tool_calls_preserve_model_order() -> None:
             ModelTurnDraft(action="finish", final_answer="done"),
         ]
     )
-    state = create_loop_state(task="Echo twice.", run_config=_config("loop-order"))
+    state = create_loop_state(current_message="Echo twice.", run_config=_config("loop-order"))
     state["resident_tool_names"] = ["echo"]
 
     await _loop(
@@ -493,8 +474,7 @@ async def test_multiple_tool_calls_preserve_model_order() -> None:
         tools=(
             _tool(
                 "echo",
-                lambda arguments: seen.append(str(arguments["value"]))
-                or arguments["value"],
+                lambda arguments: seen.append(str(arguments["value"])) or arguments["value"],
             ),
         ),
     ).run(state)
@@ -505,20 +485,16 @@ async def test_multiple_tool_calls_preserve_model_order() -> None:
 @pytest.mark.anyio
 async def test_loop_passes_remaining_budget_to_provider() -> None:
     config = _config("loop-budget", budget=100)
-    handles = RunRegistry.get_or_create(config)
+    handles = TurnRegistry.get_or_create(config)
     assert handles.llm_budget_ledger is not None
     assert await handles.llm_budget_ledger.reserve("seed", 35)
     await handles.llm_budget_ledger.commit("seed", 35)
-    provider = _SequenceProvider(
-        [ModelTurnDraft(action="finish", final_answer="done")]
-    )
+    provider = _SequenceProvider([ModelTurnDraft(action="finish", final_answer="done")])
 
-    await _loop(provider=provider).run(
-        create_loop_state(task="Answer.", run_config=config)
-    )
+    await _loop(provider=provider).run(create_loop_state(current_message="Answer.", run_config=config))
 
     assert provider.seen_budget_remaining == [65]
-    RunRegistry.remove(config.run_id)
+    TurnRegistry.remove(config.turn_id)
 
 
 @pytest.mark.anyio
@@ -543,7 +519,7 @@ async def test_effective_turn_limit_stops_before_another_model_turn(
         ]
     )
     state = create_loop_state(
-        task="Use one turn only.",
+        current_message="Use one turn only.",
         run_config=_config(
             f"loop-{expected_reason}",
             max_turns=request_max_turns,
@@ -556,8 +532,7 @@ async def test_effective_turn_limit_stops_before_another_model_turn(
         tools=(
             _tool(
                 "echo",
-                lambda arguments: calls.append(str(arguments["value"]))
-                or arguments["value"],
+                lambda arguments: calls.append(str(arguments["value"])) or arguments["value"],
             ),
         ),
         definition=_definition(
@@ -577,11 +552,9 @@ async def test_effective_turn_limit_stops_before_another_model_turn(
 @pytest.mark.anyio
 async def test_max_turns_stream_does_not_announce_an_unstarted_turn() -> None:
     call = ToolCallPlan.create("echo", {"value": "once"})
-    provider = _SequenceProvider(
-        [ModelTurnDraft(action="execute", tool_calls=(call,))]
-    )
+    provider = _SequenceProvider([ModelTurnDraft(action="execute", tool_calls=(call,))])
     state = create_loop_state(
-        task="Emit only real model turns.",
+        current_message="Emit only real model turns.",
         run_config=_config("loop-max-turn-events", max_turns=1),
     )
     state["resident_tool_names"] = ["echo"]
@@ -594,11 +567,12 @@ async def test_max_turns_stream_does_not_announce_an_unstarted_turn() -> None:
         ).run_streaming(state)
     )
 
-    assert [
-        event.turn
-        for event in events
-        if event.type is EventType.TURN_START
-    ] == [1]
+    turn_events = [event for event in events if event.type is EventType.TURN_START]
+    assert [event.iteration for event in turn_events] == [1]
+    assert [event.turn_id for event in turn_events] == ["loop-max-turn-events"]
+    assert all(not hasattr(event, "session_id") for event in turn_events)
+    assert all(event.sequence > 0 for event in events)
+    assert [event.sequence for event in events] == sorted(event.sequence for event in events)
     assert state["status"] == "failed"
     assert state["terminal"] is not None
     assert state["terminal"].stop_reason == "max_turns"
@@ -609,7 +583,7 @@ async def test_provider_error_retries_then_fails() -> None:
     provider = _SequenceProvider([RuntimeError("down"), RuntimeError("down")])
     result = await _loop(provider=provider, max_model_retries=1).run(
         create_loop_state(
-            task="Answer.",
+            current_message="Answer.",
             run_config=_config("loop-provider-error"),
         )
     )
@@ -624,13 +598,8 @@ async def test_provider_tool_validation_retry_gives_model_corrective_context() -
     provider = _SequenceProvider(
         [
             LLMToolCallValidationError(
-                validation_error=(
-                    "Tool call validation failed: max_bytes exceeds maximum"
-                ),
-                failed_generation=(
-                    '<function=read_file>{"path":"README.md",'
-                    '"max_bytes":2000000}</function>'
-                ),
+                validation_error=("Tool call validation failed: max_bytes exceeds maximum"),
+                failed_generation=('<function=read_file>{"path":"README.md","max_bytes":2000000}</function>'),
             ),
             ModelTurnDraft(action="finish", final_answer="recovered"),
         ]
@@ -638,18 +607,18 @@ async def test_provider_tool_validation_retry_gives_model_corrective_context() -
 
     result = await _loop(provider=provider, max_model_retries=1).run(
         create_loop_state(
-            task="Read README.md.",
+            current_message="Read README.md.",
             run_config=_config("loop-provider-tool-validation"),
         )
     )
 
     assert result["status"] == "completed"
-    retry_transcript = provider.seen_states[1]["canonical_transcript"]
+    retry_transcript = provider.seen_states[1]["turn_transcript"]
     feedback = retry_transcript[-1]
     assert feedback.role == "context"
     assert "model_tool_call_rejected" in feedback.content
     assert "max_bytes exceeds maximum" in feedback.content
-    assert 'max_bytes\\\":2000000' in feedback.content
+    assert 'max_bytes\\":2000000' in feedback.content
 
 
 @pytest.mark.anyio
@@ -659,7 +628,7 @@ async def test_run_streaming_injects_sink_and_closes() -> None:
         _collect(
             _loop(provider=provider).run_streaming(
                 create_loop_state(
-                    task="Stream.",
+                    current_message="Stream.",
                     run_config=_config("loop-stream"),
                 )
             )
@@ -667,7 +636,11 @@ async def test_run_streaming_injects_sink_and_closes() -> None:
         timeout=1,
     )
 
-    assert any(event.type is EventType.TEXT_DELTA for event in events)
+    text_event = next(event for event in events if event.type is EventType.TEXT_DELTA)
+    assert text_event.turn_id == "loop-stream"
+    assert not hasattr(text_event, "session_id")
+    assert text_event.iteration == 1
+    assert text_event.sequence > 0
     assert events[-1].type is EventType.LOOP_END
 
 
@@ -703,7 +676,7 @@ async def test_find_tools_result_and_activation_are_checkpointed_atomically() ->
         origin=origin,
     )
     state = create_loop_state(
-        task="Find documentation.",
+        current_message="Find documentation.",
         run_config=_config("atomic-tool-activation"),
         pending_tool_calls=(
             ToolCallPlan(
@@ -719,23 +692,18 @@ async def test_find_tools_result_and_activation_are_checkpointed_atomically() ->
     checkpoint = _Checkpoint()
 
     result = await _loop(
-        provider=_SequenceProvider(
-            [ModelTurnDraft(action="finish", final_answer="Found it.")]
-        ),
+        provider=_SequenceProvider([ModelTurnDraft(action="finish", final_answer="Found it.")]),
         tools=snapshot,
         checkpoint=checkpoint,
     ).run(state)
 
     assert result["active_tool_names"] == [hidden.definition.name]
     activation_snapshots = [
-        snap
-        for _reason, snap in checkpoint.snapshots
-        if hidden.definition.name in snap["active_tool_names"]
+        snap for _reason, snap in checkpoint.snapshots if hidden.definition.name in snap["active_tool_names"]
     ]
     assert activation_snapshots
     assert all(
-        any(item.tool_call_id == call.tool_call_id for item in snap["tool_results"])
-        for snap in activation_snapshots
+        any(item.tool_call_id == call.tool_call_id for item in snap["tool_results"]) for snap in activation_snapshots
     )
 
 
@@ -763,17 +731,13 @@ async def test_repeated_retryable_tool_failure_is_circuited_and_can_recover() ->
         ]
     )
     state = create_loop_state(
-        task="Recover from a repeated tool failure.",
+        current_message="Recover from a repeated tool failure.",
         run_config=_config("loop-repeated-tool-failure"),
         pending_tool_calls=(first,),
     )
     state["resident_tool_names"] = ["flaky"]
 
-    events = await _collect(
-        _loop(provider=provider, tools=(_tool("flaky", flaky),)).run_streaming(
-            state
-        )
-    )
+    events = await _collect(_loop(provider=provider, tools=(_tool("flaky", flaky),)).run_streaming(state))
 
     assert state["status"] == "completed"
     assert attempts == ["stuck", "stuck", "recovered"]
@@ -786,8 +750,7 @@ async def test_repeated_retryable_tool_failure_is_circuited_and_can_recover() ->
     recovery_event = next(
         event
         for event in events
-        if event.type is EventType.RECOVERY
-        and event.data.get("strategy") == "tool_failure_circuit_breaker"
+        if event.type is EventType.RECOVERY and event.data.get("strategy") == "tool_failure_circuit_breaker"
     )
     assert "flaky" in str(recovery_event.data["detail"])
 
@@ -807,7 +770,7 @@ async def test_repeated_tool_failure_circuit_uses_checkpointed_history() -> None
     first = ToolCallPlan.create("flaky", {"value": "stuck"})
     second = ToolCallPlan.create("flaky", {"value": "stuck"})
     state = create_loop_state(
-        task="Pause after repeated failures.",
+        current_message="Pause after repeated failures.",
         run_config=_config("loop-repeated-tool-failure-resume"),
         pending_tool_calls=(first,),
     )
@@ -868,12 +831,9 @@ async def test_repeating_an_open_tool_failure_circuit_fails_fast() -> None:
         attempts += 1
         raise RuntimeError("still stuck")
 
-    calls = tuple(
-        ToolCallPlan.create("flaky", {"value": "stuck"})
-        for _ in range(4)
-    )
+    calls = tuple(ToolCallPlan.create("flaky", {"value": "stuck"}) for _ in range(4))
     state = create_loop_state(
-        task="Stop a repeated failure loop.",
+        current_message="Stop a repeated failure loop.",
         run_config=_config("loop-repeated-tool-failure-terminal"),
         pending_tool_calls=(calls[0],),
     )
@@ -914,7 +874,7 @@ async def test_alternating_failed_calls_do_not_evade_the_circuit() -> None:
     third_a = ToolCallPlan.create("flaky", {"value": "a"})
     recovery = ToolCallPlan.create("flaky", {"value": "recovered"})
     state = create_loop_state(
-        task="Recover without alternating failed calls forever.",
+        current_message="Recover without alternating failed calls forever.",
         run_config=_config("loop-alternating-tool-failures"),
         pending_tool_calls=(first_a,),
     )
@@ -954,7 +914,7 @@ async def test_non_retryable_failure_opens_circuit_before_second_attempt() -> No
     repeated = ToolCallPlan.create("non_retryable", {"value": "stuck"})
     recovery = ToolCallPlan.create("non_retryable", {"value": "recovered"})
     state = create_loop_state(
-        task="Do not retry a permanent failure.",
+        current_message="Do not retry a permanent failure.",
         run_config=_config("loop-non-retryable-tool-failure"),
         pending_tool_calls=(first,),
     )
@@ -994,12 +954,9 @@ async def test_same_batch_calls_are_not_preempted_before_retry_outcome() -> None
         return "recovered"
 
     first = ToolCallPlan.create("transient", {"value": "same"})
-    batch = tuple(
-        ToolCallPlan.create("transient", {"value": "same"})
-        for _ in range(2)
-    )
+    batch = tuple(ToolCallPlan.create("transient", {"value": "same"}) for _ in range(2))
     state = create_loop_state(
-        task="Allow a successful batch retry.",
+        current_message="Allow a successful batch retry.",
         run_config=_config("loop-tool-failure-batch-retry"),
         pending_tool_calls=(first,),
     )
@@ -1017,10 +974,7 @@ async def test_same_batch_calls_are_not_preempted_before_retry_outcome() -> None
 
     assert result["status"] == "completed"
     assert attempts == 3
-    assert all(
-        item.error_code != "repeated_tool_failure"
-        for item in result["tool_results"]
-    )
+    assert all(item.error_code != "repeated_tool_failure" for item in result["tool_results"])
 
 
 @pytest.mark.anyio
@@ -1046,7 +1000,7 @@ async def test_reconciled_execution_record_precedes_failure_circuit() -> None:
         origin=origin,
     )
     state = create_loop_state(
-        task="Recover a non-idempotent tool outcome.",
+        current_message="Recover a non-idempotent tool outcome.",
         run_config=_config("loop-reconciliation-before-circuit"),
         pending_tool_calls=(
             ToolCallPlan(
@@ -1096,9 +1050,7 @@ async def test_reconciled_execution_record_precedes_failure_circuit() -> None:
     )
 
     result = await _loop(
-        provider=_SequenceProvider(
-            [ModelTurnDraft(action="finish", final_answer="Recovered.")]
-        ),
+        provider=_SequenceProvider([ModelTurnDraft(action="finish", final_answer="Recovered.")]),
         tools=(tool,),
         checkpoint=checkpoint,
     ).run(resumed)

@@ -31,11 +31,6 @@ class KnowledgeSearchInput(BaseModel):
         max_length=2000,
         description="Natural-language question or evidence query.",
     )
-    constraints: str | None = Field(
-        default=None,
-        max_length=1000,
-        description="Optional source, date, document, or metadata constraints.",
-    )
     top_k: int = Field(
         default=8,
         ge=1,
@@ -67,12 +62,8 @@ class KnowledgeSearchOutput(BaseModel):
     total_found: int = Field(default=0, ge=0)
 
 
-_KNOWLEDGE_INPUT_SCHEMA, _validate_knowledge_input = pydantic_input(
-    KnowledgeSearchInput
-)
-_KNOWLEDGE_OUTPUT_SCHEMA, _unused_knowledge_output_validator = pydantic_input(
-    KnowledgeSearchOutput
-)
+_KNOWLEDGE_INPUT_SCHEMA, _validate_knowledge_input = pydantic_input(KnowledgeSearchInput)
+_KNOWLEDGE_OUTPUT_SCHEMA, _unused_knowledge_output_validator = pydantic_input(KnowledgeSearchOutput)
 
 
 def create_knowledge_tools(
@@ -122,9 +113,7 @@ def create_search_knowledge_tool(
             effects=frozenset(),
             targets=(ToolTarget(kind="knowledge_source", value="configured"),),
         ),
-        execution_revision=(
-            f"integration-search-knowledge-v1:{execution_revision}"
-        ),
+        execution_revision=(f"integration-search-knowledge-v1:{execution_revision}"),
         idempotent=True,
         concurrency_safe=True,
         cancellation_mode=CancellationMode.COOPERATIVE,

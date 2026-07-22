@@ -15,7 +15,6 @@ from rag.agent.memory.persistent.runtime import PersistentMemoryRuntime
 from rag.agent.memory.persistent.selector import MemorySelector
 from rag.agent.memory.persistent.store import PersistentMemoryStore
 from rag.agent.workspace import open_workspace
-from rag.schema.runtime import AccessPolicy
 
 
 class _StaticGateway:
@@ -68,7 +67,7 @@ content:
             HumanMessage(content="remember this"),
             AIMessage(content="done"),
         ],
-        "run_config": SimpleNamespace(run_id="run_test"),
+        "run_config": SimpleNamespace(turn_id="run_test"),
     }
 
     written = await MemoryExtractor(llm_gateway=gateway).extract(  # type: ignore[arg-type]
@@ -90,9 +89,7 @@ async def test_selector_skips_llm_when_user_memories_fill_selection() -> None:
         def read_all_memories(self) -> list[MemoryFile]:
             return memories
 
-    selected = await MemorySelector(
-        llm_gateway=cast(Any, gateway), max_selected=5, llm_threshold=0
-    ).select(
+    selected = await MemorySelector(llm_gateway=cast(Any, gateway), max_selected=5, llm_threshold=0).select(
         task="continue work",
         index_content=index_content,
         store=Store(),  # type: ignore[arg-type]
@@ -116,12 +113,9 @@ async def test_persistent_memory_runtime_loads_selected_memories(
     store = PersistentMemoryStore(workspace)
     store.write_memory(_memory("project-direct-agent"))
     state = create_loop_state(
-        task="continue direct agent work",
+        current_message="continue direct agent work",
         run_config=AgentRunConfig(
-            run_id="memory-runtime-load",
-            thread_id="memory-runtime-load",
-            max_depth=1,
-            access_policy=AccessPolicy.default(),
+            turn_id="memory-runtime-load",
         ),
     )
 
@@ -132,9 +126,6 @@ async def test_persistent_memory_runtime_loads_selected_memories(
     )
 
     assert "project-direct-agent" in state["memory_index"]
-    assert any(
-        "project-direct-agent content" in memory
-        for memory in state["persistent_memories"]
-    )
+    assert any("project-direct-agent content" in memory for memory in state["persistent_memories"])
     assert isinstance(state["memory_state"], MemoryState)
     assert state["memory_state"].persistent.selected_count == 1

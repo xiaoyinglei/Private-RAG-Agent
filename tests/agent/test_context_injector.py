@@ -12,7 +12,6 @@ from rag.agent.loop.state import LoopState, PendingToolCall, create_loop_state
 from rag.agent.memory.injector import ContextBuilder
 from rag.agent.memory.models import ExtractedFact, MemoryRef, WorkingSummary
 from rag.agent.tools.tool import ToolContentBlock, ToolResult
-from rag.schema.runtime import AccessPolicy
 
 
 class _CharacterTokenAccounting:
@@ -34,8 +33,6 @@ class _CharacterTokenAccounting:
 
 def _definition() -> AgentRuntimePolicy:
     return AgentRuntimePolicy.test_factory(
-        agent_type="research",
-        description="Research agent",
         system_prompt="System prompt",
         allowed_tools=["search_text"],
     )
@@ -43,13 +40,10 @@ def _definition() -> AgentRuntimePolicy:
 
 def _state() -> LoopState:
     state = create_loop_state(
-        task="Explain policy",
+        current_message="Explain policy",
         run_config=AgentRunConfig(
-            run_id="ctx",
-            thread_id="ctx",
+            turn_id="ctx",
             llm_budget_total=1000,
-            max_depth=2,
-            access_policy=AccessPolicy.default(),
         ),
         messages=[HumanMessage(content="recent tail", id="h-tail")],
     )
@@ -174,9 +168,7 @@ def test_context_builder_uses_injected_token_accounting() -> None:
         state=state,
     )
 
-    assert context.context_budget.used_context_tokens == accounting.count(
-        context.as_text()
-    )
+    assert context.context_budget.used_context_tokens == accounting.count(context.as_text())
 
 
 def test_required_overflow_is_explicit_and_never_hashes_content() -> None:
@@ -184,8 +176,6 @@ def test_required_overflow_is_explicit_and_never_hashes_content() -> None:
     state["tool_results"] = []
     state["messages"] = []
     definition = AgentRuntimePolicy.test_factory(
-        agent_type="research",
-        description="Research agent",
         system_prompt="SYSTEM_REAL_CONTENT",
         allowed_tools=[],
     )

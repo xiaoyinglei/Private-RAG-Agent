@@ -1,14 +1,20 @@
 from __future__ import annotations
 
-from rag.agent.core.observations import StructuredObservation
-from rag.agent.planning import (
+from agent_runtime.planning import (
     AgentPlan,
     PlanStep,
     PlanStepPatch,
     PlanTracker,
     PlanUpdate,
 )
+from rag.agent.core.observations import StructuredObservation
 from rag.agent.core.turn_contracts import ToolCallPlan
+
+
+def test_plan_types_have_public_runtime_ownership() -> None:
+    assert AgentPlan.__module__ == "agent_runtime.planning"
+    assert PlanStep.__module__ == "agent_runtime.planning"
+    assert PlanUpdate.__module__ == "agent_runtime.planning"
 
 
 def test_initialize_plan_is_task_based_without_tool_routing() -> None:
@@ -51,9 +57,7 @@ def test_plan_update_is_bounded_and_filters_unsupported_tools() -> None:
     updated, events = PlanTracker(max_steps=2).apply_advisory_update(
         plan,
         update,
-        allowed_tool_names=frozenset(
-            {"list_files", "structured_probe"}
-        ),
+        allowed_tool_names=frozenset({"list_files", "structured_probe"}),
     )
 
     assert [step.step_id for step in updated.steps] == [

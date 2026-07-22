@@ -1,27 +1,26 @@
 from __future__ import annotations
 
-from pathlib import Path
 from collections.abc import Mapping
+from pathlib import Path
 
 import pytest
 from langgraph.checkpoint.memory import MemorySaver
-from rag.agent.core.agent_service_factory import AgentServiceFactory
+
 from rag.agent.core.checkpointing import (
     CanonicalToolCheckpoint,
     LangGraphCheckpointStore,
     agent_checkpoint_serde,
     encode_tool_checkpoint,
 )
-from rag.agent.core.context import AgentRunConfig, RunRegistry
+from rag.agent.core.context import AgentRunConfig, TurnRegistry
 from rag.agent.core.definition import AgentRuntimePolicy
 from rag.agent.core.goal_contract import GoalDeliverable, GoalSpec
-from rag.agent.core.human_input import HumanInputResponse
 from rag.agent.core.messages import ModelMessage
 from rag.agent.core.model_request import build_tool_manifest
-from rag.agent.tools.executor import ExecutionStatus, ToolExecutionRecord
 from rag.agent.core.turn_contracts import ToolCallPlan
 from rag.agent.loop.state import LoopState, ModelTurnDraft, create_loop_state
 from rag.agent.service import AgentRunRequest, AgentService
+from rag.agent.tools.executor import ExecutionStatus, ToolExecutionRecord
 from rag.agent.tools.registry import ToolRegistry
 from rag.agent.tools.tool import (
     CancellationMode,
@@ -38,8 +37,8 @@ from rag.agent.tools.tool import (
     ToolTarget,
     json_schema_input,
 )
-from rag.schema.runtime import AccessPolicy
-
+from rag.agent.turns import RuntimeBinding, TurnStatus, TurnStore
+from rag.agent.workspace import open_workspace
 
 _INPUT_SCHEMA: Mapping[str, JsonValue] = {
     "type": "object",
@@ -95,8 +94,6 @@ class _PauseAfterGoalFeedbackProvider:
 def _definition(*, requires_confirmation: bool = False) -> AgentRuntimePolicy:
     del requires_confirmation
     return AgentRuntimePolicy.test_factory(
-        agent_type="service_loop",
-        description="Service loop boundary",
         system_prompt="Use the loop.",
         allowed_tools=["write_tool"],
         max_iterations=4,
@@ -140,18 +137,10 @@ def _registry(
                 "required": ["text"],
                 "additionalProperties": False,
             },
-            static_effects=frozenset(
-                {ToolEffect.WRITE_WORKSPACE} if requires_confirmation else ()
-            ),
+            static_effects=frozenset({ToolEffect.WRITE_WORKSPACE} if requires_confirmation else ()),
             resolve_use=lambda _arguments: ResolvedToolUse(
-                effects=frozenset(
-                    {ToolEffect.WRITE_WORKSPACE} if requires_confirmation else ()
-                ),
-                targets=(
-                    (ToolTarget(kind="workspace_path", value="."),)
-                    if requires_confirmation
-                    else ()
-                ),
+                effects=frozenset({ToolEffect.WRITE_WORKSPACE} if requires_confirmation else ()),
+                targets=((ToolTarget(kind="workspace_path", value="."),) if requires_confirmation else ()),
             ),
             execution_revision=execution_revision,
             idempotent=not requires_confirmation,
@@ -167,28 +156,14 @@ def _registry(
 
 def _config(run_id: str) -> AgentRunConfig:
     return AgentRunConfig(
-        run_id=run_id,
-        thread_id=run_id,
+        turn_id=run_id,
         llm_budget_total=10_000,
-        max_depth=1,
-        access_policy=AccessPolicy.default(),
     )
 
 
 @pytest.mark.anyio
-async def test_service_run_invokes_agent_loop_without_compiling_inner_graph(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_service_run_uses_agent_loop_and_tool_executor() -> None:
     calls: list[str] = []
-
-    def fail_compile(*args: object, **kwargs: object) -> object:
-        del args, kwargs
-        raise AssertionError("single-agent service must not compile a graph")
-
-    monkeypatch.setattr(
-        "rag.agent.core.compiler.GraphCompiler.compile",
-        fail_compile,
-    )
     service = AgentService(
         definition=_definition(),
         tool_registry=_registry(calls),
@@ -198,9 +173,8 @@ async def test_service_run_invokes_agent_loop_without_compiling_inner_graph(
 
     result = await service.run(
         AgentRunRequest(
-            task="Write once.",
-            run_id="service-loop-run",
-            thread_id="service-loop-run",
+            message="Write once.",
+            turn_id="service-loop-run",
             pending_tool_calls=[call],
         )
     )
@@ -211,28 +185,12 @@ async def test_service_run_invokes_agent_loop_without_compiling_inner_graph(
 
 
 @pytest.mark.anyio
-async def test_service_factory_accepts_loop_model_turn_provider() -> None:
-    factory = AgentServiceFactory(
-        tool_registry=_registry([]),
-        model_turn_provider=_FinishFromResultsProvider(),
-    )
-
-    result = await factory.create(_definition()).run(
-        AgentRunRequest(
-            task="Answer directly.",
-            run_id="service-loop-factory",
-            thread_id="service-loop-factory",
-        )
-    )
-
-    assert result.status == "done"
-    assert result.final_answer == "direct answer"
-
-
-@pytest.mark.anyio
-async def test_service_resume_uses_loop_checkpoint_and_does_not_replay() -> None:
+async def test_service_resume_uses_loop_checkpoint_and_does_not_replay(
+    tmp_path: Path,
+) -> None:
     calls: list[str] = []
     checkpointer = MemorySaver(serde=agent_checkpoint_serde())
+    turn_store = TurnStore(tmp_path / "agent.sqlite")
     service = AgentService(
         definition=_definition(requires_confirmation=True),
         tool_registry=_registry(
@@ -241,36 +199,36 @@ async def test_service_resume_uses_loop_checkpoint_and_does_not_replay() -> None
         ),
         model_turn_provider=_FinishFromResultsProvider(),
         checkpointer=checkpointer,
+        workspace=open_workspace(tmp_path),
+        turn_store=turn_store,
+        runtime_binding=RuntimeBinding(workspace_path=str(tmp_path)),
     )
     call = ToolCallPlan.create("write_tool", {"value": "approved"})
 
     paused = await service.run(
         AgentRunRequest(
-            task="Approve one write.",
-            run_id="service-loop-resume",
-            thread_id="service-loop-resume",
+            message="Approve one write.",
             pending_tool_calls=[call],
-        )
+        ),
     )
 
     assert paused.status == "paused"
-    request = service.pending_human_input_request(run_id="service-loop-resume")
+    request = service.pending_human_input_request(turn_id=paused.turn_id)
     assert request == paused.human_input_request
-    assert await service.apending_human_input_request(run_id="service-loop-resume") == request
+    assert await service.apending_human_input_request(turn_id=paused.turn_id) == request
+    assert turn_store.get_turn(paused.turn_id).status is TurnStatus.PAUSED
 
-    resumed = await service.resume(
-        run_id="service-loop-resume",
-        response=HumanInputResponse(
-            request_id=request.request_id,
-            decision="allow_once",
-            approved_tool_call_ids=[call.tool_call_id],
-        ),
+    resumed = await service.resume_turn(
+        turn_id=paused.turn_id,
+        action="allow_once",
+        user_input=None,
     )
 
     assert resumed.status == "done"
     assert resumed.final_answer == "wrote:approved"
     assert resumed.human_input_request is None
     assert calls == ["approved"]
+    assert turn_store.get_turn(paused.turn_id).status is TurnStatus.COMPLETED
 
 
 @pytest.mark.anyio
@@ -284,7 +242,7 @@ async def test_service_exposes_non_idempotent_unknown_as_reconciliation() -> Non
     )
     call = ToolCallPlan.create("write_tool", {"value": "unknown"})
     state = create_loop_state(
-        task="Recover an ambiguous write.",
+        current_message="Recover an ambiguous write.",
         run_config=config,
         pending_tool_calls=[call],
     )
@@ -300,18 +258,26 @@ async def test_service_exposes_non_idempotent_unknown_as_reconciliation() -> Non
         requires_reconciliation=True,
     )
     await store.save_snapshot(state, reason="crash_after_started")
+    turn_store = TurnStore()
+    turn_store.begin_turn(
+        "Recover an ambiguous write.",
+        RuntimeBinding(),
+        turn_id=run_id,
+    )
+    turn_store.mark_interrupted(run_id)
     service = AgentService(
         definition=_definition(),
         tool_registry=_registry([]),
         model_turn_provider=_FinishFromResultsProvider(),
         checkpointer=checkpointer,
+        turn_store=turn_store,
     )
 
-    request = await service.apending_human_input_request(run_id=run_id)
+    request = await service.apending_human_input_request(turn_id=run_id)
 
     assert request.kind == "tool_reconciliation"
     assert request.context["operation_id"] == "op-ambiguous"
-    RunRegistry.remove(run_id)
+    TurnRegistry.remove(run_id)
 
 
 @pytest.mark.anyio
@@ -337,7 +303,7 @@ async def test_resume_reconciles_pending_call_before_changed_tool_executes() -> 
         ),
     )
     state = create_loop_state(
-        task="Resume safely.",
+        current_message="Resume safely.",
         run_config=config,
         pending_tool_calls=(
             ToolCallPlan(
@@ -361,6 +327,13 @@ async def test_resume_reconciles_pending_call_before_changed_tool_executes() -> 
         checkpointer,
         run_config=config,
     ).save_snapshot(state, reason="before-drift")
+    turn_store = TurnStore()
+    turn_store.begin_turn(
+        "Resume safely.",
+        RuntimeBinding(),
+        turn_id=run_id,
+    )
+    turn_store.mark_interrupted(run_id)
     calls: list[str] = []
     service = AgentService(
         definition=_definition(),
@@ -370,15 +343,16 @@ async def test_resume_reconciles_pending_call_before_changed_tool_executes() -> 
         ),
         model_turn_provider=_FinishFromResultsProvider(),
         checkpointer=checkpointer,
+        turn_store=turn_store,
     )
 
-    request = await service.apending_human_input_request(run_id=run_id)
+    request = await service.apending_human_input_request(turn_id=run_id)
 
     assert request.kind == "tool_reconciliation"
     assert request.context["error_code"] == "tool_definition_changed"
     assert request.context["tool_call_id"] == call.tool_call_id
     assert calls == []
-    RunRegistry.remove(run_id)
+    TurnRegistry.remove(run_id)
 
 
 @pytest.mark.anyio
@@ -406,31 +380,14 @@ async def test_explicit_goal_spec_is_a_stop_hook_not_default_controller() -> Non
 
     result = await service.run(
         AgentRunRequest(
-            task="Answer with evidence.",
-            run_id="service-loop-goal-hook",
-            thread_id="service-loop-goal-hook",
+            message="Answer with evidence.",
+            turn_id="service-loop-goal-hook",
             goal_spec=goal,
         )
     )
 
     assert result.status == "paused"
     assert result.needs_user_input == "Explicit goal still needs evidence."
-
-
-def test_runtime_boundaries_do_not_import_inner_graph_nodes() -> None:
-    root = Path(__file__).resolve().parents[2]
-    runtime_files = [
-        "rag/agent/service.py",
-        "rag/agent/core/agent_service_factory.py",
-        "rag/agent/core/agent_as_tool.py",
-        "rag/agent/core/compiler.py",
-        "rag/agent/core/llm_providers.py",
-        "rag/agent/builtin/generic.py",
-    ]
-
-    offenders = [relative for relative in runtime_files if "rag.agent.graphs.nodes" in (root / relative).read_text()]
-
-    assert offenders == []
 
 
 def test_runtime_modules_use_loop_state_instead_of_compatibility_state() -> None:
@@ -461,9 +418,8 @@ async def test_service_freezes_one_snapshot_and_reuses_one_executor() -> None:
     executor = service._tool_executor
     result = await service.run(
         AgentRunRequest(
-            task="Answer directly.",
-            run_id="single-runtime-identity",
-            thread_id="single-runtime-identity",
+            message="Answer directly.",
+            turn_id="single-runtime-identity",
         )
     )
 

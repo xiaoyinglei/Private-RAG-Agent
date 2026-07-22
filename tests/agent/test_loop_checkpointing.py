@@ -39,15 +39,11 @@ from rag.agent.tools.tool import (
     ToolDefinition,
     json_schema_input,
 )
-from rag.schema.runtime import AccessPolicy
 
 
 def _config(run_id: str) -> AgentRunConfig:
     return AgentRunConfig(
-        run_id=run_id,
-        thread_id=run_id,
-        max_depth=1,
-        access_policy=AccessPolicy.default(),
+        turn_id=run_id,
     )
 
 
@@ -96,7 +92,7 @@ def _state(run_id: str):
         origin=origin,
     )
     state = create_loop_state(
-        task="Write.",
+        current_message="Write.",
         run_config=_config(run_id),
         pending_tool_calls=(
             ToolCallPlan(
@@ -108,9 +104,7 @@ def _state(run_id: str):
         ),
     )
     state["resident_tool_names"] = ["remote_write"]
-    state["canonical_transcript"] = [
-        ModelMessage(role="user", content="Write.")
-    ]
+    state["turn_transcript"] = [ModelMessage(role="user", content="Write.")]
     state["canonical_tool_calls"] = {call.tool_call_id: call}
     state["tool_manifest"] = build_tool_manifest(
         tools=(tool,),
@@ -136,20 +130,14 @@ async def test_save_load_uses_canonical_codec_and_origin() -> None:
 
     assert restored is not None
     assert restored["tool_checkpoint"]["format_version"] == 2
-    assert restored["canonical_tool_calls"][call.tool_call_id].origin == (
-        call.origin
-    )
-    assert restored["canonical_transcript"] == state["canonical_transcript"]
+    assert restored["canonical_tool_calls"][call.tool_call_id].origin == (call.origin)
+    assert restored["turn_transcript"] == state["turn_transcript"]
 
 
 @pytest.mark.anyio
 async def test_durable_checkpoint_syncs_only_current_turn_history() -> None:
-    state, _call = _state("checkpoint-session-history")
-    state["run_config"] = replace(
-        state["run_config"],
-        session_id="session-a",
-    )
-    state["canonical_transcript"] = [
+    state, _call = _state("checkpoint-turn-history")
+    state["turn_transcript"] = [
         ModelMessage(role="assistant", content="prior turn"),
         ModelMessage(role="user", content="current turn"),
     ]
@@ -160,22 +148,18 @@ async def test_durable_checkpoint_syncs_only_current_turn_history() -> None:
     store = LangGraphCheckpointStore(
         MemorySaver(serde=agent_checkpoint_serde()),
         run_config=state["run_config"],
-        snapshot_sink=lambda snapshot: synced.append(
-            tuple(snapshot["turn_transcript"])
-        ),
+        snapshot_sink=lambda snapshot: synced.append(tuple(snapshot["turn_transcript"])),
     )
 
     await store.save_snapshot(state, reason="turn_progress")
 
-    assert synced == [
-        (ModelMessage(role="user", content="current turn"),)
-    ]
+    assert synced == [(ModelMessage(role="user", content="current turn"),)]
 
 
 @pytest.mark.anyio
 async def test_save_load_deepcopies_assistant_tool_call_arguments() -> None:
     state, _call = _state("checkpoint-transcript-tool-call")
-    state["canonical_transcript"] = [
+    state["turn_transcript"] = [
         ModelMessage(
             role="assistant",
             content="",
@@ -197,7 +181,7 @@ async def test_save_load_deepcopies_assistant_tool_call_arguments() -> None:
     restored = await store.load_latest()
 
     assert restored is not None
-    assert restored["canonical_transcript"] == state["canonical_transcript"]
+    assert restored["turn_transcript"] == state["turn_transcript"]
 
 
 @pytest.mark.anyio
@@ -248,9 +232,7 @@ async def test_apply_human_response_rejects_wrong_request_id() -> None:
     await store.save_snapshot(state, reason="approval")
 
     with pytest.raises(HumanInputRequestIdMismatchError):
-        await store.apply_human_response(
-            HumanInputResponse(request_id="wrong", decision="deny")
-        )
+        await store.apply_human_response(HumanInputResponse(request_id="wrong", decision="deny"))
 
 
 @pytest.mark.anyio
@@ -277,10 +259,7 @@ async def test_running_non_idempotent_record_requires_reconciliation() -> None:
     assert restored["status"] == "paused"
     assert restored["approval_request"] is not None
     assert restored["approval_request"].kind == "tool_reconciliation"
-    assert (
-        restored["tool_execution_records"][call.tool_call_id].status
-        is ExecutionStatus.UNKNOWN
-    )
+    assert restored["tool_execution_records"][call.tool_call_id].status is ExecutionStatus.UNKNOWN
 
 
 @pytest.mark.anyio
@@ -304,9 +283,7 @@ async def test_crash_after_durable_started_never_calls_or_replays_runner() -> No
         if record.status is ExecutionStatus.STARTED:
             raise RuntimeError("simulated process loss")
 
-    executor = ToolExecutor(
-        {"remote_write": replace(_tool(), run=runner)}
-    )
+    executor = ToolExecutor({"remote_write": replace(_tool(), run=runner)})
 
     with pytest.raises(RuntimeError, match="simulated process loss"):
         await executor.execute(

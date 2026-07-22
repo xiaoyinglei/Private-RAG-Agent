@@ -8,6 +8,7 @@ import pytest
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from pydantic import BaseModel
 
+from agent_runtime.planning import PlanStep, PlanTracker, PlanUpdate
 from rag.agent.core.context import AgentRunConfig
 from rag.agent.core.definition import AgentRuntimePolicy
 from rag.agent.core.human_input import HumanInputRequest, ToolCallSummary
@@ -39,7 +40,6 @@ from rag.agent.loop.state import (
 from rag.agent.memory.compactor import LoopContextCompactor
 from rag.agent.memory.injector import ContextBuilder
 from rag.agent.memory.models import MemoryPolicy, MemoryRef, MessageBatchPayload
-from rag.agent.planning import PlanStep, PlanTracker, PlanUpdate
 from rag.agent.tools.tool import (
     CancellationMode,
     InterruptBehavior,
@@ -55,7 +55,6 @@ from rag.agent.tools.tool import (
 from rag.assembly.tokenizer import TokenAccountingService, TokenizerContract
 from rag.providers.llm_gateway import AgentModelResponse
 from rag.schema.llm import LLMCallStage, LLMStageBudget, LLMUsage
-from rag.schema.runtime import AccessPolicy
 
 
 class _RecordingGateway:
@@ -113,8 +112,6 @@ class _RecordingMemoryStore:
 
 def _definition() -> AgentRuntimePolicy:
     return AgentRuntimePolicy.test_factory(
-        agent_type="research",
-        description="Research",
         system_prompt="Use tools when they help and preserve citations.",
         allowed_tools=["vector_search", "read_file"],
     )
@@ -122,17 +119,14 @@ def _definition() -> AgentRuntimePolicy:
 
 def _run_config(run_id: str = "loop-context") -> AgentRunConfig:
     return AgentRunConfig(
-        run_id=run_id,
-        thread_id=run_id,
+        turn_id=run_id,
         llm_budget_total=10_000,
-        max_depth=2,
-        access_policy=AccessPolicy.default(),
     )
 
 
 def _state(run_id: str = "loop-context") -> LoopState:
     return create_loop_state(
-        task="Explain the policy with sources.",
+        current_message="Explain the policy with sources.",
         run_config=_run_config(run_id),
     )
 
@@ -220,9 +214,7 @@ def _assembler() -> AgentLLMContextAssembler:
 def test_turn_parser_prefers_actual_calls_over_finish_label() -> None:
     call = ToolCallPlan.create("vector_search", {"query": "policy"})
 
-    finish = parse_loop_model_turn(
-        {"action": "finish", "final_answer": "Enough evidence."}
-    )
+    finish = parse_loop_model_turn({"action": "finish", "final_answer": "Enough evidence."})
     execute = parse_loop_model_turn(
         {
             "action": "finish",
@@ -258,7 +250,7 @@ async def test_long_session_projects_model_context_without_mutating_history() ->
         )
         for index in range(30)
     ]
-    state["canonical_transcript"] = list(transcript)
+    state["turn_transcript"] = list(transcript)
 
     envelope = await provider.next_turn(
         state,
@@ -267,12 +259,9 @@ async def test_long_session_projects_model_context_without_mutating_history() ->
     )
 
     request = gateway.calls[0]["request"]
-    assert state["canonical_transcript"] == transcript
+    assert state["turn_transcript"] == transcript
     assert len(request.messages) < len(transcript) + 2
-    assert any(
-        "context_compaction" in message.content
-        for message in request.messages
-    )
+    assert any("context_compaction" in message.content for message in request.messages)
     assert any("message-29" in message.content for message in request.messages)
     assert envelope.context_revision is not None
 
@@ -339,8 +328,7 @@ async def test_loop_provider_injects_imported_file_paths_into_canonical_context(
 
     assert envelope.request is not None
     assert any(
-        message.role == "context"
-        and "input_files/fixture.txt" in message.content
+        message.role == "context" and "input_files/fixture.txt" in message.content
         for message in envelope.request.messages
     )
 
@@ -382,7 +370,7 @@ async def test_loop_provider_binds_tool_call_to_originating_request() -> None:
 async def test_loop_provider_selection_is_state_driven_not_task_classified() -> None:
     gateway = _RecordingGateway()
     state = _state("loop-context-selection")
-    state["task"] = "Answer exactly with the single word: OK"
+    state["current_message"] = "Answer exactly with the single word: OK"
     state["resident_tool_names"] = ["read_file"]
 
     envelope = await _provider(gateway, names=("read_file",)).next_turn(
@@ -398,7 +386,7 @@ async def test_loop_provider_selection_is_state_driven_not_task_classified() -> 
 async def test_loop_provider_injects_skill_runtime_context() -> None:
     class _SkillContext:
         def render_prompt_context(self, state: LoopState) -> str:
-            assert state["task"]
+            assert state["current_message"]
             return "<available_skills>project:review</available_skills>"
 
     gateway = _RecordingGateway()
@@ -487,9 +475,7 @@ def test_loop_context_keeps_approval_and_feedback_without_goal_fields() -> None:
             message="Add a traceable citation.",
         )
     ]
-    state["plan_state"].agent_plan = PlanTracker().initialize_task(
-        task=state["task"]
-    )[0]
+    state["plan_state"].agent_plan = PlanTracker().initialize_task(task=state["current_message"])[0]
 
     context = ContextBuilder(max_context_tokens=4_000).assemble_loop(
         definition=_definition(),
@@ -543,22 +529,16 @@ def test_task_plan_is_advisory_and_filters_unsupported_tools() -> None:
 
 def test_loop_context_compaction_is_observable_before_model_turn() -> None:
     state = create_loop_state(
-        task="Summarize the conversation.",
+        current_message="Summarize the conversation.",
         run_config=AgentRunConfig(
-            run_id="loop-compaction",
-            thread_id="loop-compaction",
+            turn_id="loop-compaction",
             llm_budget_total=10_000,
-            max_depth=2,
-            access_policy=AccessPolicy.default(),
             memory_policy=MemoryPolicy(
                 message_compaction_min_count=3,
                 max_message_tail_count=1,
             ),
         ),
-        messages=[
-            HumanMessage(content=f"message {index}", id=f"msg-{index}")
-            for index in range(4)
-        ],
+        messages=[HumanMessage(content=f"message {index}", id=f"msg-{index}") for index in range(4)],
     )
 
     result = LoopContextCompactor().prepare(state)
@@ -576,13 +556,10 @@ def test_loop_context_snips_messages_without_splitting_tool_pairs() -> None:
     tool_call_id = "tc-search"
     store = _RecordingMemoryStore()
     state = create_loop_state(
-        task="Summarize the conversation.",
+        current_message="Summarize the conversation.",
         run_config=AgentRunConfig(
-            run_id="loop-snip-compaction",
-            thread_id="loop-snip-compaction",
+            turn_id="loop-snip-compaction",
             llm_budget_total=10_000,
-            max_depth=2,
-            access_policy=AccessPolicy.default(),
             memory_policy=MemoryPolicy(
                 message_compaction_min_count=99,
                 snip_compact_threshold=4,
@@ -649,12 +626,10 @@ def test_compaction_never_reformats_canonical_tool_results() -> None:
     ]
     transcript = [tool_result_message(result) for result in results]
     state["tool_results"] = results
-    state["canonical_transcript"] = transcript
+    state["turn_transcript"] = transcript
 
     LoopContextCompactor().prepare(state)
 
     assert state["tool_results"] == results
-    assert state["canonical_transcript"] == transcript
-    assert [message.content for message in transcript] == [
-        message.content for message in state["canonical_transcript"]
-    ]
+    assert state["turn_transcript"] == transcript
+    assert [message.content for message in transcript] == [message.content for message in state["turn_transcript"]]

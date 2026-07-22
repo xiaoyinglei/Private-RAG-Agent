@@ -1,19 +1,40 @@
 from __future__ import annotations
 
-from contextlib import asynccontextmanager
 from pathlib import Path
+from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
 from pytest import MonkeyPatch
 
+from agent_runtime.result import AgentResult, AgentUsage
 from rag.agent import cli
-from rag.agent.service import AgentRunRequest, AgentRunResult
-from rag.agent.sessions import RuntimeBinding, SessionStore
+from rag.agent.turns import RuntimeBinding, TurnStatus, TurnStore
+
+
+def _result(*, turn_id: str | None = None, answer: str = "bounded") -> AgentResult:
+    return AgentResult(
+        answer=answer,
+        status="done",
+        files=(),
+        tool_calls=(),
+        evidence=(),
+        citations=(),
+        usage=AgentUsage(),
+        diagnostics=(),
+        turn_id=turn_id or str(uuid4()),
+        stop_reason=None,
+        pause=None,
+        workspace_path=None,
+        groundedness=False,
+        insufficient_evidence=False,
+        plan=None,
+        plan_events=(),
+    )
 
 
 @pytest.mark.anyio
-async def test_chat_slash_commands_are_local_cli_projections(
+async def test_chat_slash_commands_do_not_reach_the_agent(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -21,113 +42,83 @@ async def test_chat_slash_commands_are_local_cli_projections(
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     database = tmp_path / "agent.sqlite"
-    store = SessionStore(database)
-    session = store.create_session(
+    store = TurnStore(database)
+    previous = store.begin_turn(
+        "first",
         RuntimeBinding(
             model_alias="fake-model",
             workspace_path=str(workspace.resolve()),
-        )
+        ),
     )
+    store.mark_terminal(previous.turn_id, TurnStatus.COMPLETED)
     store.close()
-    model_calls: list[object] = []
-
-    class _ModelControlPlane:
-        default_model = "fake-model"
-
-    class _Service:
-        _model_registry = _ModelControlPlane()
-
-        async def chat(self, request: object) -> object:
-            model_calls.append(request)
-            raise AssertionError("slash commands must not reach the model")
+    turn_calls: list[object] = []
 
     class _Facade:
         checkpoint_db = database
         workspace_path = workspace
 
-        def _agent_for_session(self, session_id: str) -> _Facade:
-            assert session_id == session.session_id
-            return self
+        def current_model(self) -> SimpleNamespace:
+            return SimpleNamespace(id="fake-model")
 
-        @asynccontextmanager
-        async def _open_product_runtime(self, **_kwargs: object):
-            yield _Service()
+        async def arun(self, *args: object, **kwargs: object) -> AgentResult:
+            turn_calls.append((args, kwargs))
+            raise AssertionError("slash commands must not reach the agent")
 
-    commands = iter(
-        [
-            "/status",
-            "/sessions",
-            "/new",
-            "/status",
-            "/help",
-            "/unknown",
-            "/exit",
-        ]
-    )
+    commands = iter(["/status", "/new", "/status", "/help", "/unknown", "/exit"])
     monkeypatch.setattr("builtins.input", lambda _prompt="": next(commands))
 
-    await cli._chat_facade_session(
+    await cli._chat_facade_loop(
         _Facade(),
-        agent_type="generic",
-        requested_model=None,
-        budget=None,
-        session_id=session.session_id,
+        max_tokens_total=None,
+        previous_turn_id=previous.turn_id,
     )
 
     output = capsys.readouterr().out
-    assert f"Session: {session.session_id}" in output
-    assert f"* {session.session_id}" in output
-    assert "已开始新的 Session" in output
-    assert "Session: (new)" in output
-    assert "/sessions" in output
+    assert f"Previous Turn: {previous.turn_id}" in output
+    assert "下一条消息将使用空历史" in output
+    assert "Previous Turn: (none)" in output
+    assert "/new" in output
     assert "未知命令: /unknown" in output
-    assert model_calls == []
+    assert turn_calls == []
 
 
 @pytest.mark.anyio
-async def test_chat_projects_max_turns_to_each_model_turn(
+async def test_chat_loop_carries_the_previous_turn_automatically(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,
 ) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    requests: list[AgentRunRequest] = []
-
-    class _ModelControlPlane:
-        default_model = "fake-model"
-
-    class _Service:
-        _model_registry = _ModelControlPlane()
-
-        async def chat(self, request: AgentRunRequest) -> AgentRunResult:
-            requests.append(request)
-            run_id = str(request.run_id)
-            return AgentRunResult(
-                run_id=run_id,
-                thread_id=run_id,
-                session_id=str(uuid4()),
-                status="done",
-                final_answer="bounded",
-            )
+    calls: list[tuple[str, dict[str, object]]] = []
+    result_ids = [str(uuid4()), str(uuid4())]
 
     class _Facade:
         checkpoint_db = tmp_path / "agent.sqlite"
         workspace_path = workspace
 
-        @asynccontextmanager
-        async def _open_product_runtime(self, **_kwargs: object):
-            yield _Service()
+        def current_model(self) -> SimpleNamespace:
+            return SimpleNamespace(id="fake-model")
 
-    commands = iter(["hello", "/exit"])
+        async def arun(
+            self,
+            message: str,
+            **kwargs: object,
+        ) -> AgentResult:
+            calls.append((message, kwargs))
+            return _result(turn_id=result_ids[len(calls) - 1])
+
+    commands = iter(["hello", "continue", "/exit"])
     monkeypatch.setattr("builtins.input", lambda _prompt="": next(commands))
 
-    await cli._chat_facade_session(
+    await cli._chat_facade_loop(
         _Facade(),
-        agent_type="generic",
-        requested_model=None,
-        budget=None,
+        max_tokens_total=None,
         max_turns=3,
     )
 
-    assert len(requests) == 1
-    assert requests[0].max_turns == 3
+    assert [message for message, _kwargs in calls] == ["hello", "continue"]
+    assert calls[0][1]["previous_turn_id"] is None
+    assert calls[1][1]["previous_turn_id"] == result_ids[0]
+    assert calls[0][1]["max_turns"] == 3
+    assert isinstance(calls[0][1]["event_sink"], cli._CLIToolEventDisplay)

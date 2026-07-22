@@ -218,9 +218,11 @@ def test_assembly_profile_cli_surface_is_removed() -> None:
         assert "--embedding-model" not in output
         assert "--reranker-model" not in output
         assert "--vector-backend" not in output
-    assert "--budget" not in agent_run_output
-    assert "--budget" in agent_chat_output
-    assert "--budget" not in agent_resume_output
+    for output in (agent_run_output, agent_chat_output, agent_resume_output):
+        assert "--budget" not in output
+    assert "--max-tokens-total" in agent_run_output
+    assert "--max-tokens-total" in agent_chat_output
+    assert "--max-tokens-total" not in agent_resume_output
 
 
 def test_agent_cli_is_the_top_level_agent_entrypoint() -> None:
@@ -240,23 +242,21 @@ def test_agent_cli_is_the_top_level_agent_entrypoint() -> None:
     assert "chat" in root_output
     assert "resume" in root_output
     assert "model" in root_output
-    assert "--agent" in _plain_help(run_help.output)
+    assert "--agent" not in _plain_help(run_help.output)
 
 
-def test_chat_model_switch_fails_after_session_has_started(capsys) -> None:
-    class UnexpectedControlPlane:
-        def switch_model(self, model_id: str, *, requested_by: str):
-            raise AssertionError(
-                f"must not switch {model_id!r} for {requested_by!r}"
-            )
+def test_chat_model_switch_fails_after_turn_lineage_has_started(capsys) -> None:
+    class UnexpectedAgent:
+        def switch_model(self, model_id: str):
+            raise AssertionError(f"must not switch {model_id!r}")
 
     agent_cli._handle_model_slash_command(
         "/model switch qwen3_5_9b_mlx_4bit",
-        control_plane=UnexpectedControlPlane(),
+        agent=UnexpectedAgent(),  # type: ignore[arg-type]
         allow_switch=False,
     )
 
-    assert "Session 已创建" in capsys.readouterr().out
+    assert "当前上下文的模型绑定已冻结" in capsys.readouterr().out
 
 
 def test_rag_cli_no_longer_exposes_agent_or_analyze_task() -> None:
@@ -340,15 +340,18 @@ def test_cli_query_help_uses_new_retrieval_profile_option() -> None:
     assert "--vector-collection-prefix" in output
 
 
-def test_agent_run_help_exposes_explicit_agent_selector() -> None:
+def test_agent_run_help_exposes_clean_one_shot_options() -> None:
     result = runner.invoke(agent_app, ["run", "--help"], env={"COLUMNS": "240"})
 
     assert result.exit_code == 0
     output = _plain_help(result.output)
-    assert "--agent" in output
-    assert "--input-file" in output
+    assert "--agent" not in output
+    assert "--input-file" not in output
+    assert "--file" in output
+    assert "--knowledge-config" in output
+    assert "--max-tokens-total" in output
     assert "--vector-collection-prefix" not in output
-    assert "generic" in output
+    assert "--budget" not in output
 
 
 def test_agent_resume_help_uses_persisted_runtime_metadata() -> None:

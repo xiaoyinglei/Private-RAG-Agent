@@ -243,7 +243,7 @@ def create_apply_patch_tool(workspace: WorkspaceRuntime) -> Tool:
             description=(
                 "Edit an existing UTF-8 workspace file by exact text replacement. "
                 "Without replace_all, the old text must occur exactly once. The write "
-                "is atomically installed and never creates a second write_file tool."
+                "is atomically installed and does not create new files."
             ),
             input_schema=_PATCH_INPUT_SCHEMA,
         ),
@@ -254,17 +254,21 @@ def create_apply_patch_tool(workspace: WorkspaceRuntime) -> Tool:
         ),
         normalize_output=_normalize_apply_patch,
         output_schema=_PATCH_OUTPUT_SCHEMA,
-        static_effects=frozenset({
-            ToolEffect.READ_WORKSPACE,
-            ToolEffect.WRITE_WORKSPACE,
-        }),
+        static_effects=frozenset(
+            {
+                ToolEffect.READ_WORKSPACE,
+                ToolEffect.WRITE_WORKSPACE,
+            }
+        ),
         resolve_use=lambda arguments: _workspace_use(
             workspace,
             str(arguments["file_path"]),
-            effects=frozenset({
-                ToolEffect.READ_WORKSPACE,
-                ToolEffect.WRITE_WORKSPACE,
-            }),
+            effects=frozenset(
+                {
+                    ToolEffect.READ_WORKSPACE,
+                    ToolEffect.WRITE_WORKSPACE,
+                }
+            ),
         ),
         execution_revision="builtin-apply-patch-v1",
         idempotent=True,
@@ -290,10 +294,7 @@ def _list_files(
         if path.name == _INTERNAL_DIRECTORY:
             continue
         relative = path.relative_to(workspace.root).as_posix()
-        if request.glob and not (
-            fnmatch.fnmatch(path.name, request.glob)
-            or fnmatch.fnmatch(relative, request.glob)
-        ):
+        if request.glob and not (fnmatch.fnmatch(path.name, request.glob) or fnmatch.fnmatch(relative, request.glob)):
             continue
         if len(entries) >= request.limit:
             truncated = True
@@ -483,9 +484,7 @@ def _normalize_model(
 
 def _normalize_apply_patch(raw: object) -> NormalizedToolOutput:
     execution = (
-        raw
-        if isinstance(raw, _ApplyPatchRunResult)
-        else _ApplyPatchRunResult(ApplyPatchOutput.model_validate(raw))
+        raw if isinstance(raw, _ApplyPatchRunResult) else _ApplyPatchRunResult(ApplyPatchOutput.model_validate(raw))
     )
     validated = ApplyPatchOutput.model_validate(execution.output)
     structured = json_schema_output(

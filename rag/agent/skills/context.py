@@ -76,7 +76,7 @@ def _expand_skill_body(body: str, args: str | None, base_dir: Path) -> str:
     This is plain textual substitution only.  It does NOT imply shell
     interpolation or script execution.  If a skill wants to run a script,
     the expanded instructions must still call an ordinary approved tool
-    such as run_python or run_command.
+    such as run_command.
     """
     body = body.replace("${SKILL_DIR}", str(base_dir))
     body = _SKILL_DIR_RE.sub(str(base_dir), body)
@@ -119,12 +119,7 @@ def render_loaded_skill_ref(ref: LoadedSkillRef) -> str:
     fp = ref.fingerprint[:16]
     args_block = _render_skill_arguments(ref.args)
     warning_block = _render_content_changed_warning(ref, body)
-    attrs = (
-        f'id="{ref.skill_id}" '
-        f'name="{ref.name}" '
-        f'source="{ref.source}" '
-        f'fingerprint="{fp}"'
-    )
+    attrs = f'id="{ref.skill_id}" name="{ref.name}" source="{ref.source}" fingerprint="{fp}"'
     return f"""<loaded_skill {attrs}>
 Base directory for this skill: {ref.root_dir}
 {args_block}
@@ -180,21 +175,13 @@ def build_skills_prompt_section(
     available. Loaded skills are injected independently so they survive resume
     and compaction even when no new skill remains invokable.
     """
-    active_skill_ids = (
-        frozenset(skill_state.active)
-        if skill_state is not None
-        else frozenset()
-    )
+    active_skill_ids = frozenset(skill_state.active) if skill_state is not None else frozenset()
     listing = render_skill_listing(
         catalog,
         max_chars=max_listing_chars,
         exclude_skill_ids=active_skill_ids,
     )
-    loaded = (
-        render_active_loaded_skills(skill_state)
-        if skill_state is not None
-        else ""
-    )
+    loaded = render_active_loaded_skills(skill_state) if skill_state is not None else ""
 
     if listing:
         parts = [SKILL_PROMPT_GUIDANCE, listing]

@@ -2,7 +2,12 @@
 
 Date: 2026-07-02
 
-Status: proposed
+Status: superseded
+
+> Superseded on 2026-07-18 by
+> `docs/superpowers/specs/2026-07-18-agent-public-api-lifecycle-cleanup-design.md`.
+> Historical examples below describe the earlier proposal and are not the
+> current SDK or CLI contract.
 
 ## 1. Why This Exists
 
@@ -207,6 +212,16 @@ result = agent.run("总结这个项目")
 print(result.answer)
 ```
 
+The same method continues context without a separate conversation object:
+
+```python
+first = agent.run("记住项目代号 ORCHID-731")
+second = agent.run("项目代号是什么？", previous_turn_id=first.turn_id)
+```
+
+Omitting `previous_turn_id` always starts a root Turn. `resume(turn_id, ...)`
+is reserved for continuing paused or interrupted execution of that same Turn.
+
 ### 7.2 Files
 
 ```python
@@ -232,7 +247,7 @@ result = agent.run("P1 工单首次响应目标是多少？请给出处")
 ### 7.4 Async and Streaming
 
 ```python
-async for event in agent.stream("分析这个文件", files=["report.xlsx"]):
+async for event in agent.astream("分析这个文件", files=["report.xlsx"]):
     print(event.type, event.data)
 ```
 
@@ -248,8 +263,8 @@ result.tool_calls
 result.citations
 result.usage
 result.diagnostics
-result.run_id
-result.thread_id
+result.turn_id
+result.pause
 ```
 
 Internal fields such as `LoopState`, raw `ToolResult`, and internal checkpoint

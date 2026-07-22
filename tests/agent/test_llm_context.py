@@ -10,7 +10,6 @@ from rag.agent.core.llm_context import (
 )
 from rag.agent.loop.state import LoopState, create_loop_state
 from rag.schema.llm import LLMCallStage, LLMStageBudget
-from rag.schema.runtime import AccessPolicy
 
 
 class _CharacterTokenAccounting:
@@ -32,8 +31,6 @@ class _CharacterTokenAccounting:
 
 def _definition() -> AgentRuntimePolicy:
     return AgentRuntimePolicy.test_factory(
-        agent_type="research",
-        description="Research",
         system_prompt="SYSTEM_POLICY",
         allowed_tools=["llm_generate"],
     )
@@ -41,13 +38,10 @@ def _definition() -> AgentRuntimePolicy:
 
 def _state() -> LoopState:
     return create_loop_state(
-        task="Answer the task",
+        current_message="Answer the task",
         run_config=AgentRunConfig(
-            run_id="context-assembler",
-            thread_id="context-assembler",
+            turn_id="context-assembler",
             llm_budget_total=10_000,
-            max_depth=1,
-            access_policy=AccessPolicy.default(),
         ),
     )
 
@@ -78,9 +72,7 @@ def test_generate_context_uses_model_token_count_for_complete_prompt() -> None:
     assert "SYSTEM_POLICY" in assembled.prompt
     assert "Produce an answer" in assembled.prompt
     assert "REAL_SUPPORT" in assembled.prompt
-    assert assembled.context.context_budget.used_context_tokens == len(
-        assembled.prompt
-    )
+    assert assembled.context.context_budget.used_context_tokens == len(assembled.prompt)
 
 
 def test_required_call_context_overflow_raises_without_hash_replacement() -> None:
@@ -94,9 +86,7 @@ def test_required_call_context_overflow_raises_without_hash_replacement() -> Non
         )
 
     assert exc_info.value.context_budget.overflow is True
-    assert "call_context" in (
-        exc_info.value.context_budget.required_truncated
-    )
+    assert "call_context" in (exc_info.value.context_budget.required_truncated)
     assert "sha256=" not in str(exc_info.value)
 
 

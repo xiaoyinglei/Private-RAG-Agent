@@ -6,6 +6,7 @@ import logging
 
 import pytest
 
+from agent_runtime.planning import AgentPlan, PlanEvent, PlanStep
 from rag.agent.core.checkpointing import _migrate_legacy_state, agent_checkpoint_serde
 from rag.agent.core.context import AgentRunConfig
 from rag.agent.loop.state import (
@@ -21,17 +22,12 @@ from rag.agent.loop.substate import (
     PersistentMemorySnapshot,
     PlanState,
 )
-from rag.agent.planning import AgentPlan, PlanEvent, PlanStep
-from rag.schema.runtime import AccessPolicy
 
 
 def _run_config(run_id: str = "pr1-test") -> AgentRunConfig:
     return AgentRunConfig(
-        run_id=run_id,
-        thread_id=run_id,
+        turn_id=run_id,
         llm_budget_total=100,
-        max_depth=2,
-        access_policy=AccessPolicy.default(),
     )
 
 
@@ -95,7 +91,7 @@ def test_finish_state_default_is_empty() -> None:
 
 
 def test_create_loop_state_populates_substates() -> None:
-    state = create_loop_state(task="Test", run_config=_run_config())
+    state = create_loop_state(current_message="Test", run_config=_run_config())
 
     assert isinstance(state["plan_state"], PlanState)
     assert isinstance(state["memory_state"], MemoryState)
@@ -110,7 +106,7 @@ def test_create_loop_state_populates_substates() -> None:
 
 def test_create_loop_state_memory_warnings_in_both_channels() -> None:
     state = create_loop_state(
-        task="Test",
+        current_message="Test",
         run_config=_run_config(),
         memory_warnings=["low budget"],
     )

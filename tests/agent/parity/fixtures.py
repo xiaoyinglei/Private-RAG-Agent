@@ -5,7 +5,7 @@ from collections.abc import Awaitable, Callable, Iterable, Mapping
 from langchain_core.messages import BaseMessage
 from pydantic import BaseModel
 
-from rag.agent.core.context import AgentRunConfig, RunRegistry
+from rag.agent.core.context import AgentRunConfig, TurnRegistry
 from rag.agent.core.definition import AgentRuntimePolicy
 from rag.agent.core.turn_contracts import ToolCallPlan
 from rag.agent.loop.state import LoopState, create_loop_state
@@ -23,7 +23,6 @@ from rag.agent.tools.tool import (
     ToolTarget,
     json_schema_input,
 )
-from rag.schema.runtime import AccessPolicy
 
 PARITY_SCENARIO_NAMES = (
     "approval_resume",
@@ -69,15 +68,12 @@ def _config(
     memory_policy: MemoryPolicy | None = None,
 ) -> AgentRunConfig:
     config = AgentRunConfig(
-        run_id=run_id,
-        thread_id=run_id,
+        turn_id=run_id,
         llm_budget_total=20_000,
-        max_depth=2,
-        access_policy=AccessPolicy.default(),
         memory_policy=memory_policy or MemoryPolicy(),
     )
-    RunRegistry.remove(run_id)
-    RunRegistry.get_or_create(config)
+    TurnRegistry.remove(run_id)
+    TurnRegistry.get_or_create(config)
     return config
 
 
@@ -90,7 +86,7 @@ def _state(
     messages: Iterable[BaseMessage] = (),
 ) -> LoopState:
     return create_loop_state(
-        task=task,
+        current_message=task,
         run_config=_config(run_id, memory_policy=memory_policy),
         pending_tool_calls=pending_tool_calls,
         messages=messages,
@@ -104,8 +100,6 @@ def _definition(
     output_model: type[BaseModel] | None = None,
 ) -> AgentRuntimePolicy:
     return AgentRuntimePolicy.test_factory(
-        agent_type=name,
-        description=f"{name} parity definition",
         system_prompt="Use canonical tools and return the requested result.",
         allowed_tools=list(allowed_tools),
         output_model=output_model,
@@ -135,11 +129,7 @@ def _tool(
             structured_content=structured,
         )
 
-    targets = (
-        (ToolTarget(kind="workspace_path", value="."),)
-        if ToolEffect.WRITE_WORKSPACE in effects
-        else ()
-    )
+    targets = (ToolTarget(kind="workspace_path", value="."),) if ToolEffect.WRITE_WORKSPACE in effects else ()
     return Tool(
         definition=ToolDefinition(
             name=name,

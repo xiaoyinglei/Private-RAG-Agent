@@ -20,17 +20,13 @@ results, and finish directly when no tool is needed.
 
 
 GENERIC_AGENT = AgentRuntimePolicy(
-    agent_type="generic",
-    description="General-purpose coding and file agent.",
     system_instructions=GENERIC_SYSTEM_PROMPT,
     core_tool_names=RESIDENT_CODING_TOOL_NAMES,
     deferred_tool_names=(),
     model_selection=ModelSelectionPolicy(
-        thinking=True,
         tool_decision_max_tokens=768,
     ),
     max_iterations=10,
-    max_depth=2,
     tool_policy=ToolPolicy(max_parallel_calls=4),
 )
 

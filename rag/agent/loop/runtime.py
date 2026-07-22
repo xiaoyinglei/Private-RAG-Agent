@@ -12,8 +12,15 @@ from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, ValidationError
 
+from agent_runtime.planning import (
+    MAX_PLAN_EVENTS,
+    AgentPlan,
+    PlanEvent,
+    PlanStep,
+    PlanTracker,
+)
 from rag.agent.core.checkpointing import CheckpointStore
-from rag.agent.core.context import RunRegistry
+from rag.agent.core.context import TurnRegistry
 from rag.agent.core.definition import AgentRuntimePolicy
 from rag.agent.core.finalization import (
     FinishCandidateBuilder,
@@ -48,14 +55,7 @@ from rag.agent.loop.state import (
 )
 from rag.agent.loop.stop_hooks import StopHookOutcome, StopHookRunner
 from rag.agent.memory.compactor import LoopCompactionResult
-from rag.agent.planning import (
-    MAX_PLAN_EVENTS,
-    AgentPlan,
-    PlanEvent,
-    PlanStep,
-    PlanTracker,
-)
-from rag.agent.streaming.events import StreamEvent
+from rag.agent.streaming.events import EventType, StreamEvent, next_sequence
 from rag.agent.streaming.sink import StreamEventSink
 from rag.agent.tools.builtins.planning import UpdatePlanInput
 from rag.agent.tools.executor import ToolExecutionRecord, ToolExecutor
@@ -73,15 +73,17 @@ if TYPE_CHECKING:
     from rag.agent.skills.runtime import SkillRuntime
 
 # Tool classification used by runtime metrics.
-_NATIVE_TOOL_SET = frozenset({
-    "list_files",
-    "search_text",
-    "read_file",
-    "apply_patch",
-    "run_command",
-    "update_plan",
-    "find_tools",
-})
+_NATIVE_TOOL_SET = frozenset(
+    {
+        "list_files",
+        "search_text",
+        "read_file",
+        "apply_patch",
+        "run_command",
+        "update_plan",
+        "find_tools",
+    }
+)
 
 _REPEATED_TOOL_FAILURE_CODE = "repeated_tool_failure"
 _MAX_RETRYABLE_IDENTICAL_FAILURES = 2
@@ -91,26 +93,19 @@ def _add_model_latency(state: LoopState, latency_ms: float) -> None:
     profile = state.get("latency_profile")
     if not isinstance(profile, AgentLatencyProfile):
         profile = AgentLatencyProfile()
-    state["latency_profile"] = profile.model_copy(
-        update={"model_latency_ms": profile.model_latency_ms + latency_ms}
-    )
+    state["latency_profile"] = profile.model_copy(update={"model_latency_ms": profile.model_latency_ms + latency_ms})
 
 
-def _append_canonical_messages(
+def _append_turn_messages(
     state: LoopState,
     messages: Sequence[ModelMessage],
 ) -> None:
     if not messages:
         return
-    state["canonical_transcript"] = [
-        *state.get("canonical_transcript", []),
+    state["turn_transcript"] = [
+        *state.get("turn_transcript", []),
         *messages,
     ]
-    if state["run_config"].session_id is not None:
-        state["turn_transcript"] = [
-            *state.get("turn_transcript", []),
-            *messages,
-        ]
 
 
 class ModelTurnEnvelope(BaseModel):
@@ -195,11 +190,7 @@ class AgentLoop:
         self._plan_tracker = plan_tracker or PlanTracker()
         self._max_model_retries = max_model_retries
         self._skill_runtime = skill_runtime
-        self._discoverable_tool_names = (
-            None
-            if discoverable_tool_names is None
-            else tuple(discoverable_tool_names)
-        )
+        self._discoverable_tool_names = None if discoverable_tool_names is None else tuple(discoverable_tool_names)
 
     def _set_stream_sink(self, sink: StreamEventSink | None) -> None:
         """Set the active stream sink, propagating to sub-components that support it."""
@@ -252,9 +243,11 @@ class AgentLoop:
     async def run(self, state: LoopState) -> LoopState:
         if state["status"] != "running":
             return state
-        handles = RunRegistry.get_or_create(state["run_config"])
+        handles = TurnRegistry.get_or_create(state["run_config"])
         if state["plan_state"].agent_plan is None:
-            plan, events = self._plan_tracker.initialize_task(task=state["task"])
+            plan, events = self._plan_tracker.initialize_task(
+                task=state["current_message"],
+            )
             state["plan_state"].agent_plan = plan
             state["plan_state"].plan_events = list(events)
         await self._checkpoint_store.save_snapshot(state, reason="loop_start")
@@ -281,10 +274,7 @@ class AgentLoop:
             request_max_turns = state["run_config"].max_turns
             max_turns = self._definition.max_iterations
             stop_reason: LoopTransitionReason = "max_iterations"
-            if (
-                request_max_turns is not None
-                and request_max_turns <= max_turns
-            ):
+            if request_max_turns is not None and request_max_turns <= max_turns:
                 max_turns = request_max_turns
                 stop_reason = "max_turns"
             if state["iteration"] >= max_turns:
@@ -302,8 +292,8 @@ class AgentLoop:
 
             await self._emit_stream(
                 _stream_turn_start(
-                    run_id=state["run_config"].run_id,
-                    turn=state["iteration"] + 1,
+                    turn_id=state["run_config"].turn_id,
+                    iteration=state["iteration"] + 1,
                 )
             )
 
@@ -323,43 +313,68 @@ class AgentLoop:
             state["last_model_turn"] = turn
             if turn.action == "execute":
                 state["tool_call_ledger"].append_plans(turn.tool_calls, turn=state["iteration"])
-                state["pending_tool_calls"] = [
-                    PendingToolCall(plan=call, status="pending") for call in turn.tool_calls
-                ]
+                state["pending_tool_calls"] = [PendingToolCall(plan=call, status="pending") for call in turn.tool_calls]
                 state["tool_call_ledger"].trim(
                     active_tool_call_ids={p.tool_call_id for p in state["pending_tool_calls"]},
                 )
                 self._record_plan_decision(state, turn)
-                await self._transition(state, reason="next_turn", detail={"action": turn.action},
-                    checkpoint_reason="model_turn")
-                await self._transition(state, reason="tool_execution",
-                    detail={"phase": "scheduled",
-                        "tool_call_ids": [c.tool_call_id for c in turn.tool_calls]},
-                    checkpoint_reason="tool_calls_scheduled")
-                await self._emit_stream(_stream_turn_end(
-                    run_id=state["run_config"].run_id, turn=state["iteration"], stop_reason="tool_use"))
+                await self._transition(
+                    state, reason="next_turn", detail={"action": turn.action}, checkpoint_reason="model_turn"
+                )
+                await self._transition(
+                    state,
+                    reason="tool_execution",
+                    detail={"phase": "scheduled", "tool_call_ids": [c.tool_call_id for c in turn.tool_calls]},
+                    checkpoint_reason="tool_calls_scheduled",
+                )
+                await self._emit_stream(
+                    _stream_turn_end(
+                        turn_id=state["run_config"].turn_id,
+                        iteration=state["iteration"],
+                        stop_reason="tool_use",
+                    )
+                )
                 continue
 
-            await self._transition(state, reason="next_turn", detail={"action": turn.action},
-                checkpoint_reason="model_turn")
+            await self._transition(
+                state, reason="next_turn", detail={"action": turn.action}, checkpoint_reason="model_turn"
+            )
 
             if turn.action == "pause":
-                await self._emit_stream(_stream_turn_end(
-                    run_id=state["run_config"].run_id, turn=state["iteration"], stop_reason="pause"))
-                await self._pause(state, reason=cast(str, turn.pause_reason), request=None,
-                    checkpoint_reason="model_pause", transition_reason="paused")
+                await self._emit_stream(
+                    _stream_turn_end(
+                        turn_id=state["run_config"].turn_id,
+                        iteration=state["iteration"],
+                        stop_reason="pause",
+                    )
+                )
+                await self._pause(
+                    state,
+                    reason=cast(str, turn.pause_reason),
+                    request=None,
+                    checkpoint_reason="model_pause",
+                    transition_reason="paused",
+                )
                 return state
 
             # finish
-            await self._emit_stream(_stream_turn_end(
-                run_id=state["run_config"].run_id, turn=state["iteration"], stop_reason="end_turn"))
+            await self._emit_stream(
+                _stream_turn_end(
+                    turn_id=state["run_config"].turn_id,
+                    iteration=state["iteration"],
+                    stop_reason="end_turn",
+                )
+            )
             if await self._evaluate_finish(state, turn):
                 return state
 
-        await self._emit_stream(_stream_loop_end(
-            run_id=state["run_config"].run_id,
-            reason=state["terminal"].stop_reason if state.get("terminal") else "loop_exited",
-            total_turns=state["iteration"]))
+        await self._emit_stream(
+            _stream_loop_end(
+                turn_id=state["run_config"].turn_id,
+                reason=state["terminal"].stop_reason if state.get("terminal") else "loop_exited",
+                total_turns=state["iteration"],
+            )
+        )
         return state
 
     async def _compact(self, state: LoopState) -> bool:
@@ -367,20 +382,31 @@ class AgentLoop:
         try:
             result = await _await_value(self._context_manager.prepare(state))
         except Exception as exc:
-            await self._fail(state, stop_reason="context_compaction_failed",
+            await self._fail(
+                state,
+                stop_reason="context_compaction_failed",
                 error=str(exc) or type(exc).__name__,
-                transition_reason="failed", checkpoint_reason="context_compaction_failed")
+                transition_reason="failed",
+                checkpoint_reason="context_compaction_failed",
+            )
             return False
         if not result.changed:
             return True
         transition = LoopTransition(
-            reason="compaction", iteration=state["iteration"],
-            detail={"channels": list(result.channels), "warnings": list(result.warnings)})
+            reason="compaction",
+            iteration=state["iteration"],
+            detail={"channels": list(result.channels), "warnings": list(result.warnings)},
+        )
         replace_latest_transition(state, transition)
         await self._event_sink.emit(transition)
-        await self._emit_stream(_stream_compact_layer(
-            channels=list(result.channels), warnings=list(result.warnings),
-            run_id=state["run_config"].run_id, turn=state["iteration"]))
+        await self._emit_stream(
+            _stream_compact_layer(
+                channels=list(result.channels),
+                warnings=list(result.warnings),
+                turn_id=state["run_config"].turn_id,
+                iteration=state["iteration"],
+            )
+        )
         return True
 
     async def _model_turn(
@@ -435,27 +461,18 @@ class AgentLoop:
                 envelope.model_call_record,
             ]
         if envelope.assistant_message is not None:
-            _append_canonical_messages(state, (envelope.assistant_message,))
+            _append_turn_messages(state, (envelope.assistant_message,))
         if envelope.context_revision is not None:
             state["context_revision"] = envelope.context_revision
         if request is None:
             return
         state["prompt_revision"] = request.prompt_revision
         serializer_revision = (
-            envelope.provider_serializer_revision
-            or state.get("provider_serializer_revision")
-            or "provider-wire-v1"
+            envelope.provider_serializer_revision or state.get("provider_serializer_revision") or "provider-wire-v1"
         )
         state["provider_serializer_revision"] = serializer_revision
-        selected = tuple(
-            self._registry_snapshot[name]
-            for name in request.exposed_tool_names
-        )
-        resident = tuple(
-            name
-            for name in state.get("resident_tool_names", ())
-            if name in request.exposed_tool_names
-        )
+        selected = tuple(self._registry_snapshot[name] for name in request.exposed_tool_names)
+        resident = tuple(name for name in state.get("resident_tool_names", ()) if name in request.exposed_tool_names)
         explicit = tuple(
             name
             for name in state.get("explicit_tool_names", ())
@@ -464,9 +481,7 @@ class AgentLoop:
         active = tuple(
             name
             for name in state.get("active_tool_names", ())
-            if name in request.exposed_tool_names
-            and name not in resident
-            and name not in explicit
+            if name in request.exposed_tool_names and name not in resident and name not in explicit
         )
         state["tool_manifest"] = build_tool_manifest(
             tools=selected,
@@ -492,96 +507,165 @@ class AgentLoop:
             )
 
     async def _handle_overflow(
-        self, state: LoopState, exc: Exception,
+        self,
+        state: LoopState,
+        exc: Exception,
     ) -> tuple[ModelTurn | None, int]:
         """Reactive compaction on context overflow.  Returns (turn, 0) to retry, (None, _) if failed."""
         if state["memory_state"].reactive_compact_used:
-            append_loop_diagnostic(state, RuntimeDiagnostic.from_exception(
-                code="context_overflow", component="agent_loop", error=exc, severity="error"))
-            await self._fail(state, stop_reason="context_overflow",
+            append_loop_diagnostic(
+                state,
+                RuntimeDiagnostic.from_exception(
+                    code="context_overflow", component="agent_loop", error=exc, severity="error"
+                ),
+            )
+            await self._fail(
+                state,
+                stop_reason="context_overflow",
                 error=str(exc) or type(exc).__name__,
-                transition_reason="failed", checkpoint_reason="context_overflow")
+                transition_reason="failed",
+                checkpoint_reason="context_overflow",
+            )
             return None, 0
 
         state["memory_state"].reactive_compact_used = True
         compact = getattr(self._context_manager, "reactive_compact", None)
         if compact is None:
-            await self._fail(state, stop_reason="context_overflow",
+            await self._fail(
+                state,
+                stop_reason="context_overflow",
                 error="Context overflow, no reactive compaction available.",
-                transition_reason="failed", checkpoint_reason="context_overflow")
+                transition_reason="failed",
+                checkpoint_reason="context_overflow",
+            )
             return None, 0
 
         try:
             result = await _await_value(compact(state))
         except Exception as compact_exc:
-            await self._fail(state, stop_reason="context_compaction_failed",
+            await self._fail(
+                state,
+                stop_reason="context_compaction_failed",
                 error=str(compact_exc) or type(compact_exc).__name__,
-                transition_reason="failed", checkpoint_reason="context_compaction_failed")
+                transition_reason="failed",
+                checkpoint_reason="context_compaction_failed",
+            )
             return None, 0
 
-        append_loop_diagnostic(state, RuntimeDiagnostic.from_exception(
-            code="context_overflow_recovered", component="agent_loop", error=exc, severity="warning"))
+        append_loop_diagnostic(
+            state,
+            RuntimeDiagnostic.from_exception(
+                code="context_overflow_recovered", component="agent_loop", error=exc, severity="warning"
+            ),
+        )
 
         if not result.changed:
-            await self._fail(state, stop_reason="context_overflow",
+            await self._fail(
+                state,
+                stop_reason="context_overflow",
                 error="Reactive compaction did not free context space.",
-                transition_reason="failed", checkpoint_reason="context_overflow")
+                transition_reason="failed",
+                checkpoint_reason="context_overflow",
+            )
             return None, 0
 
         state["iteration"] = max(0, state["iteration"] - 1)
         tr = LoopTransition(
-            reason="compaction", iteration=state["iteration"],
-            detail={"mode": "reactive", "channels": list(result.channels),
-                "warnings": list(result.warnings)})
+            reason="compaction",
+            iteration=state["iteration"],
+            detail={"mode": "reactive", "channels": list(result.channels), "warnings": list(result.warnings)},
+        )
         replace_latest_transition(state, tr)
         await self._event_sink.emit(tr)
-        await self._emit_stream(_stream_compact_layer(
-            channels=list(result.channels), warnings=list(result.warnings),
-            run_id=state["run_config"].run_id, turn=state["iteration"]))
+        await self._emit_stream(
+            _stream_compact_layer(
+                channels=list(result.channels),
+                warnings=list(result.warnings),
+                turn_id=state["run_config"].turn_id,
+                iteration=state["iteration"],
+            )
+        )
         return None, 0  # caller will retry (turn is None, but state is still running)
 
     async def _handle_invalid_turn(
-        self, state: LoopState, exc: Exception, retries: int,
+        self,
+        state: LoopState,
+        exc: Exception,
+        retries: int,
     ) -> tuple[ModelTurn | None, int]:
         """Validation error or bad model output.  Retry or fail."""
         if isinstance(exc, FinishCandidateBuildError) and _has_tool_error(state):
-            append_loop_diagnostic(state, RuntimeDiagnostic.from_exception(
-                code="tool_error", component="agent_loop", error=exc, severity="error"))
-            await self._fail(state, stop_reason="tool_error",
+            append_loop_diagnostic(
+                state,
+                RuntimeDiagnostic.from_exception(
+                    code="tool_error", component="agent_loop", error=exc, severity="error"
+                ),
+            )
+            await self._fail(
+                state,
+                stop_reason="tool_error",
                 error=_latest_tool_error_message(state),
-                transition_reason="failed", checkpoint_reason="tool_error")
+                transition_reason="failed",
+                checkpoint_reason="tool_error",
+            )
             return None, retries
 
-        append_loop_diagnostic(state, RuntimeDiagnostic.from_exception(
-            code="invalid_model_turn", component="agent_loop", error=exc, severity="error"))
+        append_loop_diagnostic(
+            state,
+            RuntimeDiagnostic.from_exception(
+                code="invalid_model_turn", component="agent_loop", error=exc, severity="error"
+            ),
+        )
 
         if retries >= self._max_model_retries:
-            await self._fail(state, stop_reason="invalid_model_turn",
+            await self._fail(
+                state,
+                stop_reason="invalid_model_turn",
                 error=str(exc) or type(exc).__name__,
-                transition_reason="failed", checkpoint_reason="invalid_model_turn")
+                transition_reason="failed",
+                checkpoint_reason="invalid_model_turn",
+            )
             return None, retries
 
         retries += 1
-        await self._emit_stream(_stream_recovery(
-            strategy="model_retry",
-            detail=f"attempt={retries}, error={str(exc)[:200]}",
-            run_id=state["run_config"].run_id, turn=state["iteration"]))
-        await self._transition(state, reason="retry",
+        await self._emit_stream(
+            _stream_recovery(
+                strategy="model_retry",
+                detail=f"attempt={retries}, error={str(exc)[:200]}",
+                turn_id=state["run_config"].turn_id,
+                iteration=state["iteration"],
+            )
+        )
+        await self._transition(
+            state,
+            reason="retry",
             detail={"component": "model", "attempt": retries, "error": str(exc)},
-            checkpoint_reason="model_retry")
+            checkpoint_reason="model_retry",
+        )
         return None, retries  # caller will retry
 
     async def _handle_provider_error(
-        self, state: LoopState, exc: Exception, retries: int,
+        self,
+        state: LoopState,
+        exc: Exception,
+        retries: int,
     ) -> tuple[ModelTurn | None, int]:
         """Model provider failure.  Retry or fail."""
-        append_loop_diagnostic(state, RuntimeDiagnostic.from_exception(
-            code="model_provider_failed", component="agent_loop", error=exc, severity="error"))
+        append_loop_diagnostic(
+            state,
+            RuntimeDiagnostic.from_exception(
+                code="model_provider_failed", component="agent_loop", error=exc, severity="error"
+            ),
+        )
 
         if retries >= self._max_model_retries:
-            await self._fail(state, stop_reason="model_provider_failed",
+            await self._fail(
+                state,
+                stop_reason="model_provider_failed",
                 error=str(exc) or type(exc).__name__,
-                transition_reason="failed", checkpoint_reason="model_provider_failed")
+                transition_reason="failed",
+                checkpoint_reason="model_provider_failed",
+            )
             return None, retries
 
         retries += 1
@@ -595,7 +679,7 @@ class AgentLoop:
             }
             if exc.failed_generation:
                 feedback["failed_generation"] = exc.failed_generation
-            _append_canonical_messages(
+            _append_turn_messages(
                 state,
                 (
                     context_event_message(
@@ -604,23 +688,27 @@ class AgentLoop:
                     ),
                 ),
             )
-        await self._emit_stream(_stream_recovery(
-            strategy="model_retry",
-            detail=f"attempt={retries}, error={str(exc)[:200]}",
-            run_id=state["run_config"].run_id, turn=state["iteration"]))
-        await self._transition(state, reason="retry",
+        await self._emit_stream(
+            _stream_recovery(
+                strategy="model_retry",
+                detail=f"attempt={retries}, error={str(exc)[:200]}",
+                turn_id=state["run_config"].turn_id,
+                iteration=state["iteration"],
+            )
+        )
+        await self._transition(
+            state,
+            reason="retry",
             detail={"component": "model", "attempt": retries, "error": str(exc)},
-            checkpoint_reason="model_retry")
+            checkpoint_reason="model_retry",
+        )
         return None, retries  # caller will retry
 
     async def _execute_pending_tools(self, state: LoopState) -> bool:
-        run_id = state["run_config"].run_id
+        turn_id = state["run_config"].turn_id
         turn = state["iteration"]
         pending = tuple(state["pending_tool_calls"])
-        calls = tuple(
-            self._canonical_call(state, pending_call)
-            for pending_call in pending
-        )
+        calls = tuple(self._canonical_call(state, pending_call) for pending_call in pending)
         executable_calls, circuit_results = _guard_repeated_tool_failures(
             state,
             calls,
@@ -631,22 +719,16 @@ class AgentLoop:
                     tool_name=call.tool_name,
                     tool_id=call.tool_call_id,
                     input_preview=_tool_input_preview(call.arguments),
-                    run_id=run_id,
-                    turn=turn,
+                    turn_id=turn_id,
+                    iteration=turn,
                 )
             )
         context = replace(
             self._execution_context,
-            approved_tool_call_ids=frozenset(
-                state["approved_tool_call_ids"]
-            ),
-            denied_tool_call_ids=frozenset(
-                state["denied_tool_call_ids"]
-            ),
+            approved_tool_call_ids=frozenset(state["approved_tool_call_ids"]),
+            denied_tool_call_ids=frozenset(state["denied_tool_call_ids"]),
             active_skill_ids=(
-                frozenset()
-                if self._skill_runtime is None
-                else self._skill_runtime.validated_active_skill_ids(state)
+                frozenset() if self._skill_runtime is None else self._skill_runtime.validated_active_skill_ids(state)
             ),
         )
         executions = await self._tool_executor.execute_batch(
@@ -657,26 +739,14 @@ class AgentLoop:
         )
         for execution in executions:
             if execution.record is not None:
-                state["tool_execution_records"][
-                    execution.record.tool_call_id
-                ] = execution.record
+                state["tool_execution_records"][execution.record.tool_call_id] = execution.record
 
         approval_executions = tuple(
-            execution
-            for execution in executions
-            if execution.result.error_code == "approval_required"
+            execution for execution in executions if execution.result.error_code == "approval_required"
         )
-        approval_execution = (
-            approval_executions[0] if approval_executions else None
-        )
-        approval_ids = {
-            execution.result.tool_call_id
-            for execution in approval_executions
-        }
-        results_by_id = {
-            result.tool_call_id: result
-            for result in circuit_results
-        }
+        approval_execution = approval_executions[0] if approval_executions else None
+        approval_ids = {execution.result.tool_call_id for execution in approval_executions}
+        results_by_id = {result.tool_call_id: result for result in circuit_results}
         results_by_id.update(
             {
                 execution.result.tool_call_id: execution.result
@@ -684,17 +754,12 @@ class AgentLoop:
                 if execution.result.tool_call_id not in approval_ids
             }
         )
-        new_results = [
-            results_by_id[call.tool_call_id]
-            for call in calls
-            if call.tool_call_id in results_by_id
-        ]
+        new_results = [results_by_id[call.tool_call_id] for call in calls if call.tool_call_id in results_by_id]
         reconciliation_execution = next(
             (
                 execution
                 for execution in executions
-                if execution.record is not None
-                and execution.record.requires_reconciliation
+                if execution.record is not None and execution.record.requires_reconciliation
             ),
             None,
         )
@@ -702,24 +767,15 @@ class AgentLoop:
         if reconciliation_execution is not None:
             pending_ids.add(reconciliation_execution.result.tool_call_id)
         state["pending_tool_calls"] = [
-            PendingToolCall(plan=item.plan, status="pending")
-            for item in pending
-            if item.tool_call_id in pending_ids
+            PendingToolCall(plan=item.plan, status="pending") for item in pending if item.tool_call_id in pending_ids
         ]
 
-        observable_results = [
-            result
-            for result in new_results
-            if result.tool_name != "update_plan"
-        ]
+        observable_results = [result for result in new_results if result.tool_name != "update_plan"]
         batch = self._observation_extractor.extract(
             observable_results,
             seen_tool_call_ids=list(self._observed_tool_call_ids),
         )
-        self._observed_tool_call_ids.update(
-            observation.tool_call_id
-            for observation in batch.structured_observations
-        )
+        self._observed_tool_call_ids.update(observation.tool_call_id for observation in batch.structured_observations)
         self._merge_observations(state, batch)
         self._record_plan_observations(state, batch)
 
@@ -733,7 +789,7 @@ class AgentLoop:
             state["tool_results"],
             new_results,
         )
-        _append_canonical_messages(
+        _append_turn_messages(
             state,
             tuple(tool_result_message(result) for result in new_results),
         )
@@ -744,16 +800,13 @@ class AgentLoop:
                     _stream_tool_use_error(
                         tool_id=tool_result.tool_call_id,
                         error=tool_result.error_message or "Unknown error",
-                        run_id=run_id,
-                        turn=turn,
+                        turn_id=turn_id,
+                        iteration=turn,
                     )
                 )
                 if tool_result.error_code == _REPEATED_TOOL_FAILURE_CODE:
                     failure_count = tool_result.metadata.get("failure_count", 0)
-                    detail = (
-                        f"tool={tool_result.tool_name}, "
-                        f"matching_failures={failure_count}"
-                    )
+                    detail = f"tool={tool_result.tool_name}, matching_failures={failure_count}"
                     append_loop_diagnostic(
                         state,
                         RuntimeDiagnostic(
@@ -767,8 +820,8 @@ class AgentLoop:
                         _stream_recovery(
                             strategy="tool_failure_circuit_breaker",
                             detail=detail,
-                            run_id=run_id,
-                            turn=turn,
+                            turn_id=turn_id,
+                            iteration=turn,
                         )
                     )
             else:
@@ -778,8 +831,8 @@ class AgentLoop:
                         tool_id=tool_result.tool_call_id,
                         result=_tool_result_text(tool_result)[:500],
                         details=_tool_result_event_details(tool_result),
-                        run_id=run_id,
-                        turn=turn,
+                        turn_id=turn_id,
+                        iteration=turn,
                     )
                 )
 
@@ -788,18 +841,13 @@ class AgentLoop:
                 _stream_plan_updated(
                     plan=plan,
                     event=event,
-                    run_id=run_id,
-                    turn=turn,
+                    turn_id=turn_id,
+                    iteration=turn,
                 )
             )
 
         if approval_execution is not None:
-            approval_call = next(
-                call
-                for call in calls
-                if call.tool_call_id
-                == approval_execution.result.tool_call_id
-            )
+            approval_call = next(call for call in calls if call.tool_call_id == approval_execution.result.tool_call_id)
             request = _approval_request(
                 approval_execution.result,
                 approval_call,
@@ -852,17 +900,13 @@ class AgentLoop:
         self._record_metrics(state, new_results)
 
         circuit_remained_open = not executions and any(
-            result.metadata.get("circuit_already_open") is True
-            for result in circuit_results
+            result.metadata.get("circuit_already_open") is True for result in circuit_results
         )
         if circuit_remained_open:
             await self._fail(
                 state,
                 stop_reason=_REPEATED_TOOL_FAILURE_CODE,
-                error=(
-                    "The model repeated an identical tool call after the "
-                    "failure circuit opened."
-                ),
+                error=("The model repeated an identical tool call after the failure circuit opened."),
                 transition_reason="failed",
                 checkpoint_reason=_REPEATED_TOOL_FAILURE_CODE,
             )
@@ -889,7 +933,7 @@ class AgentLoop:
             current = state["plan_state"].agent_plan
             if current is None:
                 current, events = self._plan_tracker.initialize_task(
-                    task=state["task"]
+                    task=state["current_message"],
                 )
                 self._append_plan_events(state, events)
             steps = [
@@ -942,12 +986,8 @@ class AgentLoop:
         )
         manifest = state.get("tool_manifest")
         origin = plan.origin or ToolCallOrigin(
-            request_id=f"{state['run_config'].run_id}:initial",
-            toolset_revision=(
-                manifest.toolset_revision
-                if manifest is not None
-                else "tools_initial"
-            ),
+            request_id=f"{state['run_config'].turn_id}:initial",
+            toolset_revision=(manifest.toolset_revision if manifest is not None else "tools_initial"),
             exposed_tool_names=exposed,
         )
         call = ToolCall(
@@ -1015,34 +1055,18 @@ class AgentLoop:
         if not isinstance(prev, ToolCallMetrics):
             prev = ToolCallMetrics()
 
-        native = sum(1 for tr in new_results
-                     if tr.tool_name in _NATIVE_TOOL_SET)
+        native = sum(1 for tr in new_results if tr.tool_name in _NATIVE_TOOL_SET)
         deferred = sum(
             1
             for result in new_results
-            if result.tool_name not in _NATIVE_TOOL_SET
-            and not result.tool_name.startswith("mcp__")
+            if result.tool_name not in _NATIVE_TOOL_SET and not result.tool_name.startswith("mcp__")
         )
-        mcp_calls = sum(1 for tr in new_results
-                        if tr.tool_name.startswith("mcp__"))
-        native_err = sum(1 for tr in new_results
-                         if tr.tool_name in _NATIVE_TOOL_SET and tr.is_error)
-        mcp_err = sum(1 for tr in new_results
-                      if tr.tool_name.startswith("mcp__") and tr.is_error)
-        durations = {
-            trace.tool_call_id: trace.duration_ms
-            for trace in self._tool_executor.traces
-        }
-        native_lat = sum(
-            durations.get(tr.tool_call_id, 0.0)
-            for tr in new_results
-            if tr.tool_name in _NATIVE_TOOL_SET
-        )
-        mcp_lat = sum(
-            durations.get(tr.tool_call_id, 0.0)
-            for tr in new_results
-            if tr.tool_name.startswith("mcp__")
-        )
+        mcp_calls = sum(1 for tr in new_results if tr.tool_name.startswith("mcp__"))
+        native_err = sum(1 for tr in new_results if tr.tool_name in _NATIVE_TOOL_SET and tr.is_error)
+        mcp_err = sum(1 for tr in new_results if tr.tool_name.startswith("mcp__") and tr.is_error)
+        durations = {trace.tool_call_id: trace.duration_ms for trace in self._tool_executor.traces}
+        native_lat = sum(durations.get(tr.tool_call_id, 0.0) for tr in new_results if tr.tool_name in _NATIVE_TOOL_SET)
+        mcp_lat = sum(durations.get(tr.tool_call_id, 0.0) for tr in new_results if tr.tool_name.startswith("mcp__"))
 
         metrics = prev.model_copy(
             update={
@@ -1064,14 +1088,16 @@ class AgentLoop:
             f"mcp={metrics.mcp_calls}/{metrics.mcp_errors}err "
             f"lat={metrics.native_latency_ms_total:.0f}/{metrics.mcp_latency_ms_total:.0f}ms"
         )
-        state["runtime_diagnostics"] = [*state["runtime_diagnostics"],
+        state["runtime_diagnostics"] = [
+            *state["runtime_diagnostics"],
             RuntimeDiagnostic(
                 code="tool_call_metrics",
                 component="AgentLoop",
                 message=msg[:500],
                 severity="warning",
                 degraded=False,
-            )][-20:]
+            ),
+        ][-20:]
 
     async def _evaluate_finish(
         self,
@@ -1118,6 +1144,17 @@ class AgentLoop:
         candidate: str,
         outcome: StopHookOutcome,
     ) -> None:
+        transcript = state["turn_transcript"]
+        if (
+            not transcript
+            or transcript[-1].role != "assistant"
+            or transcript[-1].content != candidate
+            or transcript[-1].tool_calls
+        ):
+            _append_turn_messages(
+                state,
+                (ModelMessage(role="assistant", content=candidate),),
+            )
         state["status"] = "completed"
         state["finish_state"].final_answer = candidate
         state["finish_state"].final_output = outcome.final_output
@@ -1139,7 +1176,7 @@ class AgentLoop:
         )
         await self._emit_stream(
             _stream_loop_end(
-                run_id=state["run_config"].run_id,
+                turn_id=state["run_config"].turn_id,
                 reason=outcome.code,
                 total_turns=state["iteration"],
             )
@@ -1181,7 +1218,7 @@ class AgentLoop:
         # ── 流式事件：loop 结束 ──
         await self._emit_stream(
             _stream_loop_end(
-                run_id=state["run_config"].run_id,
+                turn_id=state["run_config"].turn_id,
                 reason=stop_reason,
                 total_turns=state["iteration"],
             )
@@ -1214,13 +1251,13 @@ class AgentLoop:
             await self._emit_stream(
                 _stream_human_input_required(
                     request=request,
-                    run_id=state["run_config"].run_id,
-                    turn=state["iteration"],
+                    turn_id=state["run_config"].turn_id,
+                    iteration=state["iteration"],
                 )
             )
         await self._emit_stream(
             _stream_loop_end(
-                run_id=state["run_config"].run_id,
+                turn_id=state["run_config"].turn_id,
                 reason=str(transition_reason),
                 total_turns=state["iteration"],
             )
@@ -1256,9 +1293,7 @@ class AgentLoop:
         plan = state["plan_state"].agent_plan
         if plan is None:
             return
-        work_calls = [
-            call for call in turn.tool_calls if call.tool_name != "update_plan"
-        ]
+        work_calls = [call for call in turn.tool_calls if call.tool_name != "update_plan"]
         if not work_calls:
             return
         updated, events = self._plan_tracker.record_decision_progress(
@@ -1331,18 +1366,11 @@ def _guard_repeated_tool_failures(
         if not failures:
             executable.append(call)
             continue
-        failure_limit = (
-            _MAX_RETRYABLE_IDENTICAL_FAILURES
-            if all(result.retryable for result in failures)
-            else 1
-        )
+        failure_limit = _MAX_RETRYABLE_IDENTICAL_FAILURES if all(result.retryable for result in failures) else 1
         if len(failures) < failure_limit:
             executable.append(call)
             continue
-        already_open = any(
-            result.error_code == _REPEATED_TOOL_FAILURE_CODE
-            for result in failures
-        )
+        already_open = any(result.error_code == _REPEATED_TOOL_FAILURE_CODE for result in failures)
         blocked.append(
             ToolResult(
                 tool_call_id=call.tool_call_id,
@@ -1382,10 +1410,7 @@ def _matching_tool_failures_since_recovery(
 
 
 def _same_tool_invocation(left: ToolCall, right: ToolCall) -> bool:
-    return (
-        left.tool_name == right.tool_name
-        and left.arguments == right.arguments
-    )
+    return left.tool_name == right.tool_name and left.arguments == right.arguments
 
 
 def _merge_keyed[T](existing: list[T], additions: list[T]) -> list[T]:
@@ -1431,11 +1456,7 @@ def _latest_tool_error_message(state: LoopState) -> str:
 def _tool_result_text(result: ToolResult) -> str:
     if result.structured_content is not None:
         return str(result.structured_content)
-    return "\n".join(
-        str(block.data.get("text", ""))
-        for block in result.content
-        if block.type == "text"
-    )
+    return "\n".join(str(block.data.get("text", "")) for block in result.content if block.type == "text")
 
 
 def _tool_result_event_details(result: ToolResult) -> dict[str, Any]:
@@ -1444,11 +1465,7 @@ def _tool_result_event_details(result: ToolResult) -> dict[str, Any]:
     file_path = result.metadata.get("file_path")
     diff = result.metadata.get("diff")
     diff_truncated = result.metadata.get("diff_truncated")
-    if (
-        not isinstance(file_path, str)
-        or not isinstance(diff, str)
-        or type(diff_truncated) is not bool
-    ):
+    if not isinstance(file_path, str) or not isinstance(diff, str) or type(diff_truncated) is not bool:
         return {}
     return {
         "file_path": file_path,
@@ -1470,8 +1487,7 @@ _SENSITIVE_ARGUMENT_PARTS = (
 
 def _tool_input_preview(arguments: Mapping[str, object]) -> str:
     items = [
-        f"{str(key)[:80]}={_preview_value(value, key=str(key), depth=0)}"
-        for key, value in list(arguments.items())[:8]
+        f"{str(key)[:80]}={_preview_value(value, key=str(key), depth=0)}" for key, value in list(arguments.items())[:8]
     ]
     return ", ".join(items)[:500]
 
@@ -1484,16 +1500,12 @@ def _preview_value(value: object, *, key: str, depth: int) -> str:
         return "<nested>"
     if isinstance(value, Mapping):
         rendered = ", ".join(
-            f"{str(child_key)[:40]}: "
-            f"{_preview_value(child, key=str(child_key), depth=depth + 1)}"
+            f"{str(child_key)[:40]}: {_preview_value(child, key=str(child_key), depth=depth + 1)}"
             for child_key, child in list(value.items())[:5]
         )
         return "{" + rendered + "}"
     if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
-        rendered = ", ".join(
-            _preview_value(item, key=key, depth=depth + 1)
-            for item in list(value)[:5]
-        )
+        rendered = ", ".join(_preview_value(item, key=key, depth=depth + 1) for item in list(value)[:5])
         return "[" + rendered + "]"
     text = str(value).replace("\n", " ")
     return repr(text[:120]) if isinstance(value, str) else text[:120]
@@ -1519,23 +1531,13 @@ def _approval_request(
         args_preview = _run_command_approval_preview(
             call.arguments,
             cwd=cwd if isinstance(cwd, str) else None,
-            execution_mode=(
-                execution_mode
-                if isinstance(execution_mode, str)
-                else "restricted_sandbox"
-            ),
+            execution_mode=(execution_mode if isinstance(execution_mode, str) else "restricted_sandbox"),
             network_requested=network_requested,
         )
         if approval_scope == "network":
-            question = (
-                "Allow network access for this run_command invocation? "
-                f"{reason}"
-            )
+            question = f"Allow network access for this run_command invocation? {reason}"
         else:
-            question = (
-                "Allow run_command to execute once in restricted_sandbox "
-                f"mode? {reason}"
-            )
+            question = f"Allow run_command to execute once in restricted_sandbox mode? {reason}"
             if network_requested:
                 question += " Network access is not included in this approval."
     return HumanInputRequest(
@@ -1578,17 +1580,8 @@ def _run_command_approval_preview(
         cwd or str(arguments.get("working_dir", ".")),
         ensure_ascii=False,
     )
-    network_text = (
-        "requested (separate approval required)"
-        if network_requested
-        else "disabled"
-    )
-    return (
-        f"command: {command_text}\n"
-        f"cwd: {cwd_text}\n"
-        f"network: {network_text}\n"
-        f"execution mode: {execution_mode}"
-    )
+    network_text = "requested (separate approval required)" if network_requested else "disabled"
+    return f"command: {command_text}\ncwd: {cwd_text}\nnetwork: {network_text}\nexecution mode: {execution_mode}"
 
 
 def _reconciliation_request(
@@ -1599,16 +1592,13 @@ def _reconciliation_request(
         request_id=f"hir_{uuid4().hex[:12]}",
         kind="tool_reconciliation",
         question=(
-            f"Tool {result.tool_name} has an unknown external outcome; "
-            "choose how to reconcile it before continuing."
+            f"Tool {result.tool_name} has an unknown external outcome; choose how to reconcile it before continuing."
         ),
         context={
             "tool_call_id": result.tool_call_id,
             "tool_name": result.tool_name,
             "operation_id": None if record is None else record.operation_id,
-            "execution_status": (
-                None if record is None else record.status.value
-            ),
+            "execution_status": (None if record is None else record.status.value),
         },
         options=["mark_completed", "mark_failed"],
     )
@@ -1617,36 +1607,30 @@ def _reconciliation_request(
 # ── 流式事件 helper ──────────────────────────────────────
 
 
-def _stream_turn_start(*, run_id: str, turn: int) -> Any:
-    from rag.agent.streaming.events import EventType, StreamEvent, next_seq
-
+def _stream_turn_start(*, turn_id: str, iteration: int) -> StreamEvent:
     return StreamEvent(
         type=EventType.TURN_START,
-        run_id=run_id,
-        turn=turn,
-        seq=next_seq(),
+        turn_id=turn_id,
+        iteration=iteration,
+        sequence=next_sequence(),
     )
 
 
-def _stream_turn_end(*, run_id: str, turn: int, stop_reason: str) -> Any:
-    from rag.agent.streaming.events import EventType, StreamEvent, next_seq
-
+def _stream_turn_end(*, turn_id: str, iteration: int, stop_reason: str) -> StreamEvent:
     return StreamEvent(
         type=EventType.TURN_END,
-        run_id=run_id,
-        turn=turn,
-        seq=next_seq(),
+        turn_id=turn_id,
+        iteration=iteration,
+        sequence=next_sequence(),
         data={"stop_reason": stop_reason},
     )
 
 
-def _stream_loop_end(*, run_id: str, reason: str, total_turns: int) -> Any:
-    from rag.agent.streaming.events import EventType, StreamEvent, next_seq
-
+def _stream_loop_end(*, turn_id: str, reason: str, total_turns: int) -> StreamEvent:
     return StreamEvent(
         type=EventType.LOOP_END,
-        run_id=run_id,
-        seq=next_seq(),
+        turn_id=turn_id,
+        sequence=next_sequence(),
         data={"reason": reason, "total_turns": total_turns},
     )
 
@@ -1656,16 +1640,14 @@ def _stream_tool_use_start(
     tool_name: str,
     tool_id: str,
     input_preview: str,
-    run_id: str,
-    turn: int,
-) -> Any:
-    from rag.agent.streaming.events import EventType, StreamEvent, next_seq
-
+    turn_id: str,
+    iteration: int,
+) -> StreamEvent:
     return StreamEvent(
         type=EventType.TOOL_USE_START,
-        run_id=run_id,
-        turn=turn,
-        seq=next_seq(),
+        turn_id=turn_id,
+        iteration=iteration,
+        sequence=next_sequence(),
         span_id=f"tool:{tool_id}",
         data={
             "tool_name": tool_name,
@@ -1678,21 +1660,19 @@ def _stream_tool_use_start(
 def _stream_human_input_required(
     *,
     request: HumanInputRequest,
-    run_id: str,
-    turn: int,
-) -> Any:
-    from rag.agent.streaming.events import EventType, StreamEvent, next_seq
-
+    turn_id: str,
+    iteration: int,
+) -> StreamEvent:
     return StreamEvent(
         type=EventType.HUMAN_INPUT_REQUIRED,
-        run_id=run_id,
-        turn=turn,
-        seq=next_seq(),
+        turn_id=turn_id,
+        iteration=iteration,
+        sequence=next_sequence(),
         data={
             "request_id": request.request_id,
             "kind": request.kind,
             "question": request.question,
-            "tool_calls": [
+            "tool_calls": tuple(
                 {
                     "tool_call_id": item.tool_call_id,
                     "approval_id": item.approval_id,
@@ -1701,7 +1681,7 @@ def _stream_human_input_required(
                     "reason": item.reason,
                 }
                 for item in request.tool_calls
-            ],
+            ),
         },
     )
 
@@ -1711,13 +1691,11 @@ def _stream_tool_use_result(
     tool_name: str,
     tool_id: str,
     result: str,
-    details: Mapping[str, Any] | None = None,
-    run_id: str,
-    turn: int,
-) -> Any:
-    from rag.agent.streaming.events import EventType, StreamEvent, next_seq
-
-    data: dict[str, Any] = {
+    details: Mapping[str, JsonValue] | None = None,
+    turn_id: str,
+    iteration: int,
+) -> StreamEvent:
+    data: dict[str, JsonValue] = {
         "tool_name": tool_name,
         "tool_id": tool_id,
         "result": result,
@@ -1726,9 +1704,9 @@ def _stream_tool_use_result(
         data["details"] = dict(details)
     return StreamEvent(
         type=EventType.TOOL_USE_RESULT,
-        run_id=run_id,
-        turn=turn,
-        seq=next_seq(),
+        turn_id=turn_id,
+        iteration=iteration,
+        sequence=next_sequence(),
         span_id=f"tool:{tool_id}",
         data=data,
     )
@@ -1738,16 +1716,14 @@ def _stream_plan_updated(
     *,
     plan: AgentPlan,
     event: PlanEvent,
-    run_id: str,
-    turn: int,
-) -> Any:
-    from rag.agent.streaming.events import EventType, StreamEvent, next_seq
-
+    turn_id: str,
+    iteration: int,
+) -> StreamEvent:
     return StreamEvent(
         type=EventType.PLAN_UPDATED,
-        run_id=run_id,
-        turn=turn,
-        seq=next_seq(),
+        turn_id=turn_id,
+        iteration=iteration,
+        sequence=next_sequence(),
         data={
             "plan": plan.model_dump(mode="json"),
             "event": event.model_dump(mode="json"),
@@ -1755,42 +1731,42 @@ def _stream_plan_updated(
     )
 
 
-def _stream_tool_use_error(*, tool_id: str, error: str, run_id: str, turn: int) -> Any:
-    from rag.agent.streaming.events import EventType, StreamEvent, next_seq
-
+def _stream_tool_use_error(*, tool_id: str, error: str, turn_id: str, iteration: int) -> StreamEvent:
     return StreamEvent(
         type=EventType.TOOL_USE_ERROR,
-        run_id=run_id,
-        turn=turn,
-        seq=next_seq(),
+        turn_id=turn_id,
+        iteration=iteration,
+        sequence=next_sequence(),
         span_id=f"tool:{tool_id}",
         data={"tool_id": tool_id, "error": error},
     )
 
 
-def _stream_compact_layer(*, channels: list[str], warnings: list[str], run_id: str, turn: int) -> Any:
-    from rag.agent.streaming.events import EventType, StreamEvent, next_seq
-
+def _stream_compact_layer(
+    *,
+    channels: list[str],
+    warnings: list[str],
+    turn_id: str,
+    iteration: int,
+) -> StreamEvent:
     return StreamEvent(
         type=EventType.COMPACT_LAYER,
-        run_id=run_id,
-        turn=turn,
-        seq=next_seq(),
+        turn_id=turn_id,
+        iteration=iteration,
+        sequence=next_sequence(),
         data={
-            "channels": channels,
-            "warnings": warnings,
+            "channels": tuple(channels),
+            "warnings": tuple(warnings),
         },
     )
 
 
-def _stream_recovery(*, strategy: str, detail: str, run_id: str, turn: int) -> Any:
-    from rag.agent.streaming.events import EventType, StreamEvent, next_seq
-
+def _stream_recovery(*, strategy: str, detail: str, turn_id: str, iteration: int) -> StreamEvent:
     return StreamEvent(
         type=EventType.RECOVERY,
-        run_id=run_id,
-        turn=turn,
-        seq=next_seq(),
+        turn_id=turn_id,
+        iteration=iteration,
+        sequence=next_sequence(),
         data={"strategy": strategy, "detail": detail},
     )
 

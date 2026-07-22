@@ -101,8 +101,8 @@ class MemoryExtractor:
 
         # Write memories (with dedup check)
         written: list[str] = []
-        run_id = state.get("run_config", {})
-        run_id_str = getattr(run_id, "run_id", "unknown") if run_id else "unknown"
+        turn_config = state.get("run_config", {})
+        turn_id = getattr(turn_config, "turn_id", "unknown") if turn_config else "unknown"
 
         for memory in extracted:
             # Check for similar existing memories
@@ -122,7 +122,7 @@ class MemoryExtractor:
                 # Write new memory
                 memory.metadata["created"] = datetime.now(UTC).isoformat()
                 memory.metadata["updated"] = datetime.now(UTC).isoformat()
-                memory.metadata["source_run_id"] = run_id_str
+                memory.metadata["source_turn_id"] = turn_id
                 if store.write_memory(memory):
                     written.append(memory.name)
                 else:

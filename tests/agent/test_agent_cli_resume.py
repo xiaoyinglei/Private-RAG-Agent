@@ -1,134 +1,67 @@
 from __future__ import annotations
 
-from contextlib import asynccontextmanager
 from pathlib import Path
 from uuid import uuid4
 
 import pytest
 import typer
 
+from agent_runtime.result import (
+    AgentPause,
+    AgentResult,
+    AgentToolSummary,
+    AgentUsage,
+)
 from rag.agent import cli
-from rag.agent.cli import _build_resume_response
-from rag.agent.core.human_input import HumanInputRequest, ToolCallSummary
-from rag.agent.service import AgentRunResult
 
 
-def test_build_resume_response_approves_pending_tool_ids() -> None:
-    request = HumanInputRequest(
-        request_id="hir_test",
-        kind="tool_approval",
-        question="approve?",
-        tool_calls=[
-            ToolCallSummary(
-                tool_call_id="tc_one",
-                tool_name="write_tool",
-                args_preview="data='one'",
-            ),
-            ToolCallSummary(
-                tool_call_id="tc_two",
-                tool_name="write_tool",
-                args_preview="data='two'",
-            ),
-        ],
+def _result(
+    *,
+    turn_id: str,
+    status: str = "done",
+    answer: str | None = None,
+    pause: AgentPause | None = None,
+) -> AgentResult:
+    return AgentResult(
+        answer=answer,
+        status=status,  # type: ignore[arg-type]
+        files=(),
+        tool_calls=(),
+        evidence=(),
+        citations=(),
+        usage=AgentUsage(),
+        diagnostics=(),
+        turn_id=turn_id,
+        stop_reason=None,
+        pause=pause,
+        workspace_path=None,
+        groundedness=False,
+        insufficient_evidence=False,
+        plan=None,
+        plan_events=(),
     )
 
-    response = _build_resume_response(request, "allow_once")
 
-    assert response.request_id == "hir_test"
-    assert response.decision == "allow_once"
-    assert response.approved_tool_call_ids == ["tc_one", "tc_two"]
-    assert response.denied_tool_call_ids == []
-
-
-def test_build_resume_response_denies_pending_tool_ids() -> None:
-    request = HumanInputRequest(
-        request_id="hir_test",
-        kind="tool_approval",
-        question="approve?",
-        tool_calls=[
-            ToolCallSummary(
-                tool_call_id="tc_one",
-                tool_name="write_tool",
-                args_preview="data='one'",
-            )
-        ],
-    )
-
-    response = _build_resume_response(request, "deny")
-
-    assert response.approved_tool_call_ids == []
-    assert response.denied_tool_call_ids == ["tc_one"]
-
-
-def test_build_resume_response_uses_scoped_approval_id() -> None:
-    request = HumanInputRequest(
-        request_id="hir_network",
-        kind="tool_approval",
-        question="approve network?",
-        tool_calls=[
-            ToolCallSummary(
-                tool_call_id="tc_command",
-                approval_id="tc_command::network",
-                tool_name="run_command",
-                args_preview="command: curl https://example.com",
-            )
-        ],
-    )
-
-    response = _build_resume_response(request, "allow_once")
-
-    assert response.approved_tool_call_ids == ["tc_command::network"]
-
-
-def test_build_resume_response_rejects_unknown_decision() -> None:
-    request = HumanInputRequest(
-        request_id="hir_test",
-        kind="tool_approval",
-        question="approve?",
-    )
-
-    with pytest.raises(ValueError):
-        _build_resume_response(request, "unknown")
-
-
-def test_agent_resume_closes_service_after_result(
+def test_agent_resume_uses_public_facade_and_stable_result(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    closed: list[bool] = []
+    resumed: list[tuple[str, str, object]] = []
     facade_options: list[dict[str, object]] = []
 
-    class _Service:
-        async def resume_turn(
+    class _Facade:
+        async def aresume(
             self,
-            *,
             turn_id: str,
             action: str,
-            user_input: str | None,
-        ) -> AgentRunResult:
+            *,
+            user_input: str | None = None,
+            event_sink: object,
+        ) -> AgentResult:
             assert action == "allow_once"
             assert user_input is None
-            return AgentRunResult(
-                run_id=turn_id,
-                thread_id=turn_id,
-                session_id=str(uuid4()),
-                status="done",
-                final_answer="resumed",
-            )
-
-    class _RuntimeFacade:
-        @asynccontextmanager
-        async def _open_product_runtime(self, **kwargs: object):
-            assert isinstance(kwargs.get("stream_sink"), cli._CLIToolEventDisplay)
-            try:
-                yield _Service()
-            finally:
-                closed.append(True)
-
-    class _Facade:
-        def _agent_for_turn(self, turn_id: str) -> _RuntimeFacade:
-            assert turn_id
-            return _RuntimeFacade()
+            resumed.append((turn_id, action, event_sink))
+            return _result(turn_id=turn_id, answer="resumed")
 
     def create_facade(**kwargs: object) -> _Facade:
         facade_options.append(kwargs)
@@ -143,11 +76,12 @@ def test_agent_resume_closes_service_after_result(
         action="allow_once",
     )
 
-    assert closed == [True]
+    assert len(resumed) == 1
+    assert resumed[0][:2] == (turn_id, "allow_once")
+    assert isinstance(resumed[0][2], cli._CLIToolEventDisplay)
     assert facade_options == [
         {
             "checkpoint_db": tmp_path / "agent.sqlite",
-            "vector_dsn": None,
         }
     ]
 
@@ -157,46 +91,34 @@ def test_agent_resume_without_action_prints_pending_recovery_info(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    request = HumanInputRequest(
+    request = AgentPause(
         request_id="hir_pending",
         kind="tool_approval",
         question="Allow the command?",
-        tool_calls=[
-            ToolCallSummary(
+        tool_calls=(
+            AgentToolSummary(
                 tool_call_id="tc_pending",
                 tool_name="run_command",
                 args_preview="command='pytest'",
                 risk_level="medium",
                 reason="Runs local tests",
-            )
-        ],
-        options=["allow_once", "deny", "abort"],
+            ),
+        ),
+        options=("allow_once", "deny", "abort"),
     )
     resumed: list[bool] = []
 
-    class _Service:
-        async def apending_human_input_request(
+    class _Facade:
+        async def apending_input(
             self,
-            *,
-            run_id: str,
-        ) -> HumanInputRequest:
-            assert run_id == turn_id
+            passed_turn_id: str,
+        ) -> AgentPause:
+            assert passed_turn_id == turn_id
             return request
 
-        async def resume_turn(self, **_kwargs: object) -> AgentRunResult:
+        async def aresume(self, **_kwargs: object) -> AgentResult:
             resumed.append(True)
             raise AssertionError("inspection must not mutate the Turn")
-
-    class _RuntimeFacade:
-        @asynccontextmanager
-        async def _open_product_runtime(self, **kwargs: object):
-            assert isinstance(kwargs.get("stream_sink"), cli._CLIToolEventDisplay)
-            yield _Service()
-
-    class _Facade:
-        def _agent_for_turn(self, passed_turn_id: str) -> _RuntimeFacade:
-            assert passed_turn_id == turn_id
-            return _RuntimeFacade()
 
     monkeypatch.setattr(cli, "_create_agent_facade", lambda **_kwargs: _Facade())
     turn_id = str(uuid4())
@@ -224,20 +146,13 @@ def test_agent_resume_without_pending_request_offers_continue(
 ) -> None:
     turn_id = str(uuid4())
 
-    class _Service:
-        async def apending_human_input_request(self, *, run_id: str) -> None:
-            assert run_id == turn_id
-            raise KeyError("no pending human input")
-
-    class _RuntimeFacade:
-        @asynccontextmanager
-        async def _open_product_runtime(self, **_kwargs: object):
-            yield _Service()
-
     class _Facade:
-        def _agent_for_turn(self, passed_turn_id: str) -> _RuntimeFacade:
+        async def apending_input(
+            self,
+            passed_turn_id: str,
+        ) -> None:
             assert passed_turn_id == turn_id
-            return _RuntimeFacade()
+            return None
 
     monkeypatch.setattr(cli, "_create_agent_facade", lambda **_kwargs: _Facade())
 
@@ -279,73 +194,53 @@ def test_interactive_terminal_fails_closed_for_ci_or_non_tty(
 
 
 @pytest.mark.anyio
-async def test_inline_approval_resumes_on_the_same_runtime(
+async def test_inline_approval_uses_public_execution_chain(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    request = HumanInputRequest(
+    pause = AgentPause(
         request_id="hir_inline",
         kind="tool_approval",
         question="approve?",
-        tool_calls=[
-            ToolCallSummary(
+        tool_calls=(
+            AgentToolSummary(
                 tool_call_id="tc_inline",
                 tool_name="run_command",
                 args_preview="command='pytest'",
-            )
-        ],
+            ),
+        ),
+        options=("allow_once", "deny", "abort"),
     )
     calls: list[str] = []
     displays: list[object] = []
 
-    class _Service:
-        async def chat(self, run_request: object) -> AgentRunResult:
-            calls.append("chat")
-            return AgentRunResult(
-                run_id=run_request.run_id,
-                thread_id=run_request.run_id,
-                session_id=str(uuid4()),
-                status="paused",
-                human_input_request=request,
-                needs_user_input="approve?",
-            )
-
-        async def resume_turn(
-            self,
-            *,
-            turn_id: str,
-            action: str,
-            user_input: str | None,
-        ) -> AgentRunResult:
-            del action, user_input
-            calls.append("resume")
-            return AgentRunResult(
-                run_id=turn_id,
-                thread_id=turn_id,
-                session_id=str(uuid4()),
-                status="done",
-                final_answer="continued",
-            )
+    turn_id = str(uuid4())
 
     class _Facade:
-        workspace_path = tmp_path
+        async def arun(self, task: str, **kwargs: object) -> AgentResult:
+            assert task == "run tests"
+            displays.append(kwargs["event_sink"])
+            calls.append("execute")
+            return _result(turn_id=turn_id, status="paused", pause=pause)
 
-        @asynccontextmanager
-        async def _open_product_runtime(self, **kwargs: object):
-            calls.append("open")
-            displays.append(kwargs.get("stream_sink"))
-            try:
-                yield _Service()
-            finally:
-                calls.append("close")
+        async def aresume(
+            self,
+            turn_id: str,
+            action: str,
+            *,
+            user_input: str | None = None,
+            event_sink: object,
+        ) -> AgentResult:
+            assert action == "allow_once"
+            assert user_input is None
+            displays.append(event_sink)
+            calls.append("resume")
+            return _result(turn_id=turn_id, answer="continued")
 
     monkeypatch.setattr(
         cli,
         "_handle_pause",
-        lambda _result, _run_id: _build_resume_response(
-            request,
-            "allow_once",
-        ),
+        lambda _result: "allow_once",
     )
 
     display = cli._CLIToolEventDisplay()
@@ -353,12 +248,11 @@ async def test_inline_approval_resumes_on_the_same_runtime(
         _Facade(),
         task="run tests",
         files=(),
-        turn_id=str(uuid4()),
         max_tokens_total=None,
         interactive_approval=True,
         event_display=display,
     )
 
     assert result.answer == "continued"
-    assert calls == ["open", "chat", "resume", "close"]
-    assert displays == [display]
+    assert calls == ["execute", "resume"]
+    assert displays == [display, display]

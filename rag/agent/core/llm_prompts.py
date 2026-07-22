@@ -18,7 +18,7 @@ def build_loop_turn_prompt(
     ``allowed_tools`` is the already-selected model-facing tool-name list.
     """
 
-    task = state.get("task", "")
+    current_message = state["current_message"]
     iteration = state.get("iteration", 0)
     tool_results = state.get("tool_results", [])
     ok_count = sum(1 for result in tool_results if getattr(result, "status", None) == "ok")
@@ -29,14 +29,14 @@ def build_loop_turn_prompt(
         budget_text = "unbounded" if budget_remaining < 0 else str(budget_remaining)
         budget_line = f"\nBudget remaining: {budget_text}"
 
-    return f"""Task: {task}
+    return f"""Current user message: {current_message}
 Iteration: {iteration}
 Tools completed: {ok_count} ok, {error_count} failed
 Available tools: {", ".join(visible_names) if visible_names else "none"}{budget_line}
 
-Analyze the task and current context, then decide your next action.
+Analyze the current message and conversation context, then decide your next action.
 
-If a tool can advance the task → return action="execute" with concrete tool_calls.
+If a tool can advance the request → return action="execute" with concrete tool_calls.
 For simple questions, greetings, literal reply requests, or tasks answerable
 from the current conversation → return action="finish" without calling tools.
 If you have enough context to answer → return action="finish" with a complete

@@ -2,38 +2,30 @@
 
 from typing import TYPE_CHECKING
 
-from agent_runtime.models import (
-    ModelCatalog,
-    ModelControlPlane,
-    ModelPolicy,
-    ModelPolicyError,
-    ModelRuntimeSpec,
-    ModelSessionState,
-    ModelSpec,
-)
+from agent_runtime.knowledge import RAGKnowledgeConfig
+from agent_runtime.models import ModelSpec
 from agent_runtime.result import AgentResult, AgentUsage
+from rag.agent.streaming.events import EventType, StreamEvent
 
 if TYPE_CHECKING:
-    from agent_runtime.agent import Agent
+    from agent_runtime.agent import Agent, AgentEventSink
 
 
 def __getattr__(name: str) -> object:
-    if name == "Agent":
-        from agent_runtime.agent import Agent
+    if name in {"Agent", "AgentEventSink"}:
+        from agent_runtime.agent import Agent, AgentEventSink
 
-        return Agent
+        return {"Agent": Agent, "AgentEventSink": AgentEventSink}[name]
     raise AttributeError(f"module 'agent_runtime' has no attribute {name!r}")
 
 
 __all__ = [
     "Agent",
+    "AgentEventSink",
     "AgentResult",
     "AgentUsage",
-    "ModelCatalog",
-    "ModelControlPlane",
-    "ModelPolicy",
-    "ModelPolicyError",
-    "ModelRuntimeSpec",
-    "ModelSessionState",
+    "EventType",
     "ModelSpec",
+    "RAGKnowledgeConfig",
+    "StreamEvent",
 ]

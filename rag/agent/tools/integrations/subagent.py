@@ -92,7 +92,7 @@ class SubagentOutput(BaseModel):
     )
     citations: list[SubagentCitation] = Field(default_factory=list, max_length=20)
     status: Literal["done", "failed", "paused"] = "failed"
-    child_run_id: str = Field(default="", max_length=500)
+    child_turn_id: str = Field(default="", max_length=500)
     stop_reason: str | None = Field(default=None, max_length=1000)
 
 
@@ -167,7 +167,7 @@ def _normalize_subagent_output(raw: object) -> NormalizedToolOutput:
         error_code=error_code,
         error_message=validated.conclusion[:2000] if is_error else None,
         retryable=validated.status == "paused",
-        metadata={"child_run_id": validated.child_run_id},
+        metadata={"child_turn_id": validated.child_turn_id},
     )
 
 

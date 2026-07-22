@@ -7,7 +7,7 @@ from uuid import uuid4
 
 from pydantic import BaseModel, ValidationError
 
-from rag.agent.core.context import RunRegistry
+from rag.agent.core.context import TurnRegistry
 from rag.agent.core.llm_context import AgentLLMContextAssembler
 from rag.agent.core.llm_registry import ModelResolver
 from rag.agent.core.output_models import (
@@ -79,9 +79,9 @@ class ModelStructuredOutputFinalizer:
         if output_model is None:
             raise ValueError("AgentRuntimePolicy.output_model is not configured")
         try:
-            handles = RunRegistry.get(state["run_config"].run_id)
+            handles = TurnRegistry.get(state["run_config"].turn_id)
         except KeyError as exc:
-            raise RuntimeError(f"Runtime handles missing for run_id={state['run_config'].run_id}") from exc
+            raise RuntimeError(f"Runtime handles missing for turn_id={state['run_config'].turn_id}") from exc
 
         feedback: str | None = None
         last_errors: list[dict[str, object]] = []
@@ -100,7 +100,7 @@ class ModelStructuredOutputFinalizer:
                     prompt=assembled.prompt,
                     schema=output_model,
                     ledger=handles.llm_budget_ledger,
-                    lease_id=(f"{state['run_config'].run_id}:final_output:{attempt_index}:{uuid4().hex}"),
+                    lease_id=(f"{state['run_config'].turn_id}:final_output:{attempt_index}:{uuid4().hex}"),
                     kwargs=self._kwargs,
                 )
             except Exception as exc:

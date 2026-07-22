@@ -12,6 +12,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Literal
+from uuid import uuid4
 
 DEFAULT_MODEL = "groq_gpt_oss_120b"
 RESIDENT_TOOL_NAMES = (
@@ -42,9 +43,7 @@ class SmokeCase:
     auto_approve: bool = False
     expect_origin_retained: bool = False
     install_hidden_mcp: bool = False
-    provider: Literal["openai-compatible", "mlx", "ollama"] = (
-        "openai-compatible"
-    )
+    provider: Literal["openai-compatible", "mlx", "ollama"] = "openai-compatible"
     workspace_files: Mapping[str, str] = field(default_factory=dict)
     workspace_assertions: Mapping[str, str] = field(default_factory=dict)
     max_turns: int = 12
@@ -100,9 +99,7 @@ class _FakeTurn:
 
 
 def build_cases() -> tuple[SmokeCase, ...]:
-    service_source = (
-        Path(__file__).parents[1] / "rag" / "agent" / "service.py"
-    ).read_text(encoding="utf-8")
+    service_source = (Path(__file__).parents[1] / "rag" / "agent" / "service.py").read_text(encoding="utf-8")
     return (
         SmokeCase(
             name="direct_answer",
@@ -154,10 +151,7 @@ def build_cases() -> tuple[SmokeCase, ...]:
         ),
         SmokeCase(
             name="repeated_failure_circuit",
-            task=(
-                "Try missing.txt until the runtime circuit opens, then answer "
-                "circuit_open."
-            ),
+            task=("Try missing.txt until the runtime circuit opens, then answer circuit_open."),
             expected_answer_exact="circuit_open",
             expected_tools=("read_file", "read_file", "read_file"),
             expected_initial_tools=("read_file",),
@@ -169,10 +163,7 @@ def build_cases() -> tuple[SmokeCase, ...]:
         ),
         SmokeCase(
             name="hidden_mcp_disabled",
-            task=(
-                "Without calling a tool, output exactly hidden_disabled and no "
-                "other text."
-            ),
+            task=("Without calling a tool, output exactly hidden_disabled and no other text."),
             expected_answer_exact="hidden_disabled",
             expected_initial_tools=RESIDENT_TOOL_NAMES,
             forbidden_tools=("find_tools", "mcp__docs__search"),
@@ -197,16 +188,11 @@ def build_cases() -> tuple[SmokeCase, ...]:
             auto_approve=True,
             expect_origin_retained=True,
             workspace_files={"approval.txt": "before\n"},
-            workspace_assertions={
-                "input_files/approval.txt": "approved\n"
-            },
+            workspace_assertions={"input_files/approval.txt": "approved\n"},
         ),
         SmokeCase(
             name="cache_usage",
-            task=(
-                "Without calling a tool, output exactly cache_visible and no "
-                "other text."
-            ),
+            task=("Without calling a tool, output exactly cache_visible and no other text."),
             expected_answer_exact="cache_visible",
             expected_initial_tools=RESIDENT_TOOL_NAMES,
         ),
@@ -360,10 +346,7 @@ class _FakeGenerator:
         **kwargs: object,
     ) -> object:
         del messages, kwargs
-        visible = tuple(
-            str(item["function"]["name"])
-            for item in tools
-        )
+        visible = tuple(str(item["function"]["name"]) for item in tools)
         turn = self._next_turn(visible)
         raw_calls = []
         if turn.tool_name is not None:
@@ -426,9 +409,7 @@ class _FakeGenerator:
         turn = self._turns.pop(0)
         self.visible_tools.append(visible)
         if turn.tool_name is not None and turn.tool_name not in visible:
-            raise AssertionError(
-                f"fake model tool {turn.tool_name!r} was not visible: {visible!r}"
-            )
+            raise AssertionError(f"fake model tool {turn.tool_name!r} was not visible: {visible!r}")
         return turn
 
     def _provider_result(self, value: object) -> object:
@@ -538,16 +519,17 @@ async def run_case(
     from agent_runtime.models import ModelControlPlane
     from agent_runtime.result import AgentResult
     from agent_runtime.runtime.builder import build_agent_service
-    from rag.agent.core.human_input import HumanInputResponse
     from rag.agent.core.model_request import (
         canonical_json_text,
         tool_definition_payload,
     )
     from rag.agent.service import AgentRunRequest
     from rag.agent.tools.selection import select_tools
+    from rag.agent.turns import RuntimeBinding, TurnStore
 
-    run_id = f"delivery_smoke_{case.name}"
+    turn_id = str(uuid4())
     service = None
+    turn_store: TurnStore | None = None
     service_workspace = None
     temp_dir: tempfile.TemporaryDirectory[str] | None = None
     generator = _FakeGenerator(case) if fake_model else None
@@ -557,30 +539,26 @@ async def run_case(
             if generator is not None
             else ModelControlPlane.from_env(initial_model_id=model)
         )
+        turn_store = TurnStore()
         service = build_agent_service(
             None,
-            agent_type="generic",
             model_alias=model,
             model_control_plane=model_registry,  # type: ignore[arg-type]
-            mcp_tools=(
-                _hidden_mcp_tools() if case.install_hidden_mcp else ()
-            ),
+            mcp_tools=(_hidden_mcp_tools() if case.install_hidden_mcp else ()),
+            turn_store=turn_store,
+            runtime_binding=RuntimeBinding(model_alias=model),
         )
         service_workspace = service._workspace
         if service_workspace is None:
             raise RuntimeError("agent service did not create a workspace")
-        temp_dir = tempfile.TemporaryDirectory(prefix=f"{run_id}_")
+        temp_dir = tempfile.TemporaryDirectory(prefix=f"delivery_smoke_{case.name}_")
         source_path = Path(temp_dir.name)
         _write_workspace_files(source_path, case.workspace_files)
         workspace_path = service_workspace.root
         request = AgentRunRequest(
-            task=case.task,
-            run_id=run_id,
-            thread_id=run_id,
-            input_files=[
-                str(source_path / relative)
-                for relative in case.workspace_files
-            ],
+            message=case.task,
+            turn_id=turn_id,
+            input_files=[str(source_path / relative) for relative in case.workspace_files],
             max_turns=case.max_turns,
             tools=case.tools,
             disabled_tools=case.disabled_tools,
@@ -601,45 +579,33 @@ async def run_case(
             disabled_names=initial_state["disabled_tool_names"],
         )
         schema_bytes = len(
-            canonical_json_text(
-                tuple(
-                    tool_definition_payload(tool.definition)
-                    for tool in initial_tools
-                )
-            ).encode("utf-8")
+            canonical_json_text(tuple(tool_definition_payload(tool.definition) for tool in initial_tools)).encode(
+                "utf-8"
+            )
         )
 
         result = await service.run(request)
         approvals = 0
         while result.status == "paused" and case.auto_approve and approvals < 5:
-            human_request = service.pending_human_input_request(run_id=run_id)
+            human_request = service.pending_human_input_request(turn_id=turn_id)
             if human_request.kind != "tool_approval":
                 break
-            result = await service.resume(
-                run_id=run_id,
-                workspace_path=result.workspace_path,
-                response=HumanInputResponse(
-                    request_id=human_request.request_id,
-                    decision="allow_once",
-                    approved_tool_call_ids=[
-                        item.tool_call_id for item in human_request.tool_calls
-                    ],
-                ),
+            result = await service.resume_turn(
+                turn_id=turn_id,
+                action="allow_once",
             )
             approvals += 1
 
         origin_revisions, serializer_revision = await _checkpoint_evidence(
             service,
-            run_id=run_id,
+            turn_id=turn_id,
         )
         records = tuple(result.model_call_records)
-        public_result = AgentResult.from_internal(result)
+        public_result = AgentResult._from_internal(result)
         tool_results = tuple(result.tool_results)
-        tools = tuple(item.tool_name for item in tool_results)
+        tools = tuple(item.tool_name for item in public_result.tool_calls)
         origin_retained = (
-            None
-            if not origin_revisions or not records
-            else origin_revisions[0] == records[0].toolset_revision
+            None if not origin_revisions or not records else origin_revisions[0] == records[0].toolset_revision
         )
         assertion_error = _workspace_assertion_error(
             workspace_path,
@@ -651,44 +617,30 @@ async def run_case(
             else (tuple(tool.definition.name for tool in initial_tools),)
         )
         diagnostics = (
-            *_diagnostic_lines(result.runtime_diagnostics),
+            *_diagnostic_lines(public_result.diagnostics),
             *_model_record_lines(records),
         )
         candidate = SmokeResult(
             name=case.name,
             passed=True,
-            status=result.status,
-            answer=result.final_answer,
+            status=public_result.status,
+            answer=public_result.answer,
             tools=tools,
             visible_tools=visible_tools,
-            workspace_path=result.workspace_path,
-            stop_reason=result.stop_reason,
+            workspace_path=public_result.workspace_path,
+            stop_reason=public_result.stop_reason,
             diagnostics=diagnostics,
             schema_bytes=schema_bytes,
-            tool_errors=_tool_error_lines(tool_results),
+            tool_errors=_tool_error_lines(public_result.tool_calls),
             request_ids=tuple(record.request_id for record in records),
-            prompt_revisions=tuple(
-                record.prompt_revision for record in records
-            ),
-            toolset_revisions=tuple(
-                record.toolset_revision for record in records
-            ),
-            provider_wire_hashes=tuple(
-                record.provider_wire_hash for record in records
-            ),
-            provider_wire_kind=(
-                case.provider
-                if case.provider in {"mlx", "ollama"}
-                else "openai"
-            ),
+            prompt_revisions=tuple(record.prompt_revision for record in records),
+            toolset_revisions=tuple(record.toolset_revision for record in records),
+            provider_wire_hashes=tuple(record.provider_wire_hash for record in records),
+            provider_wire_kind=(case.provider if case.provider in {"mlx", "ollama"} else "openai"),
             serializer_revision=serializer_revision,
             usage_source=public_result.usage.usage_source,
-            cache_read_input_tokens=(
-                public_result.usage.cache_read_input_tokens
-            ),
-            cache_write_input_tokens=(
-                public_result.usage.cache_write_input_tokens
-            ),
+            cache_read_input_tokens=(public_result.usage.cache_read_input_tokens),
+            cache_write_input_tokens=(public_result.usage.cache_write_input_tokens),
             approval_count=approvals,
             origin_toolset_revisions=origin_revisions,
             origin_retained=origin_retained,
@@ -704,20 +656,16 @@ async def run_case(
             status="error",
             answer=None,
             tools=(),
-            visible_tools=(
-                tuple(generator.visible_tools) if generator is not None else ()
-            ),
+            visible_tools=(tuple(generator.visible_tools) if generator is not None else ()),
             workspace_path=None,
             error=f"{type(exc).__name__}: {exc}",
-            provider_wire_kind=(
-                case.provider
-                if case.provider in {"mlx", "ollama"}
-                else "openai"
-            ),
+            provider_wire_kind=(case.provider if case.provider in {"mlx", "ollama"} else "openai"),
         )
     finally:
         if service is not None:
             await service.aclose()
+        if turn_store is not None:
+            turn_store.close()
         if temp_dir is not None:
             temp_dir.cleanup()
         if service_workspace is not None and service_workspace.is_temporary:
@@ -727,7 +675,7 @@ async def run_case(
 async def _checkpoint_evidence(
     service: Any,
     *,
-    run_id: str,
+    turn_id: str,
 ) -> tuple[tuple[str, ...], str]:
     """Read canonical v2 evidence without materializing the whole loop state."""
 
@@ -737,20 +685,18 @@ async def _checkpoint_evidence(
         decode_tool_checkpoint,
     )
 
-    run_config = service._checkpoint_lookup_config(run_id)
     checkpoint_tuple = await service._checkpointer.aget_tuple(
         {
             "configurable": {
-                "thread_id": run_config.thread_id,
+                # LangGraph calls its storage key thread_id; the domain ID is a Turn.
+                "thread_id": turn_id,
                 "checkpoint_ns": LOOP_CHECKPOINT_NAMESPACE,
             }
         }
     )
     if checkpoint_tuple is None:
         return (), ""
-    raw_state = checkpoint_tuple.checkpoint["channel_values"].get(
-        LOOP_STATE_CHANNEL
-    )
+    raw_state = checkpoint_tuple.checkpoint["channel_values"].get(LOOP_STATE_CHANNEL)
     if not isinstance(raw_state, Mapping):
         return (), ""
     raw_tool_checkpoint = raw_state.get("tool_checkpoint")
@@ -758,10 +704,7 @@ async def _checkpoint_evidence(
         return (), ""
     tool_checkpoint = decode_tool_checkpoint(raw_tool_checkpoint)
     return (
-        tuple(
-            call.origin.toolset_revision
-            for call in tool_checkpoint.tool_calls
-        ),
+        tuple(call.origin.toolset_revision for call in tool_checkpoint.tool_calls),
         tool_checkpoint.manifest.provider_serializer_revision,
     )
 
@@ -795,14 +738,8 @@ def _validate_result(case: SmokeCase, result: SmokeResult) -> str:
         return f"expected status done, got {result.status}"
     raw_answer = result.answer or ""
     answer = raw_answer.strip().casefold()
-    if (
-        case.expected_answer_exact is not None
-        and answer != case.expected_answer_exact.strip().casefold()
-    ):
-        return (
-            f"expected exact answer {case.expected_answer_exact!r}, "
-            f"got {result.answer!r}"
-        )
+    if case.expected_answer_exact is not None and answer != case.expected_answer_exact.strip().casefold():
+        return f"expected exact answer {case.expected_answer_exact!r}, got {result.answer!r}"
     for expected in case.expected_answer_contains:
         if expected.casefold() not in answer:
             return f"answer missing {expected!r}: {result.answer!r}"
@@ -815,18 +752,10 @@ def _validate_result(case: SmokeCase, result: SmokeResult) -> str:
         if not result.visible_tools:
             return "model request did not expose a tool surface"
         if result.visible_tools[0] != case.expected_initial_tools:
-            return (
-                f"expected initial tools {case.expected_initial_tools!r}, "
-                f"got {result.visible_tools[0]!r}"
-            )
+            return f"expected initial tools {case.expected_initial_tools!r}, got {result.visible_tools[0]!r}"
     for expected_error in case.expected_tool_errors:
-        if not any(
-            line.startswith(expected_error) for line in result.tool_errors
-        ):
-            return (
-                f"expected tool error {expected_error!r}, "
-                f"got {result.tool_errors!r}"
-            )
+        if not any(line.startswith(expected_error) for line in result.tool_errors):
+            return f"expected tool error {expected_error!r}, got {result.tool_errors!r}"
     if case.expect_origin_retained and result.origin_retained is not True:
         return "originating toolset revision was not retained across resume"
     if not result.workspace_assertions_passed:
@@ -847,9 +776,7 @@ def _result_content_kinds(results: Sequence[object]) -> tuple[str, ...]:
             kinds.append("structured")
             continue
         content = tuple(getattr(result, "content", ()) or ())
-        kinds.append(
-            str(getattr(content[0], "type", "empty")) if content else "empty"
-        )
+        kinds.append(str(getattr(content[0], "type", "empty")) if content else "empty")
     return tuple(kinds)
 
 
@@ -887,11 +814,7 @@ def _tool_error_lines(tool_results: Sequence[object]) -> tuple[str, ...]:
         tool_name = str(getattr(result, "tool_name", "tool"))
         code = str(getattr(result, "error_code", None) or "tool_error")
         message = str(getattr(result, "error_message", None) or "")
-        lines.append(
-            f"{tool_name}:{code}: {message}"
-            if message
-            else f"{tool_name}:{code}"
-        )
+        lines.append(f"{tool_name}:{code}: {message}" if message else f"{tool_name}:{code}")
     return tuple(lines)
 
 
@@ -910,12 +833,7 @@ def _format_result(result: SmokeResult, *, verbose: bool) -> list[str]:
 
     lines.append(f"  schema_bytes: {result.schema_bytes}")
     if result.visible_tools:
-        lines.append(
-            "  visible_tools: "
-            + " | ".join(
-                ",".join(names) or "-" for names in result.visible_tools
-            )
-        )
+        lines.append("  visible_tools: " + " | ".join(",".join(names) or "-" for names in result.visible_tools))
     for request_id, prompt, toolset, wire_hash in zip(
         result.request_ids,
         result.prompt_revisions,
@@ -923,15 +841,9 @@ def _format_result(result: SmokeResult, *, verbose: bool) -> list[str]:
         result.provider_wire_hashes,
         strict=True,
     ):
-        lines.append(
-            "  revision: "
-            f"request={request_id} prompt={prompt} "
-            f"toolset={toolset} wire_hash={wire_hash}"
-        )
+        lines.append(f"  revision: request={request_id} prompt={prompt} toolset={toolset} wire_hash={wire_hash}")
     lines.append(
-        "  provider: "
-        f"wire_kind={result.provider_wire_kind} "
-        f"serializer={result.serializer_revision or 'unknown'}"
+        f"  provider: wire_kind={result.provider_wire_kind} serializer={result.serializer_revision or 'unknown'}"
     )
     lines.append(
         "  usage: "
@@ -960,15 +872,8 @@ async def run_matrix(
     fake_model: bool = False,
     only: set[str] | None = None,
 ) -> list[SmokeResult]:
-    cases = [
-        case
-        for case in build_cases()
-        if only is None or case.name in only
-    ]
-    return [
-        await run_case(case, model=model, fake_model=fake_model)
-        for case in cases
-    ]
+    cases = [case for case in build_cases() if only is None or case.name in only]
+    return [await run_case(case, model=model, fake_model=fake_model) for case in cases]
 
 
 def delivery_metric_evidence(
@@ -993,18 +898,12 @@ def delivery_metric_evidence(
     recovered = (
         recovery.passed
         and recovery.status == "done"
-        and any(
-            error.startswith("read_file:runner_failed:")
-            for error in recovery.tool_errors
-        )
+        and any(error.startswith("read_file:runner_failed:") for error in recovery.tool_errors)
     )
     circuit_recovered = (
         circuit.passed
         and circuit.status == "done"
-        and any(
-            error.startswith("read_file:repeated_tool_failure:")
-            for error in circuit.tool_errors
-        )
+        and any(error.startswith("read_file:repeated_tool_failure:") for error in circuit.tool_errors)
     )
     return DeliveryMetricEvidence(
         schema_bytes=cache.schema_bytes,
@@ -1033,10 +932,7 @@ def main() -> int:
     parser.add_argument(
         "--verbose",
         action="store_true",
-        help=(
-            "Print revisions, schema bytes, provider wire data, usage, "
-            "diagnostics, and tool errors."
-        ),
+        help=("Print revisions, schema bytes, provider wire data, usage, diagnostics, and tool errors."),
     )
     args = parser.parse_args()
 

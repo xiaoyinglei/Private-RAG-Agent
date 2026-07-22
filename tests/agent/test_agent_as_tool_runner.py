@@ -36,7 +36,7 @@ async def test_subagent_factory_is_an_ordinary_tool_and_normalizes_output() -> N
             conclusion="Child conclusion.",
             key_facts=["fact"],
             status="done",
-            child_run_id="child-1",
+            child_turn_id="child-1",
         )
 
     tool = create_subagent_tool(run)
@@ -52,7 +52,7 @@ async def test_subagent_factory_is_an_ordinary_tool_and_normalizes_output() -> N
     assert execution.result.structured_content["conclusion"] == (
         "Child conclusion."
     )
-    assert execution.result.metadata["child_run_id"] == "child-1"
+    assert execution.result.metadata["child_turn_id"] == "child-1"
 
 
 @pytest.mark.anyio
@@ -61,7 +61,7 @@ async def test_subagent_non_done_status_becomes_canonical_error_result() -> None
         return SubagentOutput(
             conclusion="Needs approval.",
             status="paused",
-            child_run_id="child-paused",
+            child_turn_id="child-paused",
         )
 
     tool = create_subagent_tool(run)

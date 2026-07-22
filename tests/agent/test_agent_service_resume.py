@@ -2,17 +2,14 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Mapping
+from pathlib import Path
 
 import pytest
 from langgraph.checkpoint.memory import MemorySaver
 
 from rag.agent.core.checkpointing import agent_checkpoint_serde
 from rag.agent.core.definition import AgentRuntimePolicy
-from rag.agent.core.human_input import (
-    HumanInputRequest,
-    HumanInputRequestIdMismatchError,
-    HumanInputResponse,
-)
+from rag.agent.core.human_input import HumanInputRequest
 from rag.agent.core.turn_contracts import ToolCallPlan
 from rag.agent.loop.state import LoopState, ModelTurnDraft
 from rag.agent.service import AgentRunRequest, AgentService
@@ -28,6 +25,12 @@ from rag.agent.tools.tool import (
     ToolEffect,
     json_schema_input,
 )
+from rag.agent.turns import (
+    RuntimeBinding,
+    TurnStatus,
+    TurnStore,
+)
+from rag.agent.workspace import open_workspace
 
 
 class _FinishProvider:
@@ -129,93 +132,104 @@ def _approval_id(request: HumanInputRequest) -> str:
 def _service(
     calls: list[str],
     *,
+    turn_store: TurnStore,
+    workspace_path: Path,
     checkpointer: MemorySaver | None = None,
     execution_revision: str = "remote-v1",
+    model_turn_provider: _FinishProvider | _SlowToolCallingProvider | None = None,
 ) -> AgentService:
     registry = ToolRegistry()
     registry.register(_tool(calls, execution_revision=execution_revision))
     return AgentService(
         definition=_definition(),
         tool_registry=registry,
-        model_turn_provider=_FinishProvider(),
+        model_turn_provider=model_turn_provider or _FinishProvider(),
         checkpointer=checkpointer,
+        workspace=open_workspace(workspace_path),
+        turn_store=turn_store,
+        runtime_binding=RuntimeBinding(workspace_path=str(workspace_path)),
     )
 
 
 async def _pause(
     service: AgentService,
     *,
-    run_id: str,
+    turn_store: TurnStore,
     value: str,
 ):
     call = ToolCallPlan.create("remote_write", {"value": value})
     result = await service.run(
         AgentRunRequest(
-            task="Run one remote write.",
-            run_id=run_id,
-            thread_id=run_id,
+            message="Run one remote write.",
             pending_tool_calls=[call],
-        )
+        ),
     )
     assert result.status == "paused"
     assert result.human_input_request is not None
+    assert turn_store.get_turn(result.turn_id).status is TurnStatus.PAUSED
     return call, result
 
 
 @pytest.mark.anyio
-async def test_default_checkpointer_resumes_on_same_service_without_replay() -> None:
+async def test_default_checkpointer_resumes_on_same_service_without_replay(
+    tmp_path: Path,
+) -> None:
     calls: list[str] = []
-    service = _service(calls)
-    _call, paused = await _pause(
+    turn_store = TurnStore(tmp_path / "agent.sqlite")
+    service = _service(
+        calls,
+        turn_store=turn_store,
+        workspace_path=tmp_path,
+    )
+    call, paused = await _pause(
         service,
-        run_id="resume-default",
+        turn_store=turn_store,
         value="once",
     )
+    assert _approval_id(paused.human_input_request) == call.tool_call_id
 
-    resumed = await service.resume(
-        run_id="resume-default",
-        response=HumanInputResponse(
-            request_id=paused.human_input_request.request_id,
-            decision="allow_once",
-            approved_tool_call_ids=[_approval_id(paused.human_input_request)],
-        ),
+    resumed = await service.resume_turn(
+        turn_id=paused.turn_id,
+        action="allow_once",
+        user_input=None,
     )
 
     assert resumed.status == "done"
     assert resumed.final_answer == "ran:once"
     assert calls == ["once"]
     assert resumed.tool_results[0].is_error is False
+    assert turn_store.get_turn(paused.turn_id).status is TurnStatus.COMPLETED
 
 
 @pytest.mark.anyio
-async def test_resume_latency_is_cumulative_across_approval_pause() -> None:
+async def test_resume_latency_is_cumulative_across_approval_pause(
+    tmp_path: Path,
+) -> None:
     calls: list[str] = []
     call = ToolCallPlan.create("remote_write", {"value": "timed"})
-    registry = ToolRegistry()
-    registry.register(_tool(calls))
-    service = AgentService(
-        definition=_definition(),
-        tool_registry=registry,
+    turn_store = TurnStore(tmp_path / "agent.sqlite")
+    service = _service(
+        calls,
+        turn_store=turn_store,
+        workspace_path=tmp_path,
         model_turn_provider=_SlowToolCallingProvider(call),
     )
 
     paused = await service.run(
         AgentRunRequest(
-            task="Run one remote write.",
-            run_id="resume-cumulative-latency",
-            thread_id="resume-cumulative-latency",
-        )
+            message="Run one remote write.",
+        ),
     )
     assert paused.status == "paused"
     assert paused.latency_profile is not None
+    assert paused.human_input_request is not None
+    assert _approval_id(paused.human_input_request) == call.tool_call_id
+    assert turn_store.get_turn(paused.turn_id).status is TurnStatus.PAUSED
 
-    resumed = await service.resume(
-        run_id="resume-cumulative-latency",
-        response=HumanInputResponse(
-            request_id=paused.human_input_request.request_id,
-            decision="allow_once",
-            approved_tool_call_ids=[_approval_id(paused.human_input_request)],
-        ),
+    resumed = await service.resume_turn(
+        turn_id=paused.turn_id,
+        action="allow_once",
+        user_input=None,
     )
 
     assert resumed.status == "done"
@@ -227,26 +241,37 @@ async def test_resume_latency_is_cumulative_across_approval_pause() -> None:
 
 
 @pytest.mark.anyio
-async def test_resume_uses_same_codec_across_service_boundary() -> None:
+async def test_resume_uses_same_codec_across_service_boundary(
+    tmp_path: Path,
+) -> None:
     checkpointer = MemorySaver(serde=agent_checkpoint_serde())
     calls: list[str] = []
-    first = _service(calls, checkpointer=checkpointer)
+    turn_store = TurnStore(tmp_path / "agent.sqlite")
+    first = _service(
+        calls,
+        turn_store=turn_store,
+        workspace_path=tmp_path,
+        checkpointer=checkpointer,
+    )
     _call, paused = await _pause(
         first,
-        run_id="resume-cross-service",
+        turn_store=turn_store,
         value="persisted",
     )
 
-    second = _service(calls, checkpointer=checkpointer)
-    pending = second.pending_human_input_request(run_id="resume-cross-service")
+    second = _service(
+        calls,
+        turn_store=turn_store,
+        workspace_path=tmp_path,
+        checkpointer=checkpointer,
+    )
+    pending = second.pending_human_input_request(turn_id=paused.turn_id)
     assert pending.request_id == paused.human_input_request.request_id
-    resumed = await second.resume(
-        run_id="resume-cross-service",
-        response=HumanInputResponse(
-            request_id=pending.request_id,
-            decision="allow_once",
-            approved_tool_call_ids=[_approval_id(pending)],
-        ),
+    assert _approval_id(pending) == _approval_id(paused.human_input_request)
+    resumed = await second.resume_turn(
+        turn_id=paused.turn_id,
+        action="allow_once",
+        user_input=None,
     )
 
     assert resumed.status == "done"
@@ -254,40 +279,42 @@ async def test_resume_uses_same_codec_across_service_boundary() -> None:
 
 
 @pytest.mark.anyio
-async def test_resume_preserves_request_max_turns_across_service_boundary() -> None:
+async def test_resume_preserves_request_max_turns_across_service_boundary(
+    tmp_path: Path,
+) -> None:
     checkpointer = MemorySaver(serde=agent_checkpoint_serde())
     calls: list[str] = []
     call = ToolCallPlan.create("remote_write", {"value": "bounded"})
-    registry = ToolRegistry()
-    registry.register(_tool(calls))
-    first = AgentService(
-        definition=_definition(),
-        tool_registry=registry,
-        model_turn_provider=_SlowToolCallingProvider(call),
+    turn_store = TurnStore(tmp_path / "agent.sqlite")
+    first = _service(
+        calls,
+        turn_store=turn_store,
+        workspace_path=tmp_path,
         checkpointer=checkpointer,
+        model_turn_provider=_SlowToolCallingProvider(call),
     )
 
     paused = await first.run(
         AgentRunRequest(
-            task="Use one model turn, then write.",
-            run_id="resume-max-turns",
-            thread_id="resume-max-turns",
+            message="Use one model turn, then write.",
             max_turns=1,
-        )
+        ),
     )
 
     assert paused.status == "paused"
     assert paused.iteration == 1
-    second = _service(calls, checkpointer=checkpointer)
-    resumed = await second.resume(
-        run_id="resume-max-turns",
-        response=HumanInputResponse(
-            request_id=paused.human_input_request.request_id,
-            decision="allow_once",
-            approved_tool_call_ids=[
-                _approval_id(paused.human_input_request)
-            ],
-        ),
+    assert paused.human_input_request is not None
+    assert _approval_id(paused.human_input_request) == call.tool_call_id
+    second = _service(
+        calls,
+        turn_store=turn_store,
+        workspace_path=tmp_path,
+        checkpointer=checkpointer,
+    )
+    resumed = await second.resume_turn(
+        turn_id=paused.turn_id,
+        action="allow_once",
+        user_input=None,
     )
 
     assert calls == ["bounded"]
@@ -297,53 +324,140 @@ async def test_resume_preserves_request_max_turns_across_service_boundary() -> N
 
 
 @pytest.mark.anyio
-async def test_changed_pending_tool_definition_requires_reconciliation() -> None:
+async def test_changed_pending_tool_definition_requires_reconciliation(
+    tmp_path: Path,
+) -> None:
     checkpointer = MemorySaver(serde=agent_checkpoint_serde())
     calls: list[str] = []
+    turn_store = TurnStore(tmp_path / "agent.sqlite")
     first = _service(
         calls,
+        turn_store=turn_store,
+        workspace_path=tmp_path,
         checkpointer=checkpointer,
         execution_revision="remote-v1",
     )
     _call, paused = await _pause(
         first,
-        run_id="resume-drift",
+        turn_store=turn_store,
         value="drifted",
     )
     second = _service(
         calls,
+        turn_store=turn_store,
+        workspace_path=tmp_path,
         checkpointer=checkpointer,
         execution_revision="remote-v2",
     )
 
-    result = await second.resume(
-        run_id="resume-drift",
-        response=HumanInputResponse(
-            request_id=paused.human_input_request.request_id,
-            decision="allow_once",
-        ),
+    result = await second.resume_turn(
+        turn_id=paused.turn_id,
+        action="allow_once",
+        user_input=None,
     )
 
     assert result.status == "paused"
     assert result.needs_user_input == "tool_definition_changed"
     assert result.human_input_request.kind == "tool_reconciliation"
+    reconciliation_request_id = result.human_input_request.request_id
     assert calls == []
+    assert turn_store.get_turn(paused.turn_id).status is TurnStatus.PAUSED
+
+    pending = await second.apending_human_input_request(turn_id=paused.turn_id)
+    assert pending.request_id == reconciliation_request_id
+    with pytest.raises(
+        ValueError,
+        match="only supports mark_failed or abort",
+    ):
+        await second.resume_turn(
+            turn_id=paused.turn_id,
+            action="mark_completed",
+            user_input=None,
+        )
+
+    resolved = await second.resume_turn(
+        turn_id=paused.turn_id,
+        action="mark_failed",
+        user_input=None,
+    )
+
+    assert resolved.status == "done"
+    assert calls == []
+    assert resolved.tool_results[-1].error_code == "reconciled_failed"
+    assert resolved.tool_results[-1].metadata["reconciled"] is True
+    assert turn_store.get_turn(paused.turn_id).status is TurnStatus.COMPLETED
 
 
 @pytest.mark.anyio
-async def test_resume_rejects_wrong_human_request_id() -> None:
-    service = _service([])
-    _call, _paused = await _pause(
+async def test_changed_pending_tool_definition_can_be_aborted(
+    tmp_path: Path,
+) -> None:
+    checkpointer = MemorySaver(serde=agent_checkpoint_serde())
+    calls: list[str] = []
+    turn_store = TurnStore(tmp_path / "agent.sqlite")
+    first = _service(
+        calls,
+        turn_store=turn_store,
+        workspace_path=tmp_path,
+        checkpointer=checkpointer,
+        execution_revision="remote-v1",
+    )
+    _call, paused = await _pause(
+        first,
+        turn_store=turn_store,
+        value="abort-drifted",
+    )
+    second = _service(
+        calls,
+        turn_store=turn_store,
+        workspace_path=tmp_path,
+        checkpointer=checkpointer,
+        execution_revision="remote-v2",
+    )
+    reconciliation = await second.resume_turn(
+        turn_id=paused.turn_id,
+        action="allow_once",
+        user_input=None,
+    )
+    assert reconciliation.human_input_request is not None
+    assert reconciliation.human_input_request.kind == "tool_reconciliation"
+
+    aborted = await second.resume_turn(
+        turn_id=paused.turn_id,
+        action="abort",
+        user_input=None,
+    )
+
+    assert aborted.status == "failed"
+    assert aborted.stop_reason == "user_aborted"
+    assert calls == []
+    assert turn_store.get_turn(paused.turn_id).status is TurnStatus.FAILED
+
+
+@pytest.mark.anyio
+async def test_resume_rejects_unsupported_tool_approval_action(
+    tmp_path: Path,
+) -> None:
+    turn_store = TurnStore(tmp_path / "agent.sqlite")
+    service = _service(
+        [],
+        turn_store=turn_store,
+        workspace_path=tmp_path,
+    )
+    _call, paused = await _pause(
         service,
-        run_id="resume-request-id",
+        turn_store=turn_store,
         value="x",
     )
 
-    with pytest.raises(HumanInputRequestIdMismatchError):
-        await service.resume(
-            run_id="resume-request-id",
-            response=HumanInputResponse(
-                request_id="wrong",
-                decision="deny",
-            ),
+    with pytest.raises(
+        ValueError,
+        match="supports allow_once, deny, or abort",
+    ):
+        await service.resume_turn(
+            turn_id=paused.turn_id,
+            action="continue",
+            user_input=None,
         )
+
+    assert turn_store.get_turn(paused.turn_id).status is TurnStatus.PAUSED

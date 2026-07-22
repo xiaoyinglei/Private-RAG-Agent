@@ -89,7 +89,7 @@ class AgentLLMContextAssembler:
                     build_loop_turn_prompt(
                         state,
                         budget_remaining=budget_remaining,
-                        allowed_tools=definition.allowed_tools,
+                        allowed_tools=definition.configured_tool_names,
                     ),
                 ),
             ],
@@ -202,7 +202,7 @@ class AgentLLMContextAssembler:
             self._required_section("system", definition.system_instructions),
             self._required_section(
                 "task",
-                f"{instructions}\n\nUser task:\n{state.get('task', '').strip()}",
+                f"{instructions}\n\nCurrent user message:\n{state['current_message'].strip()}",
             ),
         ]
         call_context = self._call_context(
@@ -374,13 +374,10 @@ class AgentLLMContextAssembler:
     @staticmethod
     def _empty_definition() -> AgentRuntimePolicy:
         empty_definition = AgentRuntimePolicy(
-            agent_type="context_only",
-            description="Context-only assembly",
             system_instructions="",
             core_tool_names=(),
             deferred_tool_names=(),
             max_iterations=10,
-            max_depth=2,
         )
         return empty_definition
 

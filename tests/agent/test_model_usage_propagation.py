@@ -25,7 +25,6 @@ from rag.agent.tools.tool import (
     json_schema_input,
 )
 from rag.schema.llm import LLMUsage
-from rag.schema.runtime import AccessPolicy
 
 
 def _tool() -> Tool:
@@ -64,8 +63,6 @@ def _registry() -> ToolRegistry:
 
 def _definition() -> AgentRuntimePolicy:
     return AgentRuntimePolicy.test_factory(
-        agent_type="usage_propagation",
-        description="Usage propagation.",
         system_prompt="Answer directly.",
         allowed_tools=["read_file"],
     )
@@ -98,10 +95,7 @@ class _UsageProvider:
 
 def _run_config(run_id: str) -> AgentRunConfig:
     return AgentRunConfig(
-        run_id=run_id,
-        thread_id=run_id,
-        max_depth=1,
-        access_policy=AccessPolicy.default(),
+        turn_id=run_id,
     )
 
 
@@ -129,9 +123,9 @@ async def test_provider_usage_reaches_checkpoint_internal_and_public_results() -
     )
 
     internal = await service.run(
-        AgentRunRequest(task="Answer.", run_id=run_id, thread_id=run_id)
+        AgentRunRequest(message="Answer.", turn_id=run_id)
     )
-    public = AgentResult.from_internal(internal)
+    public = AgentResult._from_internal(internal)
     loaded = await LangGraphCheckpointStore(
         checkpointer,
         run_config=_run_config(run_id),
@@ -176,12 +170,11 @@ async def test_estimated_usage_keeps_missing_cache_fields_unknown() -> None:
         model_turn_provider=_UsageProvider(usage),
     )
 
-    public = AgentResult.from_internal(
+    public = AgentResult._from_internal(
         await service.run(
             AgentRunRequest(
-                task="Answer.",
-                run_id="usage-estimated",
-                thread_id="usage-estimated",
+                message="Answer.",
+                turn_id="usage-estimated",
             )
         )
     )

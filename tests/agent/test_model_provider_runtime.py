@@ -21,7 +21,6 @@ from rag.agent.tools.tool import (
     ToolDefinition,
     json_schema_input,
 )
-from rag.schema.runtime import AccessPolicy
 
 
 def _tool() -> Tool:
@@ -64,12 +63,9 @@ def _policy() -> AgentRuntimePolicy:
 
 def _state():
     state = create_loop_state(
-        task="Answer.",
+        current_message="Answer.",
         run_config=AgentRunConfig(
-            run_id="provider-runtime",
-            thread_id="provider-runtime",
-            max_depth=1,
-            access_policy=AccessPolicy.default(),
+            turn_id="provider-runtime",
         ),
     )
     state["resident_tool_names"] = ["read_file"]
@@ -127,6 +123,4 @@ def test_non_strict_failure_records_diagnostic_and_falls_back() -> None:
     ).resolve(state)
 
     assert isinstance(provider, ResultDrivenModelTurnProvider)
-    assert state["runtime_diagnostics"][-1].code == (
-        "default_providers_initialization_failed"
-    )
+    assert state["runtime_diagnostics"][-1].code == ("default_providers_initialization_failed")

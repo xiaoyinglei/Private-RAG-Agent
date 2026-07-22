@@ -22,6 +22,7 @@ from rag.agent.core.model_request import (
     bind_model_call_record,
     build_model_request,
     build_stable_context,
+    split_turn_context,
     tool_definition_payload,
 )
 from rag.agent.core.runtime_diagnostics import AgentLatencyProfile
@@ -179,12 +180,16 @@ class LLMLoopModelTurnProvider:
             )
         )
         settings = self._model_settings(definition.model_selection)
+        initial_message, context_transcript = split_turn_context(
+            conversation_history=state["conversation_history"],
+            turn_transcript=state["turn_transcript"],
+        )
         context = build_stable_context(
             instructions=tuple(instructions),
             frozen_run_context=frozen_run_context,
-            initial_user_task=state["task"],
+            initial_user_task=initial_message,
             initial_memory=tuple(state.get("persistent_memories", ())),
-            transcript=tuple(state.get("canonical_transcript", ())),
+            transcript=context_transcript,
         )
         context_limit = (
             state["run_config"].max_context_tokens
@@ -199,7 +204,7 @@ class LLMLoopModelTurnProvider:
         )
         request = build_model_request(
             request_id=(
-                f"{state['run_config'].run_id}:turn:{state['iteration']}"
+                f"{state['run_config'].turn_id}:turn:{state['iteration']}"
             ),
             context=context,
             selected_tools=selected_tools,

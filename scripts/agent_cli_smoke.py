@@ -12,7 +12,6 @@ from pathlib import Path
 
 import click
 from typer.main import get_command
-from typer.testing import CliRunner
 
 from rag.agent.cli import (
     _CLIToolEventDisplay,
@@ -21,7 +20,6 @@ from rag.agent.cli import (
     agent_app,
 )
 from rag.agent.core.human_input import HumanInputRequest, ToolCallSummary
-from rag.agent.sessions import RuntimeBinding, SessionStore, TurnStatus
 from rag.agent.streaming.events import (
     EventType,
     StreamEvent,
@@ -29,6 +27,11 @@ from rag.agent.streaming.events import (
     text_delta,
     tool_use_error,
     tool_use_start,
+)
+from rag.agent.turns import (
+    RuntimeBinding,
+    TurnStatus,
+    TurnStore,
 )
 
 
@@ -76,21 +79,11 @@ async def _render_canonical_events() -> str:
                     "tool_name": "apply_patch",
                     "tool_id": "call_patch",
                     "result": "patched fixture.txt",
-                    "details": {
-                        "diff": (
-                            "--- a/fixture.txt\n"
-                            "+++ b/fixture.txt\n"
-                            "@@ -1 +1 @@\n"
-                            "-before\n"
-                            "+after\n"
-                        )
-                    },
+                    "details": {"diff": ("--- a/fixture.txt\n+++ b/fixture.txt\n@@ -1 +1 @@\n-before\n+after\n")},
                 },
             )
         )
-        await display.emit(
-            recovery_event("retry", "continued from persisted checkpoint")
-        )
+        await display.emit(recovery_event("retry", "continued from persisted checkpoint"))
         await display.emit(tool_use_start("read_file", "call_missing"))
         await display.emit(tool_use_error("call_missing", "file not found"))
         display.finish()
@@ -124,21 +117,20 @@ def _render_recovery_commands(turn_id: str, checkpoint_db: Path) -> str:
 
 
 def run_smoke() -> CLISmokeResult:
-    runner = CliRunner()
     checks: dict[str, bool] = {}
     with tempfile.TemporaryDirectory(prefix="agent_cli_smoke_") as temp_dir:
         root = Path(temp_dir)
         workspace = root / "workspace"
         workspace.mkdir()
         checkpoint_db = root / "agent.sqlite"
-        store = SessionStore(checkpoint_db)
-        session = store.create_session(
+        store = TurnStore(checkpoint_db)
+        turn = store.begin_turn(
+            "verify CLI projection",
             RuntimeBinding(
                 model_alias="smoke-model",
                 workspace_path=str(workspace.resolve()),
-            )
+            ),
         )
-        turn = store.begin_turn(session.session_id, "verify CLI projection")
         store.mark_terminal(turn.turn_id, TurnStatus.COMPLETED)
         store.close()
 
@@ -147,51 +139,35 @@ def run_smoke() -> CLISmokeResult:
             {
                 "text": "live text" in rendered,
                 "plan": (
-                    "计划 (revision 2)" in rendered
-                    and "✓ Inspect source" in rendered
-                    and "→ Verify CLI" in rendered
+                    "计划 (revision 2)" in rendered and "✓ Inspect source" in rendered and "→ Verify CLI" in rendered
                 ),
-                "tool_result": (
-                    "→ apply_patch" in rendered
-                    and "✓ apply_patch: patched fixture.txt" in rendered
-                ),
+                "tool_result": ("→ apply_patch" in rendered and "✓ apply_patch: patched fixture.txt" in rendered),
                 "tool_error": "✗ read_file: file not found" in rendered,
-                "diff": (
-                    "--- a/fixture.txt" in rendered
-                    and "+after" in rendered
-                ),
+                "diff": ("--- a/fixture.txt" in rendered and "+after" in rendered),
                 "recovery": "↻ 恢复: retry" in rendered,
             }
         )
 
         root_command = get_command(agent_app)
-        commands = (
-            root_command.commands
-            if isinstance(root_command, click.Group)
-            else {}
-        )
+        commands = root_command.commands if isinstance(root_command, click.Group) else {}
         resume_command = commands.get("resume")
         resume_options = {
             option
-            for parameter in (
-                () if resume_command is None else resume_command.params
-            )
+            for parameter in (() if resume_command is None else resume_command.params)
             if isinstance(parameter, click.Option)
             for option in (*parameter.opts, *parameter.secondary_opts)
         }
-        checks["command_surface"] = (
-            {"chat", "run", "resume", "model", "session"}
-            <= set(commands)
-            and {"--last", "--action"} <= resume_options
-        )
+        checks["command_surface"] = {"chat", "run", "resume", "model"} <= set(commands) and {
+            "--last",
+            "--action",
+        } <= resume_options
 
         slash_output = io.StringIO()
         with redirect_stdout(slash_output):
             _print_chat_help()
         slash_text = slash_output.getvalue()
         checks["interactive_commands"] = all(
-            command in slash_text
-            for command in ("/status", "/sessions", "/new", "/model", "/exit")
+            command in slash_text for command in ("/status", "/new", "/model", "/exit")
         )
 
         recovery_text = _render_recovery_commands(turn.turn_id, checkpoint_db)
@@ -199,83 +175,6 @@ def run_smoke() -> CLISmokeResult:
             "Allow patch?" in recovery_text
             and "Writes the workspace" in recovery_text
             and "--action allow_once" in recovery_text
-        )
-
-        listed = runner.invoke(
-            agent_app,
-            [
-                "session",
-                "list",
-                "--all",
-                "--checkpoint-db",
-                str(checkpoint_db),
-            ],
-        )
-        shown = runner.invoke(
-            agent_app,
-            [
-                "session",
-                "show",
-                session.session_id,
-                "--checkpoint-db",
-                str(checkpoint_db),
-            ],
-        )
-        archived = runner.invoke(
-            agent_app,
-            [
-                "session",
-                "archive",
-                session.session_id,
-                "--checkpoint-db",
-                str(checkpoint_db),
-            ],
-        )
-        unarchived = runner.invoke(
-            agent_app,
-            [
-                "session",
-                "unarchive",
-                session.session_id,
-                "--checkpoint-db",
-                str(checkpoint_db),
-            ],
-        )
-        deleted = runner.invoke(
-            agent_app,
-            [
-                "session",
-                "delete",
-                session.session_id,
-                "--yes",
-                "--checkpoint-db",
-                str(checkpoint_db),
-            ],
-        )
-        checks.update(
-            {
-                "session_list": (
-                    listed.exit_code == 0
-                    and session.session_id in listed.output
-                ),
-                "session_show": (
-                    shown.exit_code == 0
-                    and turn.turn_id in shown.output
-                    and "verify CLI projection" in shown.output
-                ),
-                "session_archive": (
-                    archived.exit_code == 0
-                    and "已归档" in archived.output
-                ),
-                "session_unarchive": (
-                    unarchived.exit_code == 0
-                    and "已恢复" in unarchived.output
-                ),
-                "session_delete": (
-                    deleted.exit_code == 0
-                    and "已删除" in deleted.output
-                ),
-            }
         )
 
     failures = tuple(name for name, passed in checks.items() if not passed)

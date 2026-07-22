@@ -150,7 +150,7 @@ screen -S rag_rerank_9092 -X quit >/dev/null 2>&1 || true
 
 ### 统一变量
 
-入库和 `agent run --knowledge ...` 必须使用同一套 `STORAGE_ROOT / VECTOR_DSN / VECTOR_PREFIX`。切换 embedding 模型或想重建干净索引时，换新的 `STORAGE_ROOT` 和 `VECTOR_PREFIX`。
+入库和 Agent 的 `RAGKnowledgeConfig` 必须指向同一套 `STORAGE_ROOT / VECTOR_PREFIX`。Milvus 连接信息只通过 `AGENT_VECTOR_DSN` 注入 Agent，不写入 knowledge config 或 Turn binding。切换 embedding 模型或想重建干净索引时，换新的 `STORAGE_ROOT` 和 `VECTOR_PREFIX`。
 
 ```bash
 cd "/Users/leixiaoying/LLM/RAG学习"
@@ -159,10 +159,18 @@ cd "/Users/leixiaoying/LLM/RAG学习"
 export INPUT_PATH="/absolute/path/to/one-file.docx"
 export INPUT_DIR="/absolute/path/to/private-docs"
 
-# 索引位置：同一批入库和显式 --knowledge 查询必须保持一致。
+# 索引位置：同一批入库和 knowledge config 必须保持一致。
 export STORAGE_ROOT="data/indexes/private_docs_v1"
 export VECTOR_DSN="http://127.0.0.1:19530"
 export VECTOR_PREFIX="private_docs_v1"
+export AGENT_VECTOR_DSN="$VECTOR_DSN"
+export AGENT_KNOWLEDGE_CONFIG="$STORAGE_ROOT/agent-knowledge.yaml"
+
+cat > "$AGENT_KNOWLEDGE_CONFIG" <<EOF
+storage_root: $STORAGE_ROOT
+vector_backend: milvus
+vector_collection_prefix: $VECTOR_PREFIX
+EOF
 
 # 复用常驻 embedding 服务，避免每条命令重新加载 embedding 模型。
 export RAG_EMBEDDING_SERVICE_URL="http://127.0.0.1:9090"
@@ -229,7 +237,7 @@ PY
 
 ### Agent 查询已入库知识
 
-日常查询只调用 Agent。不要手动判断 retrieval profile；如果 `STORAGE_ROOT / VECTOR_DSN / VECTOR_PREFIX` 指向已入库索引，Agent 会把知识库检索作为 deferred tools 暴露给模型，由模型自己决定是否调用。
+日常查询只调用 Agent。不要手动判断 retrieval profile；传入 `--knowledge-config "$AGENT_KNOWLEDGE_CONFIG"` 后，Agent 会把 `search_knowledge` 暴露给模型，由模型自己决定是否调用。没有该配置时，环境变量不会暗中启用 RAG。
 
 普通制度/流程问答：
 
@@ -238,6 +246,7 @@ unset RAG_RERANK_SERVICE_URL
 
 uv run agent run \
   "单笔国内差旅报销金额超过 12000 元需要谁审批？请给出处" \
+  --knowledge-config "$AGENT_KNOWLEDGE_CONFIG" \
   --verbose
 ```
 
@@ -248,6 +257,7 @@ unset RAG_RERANK_SERVICE_URL
 
 uv run agent run \
   "日提货总量是多少？请检查相关表格并给出处" \
+  --knowledge-config "$AGENT_KNOWLEDGE_CONFIG" \
   --verbose
 ```
 
@@ -287,7 +297,7 @@ uv run python scripts/evaluate_private_retrieval.py \
 
 ### Agent 测试
 
-`agent run` 默认是纯 Agent + workspace tools，不会因为当前环境已有 `STORAGE_ROOT`、`VECTOR_DSN`、`VECTOR_PREFIX` 就自动启动 RAG。需要知识库证据时显式传入 `--knowledge`；RAG 会作为 lazy knowledge provider 注册，并在模型首次调用 `search_knowledge` 时初始化。
+`agent run` 默认是纯 Agent + workspace tools，不会因为当前环境已有 `STORAGE_ROOT`、`AGENT_VECTOR_DSN` 或 embedding/reranker 配置就自动启动 RAG。需要知识库证据时显式传入一个 `--knowledge-config` JSON/YAML 文件；RAG 会作为 lazy knowledge provider 注册，并在模型首次调用 `search_knowledge` 时初始化。
 
 普通制度问答：
 
@@ -296,7 +306,7 @@ unset RAG_RERANK_SERVICE_URL
 
 uv run agent run \
   "单笔国内差旅报销金额超过 12000 元需要谁审批？请给出处" \
-  --agent generic \
+  --knowledge-config "$AGENT_KNOWLEDGE_CONFIG" \
   --verbose
 ```
 
@@ -305,8 +315,7 @@ uv run agent run \
 ```bash
 uv run agent run \
   "日提货总量是多少？请检查相关表格并给出处" \
-  --agent generic \
-  --knowledge private_docs \
+  --knowledge-config "$AGENT_KNOWLEDGE_CONFIG" \
   --verbose
 ```
 
@@ -315,7 +324,6 @@ uv run agent run \
 ```bash
 uv run agent run \
   "读取这个 Excel，汇总关键指标，并写一个简短摘要" \
-  --agent generic \
   --file "/absolute/path/to/report.xlsx" \
   --verbose
 ```
@@ -324,28 +332,28 @@ uv run agent run \
 
 ```text
 本地文件：
-  list_files -> structured_probe 或 run_python -> final answer / write_file
+  list_files / search_text -> read_file -> final answer
+  必要时由 apply_patch 或受限 run_command 处理或写回 workspace
 
 知识库问题：
-  tool_search -> activate_tools -> search_knowledge 或 search_assets -> final answer
+  search_knowledge -> final answer with evidence / citations
 ```
 
 交互式：
 
 ```bash
-uv run agent chat \
-  --agent generic
+uv run agent chat
 ```
 
 ### 常用开关
 
 | 需求 | 做法 |
 | --- | --- |
-| 关闭 rerank 省内存 | `unset RAG_RERANK_SERVICE_URL`；只在显式 `--knowledge` 的知识库路径中相关 |
+| 关闭 rerank 省内存 | `unset RAG_RERANK_SERVICE_URL`；只在显式 `--knowledge-config` 的知识库路径中相关 |
 | 开启 HTTP rerank | 启动 `rag_rerank_9092`，`export RAG_RERANK_SERVICE_URL=http://127.0.0.1:9092` |
 | 看 evidence / diagnostics | 先用 `agent run --verbose`；需要检索调试时才用 `rag query --json` |
 | 普通制度问答 | 直接问 `agent run` |
-| Excel/PPT 表格/图片 OCR 已入库资产问题 | `agent run ... --knowledge <name>`，模型会按需找 `search_assets` |
+| 已入库的文档证据问题 | `agent run ... --knowledge-config <path>`，模型会按需调用 `search_knowledge` |
 | Agent 直接读本地文件 | `agent run ... --file "/path/to/file.xlsx"` |
 | 查看/切换当前 chat 模型 | `agent model list/current/switch <model_id>`；这是 session state，不改 YAML |
 | 一次性指定模型 | 默认不需要；如要临时走云端可用 `--model mimo_cloud` |
@@ -356,6 +364,13 @@ uv run agent chat \
 ```bash
 export STORAGE_ROOT="data/smoke_milvus"
 export VECTOR_PREFIX="smoke_milvus_v1"
+export AGENT_KNOWLEDGE_CONFIG="$STORAGE_ROOT/agent-knowledge.yaml"
+
+cat > "$AGENT_KNOWLEDGE_CONFIG" <<EOF
+storage_root: $STORAGE_ROOT
+vector_backend: milvus
+vector_collection_prefix: $VECTOR_PREFIX
+EOF
 
 uv run rag ingest \
   --storage-root "$STORAGE_ROOT" \
@@ -370,7 +385,7 @@ uv run rag ingest \
 
 uv run agent run \
   "P1 工单首次响应目标是多少？请给出处" \
-  --knowledge smoke \
+  --knowledge-config "$AGENT_KNOWLEDGE_CONFIG" \
   --verbose
 ```
 
@@ -477,11 +492,11 @@ PY
 - 入库和查询必须使用同一个 embedding space；切换 embedding 模型后必须重建 Milvus collection。
 - 每次真实实验建议使用新的 `STORAGE_ROOT` 和 Milvus collection prefix，避免不同 embedding 维度或旧 schema 污染结果。
 - `9091` 被 Milvus 占用，rerank 服务使用 `9092`。
-- RAG 是 Agent 的一个显式 knowledge provider，不是所有文件任务的默认入口。本地文件分析优先用 `--file`、workspace、`structured_probe` 和 `run_python`；需要知识库证据时再加 `--knowledge`。
+- RAG 是 Agent 的一个显式 knowledge provider，不是所有文件任务的默认入口。本地文件分析优先用 `--file` 和 canonical workspace tools；需要知识库证据时再加 `--knowledge-config`。
 - 对表格真实值问题，不要信任 `sample_rows`；正确路径是资产 inspect/read/analyze 或本地 Python 计算。
 - OpenAI-compatible chat provider 的结构化输出能力依赖后端；降级必须可见，不能静默吞掉失败。
 - 批量入库脚本支持 `--summary-provider none`，可跳过 LLM 摘要生成，直接用原文进入 summary index；质量会低于严格摘要链路。
-- Agent CLI 当前默认 `--agent generic`。旧的 `research`、`orchestrator`、`compare`、`factcheck`、`synthesize` 不再是内置默认入口。
+- Agent CLI 只有一条 generic Agent runtime 装配链，不再接受 `--agent` 或历史角色名。
 
 DOCX 图形转换可选配置：
 

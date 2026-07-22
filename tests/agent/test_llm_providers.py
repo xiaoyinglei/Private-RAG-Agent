@@ -22,7 +22,6 @@ from rag.agent.tools.tool import (
     json_schema_input,
 )
 from rag.schema.llm import LLMUsage
-from rag.schema.runtime import AccessPolicy
 
 
 def _tool(name: str) -> Tool:
@@ -86,20 +85,15 @@ class _CanonicalGateway:
 
 def _state():
     return create_loop_state(
-        task="Inspect README.md.",
+        current_message="Inspect README.md.",
         run_config=AgentRunConfig(
-            run_id="provider-parity",
-            thread_id="provider-parity",
-            max_depth=1,
-            access_policy=AccessPolicy.default(),
+            turn_id="provider-parity",
         ),
     )
 
 
 def _definition() -> AgentRuntimePolicy:
     return AgentRuntimePolicy.test_factory(
-        agent_type="provider_parity",
-        description="Provider parity.",
         system_prompt="Use canonical tools.",
         allowed_tools=["list_files", "read_file"],
     )

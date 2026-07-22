@@ -20,12 +20,6 @@ from rag.agent.core.turn_contracts import ToolCallPlan
 from rag.agent.loop.runtime import ModelTurnEnvelope
 from rag.agent.loop.state import LoopPause, LoopState, ModelTurnDraft
 from rag.agent.service import AgentRunRequest, AgentService
-from rag.agent.sessions import (
-    RuntimeBinding,
-    SessionBusyError,
-    SessionStore,
-    TurnStatus,
-)
 from rag.agent.tools.builtins.shell import create_run_command_tool
 from rag.agent.tools.executor import ExecutionStatus, ToolExecutionRecord
 from rag.agent.tools.registry import ToolRegistry
@@ -38,6 +32,12 @@ from rag.agent.tools.tool import (
     Tool,
     ToolDefinition,
     json_schema_input,
+)
+from rag.agent.turns import (
+    RuntimeBinding,
+    TurnStateError,
+    TurnStatus,
+    TurnStore,
 )
 from rag.agent.workspace import open_workspace
 
@@ -113,7 +113,7 @@ def _definition() -> AgentRuntimePolicy:
 def _service(
     tmp_path,
     *,
-    store: SessionStore,
+    store: TurnStore,
     checkpointer: MemorySaver,
     provider: object,
     registry: ToolRegistry | None = None,
@@ -125,7 +125,7 @@ def _service(
         model_turn_provider=provider,
         checkpointer=checkpointer,
         workspace=open_workspace(tmp_path),
-        session_store=store,
+        turn_store=store,
         runtime_binding=RuntimeBinding(workspace_path=str(tmp_path)),
     )
 
@@ -150,10 +150,10 @@ async def _save_paused_state(
 
 
 @pytest.mark.anyio
-async def test_chat_persists_paused_turn_and_blocks_new_message(
+async def test_paused_turn_cannot_receive_a_followup(
     tmp_path,
 ) -> None:
-    store = SessionStore(tmp_path / "agent.sqlite")
+    store = TurnStore(tmp_path / "agent.sqlite")
     checkpointer = MemorySaver(serde=agent_checkpoint_serde())
     service = _service(
         tmp_path,
@@ -162,16 +162,18 @@ async def test_chat_persists_paused_turn_and_blocks_new_message(
         provider=_PauseProvider(),
     )
 
-    paused = await service.chat(AgentRunRequest(task="first"))
+    paused = await service.run(
+        AgentRunRequest(message="first"),
+    )
 
     assert paused.status == "paused"
-    assert store.get_turn(paused.run_id).status is TurnStatus.PAUSED
-    with pytest.raises(SessionBusyError, match="active Turn"):
-        await service.chat(
+    assert store.get_turn(paused.turn_id).status is TurnStatus.PAUSED
+    with pytest.raises(TurnStateError, match="only terminal Turns"):
+        await service.run(
             AgentRunRequest(
-                task="must fail",
-                session_id=paused.session_id,
-            )
+                message="must fail",
+                previous_turn_id=paused.turn_id,
+            ),
         )
 
 
@@ -179,10 +181,12 @@ async def test_chat_persists_paused_turn_and_blocks_new_message(
 async def test_resume_fails_loud_when_turn_checkpoint_is_missing(
     tmp_path,
 ) -> None:
-    store = SessionStore(tmp_path / "agent.sqlite")
+    store = TurnStore(tmp_path / "agent.sqlite")
     checkpointer = MemorySaver(serde=agent_checkpoint_serde())
-    session = store.create_session(RuntimeBinding(workspace_path=str(tmp_path)))
-    turn = store.begin_turn(session.session_id, "missing checkpoint")
+    turn = store.begin_turn(
+        "missing checkpoint",
+        RuntimeBinding(workspace_path=str(tmp_path)),
+    )
     store.mark_paused(turn.turn_id)
     service = _service(
         tmp_path,
@@ -201,13 +205,16 @@ async def test_resume_fails_loud_when_turn_checkpoint_is_missing(
 
 
 @pytest.mark.anyio
-async def test_resume_interrupted_turn_hydrates_full_session_history(
+async def test_resume_interrupted_turn_hydrates_full_predecessor_history(
     tmp_path,
 ) -> None:
-    store = SessionStore(tmp_path / "agent.sqlite")
+    store = TurnStore(tmp_path / "agent.sqlite")
     checkpointer = MemorySaver(serde=agent_checkpoint_serde())
-    session = store.create_session(RuntimeBinding(workspace_path=str(tmp_path)))
-    first = store.begin_turn(session.session_id, "remember alpha")
+    runtime = RuntimeBinding(workspace_path=str(tmp_path))
+    first = store.begin_turn(
+        "remember alpha",
+        runtime,
+    )
     store.sync_turn_messages(
         first.turn_id,
         (
@@ -217,8 +224,9 @@ async def test_resume_interrupted_turn_hydrates_full_session_history(
     )
     store.mark_terminal(first.turn_id, TurnStatus.COMPLETED)
     second = store.begin_turn(
-        session.session_id,
         "what did I ask you to remember?",
+        runtime,
+        previous_turn_id=first.turn_id,
         lease_owner="dead-worker",
     )
     seed = _service(
@@ -228,21 +236,12 @@ async def test_resume_interrupted_turn_hydrates_full_session_history(
         provider=_FinishProvider(),
     )
     request = AgentRunRequest(
-        task="remember alpha",
-        session_id=session.session_id,
-        run_id=second.turn_id,
-        history_messages=[
+        message="what did I ask you to remember?",
+        previous_turn_id=first.turn_id,
+        turn_id=second.turn_id,
+        conversation_history=[
+            ModelMessage(role="user", content="remember alpha"),
             ModelMessage(role="assistant", content="remembered"),
-            ModelMessage(
-                role="user",
-                content="what did I ask you to remember?",
-            ),
-        ],
-        turn_messages=[
-            ModelMessage(
-                role="user",
-                content="what did I ask you to remember?",
-            )
         ],
     )
     state = seed.initial_state(request)
@@ -266,15 +265,18 @@ async def test_resume_interrupted_turn_hydrates_full_session_history(
     )
 
     assert result.status == "done"
-    assert provider.observed[0]["task"] == "remember alpha"
-    assert provider.observed[0]["canonical_transcript"] == [
+    assert provider.observed[0]["current_message"] == "what did I ask you to remember?"
+    assert provider.observed[0]["conversation_history"] == [
+        ModelMessage(role="user", content="remember alpha"),
         ModelMessage(role="assistant", content="remembered"),
+    ]
+    assert provider.observed[0]["turn_transcript"] == [
         ModelMessage(
             role="user",
             content="what did I ask you to remember?",
         ),
     ]
-    assert store.history(session.session_id) == (
+    assert store.history_through(second.turn_id) == (
         ModelMessage(role="user", content="remember alpha"),
         ModelMessage(role="assistant", content="remembered"),
         ModelMessage(
@@ -290,10 +292,12 @@ async def test_resume_interrupted_turn_hydrates_full_session_history(
 async def test_resume_clarification_appends_user_input_to_same_turn(
     tmp_path,
 ) -> None:
-    store = SessionStore(tmp_path / "agent.sqlite")
+    store = TurnStore(tmp_path / "agent.sqlite")
     checkpointer = MemorySaver(serde=agent_checkpoint_serde())
-    session = store.create_session(RuntimeBinding(workspace_path=str(tmp_path)))
-    turn = store.begin_turn(session.session_id, "Which target?")
+    turn = store.begin_turn(
+        "Which target?",
+        RuntimeBinding(workspace_path=str(tmp_path)),
+    )
     seed = _service(
         tmp_path,
         store=store,
@@ -301,10 +305,8 @@ async def test_resume_clarification_appends_user_input_to_same_turn(
         provider=_FinishProvider(),
     )
     run_request = AgentRunRequest(
-        task="Which target?",
-        session_id=session.session_id,
-        run_id=turn.turn_id,
-        turn_messages=[ModelMessage(role="user", content="Which target?")],
+        message="Which target?",
+        turn_id=turn.turn_id,
     )
     human_request = HumanInputRequest(
         request_id="hir_clarify",
@@ -334,10 +336,11 @@ async def test_resume_clarification_appends_user_input_to_same_turn(
     )
 
     assert result.status == "done"
-    assert provider.observed[0]["canonical_transcript"] == [
+    assert provider.observed[0]["turn_transcript"] == [
+        ModelMessage(role="user", content="Which target?"),
         ModelMessage(role="user", content="Use production."),
     ]
-    assert store.history(session.session_id) == (
+    assert store.history_through(turn.turn_id) == (
         ModelMessage(role="user", content="Which target?"),
         ModelMessage(role="user", content="Use production."),
         ModelMessage(role="assistant", content="target accepted"),
@@ -348,10 +351,12 @@ async def test_resume_clarification_appends_user_input_to_same_turn(
 async def test_resume_tool_approval_maps_action_to_pending_calls(
     tmp_path,
 ) -> None:
-    store = SessionStore(tmp_path / "agent.sqlite")
+    store = TurnStore(tmp_path / "agent.sqlite")
     checkpointer = MemorySaver(serde=agent_checkpoint_serde())
-    session = store.create_session(RuntimeBinding(workspace_path=str(tmp_path)))
-    turn = store.begin_turn(session.session_id, "Approve it")
+    turn = store.begin_turn(
+        "Approve it",
+        RuntimeBinding(workspace_path=str(tmp_path)),
+    )
     seed = _service(
         tmp_path,
         store=store,
@@ -359,10 +364,8 @@ async def test_resume_tool_approval_maps_action_to_pending_calls(
         provider=_FinishProvider(),
     )
     run_request = AgentRunRequest(
-        task="Approve it",
-        session_id=session.session_id,
-        run_id=turn.turn_id,
-        turn_messages=[ModelMessage(role="user", content="Approve it")],
+        message="Approve it",
+        turn_id=turn.turn_id,
     )
     human_request = HumanInputRequest(
         request_id="hir_approve",
@@ -399,9 +402,7 @@ async def test_resume_tool_approval_maps_action_to_pending_calls(
         user_input=None,
     )
 
-    assert provider.observed[0]["approved_tool_call_ids"] == [
-        "call_write::network"
-    ]
+    assert provider.observed[0]["approved_tool_call_ids"] == ["call_write::network"]
 
 
 @pytest.mark.anyio
@@ -412,7 +413,7 @@ async def test_resume_tool_approval_maps_action_to_pending_calls(
 async def test_run_command_network_uses_two_checkpointed_approvals(
     tmp_path,
 ) -> None:
-    store = SessionStore(tmp_path / "agent.sqlite")
+    store = TurnStore(tmp_path / "agent.sqlite")
     checkpointer = MemorySaver(serde=agent_checkpoint_serde())
     workspace = open_workspace(tmp_path)
     sentinel = workspace.root / "approved-command.txt"
@@ -444,8 +445,8 @@ async def test_run_command_network_uses_two_checkpointed_approvals(
             definition=definition,
         )
 
-    first = await service(_CommandProvider(plan)).chat(
-        AgentRunRequest(task="Run the command with network enabled.")
+    first = await service(_CommandProvider(plan)).run(
+        AgentRunRequest(message="Run the command with network enabled."),
     )
 
     assert first.status == "paused"
@@ -457,7 +458,7 @@ async def test_run_command_network_uses_two_checkpointed_approvals(
     assert command in tool_approval.tool_calls[0].args_preview
 
     second = await service(_CommandProvider(plan)).resume_turn(
-        turn_id=first.run_id,
+        turn_id=first.turn_id,
         action="allow_once",
     )
 
@@ -466,13 +467,11 @@ async def test_run_command_network_uses_two_checkpointed_approvals(
     assert second.human_input_request is not None
     network_approval = second.human_input_request
     assert network_approval.context["approval_scope"] == "network"
-    assert network_approval.tool_calls[0].approval_id == (
-        f"{plan.tool_call_id}::network"
-    )
+    assert network_approval.tool_calls[0].approval_id == (f"{plan.tool_call_id}::network")
 
     final_provider = _CommandProvider(plan)
     final = await service(final_provider).resume_turn(
-        turn_id=first.run_id,
+        turn_id=first.turn_id,
         action="allow_once",
     )
 
@@ -531,10 +530,12 @@ async def test_outcome_unknown_reconciliation_never_replays_side_effect(
         allowed_tools=["remote_write"],
         max_iterations=3,
     )
-    store = SessionStore(tmp_path / "agent.sqlite")
+    store = TurnStore(tmp_path / "agent.sqlite")
     checkpointer = MemorySaver(serde=agent_checkpoint_serde())
-    session = store.create_session(RuntimeBinding(workspace_path=str(tmp_path)))
-    turn = store.begin_turn(session.session_id, "Reconcile write")
+    turn = store.begin_turn(
+        "Reconcile write",
+        RuntimeBinding(workspace_path=str(tmp_path)),
+    )
     seed = _service(
         tmp_path,
         store=store,
@@ -545,13 +546,9 @@ async def test_outcome_unknown_reconciliation_never_replays_side_effect(
     )
     plan = ToolCallPlan.create("remote_write", {"value": "once"})
     run_request = AgentRunRequest(
-        task="Reconcile write",
-        session_id=session.session_id,
-        run_id=turn.turn_id,
+        message="Reconcile write",
+        turn_id=turn.turn_id,
         pending_tool_calls=[plan],
-        turn_messages=[
-            ModelMessage(role="user", content="Reconcile write")
-        ],
     )
     state = seed.initial_state(run_request)
     canonical = state["canonical_tool_calls"][plan.tool_call_id]

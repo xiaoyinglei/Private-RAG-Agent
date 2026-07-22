@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import inspect
 
+from agent_runtime.planning import PlanTracker
 from rag.agent.core.context import AgentRunConfig
 from rag.agent.core.definition import AgentRuntimePolicy
 from rag.agent.core.llm_context import AgentLLMContextAssembler
@@ -9,10 +10,8 @@ from rag.agent.core.observations import ObservationBatch, StructuredObservation
 from rag.agent.loop.runtime import AgentLoop
 from rag.agent.loop.state import create_loop_state
 from rag.agent.memory.injector import ContextBuilder
-from rag.agent.planning import PlanTracker
 from rag.agent.tools.tool import ToolContentBlock, ToolResult
 from rag.schema.llm import LLMCallStage, LLMStageBudget
-from rag.schema.runtime import AccessPolicy
 
 
 class _CharacterTokenAccounting:
@@ -34,25 +33,20 @@ class _CharacterTokenAccounting:
 
 def _config() -> AgentRunConfig:
     return AgentRunConfig(
-        run_id="boundary-cleanup",
-        thread_id="boundary-cleanup",
+        turn_id="boundary-cleanup",
         llm_budget_total=10_000,
-        max_depth=2,
-        access_policy=AccessPolicy.default(),
     )
 
 
 def _definition() -> AgentRuntimePolicy:
     return AgentRuntimePolicy.test_factory(
-        agent_type="boundary",
-        description="Boundary test agent",
         system_prompt="Use canonical tool results.",
         allowed_tools=["search_knowledge"],
     )
 
 
 def _state() -> dict[str, object]:
-    return create_loop_state(task="Find policy evidence", run_config=_config())
+    return create_loop_state(current_message="Find policy evidence", run_config=_config())
 
 
 def test_observations_do_not_recreate_deprecated_flat_state() -> None:
@@ -109,9 +103,7 @@ def test_context_builder_uses_canonical_result_without_formatter() -> None:
     rendered = context.section("tool_results").content
     assert "call-knowledge" in rendered
     assert "Policy requires prior approval." in rendered
-    assert "formatter_resolver" not in inspect.signature(
-        ContextBuilder
-    ).parameters
+    assert "formatter_resolver" not in inspect.signature(ContextBuilder).parameters
 
 
 def test_llm_context_assembler_preserves_canonical_tool_content() -> None:
@@ -141,9 +133,7 @@ def test_llm_context_assembler_preserves_canonical_tool_content() -> None:
 
     assert "call-knowledge" in assembled.prompt
     assert "Canonical evidence." in assembled.prompt
-    assert "formatter_resolver" not in inspect.signature(
-        AgentLLMContextAssembler
-    ).parameters
+    assert "formatter_resolver" not in inspect.signature(AgentLLMContextAssembler).parameters
 
 
 def test_plan_tracker_accepts_core_structured_observation_directly() -> None:
