@@ -21,24 +21,32 @@ class WorkspaceRuntime:
     is_temporary: bool
 
     @property
+    def runtime_root(self) -> Path:
+        """Return the agent-owned state root without shadowing project files."""
+
+        if self.is_temporary:
+            return self.root
+        return self.root / ".rag" / "agent_runtime"
+
+    @property
     def input_files(self) -> Path:
-        return self.root / "input_files"
+        return self.runtime_root / "input_files"
 
     @property
     def scratch(self) -> Path:
-        return self.root / "scratch"
+        return self.runtime_root / "scratch"
 
     @property
     def artifacts(self) -> Path:
-        return self.root / "artifacts"
+        return self.runtime_root / "artifacts"
 
     @property
     def reports(self) -> Path:
-        return self.root / "reports"
+        return self.runtime_root / "reports"
 
     @property
     def logs(self) -> Path:
-        return self.root / "logs"
+        return self.runtime_root / "logs"
 
     @property
     def agent_memory(self) -> Path:
@@ -103,19 +111,40 @@ def open_workspace(path: str | Path, *, create: bool = False) -> WorkspaceRuntim
     return ws
 
 
-def import_files(workspace: WorkspaceRuntime, sources: list[str | Path]) -> list[Path]:
-    """Copy source files into the workspace input_files directory.
+def import_files(
+    workspace: WorkspaceRuntime,
+    sources: list[str | Path],
+    *,
+    namespace: str | None = None,
+) -> list[Path]:
+    """Resolve workspace files and stage only external files.
 
-    Returns the list of destination paths in input_files.
+    Files already inside the workspace are returned in place. External files
+    are copied into agent-owned storage so attaching a file never creates a
+    top-level ``input_files`` directory in the user's project.
     """
+    destination = workspace.input_files
+    if namespace is not None:
+        if not namespace or Path(namespace).name != namespace:
+            raise ValueError("Input file namespace must be one path segment")
+        destination /= namespace
+    destination.mkdir(parents=True, exist_ok=True)
+
     imported: list[Path] = []
     for src in sources:
-        src_path = Path(src)
+        src_path = Path(src).expanduser().resolve()
         if src_path.is_dir():
             raise ValueError(f"Directory import not supported: {src_path}")
         if not src_path.is_file():
             raise FileNotFoundError(f"Source file not found: {src_path}")
-        dest = _unique_dest(workspace.input_files, src_path.name)
+        try:
+            src_path.relative_to(workspace.root.resolve())
+        except ValueError:
+            pass
+        else:
+            imported.append(src_path)
+            continue
+        dest = _unique_dest(destination, src_path.name)
         shutil.copy2(src_path, dest)
         imported.append(dest)
     return imported

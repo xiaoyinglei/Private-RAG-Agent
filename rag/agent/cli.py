@@ -6,16 +6,18 @@ import logging
 import os
 import shlex
 import sys
-from collections.abc import Mapping, Sequence
+from collections.abc import Coroutine, Mapping, Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated
+from typing import TYPE_CHECKING, Annotated, Any
 
+import click
 import typer
 import yaml
 
 from agent_runtime.knowledge import RAGKnowledgeConfig
 from agent_runtime.models import (
     ModelControlPlane,
+    ModelNotAvailableError,
     ModelPolicyError,
     ModelSpec,
     format_model_rows,
@@ -24,7 +26,9 @@ from agent_runtime.result import AgentDiagnostic, AgentResult, AgentToolCall
 from rag.agent.core.llm_registry import UnknownModelAliasError
 from rag.agent.streaming.events import EventType, StreamEvent
 from rag.agent.turns import (
+    TurnNotFoundError,
     TurnRecord,
+    TurnStateError,
     TurnStore,
 )
 
@@ -507,6 +511,42 @@ def _is_tty(stream: object) -> bool:
     return bool(isatty()) if callable(isatty) else False
 
 
+def _run_cli_async[T](awaitable: Coroutine[Any, Any, T]) -> T:
+    """Run one public async operation and render known model setup failures."""
+
+    try:
+        return asyncio.run(awaitable)
+    except (
+        FileNotFoundError,
+        KeyError,
+        ModelNotAvailableError,
+        ModelPolicyError,
+        TurnNotFoundError,
+        TurnStateError,
+        UnknownModelAliasError,
+        ValueError,
+    ) as exc:
+        raise click.ClickException(str(exc)) from exc
+
+
+def _resolve_cli_input_files(values: Sequence[str]) -> list[str]:
+    resolved: list[str] = []
+    for value in values:
+        path = Path(value).expanduser()
+        if not path.exists():
+            raise typer.BadParameter(
+                f"输入文件不存在: {value}",
+                param_hint="--file",
+            )
+        if not path.is_file():
+            raise typer.BadParameter(
+                f"输入路径不是文件: {value}",
+                param_hint="--file",
+            )
+        resolved.append(str(path.resolve()))
+    return resolved
+
+
 async def _run_facade_command(
     facade: Agent,
     *,
@@ -874,6 +914,10 @@ def agent_chat(
         effective_previous_turn_id = latest.turn_id
     if effective_previous_turn_id is not None and knowledge_config is not None:
         raise typer.BadParameter("继续已有 Turn 时不能传 --knowledge-config；Turn 的 RuntimeBinding 是唯一配置来源")
+    if effective_previous_turn_id is not None and model is not None:
+        raise typer.BadParameter(
+            "继续已有 Turn 时不能传 --model；模型已由前一个 Turn 绑定"
+        )
     facade = _create_agent_facade(
         model=model,
         checkpoint_db=checkpoint_db,
@@ -881,7 +925,7 @@ def agent_chat(
         model_session_path=DEFAULT_MODEL_SESSION_PATH,
         knowledge=_load_knowledge_config(knowledge_config),
     )
-    asyncio.run(
+    _run_cli_async(
         _chat_facade_loop(
             facade,
             max_tokens_total=max_tokens_total,
@@ -941,7 +985,7 @@ def agent_run(
         typer.Option(
             "--file",
             "-f",
-            help="导入 workspace 的输入文件，可多次指定",
+            help="附加本次 Turn 的输入文件，可多次指定",
         ),
     ] = None,
     allow_write_tools: Annotated[
@@ -967,6 +1011,10 @@ def agent_run(
         effective_previous_turn_id = latest.turn_id
     if effective_previous_turn_id is not None and knowledge_config is not None:
         raise typer.BadParameter("继续已有 Turn 时不能传 --knowledge-config；Turn 的 RuntimeBinding 是唯一配置来源")
+    if effective_previous_turn_id is not None and model is not None:
+        raise typer.BadParameter(
+            "继续已有 Turn 时不能传 --model；模型已由前一个 Turn 绑定"
+        )
     facade = _create_agent_facade(
         model=model,
         checkpoint_db=checkpoint_db,
@@ -976,12 +1024,12 @@ def agent_run(
     )
     interactive_approval = not non_interactive and _is_interactive_terminal()
     event_display = _CLIToolEventDisplay()
-    result = asyncio.run(
+    result = _run_cli_async(
         _run_facade_command(
             facade,
             task=task,
             previous_turn_id=effective_previous_turn_id,
-            files=input_files or [],
+            files=_resolve_cli_input_files(input_files or ()),
             max_tokens_total=max_tokens_total,
             interactive_approval=interactive_approval,
             max_turns=max_turns,
@@ -1073,7 +1121,7 @@ def agent_resume(
     )
     event_display = _CLIToolEventDisplay()
     if action is None:
-        pending = asyncio.run(
+        pending = _run_cli_async(
             _pending_resume_request(
                 facade,
                 turn_id=effective_turn_id,
@@ -1086,7 +1134,7 @@ def agent_resume(
             checkpoint_db=checkpoint_db,
         )
         raise typer.Exit(code=2)
-    result = asyncio.run(
+    result = _run_cli_async(
         _resume_facade_command(
             facade,
             turn_id=effective_turn_id,

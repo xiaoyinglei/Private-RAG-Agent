@@ -117,6 +117,28 @@ def test_agent_command_help_matches_the_clean_public_contract(
         assert option not in result.output
 
 
+def test_agent_run_rejects_missing_input_without_internal_traceback(
+    tmp_path: Path,
+) -> None:
+    missing = tmp_path / "missing.txt"
+
+    result = CliRunner().invoke(
+        agent_app,
+        [
+            "run",
+            "Read the file.",
+            "--file",
+            str(missing),
+            "--non-interactive",
+        ],
+        env={"COLUMNS": "240"},
+    )
+
+    assert result.exit_code == 2
+    assert "输入文件不存在" in result.output
+    assert "Traceback" not in result.output
+
+
 def _result(
     *,
     status: str = "done",

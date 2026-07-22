@@ -163,6 +163,7 @@ class AgentRunResult(BaseModel):
     model_call_records: list[ModelCallRecord] = Field(default_factory=list)
     evidence: list[EvidenceItem] = Field(default_factory=list)
     citations: list[AnswerCitation] = Field(default_factory=list)
+    input_files: list[str] = Field(default_factory=list)
     iteration: int = 0
     groundedness_flag: bool = False
     insufficient_evidence_flag: bool = False
@@ -208,6 +209,7 @@ class AgentRunResult(BaseModel):
             model_call_records=list(state.get("model_call_records", ())),
             evidence=evidence,
             citations=citations,
+            input_files=list(state.get("input_files", ())),
             iteration=state["iteration"],
             groundedness_flag=_result_flag(
                 state["tool_results"],
@@ -610,9 +612,21 @@ class AgentService:
         started_at = time.perf_counter()
         tool_trace_start = len(self._tool_executor.traces)
         workspace = self._workspace_for_request(request)
+        imported_files: list[Path] = []
         if request.input_files:
-            import_files(workspace, [Path(item) for item in request.input_files])
-        file_manifest = build_file_manifest(workspace)
+            imported_files = import_files(
+                workspace,
+                [Path(item) for item in request.input_files],
+                namespace=(
+                    None
+                    if workspace.is_temporary
+                    else run_config.turn_id
+                ),
+            )
+        file_manifest = build_file_manifest(
+            workspace,
+            files=imported_files,
+        )
         memory_store = WorkspaceMemoryStore(
             workspace=workspace,
             policy=run_config.memory_policy,
@@ -670,6 +684,7 @@ class AgentService:
             pending_tool_calls=request.pending_tool_calls,
             messages=request.messages,
             runtime_diagnostics=self._runtime_diagnostics,
+            input_files=request.input_files,
             file_manifest=file_manifest,
         )
         allow_discovery_tools = (
@@ -819,10 +834,14 @@ class AgentService:
         self,
         request: AgentRunRequest,
     ) -> WorkspaceRuntime:
+        if self._workspace is not None:
+            if request.workspace_path is None:
+                return self._workspace
+            requested = Path(request.workspace_path).expanduser().resolve()
+            if requested == self._workspace.root.resolve():
+                return self._workspace
         if request.workspace_path is not None:
             return open_workspace(request.workspace_path, create=True)
-        if self._workspace is not None:
-            return self._workspace
         return create_temp_workspace()
 
     def _resolve_output_finalizer(

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -20,6 +21,7 @@ from agent_runtime.models import (
 from rag.agent.cli import agent_app
 from rag.agent.core.llm_registry import ModelNotAvailableError, ModelRegistry
 from rag.schema.llm import DEFAULT_LLM_STAGE_BUDGETS, LLMCallStage
+from rag.utils.text import load_env_file
 
 
 def _write_models_config(path: Path) -> None:
@@ -131,6 +133,32 @@ def test_bundled_tool_decision_output_budget_is_small_for_local_agent() -> None:
     assert DEFAULT_LLM_STAGE_BUDGETS[LLMCallStage.TOOL_DECISION].max_output_tokens == 768
 
 
+def test_env_loader_uses_shared_env_for_linked_worktree(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    primary = tmp_path / "repository"
+    common_git = primary / ".git"
+    worktree_git = common_git / "worktrees" / "feature"
+    worktree = tmp_path / "feature-worktree"
+    worktree_git.mkdir(parents=True)
+    worktree.mkdir()
+    (worktree / ".git").write_text(
+        f"gitdir: {worktree_git}\n",
+        encoding="utf-8",
+    )
+    (worktree_git / "commondir").write_text("../..\n", encoding="utf-8")
+    shared_env = primary / ".env"
+    shared_env.write_text("WORKTREE_SHARED_KEY=available\n", encoding="utf-8")
+    monkeypatch.delenv("AGENT_ENV_FILE", raising=False)
+    monkeypatch.delenv("WORKTREE_SHARED_KEY", raising=False)
+
+    loaded = load_env_file(worktree / ".env")
+
+    assert loaded == shared_env.resolve()
+    assert os.environ["WORKTREE_SHARED_KEY"] == "available"
+
+
 def test_model_policy_reviews_agent_model_switch_requests(tmp_path: Path) -> None:
     config_path = tmp_path / "models.yaml"
     _write_models_config(config_path)
@@ -233,7 +261,10 @@ def test_control_plane_rejects_cloud_model_without_api_key(
 
     control = ModelControlPlane.from_config_file(config_path, initial_model_id="mimo_cloud")
 
-    with pytest.raises(RuntimeError, match="Missing API key: MIMO_API_KEY"):
+    with pytest.raises(
+        ModelNotAvailableError,
+        match="MIMO_API_KEY is not set",
+    ):
         control.resolve_for_node(node_model=None, node_name="tool_decision")
 
 

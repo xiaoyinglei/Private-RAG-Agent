@@ -223,6 +223,7 @@ class LoopState(TypedDict):
     finish_state: FinishState
     skill_state: SkillState
     # ── File manifest (file-first processing) ──
+    input_files: list[str]
     file_manifest: FileManifest | None
     # ── Persistent cross-session memory ──
     persistent_memories: list[str]  # selected memory texts for current run
@@ -239,6 +240,7 @@ def create_loop_state(
     pending_tool_calls: Iterable[ToolCallPlan] = (),
     memory_warnings: Iterable[str] = (),
     runtime_diagnostics: Iterable[RuntimeDiagnostic] = (),
+    input_files: Iterable[str] = (),
     file_manifest: FileManifest | None = None,
 ) -> LoopState:
     # ── Function-level imports to avoid circular import with substate.py ──
@@ -298,6 +300,7 @@ def create_loop_state(
         "terminal": None,
         "latest_transition": None,
         # ── File manifest (file-first processing) ──
+        "input_files": list(input_files),
         "file_manifest": file_manifest,
         # ── Persistent cross-session memory ──
         "persistent_memories": [],

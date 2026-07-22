@@ -180,14 +180,27 @@ _PROBE_MAX_COLUMNS = 50
 _FILE_SAMPLE_BYTES = 4096
 
 
-def build_file_manifest(workspace: WorkspaceRuntime) -> FileManifest:
-    """Build manifest for all files in workspace/input_files/.
+def build_file_manifest(
+    workspace: WorkspaceRuntime,
+    *,
+    files: list[Path] | None = None,
+) -> FileManifest:
+    """Build a manifest for explicit inputs or the managed input directory.
 
     For structured files (csv/xlsx), runs a lightweight schema and pandas
     preview to give the model enough context on the first turn.
     """
-    input_dir = workspace.input_files
-    if not input_dir.is_dir():
+    if files is None:
+        input_dir = workspace.input_files
+        candidates = (
+            []
+            if not input_dir.is_dir()
+            else [path for path in input_dir.iterdir() if path.is_file()]
+        )
+    else:
+        candidates = [workspace.ensure_within_workspace(path) for path in files]
+
+    if not candidates:
         return FileManifest(
             files=[],
             total_size_bytes=0,
@@ -198,7 +211,7 @@ def build_file_manifest(workspace: WorkspaceRuntime) -> FileManifest:
     entries: list[FileManifestEntry] = []
     total_size = 0
 
-    for path in sorted(input_dir.iterdir()):
+    for path in sorted(candidates):
         if not path.is_file():
             continue
         try:

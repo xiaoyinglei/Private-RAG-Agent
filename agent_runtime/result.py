@@ -195,10 +195,11 @@ class AgentResult:
     ) -> AgentResult:
         status = _project_status(result.status)
         arguments_by_id = _tool_call_arguments(result)
+        projected_files = files or tuple(result.input_files)
         return cls(
             answer=result.final_answer,
             status=status,
-            files=files,
+            files=projected_files,
             tool_calls=tuple(_project_tool_call(tool, arguments_by_id=arguments_by_id) for tool in result.tool_results),
             evidence=tuple(_project_evidence(item) for item in result.evidence),
             citations=tuple(_project_citation(item) for item in result.citations),

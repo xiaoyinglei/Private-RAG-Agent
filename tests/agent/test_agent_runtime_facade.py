@@ -26,7 +26,7 @@ from rag.agent.tools.executor import ToolExecutor
 from rag.agent.tools.integrations.knowledge import KnowledgeSearchInput
 from rag.agent.tools.permissions import ToolExecutionContext
 from rag.agent.tools.tool import ToolCall, ToolCallOrigin
-from rag.agent.turns import RuntimeBinding, TurnStore
+from rag.agent.turns import RuntimeBinding, TurnStatus, TurnStore
 
 
 def test_agent_runtime_exports_sdk_facade() -> None:
@@ -39,6 +39,7 @@ def test_agent_runtime_exports_sdk_facade() -> None:
         "AgentResult",
         "AgentUsage",
         "EventType",
+        "ModelNotAvailableError",
         "ModelSpec",
         "RAGKnowledgeConfig",
         "StreamEvent",
@@ -562,6 +563,24 @@ async def test_agent_aresume_projects_stable_turn_result(
     assert result.turn_id == "resume-turn"
     assert not hasattr(result, "session_id")
     assert not hasattr(result, "raw")
+
+
+@pytest.mark.anyio
+async def test_agent_pending_input_returns_none_for_completed_turn(
+    tmp_path: Path,
+) -> None:
+    agent = Agent(
+        checkpoint_db=tmp_path / "agent.sqlite",
+        workspace_path=tmp_path,
+    )
+    store = agent._get_turn_store()
+    turn = store.begin_turn(
+        "Already done.",
+        RuntimeBinding(workspace_path=str(tmp_path.resolve())),
+    )
+    store.mark_terminal(turn.turn_id, TurnStatus.COMPLETED)
+
+    assert await agent.apending_input(turn.turn_id) is None
 
 
 @pytest.mark.anyio

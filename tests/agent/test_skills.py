@@ -853,7 +853,9 @@ class TestFinalSkillToolFactories:
         assert execution.result.is_error is False
         assert execution.result.structured_content is not None
         output = execution.result.structured_content
-        assert output["workspace_path"] == ("scratch/skills/project_demo/scripts/helper.py")
+        assert output["workspace_path"] == (
+            ".rag/agent_runtime/scratch/skills/project_demo/scripts/helper.py"
+        )
         materialized = workspace.root / output["workspace_path"]
         assert materialized.read_text(encoding="utf-8") == "print('ok')\n"
         assert len(output["source_fingerprint"]) == 64

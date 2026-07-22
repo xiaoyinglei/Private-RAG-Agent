@@ -128,7 +128,7 @@ class Agent:
             internal_result = await service.run(request)
         return AgentResult._from_internal(
             internal_result,
-            files=tuple(files or ()),
+            files=tuple(request.input_files),
         )
 
     def resume(
@@ -267,7 +267,12 @@ class Agent:
         self,
         turn_id: str,
     ) -> AgentPause | None:
-        runtime_agent = self._agent_for_turn(turn_id)
+        from rag.agent.turns import TurnStatus
+
+        turn = self._get_turn_store().get_turn(turn_id)
+        if turn.status in {TurnStatus.COMPLETED, TurnStatus.FAILED}:
+            return None
+        runtime_agent = self._agent_for_binding(turn.runtime)
         async with runtime_agent._open_product_runtime() as service:
             try:
                 request = await service.apending_human_input_request(turn_id=turn_id)
@@ -343,7 +348,11 @@ class Agent:
         from rag.utils.text import load_env_file
 
         startup_started_at = time.perf_counter()
-        load_env_file()
+        load_env_file(
+            ".env"
+            if self.workspace_path is None
+            else self.workspace_path / ".env"
+        )
         try:
             model_control_plane = self._get_model_control_plane()
         except Exception:

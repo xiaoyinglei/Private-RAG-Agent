@@ -3,7 +3,7 @@
 from typing import TYPE_CHECKING
 
 from agent_runtime.knowledge import RAGKnowledgeConfig
-from agent_runtime.models import ModelSpec
+from agent_runtime.models import ModelNotAvailableError, ModelSpec
 from agent_runtime.result import AgentResult, AgentUsage
 from rag.agent.streaming.events import EventType, StreamEvent
 
@@ -25,6 +25,7 @@ __all__ = [
     "AgentResult",
     "AgentUsage",
     "EventType",
+    "ModelNotAvailableError",
     "ModelSpec",
     "RAGKnowledgeConfig",
     "StreamEvent",

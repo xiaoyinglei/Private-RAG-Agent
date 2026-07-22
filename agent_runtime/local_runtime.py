@@ -7,9 +7,10 @@ from collections.abc import Callable
 from urllib.request import urlopen
 
 from agent_runtime.models import ModelSpec
+from rag.agent.core.llm_registry import ModelNotAvailableError
 
 
-class LocalRuntimeError(RuntimeError):
+class LocalRuntimeError(ModelNotAvailableError):
     """Local model runtime is not ready."""
 
 

@@ -105,6 +105,10 @@ uv run agent run \
   "运行测试并修复失败项"
 ```
 
+Agent 默认读取当前 workspace 的 `.env`。在 Git linked worktree 中本地
+`.env` 缺失时，会只读加载同一仓库主 checkout 的 `.env`；也可以通过
+`AGENT_ENV_FILE=/absolute/path/to/.env` 显式指定。已存在的进程环境变量始终优先。
+
 需要限制模型回合数时，CLI 和 Python SDK 使用同一公开参数；该上限不会覆盖
 Agent 定义中更小的安全上限：
 
@@ -624,7 +628,8 @@ CLI agent chat
 
 ```text
 --file / files=
-  -> workspace/input_files/
+  -> workspace 内文件直接引用
+  -> workspace 外文件按 Turn 归档到 .rag/agent_runtime/input_files/
   -> list_files / search_text
   -> read_file
   -> apply_patch or run_command when explicitly needed
@@ -641,7 +646,7 @@ CLI agent chat
 - CLI 和 SDK 共用 product runtime builder，不存在第二套 Agent runtime。
 - `run/arun` 统一执行文件、代码和连续上下文任务；`chat` 只是 CLI 交互循环；`resume` 支持审批、澄清、中断继续、未知副作用对账和 abort。
 - canonical history、Turn 状态、runtime binding 和 checkpoint 使用 SQLite 持久化；内存对象只用于同进程资源复用。
-- 当前 workspace 由文件工具直接读写；`--file` 输入归档到 `workspace/input_files/`，不复制整个项目，也没有 upload/download 产品层。
+- 当前 workspace 由文件工具直接读写；`--file` 对 workspace 内文件直接引用，对外部文件才按 Turn 复制到 `.rag/agent_runtime/input_files/`。运行时不会在项目根目录创建 `input_files/` 等伪业务目录。
 - MCP server 由 workspace 配置显式启用；Skill 采用 catalog + progressive disclosure；subagent 作为 hidden `task` Tool 接入并继承有界上下文与权限。
 - model context 支持 proactive compaction，工具输出有界，usage 只在 provider 明确返回时记录 cache read/write。
 

@@ -1963,6 +1963,7 @@ def _normalize_loaded_state(state: LoopState) -> LoopState:
     )
     state.setdefault("canonical_tool_calls", {})
     state.setdefault("model_call_records", [])
+    state.setdefault("input_files", [])
     state.setdefault("tool_manifest", None)
     state.setdefault("tool_checkpoint", None)
     state.setdefault("context_revision", "context_pending")

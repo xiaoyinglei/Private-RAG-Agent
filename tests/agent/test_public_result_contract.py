@@ -355,6 +355,19 @@ def test_internal_projection_builds_stable_result_dtos_without_internal_objects(
         public.pause.context["attempt"] = 2  # type: ignore[index]
 
 
+def test_public_result_restores_input_files_from_resumed_turn() -> None:
+    raw = AgentRunResult(
+        turn_id="resumed-turn",
+        status="done",
+        final_answer="done",
+        input_files=["/tmp/report.pdf"],
+    )
+
+    public = AgentResult._from_internal(raw)
+
+    assert public.files == ("/tmp/report.pdf",)
+
+
 def test_internal_projection_preserves_the_single_turn_identity() -> None:
     result = AgentRunResult(
         turn_id="turn-root",

@@ -11,6 +11,7 @@ from urllib.parse import urlparse
 from rag.agent.core.llm_config import ModelProvider
 from rag.agent.core.llm_config import ModelSpec as InternalModelSpec
 from rag.agent.core.llm_registry import (
+    ModelNotAvailableError,
     ModelRegistry,
     ModelResolver,
     ResolvedModel,
@@ -333,7 +334,11 @@ class ModelControlPlane:
         if spec.api_key_env:
             value = os.environ.get(spec.api_key_env)
             if not isinstance(value, str) or not value.strip():
-                raise RuntimeError(f"Missing API key: {spec.api_key_env}")
+                raise ModelNotAvailableError(
+                    f"Model {spec.id!r} is unavailable because environment variable "
+                    f"{spec.api_key_env} is not set. Export it or add it to .env; "
+                    "use AGENT_ENV_FILE to select a different env file"
+                )
 
 
 def _load_session_state(
@@ -443,6 +448,7 @@ __all__ = [
     "ModelCatalog",
     "ModelControlPlane",
     "ModelLocation",
+    "ModelNotAvailableError",
     "ModelPolicy",
     "ModelPolicyError",
     "ModelRuntimeSpec",
