@@ -646,7 +646,7 @@ def test_sandbox_auto_approval_requires_process_execution() -> None:
         ),
         pytest.param(
             "run_command",
-            "builtin-run-command-v2-restricted-sandbox",
+            "builtin-run-command-v3-trusted-toolchain",
             frozenset(
                 {ToolEffect.EXECUTE_PROCESS, ToolEffect.DESTRUCTIVE}
             ),

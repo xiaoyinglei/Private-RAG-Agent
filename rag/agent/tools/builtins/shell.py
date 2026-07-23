@@ -7,6 +7,7 @@ import signal
 import tempfile
 import time
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -124,7 +125,7 @@ def create_run_command_tool(
             }
         ),
         resolve_use=lambda arguments: _resolve_command_use(workspace, arguments),
-        execution_revision="builtin-run-command-v2-restricted-sandbox",
+        execution_revision="builtin-run-command-v3-trusted-toolchain",
         idempotent=False,
         concurrency_safe=False,
         cancellation_mode=CancellationMode.MANAGED_PROCESS,
@@ -286,6 +287,16 @@ def _build_command_sandbox_profile(
     temporary = _escape_seatbelt_string(
         str(os.path.realpath(temporary_root))
     )
+    trusted_toolchains = tuple(
+        _escape_seatbelt_string(str(path))
+        for path in _trusted_toolchain_roots(workspace_root)
+    )
+    trusted_toolchain_reads = "".join(
+        f'  (subpath "{path}")\n' for path in trusted_toolchains
+    )
+    trusted_toolchain_ancestors = "".join(
+        f'  (path-ancestors "{path}")\n' for path in trusted_toolchains
+    )
     network_policy = (
         # DNS is the only approved AF_UNIX endpoint; local service and Docker
         # sockets remain denied even when IP networking is approved.
@@ -326,6 +337,7 @@ def _build_command_sandbox_profile(
         "(allow file-read* file-test-existence\n"
         f'  (subpath "{workspace}")\n'
         f'  (subpath "{temporary}")\n'
+        f"{trusted_toolchain_reads}"
         '  (literal "/")\n'
         '  (subpath "/bin")\n'
         '  (subpath "/sbin")\n'
@@ -354,6 +366,7 @@ def _build_command_sandbox_profile(
         "(allow file-read-metadata file-test-existence\n"
         f'  (path-ancestors "{workspace}")\n'
         f'  (path-ancestors "{temporary}")\n'
+        f"{trusted_toolchain_ancestors}"
         '  (path-ancestors "/Library/Apple")\n'
         '  (path-ancestors "/Library/Developer/CommandLineTools")\n'
         '  (path-ancestors "/Library/Preferences/com.apple.networkd.plist")\n'
@@ -367,6 +380,43 @@ def _build_command_sandbox_profile(
         '  (literal "/dev/null"))\n'
         f"{network_policy}\n"
     )
+
+
+def _trusted_toolchain_roots(
+    workspace_root: os.PathLike[str] | str,
+) -> tuple[Path, ...]:
+    """Resolve recognized read-only toolchains used by a workspace venv.
+
+    A uv-created virtual environment commonly links ``.venv/bin/python`` to
+    the managed CPython installation outside the workspace. Seatbelt resolves
+    that symlink before applying path rules, so the interpreter must be
+    readable explicitly. Only the one referenced CPython distribution is
+    admitted, and only when it lives below a standard uv-managed Python root.
+    """
+
+    workspace = Path(workspace_root).resolve()
+    uv_python_roots = tuple(
+        path.resolve()
+        for path in (
+            Path.home() / "Library" / "Application Support" / "uv" / "python",
+            Path.home() / ".local" / "share" / "uv" / "python",
+        )
+        if path.is_dir()
+    )
+    trusted: set[Path] = set()
+    for name in ("python", "python3"):
+        executable = workspace / ".venv" / "bin" / name
+        if not executable.exists():
+            continue
+        resolved = executable.resolve()
+        for root in uv_python_roots:
+            if not resolved.is_relative_to(root):
+                continue
+            relative = resolved.relative_to(root)
+            if relative.parts:
+                trusted.add(root / relative.parts[0])
+            break
+    return tuple(sorted(trusted, key=str))
 
 
 def _escape_seatbelt_string(value: str) -> str:

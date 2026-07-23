@@ -418,12 +418,24 @@ class PlanTracker:
         if plan.status == target_status:
             return plan, []
         step_status: PlanStepStatus = "blocked" if blocked else "completed"
-        steps = [
-            step.model_copy(update={"status": step_status})
-            if step.status in {"pending", "in_progress"}
-            else step
-            for step in plan.steps
-        ]
+        steps: list[PlanStep] = []
+        for step in plan.steps:
+            should_update = step.status in {"pending", "in_progress"}
+            if (
+                blocked
+                and step.status == "completed"
+                and not step.tool_call_ids
+                and not step.evidence_refs
+            ):
+                # Preserve the exact model-submitted snapshot while the run is
+                # active, but do not report an unverified completion after the
+                # run itself fails.
+                should_update = True
+            steps.append(
+                step.model_copy(update={"status": step_status})
+                if should_update
+                else step
+            )
         updated = plan.model_copy(
             update={
                 "status": target_status,

@@ -137,7 +137,7 @@ def can_use_tool(
         context.auto_approve_sandboxed
         and tool.definition.name == "run_command"
         and tool.execution_revision
-        == "builtin-run-command-v2-restricted-sandbox"
+        == "builtin-run-command-v3-trusted-toolchain"
         and tool.cancellation_mode is CancellationMode.MANAGED_PROCESS
         and ToolEffect.EXECUTE_PROCESS in resolved.effects
         and ToolEffect.DESTRUCTIVE not in resolved.effects

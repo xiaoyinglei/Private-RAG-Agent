@@ -87,6 +87,14 @@ _NATIVE_TOOL_SET = frozenset(
 
 _REPEATED_TOOL_FAILURE_CODE = "repeated_tool_failure"
 _MAX_RETRYABLE_IDENTICAL_FAILURES = 2
+_DELIVERY_CONTROL_CODE = "delivery_control"
+_DELIVERY_STALLED_CODE = "delivery_stalled"
+_EXPLORATION_TOOL_NAMES = frozenset(
+    {"list_files", "search_text", "read_file", "run_command", "find_tools"}
+)
+_DELIVERY_CONTROL_THRESHOLDS = (8, 12, 20, 28)
+_EXPLORATION_LIMIT = 20
+_FOCUSED_EXPLORATION_EXTENSION = 8
 
 
 def _add_model_latency(state: LoopState, latency_ms: float) -> None:
@@ -709,9 +717,13 @@ class AgentLoop:
         turn = state["iteration"]
         pending = tuple(state["pending_tool_calls"])
         calls = tuple(self._canonical_call(state, pending_call) for pending_call in pending)
-        executable_calls, circuit_results = _guard_repeated_tool_failures(
+        delivery_calls, delivery_results = _guard_exploration_stall(
             state,
             calls,
+        )
+        executable_calls, circuit_results = _guard_repeated_tool_failures(
+            state,
+            delivery_calls,
         )
         for call in executable_calls:
             await self._emit_stream(
@@ -746,7 +758,10 @@ class AgentLoop:
         )
         approval_execution = approval_executions[0] if approval_executions else None
         approval_ids = {execution.result.tool_call_id for execution in approval_executions}
-        results_by_id = {result.tool_call_id: result for result in circuit_results}
+        results_by_id = {
+            result.tool_call_id: result
+            for result in (*delivery_results, *circuit_results)
+        }
         results_by_id.update(
             {
                 execution.result.tool_call_id: execution.result
@@ -793,6 +808,17 @@ class AgentLoop:
             state,
             tuple(tool_result_message(result) for result in new_results),
         )
+        delivery_control = _delivery_control_event(state)
+        if delivery_control is not None:
+            _append_turn_messages(state, (delivery_control,))
+            await self._emit_stream(
+                _stream_recovery(
+                    strategy="delivery_control",
+                    detail=delivery_control.content[:200],
+                    turn_id=turn_id,
+                    iteration=turn,
+                )
+            )
 
         for tool_result in new_results:
             if tool_result.is_error:
@@ -898,6 +924,34 @@ class AgentLoop:
 
         # Record tool call metrics.
         self._record_metrics(state, new_results)
+
+        delivery_control_remained_open = not executions and any(
+            result.metadata.get("delivery_control_already_open") is True
+            for result in delivery_results
+        )
+        if delivery_control_remained_open:
+            inspection_counts: list[int] = []
+            for result in delivery_results:
+                value = result.metadata.get("consecutive_exploration_calls")
+                if isinstance(value, int) and not isinstance(value, bool):
+                    inspection_counts.append(value)
+            inspection_calls = max(
+                inspection_counts,
+                default=_EXPLORATION_LIMIT,
+            )
+            await self._fail(
+                state,
+                stop_reason=_DELIVERY_STALLED_CODE,
+                error=(
+                    f"The model used {inspection_calls} inspection calls plus "
+                    "the focused extension without making a concrete delivery "
+                    "action. Narrow the task or select a model capable of "
+                    "cross-file coding."
+                ),
+                transition_reason="failed",
+                checkpoint_reason=_DELIVERY_STALLED_CODE,
+            )
+            return True
 
         circuit_remained_open = not executions and any(
             result.metadata.get("circuit_already_open") is True for result in circuit_results
@@ -1348,6 +1402,171 @@ async def _remaining_llm_budget(handles: Any) -> int | None:
     if ledger is None:
         return None
     return cast(int, await ledger.remaining())
+
+
+def _delivery_control_event(state: LoopState) -> ModelMessage | None:
+    trailing = _trailing_exploration_results(state)
+    if not trailing:
+        return None
+
+    inspection_calls = len(trailing)
+    reached = [
+        threshold
+        for threshold in _DELIVERY_CONTROL_THRESHOLDS
+        if inspection_calls >= threshold
+    ]
+    if not reached:
+        return None
+    threshold = reached[-1]
+    cycle_id = trailing[0].tool_call_id
+    marker = f'"cycle_id":"{cycle_id}"'
+    threshold_marker = f'"threshold":{threshold}'
+    if any(
+        message.role == "context"
+        and '"event_type":"delivery_control"' in message.content
+        and marker in message.content
+        and threshold_marker in message.content
+        for message in state["turn_transcript"]
+    ):
+        return None
+
+    if threshold < 12:
+        instruction = (
+            "Stop broad exploration and choose the delivery path now. For an "
+            "implementation task, update the plan or make the first concrete "
+            "edit. For an analysis task, synthesize the answer from current "
+            "evidence."
+        )
+    elif threshold < _EXPLORATION_LIMIT:
+        instruction = (
+            "The first concrete edit is overdue. Stop mapping the repository. "
+            "Use only the exact remaining evidence needed for the existing "
+            "choke point, then call apply_patch or finish with blocker evidence."
+        )
+    else:
+        instruction = (
+            "Exploration is closed for this delivery cycle. Do not issue "
+            "another list_files, search_text, read_file, find_tools, or "
+            "run_command call. If evidence is still missing, one update_plan "
+            "checkpoint naming the exact unresolved files or questions grants "
+            "at most eight focused inspection calls; repeating update_plan does "
+            "not grant more. Otherwise call apply_patch, use another concrete "
+            "delivery tool, or finish with blocker evidence."
+        )
+    return context_event_message(
+        "delivery_control",
+        {
+            "cycle_id": cycle_id,
+            "inspection_calls": inspection_calls,
+            "threshold": threshold,
+            "instruction": instruction,
+        },
+    )
+
+
+def _guard_exploration_stall(
+    state: LoopState,
+    calls: Sequence[ToolCall],
+) -> tuple[tuple[ToolCall, ...], tuple[ToolResult, ...]]:
+    cycle = _delivery_cycle_results(state)
+    trailing = _trailing_exploration_results(state)
+    trailing_exploration_calls = len(trailing)
+    control_already_open = any(
+        result.error_code == _DELIVERY_CONTROL_CODE for result in cycle
+    )
+    focused_extension_active = control_already_open and any(
+        result.tool_name == "update_plan" for result in cycle
+    )
+    exploration_limit = _EXPLORATION_LIMIT + (
+        _FOCUSED_EXPLORATION_EXTENSION if focused_extension_active else 0
+    )
+    remaining_exploration = max(
+        exploration_limit - trailing_exploration_calls,
+        0,
+    )
+    projected_exploration_calls = trailing_exploration_calls
+
+    executable: list[ToolCall] = []
+    blocked: list[ToolResult] = []
+    for call in calls:
+        if call.tool_call_id in state["tool_execution_records"]:
+            # Delivery actions remain available. Recorded calls must stay on
+            # ToolExecutor's replay/reconciliation path.
+            executable.append(call)
+            continue
+        if call.tool_name not in _EXPLORATION_TOOL_NAMES:
+            executable.append(call)
+            if call.tool_name != "update_plan":
+                # A concrete delivery action starts a fresh inspection cycle,
+                # including focused verification later in the same tool batch.
+                remaining_exploration = _EXPLORATION_LIMIT
+                projected_exploration_calls = 0
+                control_already_open = False
+                focused_extension_active = False
+            continue
+        if remaining_exploration > 0:
+            executable.append(call)
+            remaining_exploration -= 1
+            projected_exploration_calls += 1
+            continue
+        if not control_already_open:
+            message = (
+                "Exploration limit reached after "
+                f"{projected_exploration_calls} consecutive inspection calls. "
+                "Submit one update_plan naming the exact unresolved evidence "
+                "for up to eight focused inspection calls, call apply_patch, "
+                "use another concrete delivery tool, or finish."
+            )
+        elif focused_extension_active:
+            message = (
+                "The focused exploration extension is exhausted. Repeating "
+                "update_plan does not grant more calls. Call apply_patch, use "
+                "another concrete delivery tool, or finish."
+            )
+        else:
+            message = (
+                "Exploration remains closed. Use the available evidence to "
+                "call apply_patch, use another concrete delivery tool, or "
+                "finish."
+            )
+        blocked.append(
+            ToolResult(
+                tool_call_id=call.tool_call_id,
+                tool_name=call.tool_name,
+                is_error=True,
+                error_code=_DELIVERY_CONTROL_CODE,
+                error_message=message,
+                retryable=False,
+                metadata={
+                    "consecutive_exploration_calls": projected_exploration_calls,
+                    "delivery_control_already_open": control_already_open,
+                    "focused_extension_active": focused_extension_active,
+                },
+            )
+        )
+    return tuple(executable), tuple(blocked)
+
+
+def _trailing_exploration_results(state: LoopState) -> list[ToolResult]:
+    return [
+        result
+        for result in _delivery_cycle_results(state)
+        if result.tool_name in _EXPLORATION_TOOL_NAMES
+        and result.error_code != _DELIVERY_CONTROL_CODE
+    ]
+
+
+def _delivery_cycle_results(state: LoopState) -> list[ToolResult]:
+    cycle: list[ToolResult] = []
+    for result in reversed(state["tool_results"]):
+        if (
+            result.tool_name != "update_plan"
+            and result.tool_name not in _EXPLORATION_TOOL_NAMES
+        ):
+            break
+        cycle.append(result)
+    cycle.reverse()
+    return cycle
 
 
 def _guard_repeated_tool_failures(

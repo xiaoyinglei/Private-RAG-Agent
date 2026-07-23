@@ -6,6 +6,7 @@ from collections.abc import AsyncIterable, Mapping
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from pathlib import Path
+from typing import cast
 
 import pytest
 from langgraph.checkpoint.memory import MemorySaver
@@ -26,6 +27,8 @@ from rag.agent.loop.runtime import (
     LoopEventSink,
     ModelTurnEnvelope,
     _approval_request,
+    _delivery_control_event,
+    _guard_exploration_stall,
 )
 from rag.agent.loop.state import (
     LoopState,
@@ -705,6 +708,173 @@ async def test_find_tools_result_and_activation_are_checkpointed_atomically() ->
     assert all(
         any(item.tool_call_id == call.tool_call_id for item in snap["tool_results"]) for snap in activation_snapshots
     )
+
+
+def test_exploration_stall_blocks_inspection_but_keeps_delivery_paths() -> None:
+    state = create_loop_state(
+        current_message="Make the requested change.",
+        run_config=_config("loop-exploration-stall"),
+    )
+    state["tool_results"] = [
+        ToolResult(tool_call_id=f"read-{index}", tool_name="read_file")
+        for index in range(20)
+    ]
+    origin = ToolCallOrigin(
+        request_id="delivery-control-request",
+        toolset_revision="delivery-control-tools",
+        exposed_tool_names=("read_file", "apply_patch"),
+    )
+    repeated_read = ToolCall(
+        tool_call_id="read-new",
+        tool_name="read_file",
+        arguments={"path": "src/example.py"},
+        origin=origin,
+    )
+    replayed_read = ToolCall(
+        tool_call_id="read-replay",
+        tool_name="read_file",
+        arguments={"path": "src/example.py"},
+        origin=origin,
+    )
+    patch = ToolCall(
+        tool_call_id="patch-now",
+        tool_name="apply_patch",
+        arguments={"file_path": "src/example.py"},
+        origin=origin,
+    )
+    state["tool_execution_records"][replayed_read.tool_call_id] = cast(
+        ToolExecutionRecord,
+        object(),
+    )
+
+    executable, blocked = _guard_exploration_stall(
+        state,
+        (repeated_read, replayed_read, patch),
+    )
+
+    assert executable == (replayed_read, patch)
+    assert len(blocked) == 1
+    assert blocked[0].tool_call_id == repeated_read.tool_call_id
+    assert blocked[0].error_code == "delivery_control"
+    assert blocked[0].retryable is False
+    assert blocked[0].metadata["delivery_control_already_open"] is False
+    event = _delivery_control_event(state)
+    assert event is not None
+    assert '"threshold":20' in event.content
+
+
+def test_update_plan_grants_only_one_bounded_focused_extension() -> None:
+    state = create_loop_state(
+        current_message="Deliver the implementation.",
+        run_config=_config("loop-plan-does-not-reopen-exploration"),
+    )
+    state["tool_results"] = [
+        *(
+            ToolResult(tool_call_id=f"read-{index}", tool_name="read_file")
+            for index in range(20)
+        ),
+        ToolResult(
+            tool_call_id="blocked-read",
+            tool_name="read_file",
+            is_error=True,
+            error_code="delivery_control",
+            error_message="exploration closed",
+        ),
+        ToolResult(tool_call_id="plan-update", tool_name="update_plan"),
+    ]
+    origin = ToolCallOrigin(
+        request_id="plan-escape-request",
+        toolset_revision="plan-escape-tools",
+        exposed_tool_names=("read_file",),
+    )
+    calls = tuple(
+        ToolCall(
+            tool_call_id=f"focused-read-{index}",
+            tool_name="read_file",
+            arguments={"path": f"src/example_{index}.py"},
+            origin=origin,
+        )
+        for index in range(9)
+    )
+
+    executable, blocked = _guard_exploration_stall(state, calls)
+
+    assert executable == calls[:8]
+    assert len(blocked) == 1
+    assert blocked[0].tool_call_id == calls[8].tool_call_id
+    assert blocked[0].metadata["delivery_control_already_open"] is True
+    assert blocked[0].metadata["focused_extension_active"] is True
+
+
+def test_exploration_stall_caps_a_batch_at_the_threshold() -> None:
+    state = create_loop_state(
+        current_message="Inspect the two remaining files.",
+        run_config=_config("loop-exploration-threshold-batch"),
+    )
+    state["tool_results"] = [
+        ToolResult(tool_call_id=f"read-{index}", tool_name="read_file")
+        for index in range(19)
+    ]
+    origin = ToolCallOrigin(
+        request_id="delivery-batch-request",
+        toolset_revision="delivery-batch-tools",
+        exposed_tool_names=("read_file",),
+    )
+    calls = tuple(
+        ToolCall(
+            tool_call_id=f"batch-{index}",
+            tool_name="read_file",
+            arguments={"path": f"src/file_{index}.py"},
+            origin=origin,
+        )
+        for index in range(2)
+    )
+
+    executable, blocked = _guard_exploration_stall(state, calls)
+
+    assert executable == calls[:1]
+    assert len(blocked) == 1
+    assert blocked[0].tool_call_id == calls[1].tool_call_id
+
+
+@pytest.mark.anyio
+async def test_repeated_delivery_control_breach_fails_fast() -> None:
+    attempts = 0
+
+    def inspect(_arguments: Mapping[str, JsonValue]) -> str:
+        nonlocal attempts
+        attempts += 1
+        return "unexpected inspection"
+
+    first = ToolCallPlan.create("read_file", {"value": "first"})
+    repeated = ToolCallPlan.create("read_file", {"value": "second"})
+    state = create_loop_state(
+        current_message="Stop exploring and deliver.",
+        run_config=_config("loop-delivery-control-fail-fast"),
+        pending_tool_calls=(first,),
+    )
+    state["resident_tool_names"] = ["read_file"]
+    state["tool_results"] = [
+        ToolResult(tool_call_id=f"seed-{index}", tool_name="read_file")
+        for index in range(20)
+    ]
+
+    result = await _loop(
+        provider=_SequenceProvider(
+            [ModelTurnDraft(action="execute", tool_calls=(repeated,))]
+        ),
+        tools=(_tool("read_file", inspect),),
+    ).run(state)
+
+    assert attempts == 0
+    assert result["status"] == "failed"
+    assert result["terminal"] is not None
+    assert result["terminal"].stop_reason == "delivery_stalled"
+    assert "cross-file coding" in (result["terminal"].error or "")
+    assert [item.error_code for item in result["tool_results"][-2:]] == [
+        "delivery_control",
+        "delivery_control",
+    ]
 
 
 @pytest.mark.anyio

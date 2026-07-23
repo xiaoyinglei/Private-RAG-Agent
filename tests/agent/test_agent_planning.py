@@ -140,6 +140,41 @@ def test_llm_update_cannot_claim_plan_or_step_completion() -> None:
     assert "llm_completion_ignored" in events[0].warnings
 
 
+def test_blocked_run_downgrades_only_unverified_completed_steps() -> None:
+    plan = AgentPlan(
+        objective="Implement and verify the change.",
+        steps=[
+            PlanStep(
+                step_id="step_001",
+                title="Claimed complete without evidence",
+                status="completed",
+            ),
+            PlanStep(
+                step_id="step_002",
+                title="Completed with tool evidence",
+                status="completed",
+                tool_call_ids=["call_verified"],
+            ),
+            PlanStep(
+                step_id="step_003",
+                title="Still in progress",
+                status="in_progress",
+            ),
+        ],
+    )
+
+    updated, events = PlanTracker().record_completion(plan, blocked=True)
+
+    assert updated is not None
+    assert updated.status == "blocked"
+    assert [step.status for step in updated.steps] == [
+        "blocked",
+        "completed",
+        "blocked",
+    ]
+    assert events[0].event_type == "blocked"
+
+
 def test_unbound_observation_requests_replan() -> None:
     plan = AgentPlan(
         objective="Answer carefully.",

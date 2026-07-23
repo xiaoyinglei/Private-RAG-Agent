@@ -4,6 +4,7 @@ import asyncio
 
 import pytest
 
+from rag.agent.builtin.generic import GENERIC_AGENT, GENERIC_SYSTEM_PROMPT
 from rag.agent.core.context import (
     AgentRunConfig,
     AgentRuntimeHandles,
@@ -154,6 +155,13 @@ class TestAgentRuntimePolicy:
         assert not hasattr(ad, "description")
         assert not hasattr(ad, "allowed_tools")
         assert ad.output_validation_max_retries == 2
+
+    def test_generic_coding_agent_has_delivery_budget_and_aci_guidance(self) -> None:
+        assert GENERIC_AGENT.max_iterations == 50
+        assert GENERIC_AGENT.model_selection.tool_decision_max_tokens == 4_096
+        assert "read_file.start_line" in GENERIC_SYSTEM_PROMPT
+        assert "first concrete edit" in GENERIC_SYSTEM_PROMPT
+        assert "twelve inspection" in GENERIC_SYSTEM_PROMPT
 
     def test_definition_rejects_negative_output_validation_retries(self) -> None:
         with pytest.raises(

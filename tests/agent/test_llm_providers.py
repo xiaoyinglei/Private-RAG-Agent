@@ -21,7 +21,7 @@ from rag.agent.tools.tool import (
     ToolDefinition,
     json_schema_input,
 )
-from rag.schema.llm import LLMUsage
+from rag.schema.llm import LLMCallStage, LLMStageBudget, LLMUsage
 
 
 def _tool(name: str) -> Tool:
@@ -55,6 +55,18 @@ def _tool(name: str) -> Tool:
 class _CanonicalGateway:
     def __init__(self) -> None:
         self.calls: list[dict[str, object]] = []
+
+    def effective_stage_budget(
+        self,
+        stage: LLMCallStage,
+        *,
+        kwargs: Mapping[str, object] | None = None,
+    ) -> LLMStageBudget:
+        del stage, kwargs
+        return LLMStageBudget(
+            max_input_tokens=32_000,
+            max_output_tokens=4_096,
+        )
 
     async def agenerate_model_request(self, **kwargs: object) -> object:
         self.calls.append(dict(kwargs))

@@ -58,13 +58,31 @@ from rag.schema.llm import LLMCallStage, LLMStageBudget, LLMUsage
 
 
 class _RecordingGateway:
-    def __init__(self, turn: ToolUseResult | None = None) -> None:
+    def __init__(
+        self,
+        turn: ToolUseResult | None = None,
+        *,
+        max_input_tokens: int = 32_000,
+    ) -> None:
         self.calls: list[dict[str, object]] = []
+        self.max_input_tokens = max_input_tokens
         self.turn = turn or ToolUseResult(
             text="The policy changed in 2026.",
             tool_calls=[],
             stop_reason=StopReason.END_TURN,
             raw_stop_reason="stop",
+        )
+
+    def effective_stage_budget(
+        self,
+        stage: LLMCallStage,
+        *,
+        kwargs: Mapping[str, object] | None = None,
+    ) -> LLMStageBudget:
+        del stage, kwargs
+        return LLMStageBudget(
+            max_input_tokens=self.max_input_tokens,
+            max_output_tokens=4_096,
         )
 
     async def agenerate_model_request(self, **kwargs: object) -> AgentModelResponse:
@@ -264,6 +282,36 @@ async def test_long_session_projects_model_context_without_mutating_history() ->
     assert any("context_compaction" in message.content for message in request.messages)
     assert any("message-29" in message.content for message in request.messages)
     assert envelope.context_revision is not None
+
+
+@pytest.mark.anyio
+async def test_loop_provider_projects_to_gateway_stage_budget() -> None:
+    gateway = _RecordingGateway(max_input_tokens=512)
+    provider = _provider(
+        gateway,
+        names=(),
+        context_window_tokens=32_768,
+    )
+    state = _state("stage-budget-projection")
+    transcript = [
+        ModelMessage(
+            role="assistant" if index % 2 else "user",
+            content=f"stage-message-{index}: " + ("x" * 180),
+        )
+        for index in range(30)
+    ]
+    state["turn_transcript"] = list(transcript)
+
+    await provider.next_turn(
+        state,
+        definition=_definition(),
+        budget_remaining=10_000,
+    )
+
+    request = gateway.calls[0]["request"]
+    assert state["turn_transcript"] == transcript
+    assert len(request.messages) < len(transcript) + 2
+    assert any("context_compaction" in message.content for message in request.messages)
 
 
 @pytest.mark.anyio

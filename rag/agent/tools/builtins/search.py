@@ -25,8 +25,26 @@ from rag.agent.tools.tool import (
 from rag.agent.workspace import WorkspaceRuntime
 
 _INTERNAL_DIRECTORY = ".agent_memory"
+_DEFAULT_IGNORED_DIRECTORIES = frozenset(
+    {
+        _INTERNAL_DIRECTORY,
+        ".git",
+        ".mypy_cache",
+        ".nox",
+        ".pytest_cache",
+        ".rag",
+        ".ruff_cache",
+        ".tox",
+        ".venv",
+        "__pycache__",
+        "node_modules",
+    }
+)
 _MAX_SEARCH_FILE_BYTES = 2_000_000
 _MAX_RETURNED_LINE_CHARS = 500
+_SOURCE_FILE_SUFFIXES = frozenset(
+    {".c", ".cc", ".cpp", ".go", ".java", ".js", ".jsx", ".py", ".rs", ".ts", ".tsx"}
+)
 
 
 class SearchTextInput(BaseModel):
@@ -47,15 +65,22 @@ class SearchTextInput(BaseModel):
         max_length=512,
         description="Optional file glob such as '*.py' or 'src/**/*.ts'.",
     )
-    regex: bool = Field(
-        default=False,
-        description="Interpret pattern as a Python regular expression.",
+    regex: bool | None = Field(
+        default=None,
+        description=(
+            "Matching mode. Use true for a Python regular expression and false "
+            "for exact literal text. Omit it to auto-detect common regex syntax "
+            "such as '.*', '|', '^', '$', character classes, or escaped classes."
+        ),
     )
     context_lines: int = Field(
-        default=0,
+        default=2,
         ge=0,
-        le=5,
-        description="Lines of context to return before and after each match.",
+        le=50,
+        description=(
+            "Lines of context to return before and after each match; defaults "
+            "to two so symbol searches usually reveal the local definition."
+        ),
     )
     max_results: int = Field(
         default=40,
@@ -122,7 +147,7 @@ def create_search_text_tool(workspace: WorkspaceRuntime) -> Tool:
                 ),
             ),
         ),
-        execution_revision="builtin-search-text-v1",
+        execution_revision="builtin-search-text-v2-source-first",
         idempotent=True,
         concurrency_safe=True,
         cancellation_mode=CancellationMode.COOPERATIVE,
@@ -136,7 +161,10 @@ def _validate_search_input(
     arguments: Mapping[str, JsonValue],
 ) -> Mapping[str, JsonValue]:
     canonical = _validate_search_model(arguments)
-    if canonical["regex"]:
+    if _uses_regular_expression(
+        str(canonical["pattern"]),
+        canonical["regex"] if isinstance(canonical["regex"], bool) else None,
+    ):
         try:
             re.compile(str(canonical["pattern"]))
         except re.error:
@@ -152,7 +180,11 @@ def _search_text(
     request: SearchTextInput,
 ) -> SearchTextOutput:
     files = _searchable_files(workspace, request.path, request.glob)
-    expression = re.compile(request.pattern) if request.regex else None
+    expression = (
+        re.compile(request.pattern)
+        if _uses_regular_expression(request.pattern, request.regex)
+        else None
+    )
     matches: list[SearchTextMatch] = []
     truncated = False
 
@@ -232,7 +264,7 @@ def _searchable_files(
         directory_names[:] = sorted(
             name
             for name in directory_names
-            if name != _INTERNAL_DIRECTORY
+            if name not in _DEFAULT_IGNORED_DIRECTORIES
             and not (current / name).is_symlink()
         )
         for name in sorted(file_names):
@@ -241,7 +273,12 @@ def _searchable_files(
                 continue
             if _matches_glob(workspace, path, glob):
                 files.append(path)
-    return tuple(files)
+    return tuple(
+        sorted(
+            files,
+            key=lambda path: _search_file_priority(workspace, path),
+        )
+    )
 
 
 def _matches_glob(
@@ -257,6 +294,43 @@ def _matches_glob(
 
 def _bounded_line(value: str) -> str:
     return value[:_MAX_RETURNED_LINE_CHARS]
+
+
+def _search_file_priority(
+    workspace: WorkspaceRuntime,
+    path: Path,
+) -> tuple[int, str]:
+    relative = path.relative_to(workspace.root).as_posix()
+    parts = set(Path(relative).parts[:-1])
+    if "docs" in parts:
+        group = 3
+    elif path.suffix.lower() in _SOURCE_FILE_SUFFIXES:
+        group = 1 if "tests" in parts else 0
+    else:
+        group = 2
+    return group, relative
+
+
+def _uses_regular_expression(pattern: str, requested: bool | None) -> bool:
+    if requested is not None:
+        return requested
+    return any(
+        marker in pattern
+        for marker in (
+            ".*",
+            ".+",
+            ".?",
+            "|",
+            "^",
+            "$",
+            "(?",
+            "[",
+            r"\b",
+            r"\d",
+            r"\s",
+            r"\w",
+        )
+    )
 
 
 def _normalize_search_output(raw: object) -> NormalizedToolOutput:

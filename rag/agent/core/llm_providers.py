@@ -195,12 +195,17 @@ class LLMLoopModelTurnProvider:
             state["run_config"].max_context_tokens
             or self._context_window_tokens
         )
+        model_input_limit = max(
+            256,
+            context_limit - settings.max_output_tokens - 1_024,
+        )
+        stage_input_limit = self._gateway.effective_stage_budget(
+            LLMCallStage.TOOL_DECISION,
+            kwargs={"max_tokens": settings.max_output_tokens},
+        ).max_input_tokens
         context = _project_model_context(
             context,
-            max_input_tokens=max(
-                256,
-                context_limit - settings.max_output_tokens - 1_024,
-            ),
+            max_input_tokens=min(model_input_limit, stage_input_limit),
         )
         request = build_model_request(
             request_id=(
