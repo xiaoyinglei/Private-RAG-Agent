@@ -113,7 +113,11 @@ def test_legacy_agent_modules_are_removed() -> None:
     )
 
     for module_name in legacy_modules:
-        assert importlib.util.find_spec(module_name) is None
+        try:
+            module_spec = importlib.util.find_spec(module_name)
+        except ModuleNotFoundError:
+            module_spec = None
+        assert module_spec is None
 
 
 def test_legacy_agent_closure_files_are_removed() -> None:

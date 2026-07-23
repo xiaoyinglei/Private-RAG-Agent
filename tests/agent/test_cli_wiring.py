@@ -2,8 +2,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import click
 import pytest
 from pydantic import ValidationError
+from typer.main import get_command
 from typer.testing import CliRunner
 
 from agent_runtime import RAGKnowledgeConfig
@@ -63,9 +65,9 @@ class _ModelRegistry:
                 "--agent",
                 "--turn-id",
                 "--run-id",
-                "--knowledge ",
+                "--knowledge",
                 "--input-file",
-                "--tool ",
+                "--tool",
                 "--disable-tool",
                 "--allow-discovery-tools",
                 "--budget",
@@ -99,22 +101,24 @@ class _ModelRegistry:
         ),
     ],
 )
-def test_agent_command_help_matches_the_clean_public_contract(
+def test_agent_command_options_match_the_clean_public_contract(
     command: str,
     present: tuple[str, ...],
     removed: tuple[str, ...],
 ) -> None:
-    result = CliRunner().invoke(
-        agent_app,
-        [command, "--help"],
-        env={"COLUMNS": "240"},
-    )
+    root_command = get_command(agent_app)
+    command_info = root_command.get_command(click.Context(root_command), command)
 
-    assert result.exit_code == 0
+    assert command_info is not None
+    option_names = {
+        option
+        for parameter in command_info.params
+        for option in (*parameter.opts, *parameter.secondary_opts)
+    }
     for option in present:
-        assert option in result.output
+        assert option in option_names
     for option in removed:
-        assert option not in result.output
+        assert option not in option_names
 
 
 def test_agent_run_rejects_missing_input_without_internal_traceback(
