@@ -79,9 +79,8 @@ async def test_update_plan_is_canonical_result_and_checkpoint_state(
 ) -> None:
     service, definition, checkpointer = _plan_service(tmp_path)
     request = AgentRunRequest(
-        task="Make update_plan durable.",
-        run_id="turn-plan-result",
-        thread_id="turn-plan-result",
+        message="Make update_plan durable.",
+        turn_id="turn-plan-result",
     )
 
     result = await service.run(request)
@@ -100,9 +99,7 @@ async def test_update_plan_is_canonical_result_and_checkpoint_state(
     assert result.plan.revision == 1
     assert result.plan.active_step_id == "step_002"
     assert any(event.event_type == "llm_update" for event in result.plan_events)
-    update_result = next(
-        item for item in result.tool_results if item.tool_name == "update_plan"
-    )
+    update_result = next(item for item in result.tool_results if item.tool_name == "update_plan")
     assert update_result.structured_content == {
         "accepted": True,
         "revision": result.plan.revision,
@@ -117,7 +114,7 @@ async def test_update_plan_is_canonical_result_and_checkpoint_state(
     assert restored["plan_state"].agent_plan == result.plan
     assert restored["plan_state"].plan_events == result.plan_events
 
-    public = AgentResult.from_internal(result)
+    public = AgentResult._from_internal(result)
     assert public.plan == result.plan
     assert public.plan_events == tuple(result.plan_events)
 
@@ -132,17 +129,17 @@ async def test_update_plan_emits_complete_plan_snapshot_on_stream(
         event
         async for event in service.run_streaming(
             AgentRunRequest(
-                task="Stream the durable plan.",
-                run_id="turn-plan-stream",
-                thread_id="turn-plan-stream",
+                message="Stream the durable plan.",
+                turn_id="turn-plan-stream",
             )
         )
     ]
 
-    plan_event = next(
-        event for event in events if event.type.value == "plan_updated"
-    )
-    assert plan_event.run_id == "turn-plan-stream"
+    plan_event = next(event for event in events if event.type.value == "plan_updated")
+    assert plan_event.turn_id == "turn-plan-stream"
+    assert not hasattr(plan_event, "session_id")
+    assert plan_event.iteration == 1
+    assert plan_event.sequence > 0
     assert plan_event.data["plan"]["summary"] == _PLAN_ARGUMENTS["explanation"]
     assert plan_event.data["plan"]["active_step_id"] == "step_002"
     assert [step["status"] for step in plan_event.data["plan"]["steps"]] == [

@@ -39,7 +39,7 @@ async def test_subagent_tool_projects_an_injected_runner() -> None:
             "evidence_refs": [],
             "citations": [],
             "status": "done",
-            "child_run_id": "child-1",
+            "child_turn_id": "child-1",
             "stop_reason": "finished",
         }
 
@@ -68,7 +68,7 @@ async def test_subagent_tool_projects_an_injected_runner() -> None:
     assert output["status"] == "done"
     assert output["conclusion"] == "child conclusion"
     assert output["key_facts"] == ("fact one",)
-    assert execution.result.metadata["child_run_id"] == "child-1"
+    assert execution.result.metadata["child_turn_id"] == "child-1"
 
 
 @pytest.mark.anyio
@@ -77,7 +77,7 @@ async def test_subagent_failure_is_a_canonical_error_result() -> None:
         lambda _arguments: {
             "conclusion": "child failed",
             "status": "failed",
-            "child_run_id": "child-failed",
+            "child_turn_id": "child-failed",
         }
     )
 
@@ -99,7 +99,7 @@ async def test_subagent_effect_requires_external_approval() -> None:
         lambda _arguments: {
             "conclusion": "done",
             "status": "done",
-            "child_run_id": "child-1",
+            "child_turn_id": "child-1",
         }
     )
 

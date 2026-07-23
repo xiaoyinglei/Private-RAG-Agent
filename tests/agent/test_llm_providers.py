@@ -21,8 +21,7 @@ from rag.agent.tools.tool import (
     ToolDefinition,
     json_schema_input,
 )
-from rag.schema.llm import LLMUsage
-from rag.schema.runtime import AccessPolicy
+from rag.schema.llm import LLMCallStage, LLMStageBudget, LLMUsage
 
 
 def _tool(name: str) -> Tool:
@@ -57,6 +56,18 @@ class _CanonicalGateway:
     def __init__(self) -> None:
         self.calls: list[dict[str, object]] = []
 
+    def effective_stage_budget(
+        self,
+        stage: LLMCallStage,
+        *,
+        kwargs: Mapping[str, object] | None = None,
+    ) -> LLMStageBudget:
+        del stage, kwargs
+        return LLMStageBudget(
+            max_input_tokens=32_000,
+            max_output_tokens=4_096,
+        )
+
     async def agenerate_model_request(self, **kwargs: object) -> object:
         self.calls.append(dict(kwargs))
         return SimpleNamespace(
@@ -86,20 +97,15 @@ class _CanonicalGateway:
 
 def _state():
     return create_loop_state(
-        task="Inspect README.md.",
+        current_message="Inspect README.md.",
         run_config=AgentRunConfig(
-            run_id="provider-parity",
-            thread_id="provider-parity",
-            max_depth=1,
-            access_policy=AccessPolicy.default(),
+            turn_id="provider-parity",
         ),
     )
 
 
 def _definition() -> AgentRuntimePolicy:
     return AgentRuntimePolicy.test_factory(
-        agent_type="provider_parity",
-        description="Provider parity.",
         system_prompt="Use canonical tools.",
         allowed_tools=["list_files", "read_file"],
     )

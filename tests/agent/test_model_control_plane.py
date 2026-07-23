@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -20,6 +21,7 @@ from agent_runtime.models import (
 from rag.agent.cli import agent_app
 from rag.agent.core.llm_registry import ModelNotAvailableError, ModelRegistry
 from rag.schema.llm import DEFAULT_LLM_STAGE_BUDGETS, LLMCallStage
+from rag.utils.text import load_env_file
 
 
 def _write_models_config(path: Path) -> None:
@@ -97,16 +99,16 @@ def test_model_catalog_loads_runtime_specs_without_embedding_models(tmp_path: Pa
     assert local.runtime.expected_model_contains == "Qwen3-14B"
 
 
-def test_bundled_default_chat_model_is_cloud_groq() -> None:
+def test_bundled_default_chat_model_is_deepseek_chat() -> None:
     catalog = ModelCatalog.from_config_file(Path("configs/models.yaml"))
 
     spec = catalog.get(catalog.default_model_id)
 
-    assert catalog.default_model_id == "groq_gpt_oss_120b"
-    assert spec.provider == "groq"
-    assert spec.provider_model == "openai/gpt-oss-120b"
+    assert catalog.default_model_id == "deepseek_chat"
+    assert spec.provider == "deepseek"
+    assert spec.provider_model == "deepseek-chat"
     assert spec.location == "cloud"
-    assert spec.api_key_env == "GROQ_API_KEY"
+    assert spec.api_key_env == "DEEPSEEK_API_KEY"
 
 
 def test_bundled_local_qwen8_runtime_is_available_for_local_testing() -> None:
@@ -124,11 +126,41 @@ def test_bundled_local_qwen8_runtime_is_available_for_local_testing() -> None:
     assert "mlx-community/Qwen3-8B-4bit" in spec.runtime.launch_command
 
 
-def test_bundled_tool_decision_output_budget_is_small_for_local_agent() -> None:
+def test_bundled_tool_decision_budget_supports_coding_turns() -> None:
     payload = yaml.safe_load(Path("configs/models.yaml").read_text(encoding="utf-8"))
 
-    assert payload["llm_budgets"]["tool_decision"]["max_output_tokens"] == 768
-    assert DEFAULT_LLM_STAGE_BUDGETS[LLMCallStage.TOOL_DECISION].max_output_tokens == 768
+    budget = payload["llm_budgets"]["tool_decision"]
+    assert budget["max_input_tokens"] == 32_000
+    assert budget["max_output_tokens"] == 4_096
+    default = DEFAULT_LLM_STAGE_BUDGETS[LLMCallStage.TOOL_DECISION]
+    assert default.max_input_tokens == 32_000
+    assert default.max_output_tokens == 4_096
+
+
+def test_env_loader_uses_shared_env_for_linked_worktree(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    primary = tmp_path / "repository"
+    common_git = primary / ".git"
+    worktree_git = common_git / "worktrees" / "feature"
+    worktree = tmp_path / "feature-worktree"
+    worktree_git.mkdir(parents=True)
+    worktree.mkdir()
+    (worktree / ".git").write_text(
+        f"gitdir: {worktree_git}\n",
+        encoding="utf-8",
+    )
+    (worktree_git / "commondir").write_text("../..\n", encoding="utf-8")
+    shared_env = primary / ".env"
+    shared_env.write_text("WORKTREE_SHARED_KEY=available\n", encoding="utf-8")
+    monkeypatch.delenv("AGENT_ENV_FILE", raising=False)
+    monkeypatch.delenv("WORKTREE_SHARED_KEY", raising=False)
+
+    loaded = load_env_file(worktree / ".env")
+
+    assert loaded == shared_env.resolve()
+    assert os.environ["WORKTREE_SHARED_KEY"] == "available"
 
 
 def test_model_policy_reviews_agent_model_switch_requests(tmp_path: Path) -> None:
@@ -233,7 +265,10 @@ def test_control_plane_rejects_cloud_model_without_api_key(
 
     control = ModelControlPlane.from_config_file(config_path, initial_model_id="mimo_cloud")
 
-    with pytest.raises(RuntimeError, match="Missing API key: MIMO_API_KEY"):
+    with pytest.raises(
+        ModelNotAvailableError,
+        match="MIMO_API_KEY is not set",
+    ):
         control.resolve_for_node(node_model=None, node_name="tool_decision")
 
 

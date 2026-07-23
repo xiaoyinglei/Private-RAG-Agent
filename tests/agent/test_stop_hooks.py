@@ -23,7 +23,6 @@ from rag.agent.loop.stop_hooks import (
     build_stop_hooks,
 )
 from rag.agent.tools.tool import ToolResult
-from rag.schema.runtime import AccessPolicy
 
 
 class _StructuredAnswer(BaseModel):
@@ -32,16 +31,13 @@ class _StructuredAnswer(BaseModel):
 
 def _config(run_id: str = "stop-hooks") -> AgentRunConfig:
     return AgentRunConfig(
-        run_id=run_id,
-        thread_id=run_id,
+        turn_id=run_id,
         llm_budget_total=100,
-        max_depth=2,
-        access_policy=AccessPolicy.default(),
     )
 
 
 def _state():
-    return create_loop_state(task="Answer carefully", run_config=_config())
+    return create_loop_state(current_message="Answer carefully", run_config=_config())
 
 
 @dataclass
@@ -247,8 +243,6 @@ class _ExhaustedFinalizer:
 @pytest.mark.anyio
 async def test_structured_output_hook_is_critical_and_returns_validated_output() -> None:
     definition = AgentRuntimePolicy.test_factory(
-        agent_type="structured",
-        description="structured",
         system_prompt="Return structured output.",
         allowed_tools=[],
         output_model=_StructuredAnswer,
@@ -278,8 +272,6 @@ async def test_structured_output_hook_is_critical_and_returns_validated_output()
 @pytest.mark.anyio
 async def test_structured_output_exhaustion_halts_with_validation_details() -> None:
     definition = AgentRuntimePolicy.test_factory(
-        agent_type="structured",
-        description="structured",
         system_prompt="Return structured output.",
         allowed_tools=[],
         output_model=_StructuredAnswer,
@@ -379,8 +371,6 @@ async def test_explicit_goal_contract_accepts_traceable_evidence() -> None:
 
 def test_stop_hook_factory_installs_goal_hook_only_when_explicitly_supplied() -> None:
     definition = AgentRuntimePolicy.test_factory(
-        agent_type="plain",
-        description="plain",
         system_prompt="Answer.",
         allowed_tools=[],
     )

@@ -126,7 +126,11 @@ class ContextBuilder:
 
         add("system", definition.system_instructions, required=True)
         add("policy_hints", self._format_policy_hints(policy_hints))
-        add("task", self._format_task(state.get("task", "")), required=True)
+        add(
+            "task",
+            self._format_task(state.get("current_message", "")),
+            required=True,
+        )
         add(
             "open_decisions",
             self._format_loop_open_decisions(state),

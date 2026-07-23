@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from pydantic import BaseModel, Field
 
+from agent_runtime.planning import AgentPlan, PlanEvent
 from rag.agent.core.output_models import ValidatedFinalOutput
 from rag.agent.core.runtime_diagnostics import RuntimeDiagnostic
 from rag.agent.loop.state import StopHookFeedback
@@ -19,7 +20,6 @@ from rag.agent.memory.models import (
     MemoryRef,
     WorkingSummary,
 )
-from rag.agent.planning import AgentPlan, PlanEvent
 
 
 class PersistentMemorySnapshot(BaseModel):

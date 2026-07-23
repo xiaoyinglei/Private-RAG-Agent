@@ -7,9 +7,8 @@ from pathlib import Path
 import pytest
 from pydantic import BaseModel
 
-from rag.agent.core.context import RunRegistry
+from rag.agent.core.context import TurnRegistry
 from rag.agent.core.definition import AgentRuntimePolicy, ToolPolicy
-from rag.agent.core.human_input import HumanInputResponse
 from rag.agent.core.model_request import ModelCallRecord
 from rag.agent.core.output_models import ValidatedFinalOutput
 from rag.agent.core.turn_contracts import ToolCallPlan
@@ -32,6 +31,7 @@ from rag.agent.tools.tool import (
     ToolTarget,
     json_schema_input,
 )
+from rag.agent.turns import RuntimeBinding, TurnStatus, TurnStore
 from rag.agent.workspace import open_workspace
 from rag.schema.llm import LLMUsage
 
@@ -104,11 +104,7 @@ class _ManifestProvider:
     ) -> ModelTurnDraft:
         del definition, budget_remaining
         manifest = state["file_manifest"]
-        self.paths = (
-            ()
-            if manifest is None
-            else tuple(entry.path for entry in manifest.files)
-        )
+        self.paths = () if manifest is None else tuple(entry.path for entry in manifest.files)
         return ModelTurnDraft(action="finish", final_answer="inspected")
 
 
@@ -140,11 +136,7 @@ def _tool(
             structured_content={"text": text},
         )
 
-    effects = (
-        frozenset({ToolEffect.WRITE_WORKSPACE})
-        if write
-        else frozenset()
-    )
+    effects = frozenset({ToolEffect.WRITE_WORKSPACE}) if write else frozenset()
     return Tool(
         definition=ToolDefinition(
             name=name,
@@ -158,11 +150,7 @@ def _tool(
         static_effects=effects,
         resolve_use=lambda _arguments: ResolvedToolUse(
             effects=effects,
-            targets=(
-                (ToolTarget(kind="workspace_path", value="."),)
-                if write
-                else ()
-            ),
+            targets=((ToolTarget(kind="workspace_path", value="."),) if write else ()),
         ),
         execution_revision=f"{name}-v1",
         idempotent=not write,
@@ -188,7 +176,6 @@ def _definition(
     tool_policy: ToolPolicy | None = None,
 ) -> AgentRuntimePolicy:
     return AgentRuntimePolicy.test_factory(
-        agent_type="service_test",
         system_prompt="Use canonical tools.",
         allowed_tools=list(names),
         output_model=output_model,
@@ -205,24 +192,23 @@ def test_initial_state_creates_runtime_handles_and_manifest() -> None:
     )
     state = service.initial_state(
         AgentRunRequest(
-            task="Inspect.",
-            run_id="service-state",
-            thread_id="service-state",
+            message="Inspect.",
+            turn_id="service-state",
         )
     )
 
-    assert RunRegistry.get("service-state") is not None
+    assert TurnRegistry.get("service-state") is not None
     assert state["resident_tool_names"] == ["read_file"]
     assert state["tool_manifest"] is not None
     assert state["tool_manifest"].resident_tool_names == ("read_file",)
-    RunRegistry.remove("service-state")
+    TurnRegistry.remove("service-state")
 
 
 @pytest.mark.parametrize("max_turns", [0, -1, True])
 def test_run_request_rejects_invalid_max_turns(max_turns: object) -> None:
     with pytest.raises(ValueError, match="max_turns"):
         AgentRunRequest(
-            task="Answer.",
+            message="Answer.",
             max_turns=max_turns,  # type: ignore[arg-type]
         )
 
@@ -247,9 +233,7 @@ async def test_service_enforces_request_max_turns() -> None:
             if self.model_calls == 1:
                 return ModelTurnDraft(
                     action="execute",
-                    tool_calls=(
-                        ToolCallPlan.create("echo", {"value": "once"}),
-                    ),
+                    tool_calls=(ToolCallPlan.create("echo", {"value": "once"}),),
                 )
             return ModelTurnDraft(
                 action="finish",
@@ -265,9 +249,8 @@ async def test_service_enforces_request_max_turns() -> None:
 
     result = await service.run(
         AgentRunRequest(
-            task="Use one model turn.",
-            run_id="service-max-turns",
-            thread_id="service-max-turns",
+            message="Use one model turn.",
+            turn_id="service-max-turns",
             max_turns=1,
         )
     )
@@ -290,12 +273,9 @@ async def test_service_executes_pending_call_through_final_executor() -> None:
 
     result = await service.run(
         AgentRunRequest(
-            task="Echo.",
-            run_id="service-tool",
-            thread_id="service-tool",
-            pending_tool_calls=[
-                ToolCallPlan.create("echo", {"value": "once"})
-            ],
+            message="Echo.",
+            turn_id="service-tool",
+            pending_tool_calls=[ToolCallPlan.create("echo", {"value": "once"})],
         )
     )
 
@@ -315,12 +295,9 @@ async def test_service_pauses_write_until_approved() -> None:
 
     result = await service.run(
         AgentRunRequest(
-            task="Write.",
-            run_id="service-approval",
-            thread_id="service-approval",
-            pending_tool_calls=[
-                ToolCallPlan.create("write_tool", {"value": "x"})
-            ],
+            message="Write.",
+            turn_id="service-approval",
+            pending_tool_calls=[ToolCallPlan.create("write_tool", {"value": "x"})],
         )
     )
 
@@ -338,9 +315,8 @@ async def test_public_explicit_names_replace_defaults_and_disabled_wins() -> Non
     )
     state = service.initial_state(
         AgentRunRequest(
-            task="Answer.",
-            run_id="service-options",
-            thread_id="service-options",
+            message="Answer.",
+            turn_id="service-options",
             tools=("second", "first"),
             disabled_tools=("first",),
         )
@@ -349,16 +325,14 @@ async def test_public_explicit_names_replace_defaults_and_disabled_wins() -> Non
     assert state["resident_tool_names"] == []
     assert state["explicit_tool_names"] == ["second"]
     assert state["disabled_tool_names"] == ["first"]
-    RunRegistry.remove("service-options")
+    TurnRegistry.remove("service-options")
 
 
 def test_tool_policy_denials_are_removed_from_the_model_tool_surface() -> None:
     service = AgentService(
         definition=_definition(
             ("first", "second"),
-            tool_policy=ToolPolicy(
-                deny_tools=frozenset({"first", "not-installed-here"})
-            ),
+            tool_policy=ToolPolicy(deny_tools=frozenset({"first", "not-installed-here"})),
         ),
         tool_registry=_registry(_tool("first"), _tool("second")),
         model_turn_provider=_FinishProvider(),
@@ -366,9 +340,8 @@ def test_tool_policy_denials_are_removed_from_the_model_tool_surface() -> None:
 
     state = service.initial_state(
         AgentRunRequest(
-            task="Answer.",
-            run_id="service-policy-deny",
-            thread_id="service-policy-deny",
+            message="Answer.",
+            turn_id="service-policy-deny",
         )
     )
 
@@ -376,82 +349,67 @@ def test_tool_policy_denials_are_removed_from_the_model_tool_surface() -> None:
     assert state["disabled_tool_names"] == ["first"]
     assert state["tool_manifest"] is not None
     assert state["tool_manifest"].resident_tool_names == ("second",)
-    RunRegistry.remove("service-policy-deny")
+    TurnRegistry.remove("service-policy-deny")
 
 
 @pytest.mark.anyio
-async def test_tool_policy_preserves_each_forced_confirmation_across_resume() -> None:
+async def test_tool_policy_preserves_each_forced_confirmation_across_resume(
+    tmp_path: Path,
+) -> None:
     calls: list[str] = []
     names = ("one", "two")
+    turn_store = TurnStore(tmp_path / "agent.sqlite")
     service = AgentService(
         definition=_definition(
             names,
-            tool_policy=ToolPolicy(
-                require_confirmation_for=frozenset(names)
-            ),
+            tool_policy=ToolPolicy(require_confirmation_for=frozenset(names)),
         ),
         tool_registry=_registry(*(_tool(name, calls) for name in names)),
         model_turn_provider=_FinishProvider(),
+        workspace=open_workspace(tmp_path),
+        turn_store=turn_store,
+        runtime_binding=RuntimeBinding(workspace_path=str(tmp_path)),
     )
 
     first_pause = await service.run(
         AgentRunRequest(
-            task="Confirm each call.",
-            run_id="service-policy-confirm",
-            thread_id="service-policy-confirm",
-            pending_tool_calls=[
-                ToolCallPlan.create(name, {"value": name})
-                for name in names
-            ],
-        )
+            message="Confirm each call.",
+            pending_tool_calls=[ToolCallPlan.create(name, {"value": name}) for name in names],
+        ),
     )
 
     assert first_pause.status == "paused"
     assert first_pause.human_input_request is not None
-    assert [
-        item["tool_name"]
-        for item in first_pause.pending_tool_calls_summary
-    ] == ["one", "two"]
+    assert [item["tool_name"] for item in first_pause.pending_tool_calls_summary] == ["one", "two"]
     assert calls == []
     first_summary = first_pause.human_input_request.tool_calls[0]
-    first_approval_id = (
-        first_summary.approval_id or first_summary.tool_call_id
-    )
+    first_approval_id = first_summary.approval_id or first_summary.tool_call_id
+    assert turn_store.get_turn(first_pause.turn_id).status is TurnStatus.PAUSED
 
-    second_pause = await service.resume(
-        run_id="service-policy-confirm",
-        response=HumanInputResponse(
-            request_id=first_pause.human_input_request.request_id,
-            decision="allow_once",
-            approved_tool_call_ids=[first_approval_id],
-        ),
+    second_pause = await service.resume_turn(
+        turn_id=first_pause.turn_id,
+        action="allow_once",
+        user_input=None,
     )
 
     assert second_pause.status == "paused"
     assert second_pause.human_input_request is not None
-    assert [
-        item["tool_name"]
-        for item in second_pause.pending_tool_calls_summary
-    ] == ["two"]
+    assert [item["tool_name"] for item in second_pause.pending_tool_calls_summary] == ["two"]
     assert calls == ["one"]
     second_summary = second_pause.human_input_request.tool_calls[0]
-    second_approval_id = (
-        second_summary.approval_id or second_summary.tool_call_id
-    )
+    second_approval_id = second_summary.approval_id or second_summary.tool_call_id
     assert second_approval_id != first_approval_id
 
-    completed = await service.resume(
-        run_id="service-policy-confirm",
-        response=HumanInputResponse(
-            request_id=second_pause.human_input_request.request_id,
-            decision="allow_once",
-            approved_tool_call_ids=[second_approval_id],
-        ),
+    completed = await service.resume_turn(
+        turn_id=first_pause.turn_id,
+        action="allow_once",
+        user_input=None,
     )
 
     assert completed.status == "done"
     assert calls == ["one", "two"]
     assert all(not result.is_error for result in completed.tool_results)
+    assert turn_store.get_turn(first_pause.turn_id).status is TurnStatus.COMPLETED
 
 
 @pytest.mark.anyio
@@ -472,9 +430,8 @@ async def test_tool_policy_auto_approves_builtin_restricted_sandbox_call(
 
     result = await service.run(
         AgentRunRequest(
-            task="Run in the sandbox.",
-            run_id="service-policy-sandbox",
-            thread_id="service-policy-sandbox",
+            message="Run in the sandbox.",
+            turn_id="service-policy-sandbox",
             pending_tool_calls=[
                 ToolCallPlan.create(
                     "run_command",
@@ -517,13 +474,9 @@ async def test_tool_policy_caps_safe_parallel_calls() -> None:
 
     result = await service.run(
         AgentRunRequest(
-            task="Run safely.",
-            run_id="service-policy-parallel",
-            thread_id="service-policy-parallel",
-            pending_tool_calls=[
-                ToolCallPlan.create(name, {"value": name})
-                for name in names
-            ],
+            message="Run safely.",
+            turn_id="service-policy-parallel",
+            pending_tool_calls=[ToolCallPlan.create(name, {"value": name}) for name in names],
         )
     )
 
@@ -541,7 +494,7 @@ def test_unknown_public_tool_fails_before_model_call() -> None:
     with pytest.raises(ToolConfigurationError, match="unknown"):
         service.initial_state(
             AgentRunRequest(
-                task="Answer.",
+                message="Answer.",
                 tools=("missing",),
             )
         )
@@ -561,7 +514,7 @@ async def test_strict_model_initialization_failure_is_visible() -> None:
     )
 
     with pytest.raises(RuntimeError, match="model provider broken"):
-        await service.run(AgentRunRequest(task="Answer."))
+        await service.run(AgentRunRequest(message="Answer."))
 
 
 @pytest.mark.anyio
@@ -574,9 +527,8 @@ async def test_service_projects_model_call_records_and_latency() -> None:
 
     result = await service.run(
         AgentRunRequest(
-            task="Answer.",
-            run_id="service-usage",
-            thread_id="service-usage",
+            message="Answer.",
+            turn_id="service-usage",
         )
     )
 
@@ -600,16 +552,17 @@ async def test_service_builds_manifest_for_imported_input_files(
 
     result = await service.run(
         AgentRunRequest(
-            task="Inspect the fixture.",
-            run_id="service-input-manifest",
-            thread_id="service-input-manifest",
+            message="Inspect the fixture.",
+            turn_id="service-input-manifest",
             input_files=[str(source)],
             workspace_path=str(tmp_path / "workspace"),
         )
     )
 
     assert result.status == "done"
-    assert provider.paths == ("input_files/fixture.txt",)
+    assert provider.paths == (
+        ".rag/agent_runtime/input_files/service-input-manifest/fixture.txt",
+    )
 
 
 def test_result_restores_configured_concrete_final_output() -> None:
@@ -621,23 +574,19 @@ def test_result_restores_configured_concrete_final_output() -> None:
     )
     state = service.initial_state(
         AgentRunRequest(
-            task="Answer.",
-            run_id="service-output",
-            thread_id="service-output",
+            message="Answer.",
+            turn_id="service-output",
         )
     )
     state["finish_state"].final_output = ValidatedFinalOutput(
-        model_path=(
-            f"{_StructuredAnswer.__module__}."
-            f"{_StructuredAnswer.__qualname__}"
-        ),
+        model_path=(f"{_StructuredAnswer.__module__}.{_StructuredAnswer.__qualname__}"),
         data={"answer": "grounded", "confidence": 0.9},
     )
 
-    result = AgentRunResult.from_state(state, definition=definition)
+    result = AgentRunResult.from_loop_result(state, definition=definition)
 
     assert result.final_output == _StructuredAnswer(
         answer="grounded",
         confidence=0.9,
     )
-    RunRegistry.remove("service-output")
+    TurnRegistry.remove("service-output")

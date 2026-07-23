@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 from pydantic import BaseModel
 
-from rag.agent.core.context import AgentRunConfig, RunRegistry
+from rag.agent.core.context import AgentRunConfig, TurnRegistry
 from rag.agent.core.definition import AgentRuntimePolicy
 from rag.agent.core.llm_context import AgentLLMContextOverflowError
 from rag.agent.core.output_finalizer import (
@@ -15,7 +15,6 @@ from rag.agent.loop.state import LoopState, create_loop_state
 from rag.assembly.tokenizer import TokenAccountingService, TokenizerContract
 from rag.providers.llm_gateway import LLMGateway
 from rag.schema.llm import LLMCallStage, LLMStageBudget
-from rag.schema.runtime import AccessPolicy
 
 
 class _AnswerOutput(BaseModel):
@@ -87,8 +86,6 @@ def _gateway(
 
 def _definition(*, retries: int = 2) -> AgentRuntimePolicy:
     return AgentRuntimePolicy.test_factory(
-        agent_type="structured",
-        description="Structured output",
         system_prompt="Return grounded structured output.",
         allowed_tools=[],
         output_model=_AnswerOutput,
@@ -98,22 +95,17 @@ def _definition(*, retries: int = 2) -> AgentRuntimePolicy:
 
 def _state(*, task: str = "Answer with confidence") -> LoopState:
     config = AgentRunConfig(
-        run_id="output-finalizer",
-        thread_id="output-finalizer",
+        turn_id="output-finalizer",
         llm_budget_total=20_000,
-        max_depth=1,
-        access_policy=AccessPolicy.default(),
     )
-    RunRegistry.remove(config.run_id)
-    RunRegistry.get_or_create(config)
-    return create_loop_state(task=task, run_config=config)
+    TurnRegistry.remove(config.turn_id)
+    TurnRegistry.get_or_create(config)
+    return create_loop_state(current_message=task, run_config=config)
 
 
 @pytest.mark.anyio
 async def test_structured_finalizer_returns_validated_model() -> None:
-    generator = _StructuredGenerator(
-        [{"answer": "validated", "confidence": 0.9}]
-    )
+    generator = _StructuredGenerator([{"answer": "validated", "confidence": 0.9}])
     gateway = _gateway(generator)
     finalizer = ModelStructuredOutputFinalizer(gateway=gateway)
 
@@ -126,7 +118,7 @@ async def test_structured_finalizer_returns_validated_model() -> None:
     assert result == _AnswerOutput(answer="validated", confidence=0.9)
     assert finalizer.token_accounting is gateway.token_accounting
     assert generator.calls == 1
-    RunRegistry.remove("output-finalizer")
+    TurnRegistry.remove("output-finalizer")
 
 
 @pytest.mark.anyio
@@ -148,7 +140,7 @@ async def test_structured_finalizer_repairs_validation_failure_with_bounded_retr
     assert result.answer == "repaired"
     assert generator.calls == 2
     assert "confidence" in generator.prompts[1]
-    RunRegistry.remove("output-finalizer")
+    TurnRegistry.remove("output-finalizer")
 
 
 @pytest.mark.anyio
@@ -171,17 +163,13 @@ async def test_structured_finalizer_exhausts_configured_validation_retries() -> 
 
     assert exc_info.value.attempts == 3
     assert generator.calls == 3
-    RunRegistry.remove("output-finalizer")
+    TurnRegistry.remove("output-finalizer")
 
 
 @pytest.mark.anyio
 async def test_structured_finalizer_context_overflow_skips_model_call() -> None:
-    generator = _StructuredGenerator(
-        [{"answer": "unused", "confidence": 1.0}]
-    )
-    finalizer = ModelStructuredOutputFinalizer(
-        gateway=_gateway(generator, max_input_tokens=8)
-    )
+    generator = _StructuredGenerator([{"answer": "unused", "confidence": 1.0}])
+    finalizer = ModelStructuredOutputFinalizer(gateway=_gateway(generator, max_input_tokens=8))
 
     with pytest.raises(AgentLLMContextOverflowError):
         await finalizer.finalize(
@@ -191,21 +179,15 @@ async def test_structured_finalizer_context_overflow_skips_model_call() -> None:
         )
 
     assert generator.calls == 0
-    RunRegistry.remove("output-finalizer")
+    TurnRegistry.remove("output-finalizer")
 
 
 def test_final_answer_prefers_text_then_answer_fields() -> None:
-    assert final_answer_from_output(
-        _TextOutput(text="text field", answer="answer field")
-    ) == "text field"
-    assert final_answer_from_output(
-        _AnswerOutput(answer="answer field", confidence=0.7)
-    ) == "answer field"
+    assert final_answer_from_output(_TextOutput(text="text field", answer="answer field")) == "text field"
+    assert final_answer_from_output(_AnswerOutput(answer="answer field", confidence=0.7)) == "answer field"
 
 
 def test_final_answer_uses_json_when_no_text_field_exists() -> None:
     output = _JsonOnlyOutput(value=7, labels=["a", "b"])
 
-    assert final_answer_from_output(output) == output.model_dump_json(
-        exclude_none=True
-    )
+    assert final_answer_from_output(output) == output.model_dump_json(exclude_none=True)

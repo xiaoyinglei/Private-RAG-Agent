@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable, Mapping
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any
 
@@ -620,6 +621,30 @@ async def test_gateway_adapts_one_canonical_request_to_openai_wire() -> None:
         "read_file",
     ]
     assert "model" not in generator.calls[0]
+
+
+@pytest.mark.anyio
+async def test_canonical_request_output_limit_reaches_native_provider() -> None:
+    generator = _CanonicalNativeGenerator()
+    original = _canonical_request()
+    request = replace(
+        original,
+        settings=replace(original.settings, max_output_tokens=2),
+    )
+
+    await _gateway(
+        generator,
+        max_input_tokens=2_000,
+        max_output_tokens=4,
+        model_context_tokens=4_000,
+    ).agenerate_model_request(
+        stage=LLMCallStage.TOOL_DECISION,
+        request=request,
+        provider="openai-compatible",
+        supports_native_tools=True,
+    )
+
+    assert generator.calls[0]["max_tokens"] == 2
 
 
 @pytest.mark.anyio

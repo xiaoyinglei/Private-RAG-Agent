@@ -6,15 +6,17 @@ StreamEvent 定义 — 流式输出的基础类型。
 - 高频字段提到顶层，不全塞 metadata
 - EventType 用 Enum，方便 UI 层 pattern match
 """
+
 from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from enum import Enum
-from typing import Any
+from enum import StrEnum
+
+from rag.agent.tools.tool import JsonValue
 
 
-class EventType(Enum):
+class EventType(StrEnum):
     """流式事件类型。"""
 
     # ── LLM 流式输出 ──────────────────────────────────────
@@ -50,12 +52,11 @@ class StreamEvent:
     """流式事件 — 不可变，可安全在协程间传递。"""
 
     type: EventType
-    run_id: str = ""
-    session_id: str = ""
-    turn: int = 0
-    seq: int = 0
+    turn_id: str = ""
+    iteration: int = 0
+    sequence: int = 0
     timestamp_ms: int = 0
-    data: dict[str, Any] = field(default_factory=dict)
+    data: dict[str, JsonValue] = field(default_factory=dict)
     span_id: str | None = None  # 关联同一个 tool 调用的 start/progress/result
     parent_id: str | None = None  # 子 agent / 嵌套事件
 
@@ -63,24 +64,18 @@ class StreamEvent:
         if self.timestamp_ms == 0:
             object.__setattr__(self, "timestamp_ms", _now_ms())
 
-    @property
-    def turn_id(self) -> str:
-        """Public Session/Turn name for the legacy event run identifier."""
-
-        return self.run_id
-
 
 def _now_ms() -> int:
     return int(time.monotonic() * 1000)
 
 
-_seq_counter = 0
+_sequence_counter = 0
 
 
-def next_seq() -> int:
-    global _seq_counter
-    _seq_counter += 1
-    return _seq_counter
+def next_sequence() -> int:
+    global _sequence_counter
+    _sequence_counter += 1
+    return _sequence_counter
 
 
 # ── 工厂函数 ──────────────────────────────────────────────
@@ -89,14 +84,14 @@ def next_seq() -> int:
 def text_delta(
     text: str,
     *,
-    run_id: str = "",
-    turn: int = 0,
+    turn_id: str = "",
+    iteration: int = 0,
 ) -> StreamEvent:
     return StreamEvent(
         type=EventType.TEXT_DELTA,
-        run_id=run_id,
-        turn=turn,
-        seq=next_seq(),
+        turn_id=turn_id,
+        iteration=iteration,
+        sequence=next_sequence(),
         data={"text": text},
     )
 
@@ -104,14 +99,14 @@ def text_delta(
 def thinking_delta(
     text: str,
     *,
-    run_id: str = "",
-    turn: int = 0,
+    turn_id: str = "",
+    iteration: int = 0,
 ) -> StreamEvent:
     return StreamEvent(
         type=EventType.THINKING_DELTA,
-        run_id=run_id,
-        turn=turn,
-        seq=next_seq(),
+        turn_id=turn_id,
+        iteration=iteration,
+        sequence=next_sequence(),
         data={"text": text},
     )
 
@@ -121,15 +116,15 @@ def tool_use_start(
     tool_id: str,
     *,
     input_preview: str = "",
-    run_id: str = "",
-    turn: int = 0,
+    turn_id: str = "",
+    iteration: int = 0,
 ) -> StreamEvent:
     span = f"tool:{tool_id}"
     return StreamEvent(
         type=EventType.TOOL_USE_START,
-        run_id=run_id,
-        turn=turn,
-        seq=next_seq(),
+        turn_id=turn_id,
+        iteration=iteration,
+        sequence=next_sequence(),
         span_id=span,
         data={
             "tool_name": tool_name,
@@ -144,18 +139,18 @@ def tool_use_progress(
     progress: str,
     *,
     percent: float | None = None,
-    run_id: str = "",
-    turn: int = 0,
+    turn_id: str = "",
+    iteration: int = 0,
 ) -> StreamEvent:
     span = f"tool:{tool_id}"
-    d: dict[str, Any] = {"tool_id": tool_id, "progress": progress}
+    d: dict[str, JsonValue] = {"tool_id": tool_id, "progress": progress}
     if percent is not None:
         d["percent"] = percent
     return StreamEvent(
         type=EventType.TOOL_USE_PROGRESS,
-        run_id=run_id,
-        turn=turn,
-        seq=next_seq(),
+        turn_id=turn_id,
+        iteration=iteration,
+        sequence=next_sequence(),
         span_id=span,
         data=d,
     )
@@ -164,18 +159,18 @@ def tool_use_progress(
 def tool_use_result(
     tool_name: str,
     tool_id: str,
-    result: Any,
+    result: JsonValue,
     *,
     elapsed_ms: float = 0,
-    run_id: str = "",
-    turn: int = 0,
+    turn_id: str = "",
+    iteration: int = 0,
 ) -> StreamEvent:
     span = f"tool:{tool_id}"
     return StreamEvent(
         type=EventType.TOOL_USE_RESULT,
-        run_id=run_id,
-        turn=turn,
-        seq=next_seq(),
+        turn_id=turn_id,
+        iteration=iteration,
+        sequence=next_sequence(),
         span_id=span,
         data={
             "tool_name": tool_name,
@@ -191,15 +186,15 @@ def tool_use_error(
     error: str,
     *,
     recoverable: bool = True,
-    run_id: str = "",
-    turn: int = 0,
+    turn_id: str = "",
+    iteration: int = 0,
 ) -> StreamEvent:
     span = f"tool:{tool_id}"
     return StreamEvent(
         type=EventType.TOOL_USE_ERROR,
-        run_id=run_id,
-        turn=turn,
-        seq=next_seq(),
+        turn_id=turn_id,
+        iteration=iteration,
+        sequence=next_sequence(),
         span_id=span,
         data={
             "tool_id": tool_id,
@@ -214,14 +209,14 @@ def compact_layer(
     before_tokens: int,
     after_tokens: int,
     *,
-    run_id: str = "",
-    turn: int = 0,
+    turn_id: str = "",
+    iteration: int = 0,
 ) -> StreamEvent:
     return StreamEvent(
         type=EventType.COMPACT_LAYER,
-        run_id=run_id,
-        turn=turn,
-        seq=next_seq(),
+        turn_id=turn_id,
+        iteration=iteration,
+        sequence=next_sequence(),
         data={
             "layer": layer_name,
             "before": before_tokens,
@@ -231,26 +226,26 @@ def compact_layer(
     )
 
 
-def turn_start(*, run_id: str = "", turn: int = 0) -> StreamEvent:
+def turn_start(*, turn_id: str = "", iteration: int = 0) -> StreamEvent:
     return StreamEvent(
         type=EventType.TURN_START,
-        run_id=run_id,
-        turn=turn,
-        seq=next_seq(),
+        turn_id=turn_id,
+        iteration=iteration,
+        sequence=next_sequence(),
     )
 
 
 def turn_end(
     *,
-    run_id: str = "",
-    turn: int = 0,
+    turn_id: str = "",
+    iteration: int = 0,
     stop_reason: str = "",
 ) -> StreamEvent:
     return StreamEvent(
         type=EventType.TURN_END,
-        run_id=run_id,
-        turn=turn,
-        seq=next_seq(),
+        turn_id=turn_id,
+        iteration=iteration,
+        sequence=next_sequence(),
         data={"stop_reason": stop_reason},
     )
 
@@ -258,13 +253,13 @@ def turn_end(
 def loop_end(
     *,
     reason: str,
-    run_id: str = "",
+    turn_id: str = "",
     total_turns: int = 0,
 ) -> StreamEvent:
     return StreamEvent(
         type=EventType.LOOP_END,
-        run_id=run_id,
-        seq=next_seq(),
+        turn_id=turn_id,
+        sequence=next_sequence(),
         data={"reason": reason, "total_turns": total_turns},
     )
 
@@ -273,14 +268,14 @@ def recovery_event(
     strategy: str,
     detail: str = "",
     *,
-    run_id: str = "",
-    turn: int = 0,
+    turn_id: str = "",
+    iteration: int = 0,
 ) -> StreamEvent:
     return StreamEvent(
         type=EventType.RECOVERY,
-        run_id=run_id,
-        turn=turn,
-        seq=next_seq(),
+        turn_id=turn_id,
+        iteration=iteration,
+        sequence=next_sequence(),
         data={"strategy": strategy, "detail": detail},
     )
 
@@ -289,13 +284,13 @@ def budget_update(
     used: int,
     remaining: int,
     *,
-    run_id: str = "",
-    turn: int = 0,
+    turn_id: str = "",
+    iteration: int = 0,
 ) -> StreamEvent:
     return StreamEvent(
         type=EventType.BUDGET_UPDATE,
-        run_id=run_id,
-        turn=turn,
-        seq=next_seq(),
+        turn_id=turn_id,
+        iteration=iteration,
+        sequence=next_sequence(),
         data={"used": used, "remaining": remaining},
     )

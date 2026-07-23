@@ -4,11 +4,13 @@ import json
 import subprocess
 import time
 from collections.abc import Callable
-from typing import Any
 from urllib.request import urlopen
 
+from agent_runtime.models import ModelSpec
+from rag.agent.core.llm_registry import ModelNotAvailableError
 
-class LocalRuntimeError(RuntimeError):
+
+class LocalRuntimeError(ModelNotAvailableError):
     """Local model runtime is not ready."""
 
 
@@ -34,7 +36,7 @@ class LocalRuntimeManager:
         self._sleep = sleep
         self._monotonic = monotonic
 
-    def ensure_ready(self, spec: Any) -> None:
+    def ensure_ready(self, spec: ModelSpec) -> None:
         if getattr(spec, "location", None) != "local":
             return
 
@@ -42,11 +44,9 @@ class LocalRuntimeManager:
         health_url = getattr(runtime, "health_url", None) if runtime is not None else None
         if not health_url:
             raise LocalRuntimeError(f"Local model {spec.id!r} has no runtime.health_url")
-        expected = (
-            getattr(runtime, "expected_model_contains", None)
-            if runtime is not None
-            else None
-        ) or getattr(spec, "provider_model", "")
+        expected = (getattr(runtime, "expected_model_contains", None) if runtime is not None else None) or getattr(
+            spec, "provider_model", ""
+        )
 
         try:
             payload = self._request_json(str(health_url), 2.0)
@@ -60,11 +60,7 @@ class LocalRuntimeManager:
         except EndpointConflictError:
             raise
         except Exception as initial_error:
-            launch_command = (
-                getattr(runtime, "launch_command", ())
-                if runtime is not None
-                else ()
-            )
+            launch_command = getattr(runtime, "launch_command", ()) if runtime is not None else ()
             if not launch_command:
                 raise LocalRuntimeError(
                     f"Local model {spec.id!r} is not running and has no runtime.launch_command"
@@ -92,9 +88,7 @@ class LocalRuntimeManager:
                 last_error = exc
                 self._sleep(interval)
 
-        raise LocalRuntimeTimeoutError(
-            f"Timed out waiting for local model {spec.id!r} at {health_url}"
-        ) from last_error
+        raise LocalRuntimeTimeoutError(f"Timed out waiting for local model {spec.id!r} at {health_url}") from last_error
 
 
 def _request_json(url: str, timeout: float) -> object:

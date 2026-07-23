@@ -8,7 +8,7 @@ from rag.agent.core.checkpointing import (
     _migrate_legacy_state,
     agent_checkpoint_serde,
 )
-from rag.agent.core.context import AgentRunConfig, RunRegistry
+from rag.agent.core.context import AgentRunConfig, TurnRegistry
 from rag.agent.core.messages import (
     ModelMessage,
     tool_result_message,
@@ -23,16 +23,12 @@ from rag.agent.loop.state import (
     create_loop_state,
 )
 from rag.agent.tools.tool import ToolContentBlock, ToolResult
-from rag.schema.runtime import AccessPolicy
 
 
 def _config() -> AgentRunConfig:
     return AgentRunConfig(
-        run_id="test-pr3-cleanup",
-        thread_id="test-pr3-cleanup",
+        turn_id="test-pr3-cleanup",
         llm_budget_total=100,
-        max_depth=1,
-        access_policy=AccessPolicy.default(),
     )
 
 
@@ -58,9 +54,7 @@ def _result(plan: ToolCallPlan) -> ToolResult:
     return ToolResult(
         tool_call_id=plan.tool_call_id,
         tool_name=plan.tool_name,
-        content=(
-            ToolContentBlock(type="text", data={"text": "result ok"}),
-        ),
+        content=(ToolContentBlock(type="text", data={"text": "result ok"}),),
         structured_content={"result": "ok"},
     )
 
@@ -95,13 +89,11 @@ def test_tool_call_ledger_is_bounded_fifo_and_preserves_active_calls() -> None:
     ledger.trim(active_tool_call_ids=active_ids)
 
     assert len(ledger.entries) == 128
-    assert active_ids.issubset(
-        entry.plan.tool_call_id for entry in ledger.entries
-    )
+    assert active_ids.issubset(entry.plan.tool_call_id for entry in ledger.entries)
 
 
 def test_canonical_transcript_preserves_calls_arguments_and_results() -> None:
-    state = create_loop_state(task="transcript", run_config=_config())
+    state = create_loop_state(current_message="transcript", run_config=_config())
     plans = [
         ToolCallPlan.create("search", {"query": "Paris", "top_k": 5}),
         ToolCallPlan.create("analyze", {"data": [1, 2, 3]}),
@@ -127,7 +119,7 @@ def test_canonical_transcript_preserves_calls_arguments_and_results() -> None:
                 tool_result_message(result),
             ]
         )
-    state["canonical_transcript"] = transcript
+    state["turn_transcript"] = transcript
 
     assert len(transcript) == 4
     assert transcript[0].tool_calls[0].name == "search"
@@ -142,7 +134,7 @@ def test_canonical_transcript_preserves_calls_arguments_and_results() -> None:
 
 
 def test_deprecated_fields_are_absent_from_new_and_migrated_state() -> None:
-    state = create_loop_state(task="new state", run_config=_config())
+    state = create_loop_state(current_message="new state", run_config=_config())
     assert _DEPRECATED_FIELDS.isdisjoint(state)
 
     raw: dict[str, object] = dict(state)
@@ -172,10 +164,8 @@ def test_live_state_serde_preserves_final_result_and_ledger() -> None:
         "search_knowledge",
         {"query": "capital of France"},
     )
-    state = create_loop_state(task="capital", run_config=_config())
-    state["pending_tool_calls"] = [
-        PendingToolCall(plan=plan, status="completed", summary="Paris")
-    ]
+    state = create_loop_state(current_message="capital", run_config=_config())
+    state["pending_tool_calls"] = [PendingToolCall(plan=plan, status="completed", summary="Paris")]
     state["tool_call_ledger"].append_plans([plan], turn=1)
     state["tool_results"] = [
         ToolResult(
@@ -202,4 +192,4 @@ def test_live_state_serde_preserves_final_result_and_ledger() -> None:
 @pytest.fixture(autouse=True)
 def _cleanup_run_registry() -> None:
     yield
-    RunRegistry.remove("test-pr3-cleanup")
+    TurnRegistry.remove("test-pr3-cleanup")

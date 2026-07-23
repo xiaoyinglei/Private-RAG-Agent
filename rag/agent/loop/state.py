@@ -181,7 +181,8 @@ class ToolCallLedger(BaseModel):
 
 
 class LoopState(TypedDict):
-    task: str
+    current_message: str
+    conversation_history: list[ModelMessage]
     messages: list[BaseMessage]
     run_config: AgentRunConfig
     iteration: int
@@ -194,7 +195,6 @@ class LoopState(TypedDict):
     approved_tool_call_ids: list[str]
     denied_tool_call_ids: list[str]
     tool_results: list[ToolResult]
-    canonical_transcript: list[ModelMessage]
     turn_transcript: list[ModelMessage]
     canonical_tool_calls: dict[str, ToolCall]
     model_call_records: list[ModelCallRecord]
@@ -223,6 +223,7 @@ class LoopState(TypedDict):
     finish_state: FinishState
     skill_state: SkillState
     # ── File manifest (file-first processing) ──
+    input_files: list[str]
     file_manifest: FileManifest | None
     # ── Persistent cross-session memory ──
     persistent_memories: list[str]  # selected memory texts for current run
@@ -231,12 +232,15 @@ class LoopState(TypedDict):
 
 def create_loop_state(
     *,
-    task: str,
+    current_message: str,
     run_config: AgentRunConfig,
+    conversation_history: Iterable[ModelMessage] = (),
+    turn_transcript: Iterable[ModelMessage] = (),
     messages: Iterable[BaseMessage] = (),
     pending_tool_calls: Iterable[ToolCallPlan] = (),
     memory_warnings: Iterable[str] = (),
     runtime_diagnostics: Iterable[RuntimeDiagnostic] = (),
+    input_files: Iterable[str] = (),
     file_manifest: FileManifest | None = None,
 ) -> LoopState:
     # ── Function-level imports to avoid circular import with substate.py ──
@@ -249,8 +253,15 @@ def create_loop_state(
     )
     from rag.agent.skills.models import SkillState
 
+    current_turn = list(turn_transcript)
+    if not current_turn:
+        current_turn.append(
+            ModelMessage(role="user", content=current_message)
+        )
+
     return {
-        "task": task,
+        "current_message": current_message,
+        "conversation_history": list(conversation_history),
         "messages": list(messages),
         "run_config": run_config,
         "iteration": 0,
@@ -267,8 +278,7 @@ def create_loop_state(
         "approved_tool_call_ids": [],
         "denied_tool_call_ids": [],
         "tool_results": [],
-        "canonical_transcript": [],
-        "turn_transcript": [],
+        "turn_transcript": current_turn,
         "canonical_tool_calls": {},
         "model_call_records": [],
         "tool_manifest": None,
@@ -290,6 +300,7 @@ def create_loop_state(
         "terminal": None,
         "latest_transition": None,
         # ── File manifest (file-first processing) ──
+        "input_files": list(input_files),
         "file_manifest": file_manifest,
         # ── Persistent cross-session memory ──
         "persistent_memories": [],

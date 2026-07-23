@@ -138,6 +138,8 @@ async def test_filesystem_tools_list_read_patch_and_expose_changes_immediately(
     source.mkdir()
     target = source / "example.py"
     target.write_text("before\nneedle_one()\nafter\n", encoding="utf-8")
+    (workspace.root / ".venv").mkdir()
+    (workspace.root / ".rag").mkdir(exist_ok=True)
     tools = _tools_by_name(workspace)
 
     listed = await _execute(
@@ -219,6 +221,40 @@ async def test_read_file_default_window_bounds_model_context(
     assert execution.result.structured_content is not None
     assert len(execution.result.structured_content["content"]) == 16_000
     assert execution.result.structured_content["truncated"] is True
+
+
+@pytest.mark.anyio
+async def test_read_file_supports_source_line_windows_and_continuation(
+    tmp_path: Path,
+) -> None:
+    workspace = open_workspace(tmp_path, create=True)
+    (workspace.root / "lines.py").write_text(
+        "line_1\nline_2\nline_3\nline_4\nline_5\n",
+        encoding="utf-8",
+    )
+    read_file = _tools_by_name(workspace)["read_file"]
+
+    execution = await _execute(
+        read_file,
+        {"path": "lines.py", "start_line": 3, "max_lines": 2},
+        workspace=workspace,
+    )
+
+    assert execution.result.structured_content is not None
+    output = execution.result.structured_content
+    assert output["content"] == "line_3\nline_4\n"
+    assert output["start_line"] == 3
+    assert output["end_line"] == 4
+    assert output["next_line"] == 5
+    assert output["next_offset"] == len("line_1\nline_2\nline_3\nline_4\n")
+    assert output["truncated"] is True
+
+    mixed_modes = await _execute(
+        read_file,
+        {"path": "lines.py", "offset": 2, "start_line": 3},
+        workspace=workspace,
+    )
+    assert mixed_modes.result.error_code == "invalid_arguments"
 
 
 @pytest.mark.anyio
@@ -309,6 +345,16 @@ async def test_search_text_supports_literal_regex_path_glob_context_and_limits(
         },
         workspace=workspace,
     )
+    auto_regex = await _execute(
+        search,
+        {
+            "pattern": r"needle_[a-z]+\(",
+            "path": "src",
+            "glob": "*.py",
+            "max_results": 10,
+        },
+        workspace=workspace,
+    )
     limited = await _execute(
         search,
         {
@@ -338,10 +384,76 @@ async def test_search_text_supports_literal_regex_path_glob_context_and_limits(
     assert [
         match["file_path"] for match in regex.result.structured_content["matches"]
     ] == ["src/one.py", "src/two.py"]
+    assert auto_regex.result.structured_content is not None
+    assert [
+        match["file_path"]
+        for match in auto_regex.result.structured_content["matches"]
+    ] == ["src/one.py", "src/two.py"]
     assert limited.result.structured_content is not None
     assert limited.result.structured_content["total_matches"] == 1
     assert limited.result.structured_content["truncated"] is True
     assert invalid_regex.result.error_code == "invalid_arguments"
+
+
+@pytest.mark.anyio
+async def test_search_text_prioritizes_source_and_returns_local_context(
+    tmp_path: Path,
+) -> None:
+    workspace = open_workspace(tmp_path, create=True)
+    source = workspace.root / "src"
+    docs = workspace.root / "docs"
+    source.mkdir()
+    docs.mkdir()
+    (source / "state.py").write_text(
+        "from pydantic import BaseModel\n\nclass PlanState(BaseModel):\n    revision: int = 0\n",
+        encoding="utf-8",
+    )
+    (docs / "history.md").write_text(
+        "PlanState\n" * 20,
+        encoding="utf-8",
+    )
+
+    execution = await _execute(
+        _tools_by_name(workspace)["search_text"],
+        {"pattern": "PlanState", "path": ".", "max_results": 1},
+        workspace=workspace,
+    )
+
+    assert execution.result.structured_content is not None
+    [match] = execution.result.structured_content["matches"]
+    assert match["file_path"] == "src/state.py"
+    assert match["line_number"] == 3
+    assert match["context_before"] == (
+        "from pydantic import BaseModel",
+        "",
+    )
+    assert match["context_after"] == ("    revision: int = 0",)
+    assert execution.result.structured_content["truncated"] is True
+
+
+@pytest.mark.anyio
+async def test_search_text_skips_generated_directories_by_default(
+    tmp_path: Path,
+) -> None:
+    workspace = open_workspace(tmp_path, create=True)
+    for directory in ("src", ".venv/lib", ".rag/cache", "node_modules/pkg"):
+        (workspace.root / directory).mkdir(parents=True)
+        (workspace.root / directory / "target.py").write_text(
+            "generated_directory_marker\n",
+            encoding="utf-8",
+        )
+
+    execution = await _execute(
+        _tools_by_name(workspace)["search_text"],
+        {"pattern": "generated_directory_marker", "path": ".", "glob": "*.py"},
+        workspace=workspace,
+    )
+
+    assert execution.result.structured_content is not None
+    assert [
+        match["file_path"]
+        for match in execution.result.structured_content["matches"]
+    ] == ["src/target.py"]
 
 
 @pytest.mark.anyio
@@ -688,6 +800,28 @@ def test_run_command_network_profile_limits_unix_sockets_to_dns(
     assert 'literal "/private/var/run/mDNSResponder"' in profile
     assert "docker.sock" not in profile
     assert "com.apple.SecurityServer" not in profile
+
+
+def test_run_command_profile_mounts_trusted_toolchain_read_only(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    toolchain = Path("/opt/uv/python/cpython-3.12-test")
+    monkeypatch.setattr(
+        shell_module,
+        "_trusted_toolchain_roots",
+        lambda _workspace_root: (toolchain,),
+    )
+
+    profile = shell_module._build_command_sandbox_profile(
+        workspace_root=tmp_path / "workspace",
+        temporary_root=tmp_path / "temporary",
+        allow_network=False,
+    )
+
+    assert f'(subpath "{toolchain}")' in profile
+    write_section = profile.split("(allow file-write*", maxsplit=1)[1]
+    assert str(toolchain) not in write_section
 
 
 @pytest.mark.anyio

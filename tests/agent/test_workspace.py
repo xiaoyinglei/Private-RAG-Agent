@@ -38,7 +38,7 @@ class TestWorkspaceInitialize:
         ws = WorkspaceRuntime(root=tmp_path, is_temporary=False)
         ws.initialize()
         for name in ("input_files", "scratch", "artifacts", "reports", "logs"):
-            assert (tmp_path / name).is_dir()
+            assert (ws.runtime_root / name).is_dir()
 
     def test_is_idempotent(self, tmp_path: Path) -> None:
         ws = WorkspaceRuntime(root=tmp_path, is_temporary=False)
@@ -56,23 +56,23 @@ class TestWorkspaceInitialize:
 class TestWorkspaceProperties:
     def test_input_files(self, tmp_path: Path) -> None:
         ws = WorkspaceRuntime(root=tmp_path, is_temporary=False)
-        assert ws.input_files == tmp_path / "input_files"
+        assert ws.input_files == tmp_path / ".rag" / "agent_runtime" / "input_files"
 
     def test_scratch(self, tmp_path: Path) -> None:
         ws = WorkspaceRuntime(root=tmp_path, is_temporary=False)
-        assert ws.scratch == tmp_path / "scratch"
+        assert ws.scratch == tmp_path / ".rag" / "agent_runtime" / "scratch"
 
     def test_artifacts(self, tmp_path: Path) -> None:
         ws = WorkspaceRuntime(root=tmp_path, is_temporary=False)
-        assert ws.artifacts == tmp_path / "artifacts"
+        assert ws.artifacts == tmp_path / ".rag" / "agent_runtime" / "artifacts"
 
     def test_reports(self, tmp_path: Path) -> None:
         ws = WorkspaceRuntime(root=tmp_path, is_temporary=False)
-        assert ws.reports == tmp_path / "reports"
+        assert ws.reports == tmp_path / ".rag" / "agent_runtime" / "reports"
 
     def test_logs(self, tmp_path: Path) -> None:
         ws = WorkspaceRuntime(root=tmp_path, is_temporary=False)
-        assert ws.logs == tmp_path / "logs"
+        assert ws.logs == tmp_path / ".rag" / "agent_runtime" / "logs"
 
 
 # ---------------------------------------------------------------------------
@@ -139,7 +139,7 @@ class TestEnsureWithinScratch:
     def test_accepts_scratch_path(self, tmp_path: Path) -> None:
         ws = WorkspaceRuntime(root=tmp_path, is_temporary=False)
         ws.initialize()
-        scratch_file = tmp_path / "scratch" / "working.txt"
+        scratch_file = ws.scratch / "working.txt"
         result = ws.ensure_within_scratch(scratch_file)
         assert result == scratch_file.resolve()
 
@@ -236,24 +236,28 @@ class TestOpenWorkspace:
 
 
 class TestImportFiles:
-    def test_copies_file_to_input_files(self, tmp_path: Path) -> None:
+    def test_reuses_file_already_in_workspace(self, tmp_path: Path) -> None:
         ws = open_workspace(tmp_path)
         src = tmp_path / "upload.txt"
         src.write_text("hello")
         results = import_files(ws, [src])
         assert len(results) == 1
-        assert results[0].exists()
-        assert results[0].parent == ws.input_files
-        assert results[0].read_text() == "hello"
+        assert results == [src.resolve()]
 
-    def test_avoids_name_collision(self, tmp_path: Path) -> None:
-        ws = open_workspace(tmp_path)
-        src = tmp_path / "data.csv"
+    def test_stages_external_file_in_namespaced_runtime_storage(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        workspace_root = tmp_path / "workspace"
+        source_root = tmp_path / "source"
+        source_root.mkdir()
+        ws = open_workspace(workspace_root, create=True)
+        src = source_root / "data.csv"
         src.write_text("a,b")
-        first = import_files(ws, [src])
-        # Same filename again
-        second = import_files(ws, [src])
-        assert len(second) == 1
+        first = import_files(ws, [src], namespace="turn-1")
+        second = import_files(ws, [src], namespace="turn-1")
+        assert first[0].parent == ws.input_files / "turn-1"
+        assert first[0].name == "data.csv"
         assert second[0].name == "data__1.csv"
         assert first[0] != second[0]
 

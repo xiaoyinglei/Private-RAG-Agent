@@ -132,10 +132,7 @@ class ObservationBatch(BaseModel):
             "asset_refs": list(self.asset_refs),
             "evidence": list(self.evidence),
             "citations": list(self.citations),
-            "errors": [
-                error.model_dump(mode="json")
-                for error in self.errors
-            ],
+            "errors": [error.model_dump(mode="json") for error in self.errors],
         }
 
 
@@ -207,35 +204,21 @@ class ObservationExtractor:
         seen_tool_call_ids: Sequence[str] = (),
     ) -> ObservationBatch:
         seen = set(seen_tool_call_ids)
-        selected_results = [
-            result
-            for result in tool_results
-            if result.tool_call_id not in seen
-        ]
-        observations = [
-            self._observation_builder.from_tool_result(result)
-            for result in selected_results
-        ]
+        selected_results = [result for result in tool_results if result.tool_call_id not in seen]
+        observations = [self._observation_builder.from_tool_result(result) for result in selected_results]
         if not observations:
             return ObservationBatch()
 
-        results_by_id = {
-            result.tool_call_id: result
-            for result in selected_results
-        }
+        results_by_id = {result.tool_call_id: result for result in selected_results}
         computation_results = [
             ComputationResult(
                 source_tool_call_id=observation.tool_call_id,
                 source_tool_name=observation.tool_name,
                 operation=observation.operation,
                 value_preview=(
-                    None
-                    if observation.answer_candidate is None
-                    else observation.answer_candidate.text[:300]
+                    None if observation.answer_candidate is None else observation.answer_candidate.text[:300]
                 ),
-                expression=_computation_expression(
-                    results_by_id.get(observation.tool_call_id)
-                ),
+                expression=_computation_expression(results_by_id.get(observation.tool_call_id)),
                 evidence_refs=observation.evidence_refs,
             )
             for observation in observations
@@ -244,33 +227,15 @@ class ObservationExtractor:
         return ObservationBatch(
             structured_observations=observations,
             answer_candidates=[
-                observation.answer_candidate
-                for observation in observations
-                if observation.answer_candidate is not None
+                observation.answer_candidate for observation in observations if observation.answer_candidate is not None
             ],
-            evidence_refs=[
-                ref
-                for observation in observations
-                for ref in observation.evidence_refs
-            ],
+            evidence_refs=[ref for observation in observations for ref in observation.evidence_refs],
             computation_results=computation_results,
             context_units=_dedupe_context_units(
-                [
-                    unit
-                    for observation in observations
-                    for unit in observation.context_units
-                ]
+                [unit for observation in observations for unit in observation.context_units]
             ),
-            locators=[
-                locator
-                for observation in observations
-                for locator in observation.locators
-            ],
-            asset_refs=[
-                asset_ref
-                for observation in observations
-                for asset_ref in observation.asset_refs
-            ],
+            locators=[locator for observation in observations for locator in observation.locators],
+            asset_refs=[asset_ref for observation in observations for asset_ref in observation.asset_refs],
             evidence=_evidence_from_outputs(observations, selected_results),
             citations=_citations_from_outputs(observations, selected_results),
             errors=_errors_from_results(selected_results),
@@ -291,7 +256,7 @@ class ObservationExtractor:
         return cast(dict[str, Any], batch.as_state_update())
 
 
-def _answer_text(tool_name: str, output: BaseModel | None) -> str | None:
+def _answer_text(tool_name: str, output: BaseModel | _OutputView | None) -> str | None:
     if output is None:
         return None
     if tool_name.startswith("agent_"):
@@ -310,9 +275,6 @@ def _answer_text(tool_name: str, output: BaseModel | None) -> str | None:
         "asset_read_slice",
         "list_files",
         "read_file",
-        "write_file",
-        "run_python",
-        "structured_probe",
     }:
         return None
     text = getattr(output, "text", None)
@@ -327,7 +289,7 @@ def _answer_text(tool_name: str, output: BaseModel | None) -> str | None:
     return output.model_dump_json(exclude_none=True)
 
 
-def _evidence_refs_from_output(output: BaseModel | None) -> list[EvidenceRef]:
+def _evidence_refs_from_output(output: BaseModel | _OutputView | None) -> list[EvidenceRef]:
     if output is None:
         return []
     refs: list[EvidenceRef] = []
@@ -374,7 +336,7 @@ def _evidence_refs_from_output(output: BaseModel | None) -> list[EvidenceRef]:
 
 
 def _delegated_evidence_refs_from_output(
-    output: BaseModel | None,
+    output: BaseModel | _OutputView | None,
 ) -> list[EvidenceRef]:
     if output is None:
         return []
@@ -385,9 +347,7 @@ def _delegated_evidence_refs_from_output(
         citation_anchor = getattr(item, "citation_anchor", None)
         if not isinstance(evidence_id, str) or not evidence_id.strip():
             continue
-        if not (
-            isinstance(citation_id, str) and citation_id.strip()
-        ) and not (
+        if not (isinstance(citation_id, str) and citation_id.strip()) and not (
             isinstance(citation_anchor, str) and citation_anchor.strip()
         ):
             continue
@@ -395,16 +355,8 @@ def _delegated_evidence_refs_from_output(
         refs.append(
             EvidenceRef(
                 evidence_id=evidence_id.strip(),
-                citation_id=(
-                    citation_id.strip()
-                    if isinstance(citation_id, str)
-                    else None
-                ),
-                citation_anchor=(
-                    citation_anchor.strip()
-                    if isinstance(citation_anchor, str)
-                    else None
-                ),
+                citation_id=(citation_id.strip() if isinstance(citation_id, str) else None),
+                citation_anchor=(citation_anchor.strip() if isinstance(citation_anchor, str) else None),
                 doc_id=doc_id if isinstance(doc_id, int) else None,
                 source="delegated_agent",
             )
@@ -426,7 +378,7 @@ def _delegated_evidence_refs_from_output(
 
 
 def _search_evidence_refs_from_output(
-    output: BaseModel | None,
+    output: BaseModel | _OutputView | None,
 ) -> list[EvidenceRef]:
     if output is None:
         return []
@@ -438,16 +390,8 @@ def _search_evidence_refs_from_output(
         if not isinstance(item, dict):
             continue
         ref = EvidenceRef(
-            evidence_id=(
-                str(item["evidence_id"])
-                if item.get("evidence_id")
-                else None
-            ),
-            citation_anchor=(
-                str(item["citation_anchor"])
-                if item.get("citation_anchor")
-                else None
-            ),
+            evidence_id=(str(item["evidence_id"]) if item.get("evidence_id") else None),
+            citation_anchor=(str(item["citation_anchor"]) if item.get("citation_anchor") else None),
             doc_id=item["doc_id"] if isinstance(item.get("doc_id"), int) else None,
             source="retrieval",
         )
@@ -495,8 +439,7 @@ def _context_units_from_output(
             units.extend(
                 _asset_context_unit(result.tool_name, locator)
                 for locator in locators
-                if isinstance(locator.get("asset_id"), int)
-                and isinstance(locator.get("asset_type"), str)
+                if isinstance(locator.get("asset_id"), int) and isinstance(locator.get("asset_type"), str)
             )
         return units
     if result.tool_name == "list_files":
@@ -504,13 +447,6 @@ def _context_units_from_output(
     if result.tool_name == "read_file":
         unit = _read_file_context_unit(output, tool_call_id=result.tool_call_id)
         return [] if unit is None else [unit]
-    if result.tool_name == "write_file":
-        unit = _write_file_context_unit(output, tool_call_id=result.tool_call_id)
-        return [] if unit is None else [unit]
-    if result.tool_name == "run_python":
-        return _run_python_context_units(output, tool_call_id=result.tool_call_id)
-    if result.tool_name == "structured_probe":
-        return _structured_probe_context_units(output)
     return []
 
 
@@ -527,20 +463,10 @@ def _retrieval_context_units(
         if not isinstance(item, dict):
             continue
         locator = _retrieval_locator(item)
-        item_refs = _search_evidence_refs_from_output(
-            _SingleSearchItemOutput(items=[item])
-        )
+        item_refs = _search_evidence_refs_from_output(_SingleSearchItemOutput(items=[item]))
         record_type = str(item.get("record_type", "") or "")
-        unit_type = (
-            "document_section"
-            if record_type == "section"
-            else "retrieved_chunk"
-        )
-        identifier = (
-            str(item["evidence_id"])
-            if item.get("evidence_id")
-            else f"{result.tool_call_id}:{index}"
-        )
+        unit_type = "document_section" if record_type == "section" else "retrieved_chunk"
+        identifier = str(item["evidence_id"]) if item.get("evidence_id") else f"{result.tool_call_id}:{index}"
         text = str(item.get("text", "") or "")
         capabilities = ["text_extract", "text_synthesize", "quote"]
         if "ASSET_ANCHOR:" in text or "asset" in record_type:
@@ -551,11 +477,7 @@ def _retrieval_context_units(
                 unit_type=unit_type,
                 locator=locator,
                 preview=text[:1000] if text else None,
-                content_ref=(
-                    str(item["evidence_id"])
-                    if item.get("evidence_id")
-                    else result.tool_call_id
-                ),
+                content_ref=(str(item["evidence_id"]) if item.get("evidence_id") else result.tool_call_id),
                 evidence_refs=item_refs or list(evidence_refs),
                 capabilities=capabilities,
                 metadata={"source_tool": result.tool_name},
@@ -589,9 +511,12 @@ def _retrieval_locator(item: dict[str, object]) -> dict[str, object]:
     }
 
 
-def _list_files_context_units(output: BaseModel) -> list[ContextUnit]:
+def _list_files_context_units(output: BaseModel | _OutputView) -> list[ContextUnit]:
     units: list[ContextUnit] = []
-    for file_info in getattr(output, "files", []) or []:
+    entries = getattr(output, "entries", None)
+    if not isinstance(entries, list):
+        entries = getattr(output, "files", [])
+    for file_info in entries or []:
         locator = _workspace_file_locator(file_info, source_tool="list_files")
         path = locator.get("path")
         if not isinstance(path, str) or not path.strip():
@@ -599,11 +524,7 @@ def _list_files_context_units(output: BaseModel) -> list[ContextUnit]:
         is_dir = bool(locator.get("is_dir", False))
         units.append(
             ContextUnit(
-                unit_id=(
-                    f"workspace_dir:{path}"
-                    if is_dir
-                    else f"workspace_file:{path}"
-                ),
+                unit_id=(f"workspace_dir:{path}" if is_dir else f"workspace_file:{path}"),
                 unit_type="workspace_dir" if is_dir else "workspace_file",
                 locator=locator,
                 preview=f"{path} ({locator.get('size_bytes', 0)} bytes)",
@@ -619,7 +540,7 @@ def _list_files_context_units(output: BaseModel) -> list[ContextUnit]:
 
 
 def _read_file_context_unit(
-    output: BaseModel,
+    output: BaseModel | _OutputView,
     *,
     tool_call_id: str,
 ) -> ContextUnit | None:
@@ -631,93 +552,11 @@ def _read_file_context_unit(
         unit_id=f"workspace_file:{path}",
         unit_type="workspace_file_content",
         locator=_read_file_locator(output),
-        preview=(
-            content[:1000]
-            if isinstance(content, str) and content
-            else None
-        ),
+        preview=(content[:1000] if isinstance(content, str) and content else None),
         content_ref=tool_call_id,
         capabilities=["read_file"],
         metadata={"source_tool": "read_file"},
     )
-
-
-def _write_file_context_unit(
-    output: BaseModel,
-    *,
-    tool_call_id: str,
-) -> ContextUnit | None:
-    path = getattr(output, "path", None)
-    if not isinstance(path, str) or not path.strip():
-        return None
-    locator = _write_file_locator(output)
-    return ContextUnit(
-        unit_id=f"workspace_file:{path}",
-        unit_type="workspace_file",
-        locator=locator,
-        preview=f"wrote {path} ({locator.get('size_bytes', 0)} bytes)",
-        content_ref=tool_call_id,
-        capabilities=["read_file"],
-        metadata={"source_tool": "write_file"},
-    )
-
-
-def _run_python_context_units(
-    output: BaseModel,
-    *,
-    tool_call_id: str,
-) -> list[ContextUnit]:
-    units = [
-        ContextUnit(
-            unit_id=f"python_run:{tool_call_id}",
-            unit_type="python_execution",
-            locator=_run_python_locator(output),
-            preview=_run_python_preview(output),
-            content_ref=tool_call_id,
-            capabilities=["run_python"],
-            metadata={"source_tool": "run_python"},
-        )
-    ]
-    for path in getattr(output, "generated_files", []) or []:
-        if not isinstance(path, str) or not path.strip():
-            continue
-        units.append(
-            ContextUnit(
-                unit_id=f"workspace_file:{path}",
-                unit_type="workspace_file",
-                locator={
-                    "path": path,
-                    "source_tool": "run_python",
-                    "generated_by": tool_call_id,
-                },
-                preview=f"generated {path}",
-                content_ref=path,
-                capabilities=["read_file"],
-                metadata={"source_tool": "run_python"},
-            )
-        )
-    return units
-
-
-def _structured_probe_context_units(output: BaseModel) -> list[ContextUnit]:
-    path = getattr(output, "path", None)
-    if not isinstance(path, str) or not path.strip():
-        return []
-    units: list[ContextUnit] = []
-    for table in getattr(output, "tables", []) or []:
-        table_index = getattr(table, "table_index", len(units))
-        units.append(
-            ContextUnit(
-                unit_id=f"structured_table:{path}:{table_index}",
-                unit_type="structured_table",
-                locator=_structured_table_locator(path, table),
-                preview=_structured_table_preview(table),
-                content_ref=path,
-                capabilities=["structured_probe", "run_python"],
-                metadata={"source_tool": "structured_probe"},
-            )
-        )
-    return units
 
 
 def _asset_context_unit(
@@ -733,11 +572,7 @@ def _asset_context_unit(
         "image": "image_asset",
     }.get(asset_type, "document_asset")
     advertised = locator.get("analysis_capabilities", [])
-    analysis_capabilities = (
-        [str(capability) for capability in advertised]
-        if isinstance(advertised, list)
-        else []
-    )
+    analysis_capabilities = [str(capability) for capability in advertised] if isinstance(advertised, list) else []
     capabilities = list(
         dict.fromkeys(
             [
@@ -776,15 +611,15 @@ def _dedupe_context_units(
 
 
 def _locators_from_output(
-    output: BaseModel | None,
+    output: BaseModel | _OutputView | None,
     *,
     tool_name: str | None = None,
 ) -> list[dict[str, object]]:
     if output is None:
         return []
-    primitive_locators = _primitive_locators_from_output(tool_name, output)
-    if primitive_locators:
-        return primitive_locators
+    workspace_locators = _workspace_tool_locators_from_output(tool_name, output)
+    if workspace_locators:
+        return workspace_locators
     items = getattr(output, "items", None)
     if isinstance(items, list):
         return _search_asset_locators(items)
@@ -818,46 +653,20 @@ def _locators_from_output(
     assets = getattr(output, "assets", None)
     if not isinstance(assets, list):
         return []
-    return [
-        _asset_locator_from_descriptor(asset)
-        for asset in assets
-        if hasattr(asset, "model_dump")
-    ]
+    return [_asset_locator_from_descriptor(asset) for asset in assets if hasattr(asset, "model_dump")]
 
 
-def _primitive_locators_from_output(
+def _workspace_tool_locators_from_output(
     tool_name: str | None,
-    output: BaseModel,
+    output: BaseModel | _OutputView,
 ) -> list[dict[str, object]]:
     if tool_name == "list_files":
-        return [
-            _workspace_file_locator(file_info, source_tool="list_files")
-            for file_info in getattr(output, "files", []) or []
-        ]
+        entries = getattr(output, "entries", None)
+        if not isinstance(entries, list):
+            entries = getattr(output, "files", [])
+        return [_workspace_file_locator(file_info, source_tool="list_files") for file_info in entries or []]
     if tool_name == "read_file":
         return [_read_file_locator(output)]
-    if tool_name == "write_file":
-        return [_write_file_locator(output)]
-    if tool_name == "run_python":
-        locators = [_run_python_locator(output)]
-        locators.extend(
-            {
-                "path": path,
-                "source_tool": "run_python",
-                "generated": True,
-            }
-            for path in getattr(output, "generated_files", []) or []
-            if isinstance(path, str) and path.strip()
-        )
-        return locators
-    if tool_name == "structured_probe":
-        path = getattr(output, "path", None)
-        if not isinstance(path, str) or not path.strip():
-            return []
-        return [
-            _structured_table_locator(path, table)
-            for table in getattr(output, "tables", []) or []
-        ]
     return []
 
 
@@ -870,25 +679,36 @@ def _workspace_file_locator(
     for field, output_field in (
         ("path", "path"),
         ("name", "name"),
-        ("size", "size_bytes"),
-        ("is_dir", "is_dir"),
         ("mime_type", "mime_type"),
     ):
-        value = getattr(file_info, field, None)
+        value = _workspace_file_field(file_info, field)
         if value not in (None, "", []):
             values[output_field] = value
-    file_kind = getattr(file_info, "file_kind", None)
-    has_file_kind = (
-        isinstance(file_kind, str)
-        and file_kind not in {"", "unknown"}
-    )
+    size_bytes = _workspace_file_field(file_info, "size_bytes")
+    if not isinstance(size_bytes, int):
+        size_bytes = _workspace_file_field(file_info, "size")
+    if isinstance(size_bytes, int):
+        values["size_bytes"] = size_bytes
+    is_directory = _workspace_file_field(file_info, "is_directory")
+    if not isinstance(is_directory, bool):
+        is_directory = _workspace_file_field(file_info, "is_dir")
+    if isinstance(is_directory, bool):
+        values["is_dir"] = is_directory
+    file_kind = _workspace_file_field(file_info, "file_kind")
+    has_file_kind = isinstance(file_kind, str) and file_kind not in {"", "unknown"}
     if has_file_kind:
         values["file_kind"] = file_kind
         for field in ("is_binary", "readable_as_text"):
-            value = getattr(file_info, field, None)
+            value = _workspace_file_field(file_info, field)
             if isinstance(value, bool):
                 values[field] = value
     return values
+
+
+def _workspace_file_field(file_info: object, field: str) -> object:
+    if isinstance(file_info, Mapping):
+        return file_info.get(field)
+    return getattr(file_info, field, None)
 
 
 def _workspace_file_capabilities(
@@ -896,13 +716,13 @@ def _workspace_file_capabilities(
     *,
     is_dir: bool,
 ) -> list[str]:
-    raw = getattr(file_info, "capabilities", None)
+    raw = _workspace_file_field(file_info, "capabilities")
     if isinstance(raw, list) and raw:
         return [str(item) for item in raw if str(item)]
     return ["list_files"] if is_dir else ["read_file"]
 
 
-def _read_file_locator(output: BaseModel) -> dict[str, object]:
+def _read_file_locator(output: BaseModel | _OutputView) -> dict[str, object]:
     values: dict[str, object] = {"source_tool": "read_file"}
     for output_field, locator_field in (
         ("path", "path"),
@@ -915,132 +735,6 @@ def _read_file_locator(output: BaseModel) -> dict[str, object]:
         if value not in (None, "", []):
             values[locator_field] = value
     return values
-
-
-def _write_file_locator(output: BaseModel) -> dict[str, object]:
-    values: dict[str, object] = {"source_tool": "write_file"}
-    for field in ("path", "size_bytes"):
-        value = getattr(output, field, None)
-        if value not in (None, "", []):
-            values[field] = value
-    return values
-
-
-def _run_python_locator(output: BaseModel) -> dict[str, object]:
-    values: dict[str, object] = {"source_tool": "run_python"}
-    for field in (
-        "ok",
-        "exit_code",
-        "duration_ms",
-        "stdout_truncated",
-        "stderr_truncated",
-        "generated_files",
-    ):
-        value = getattr(output, field, None)
-        if value not in (None, "", []):
-            values[field] = value
-    return values
-
-
-def _run_python_preview(output: BaseModel) -> str | None:
-    lines: list[str] = []
-    stdout = getattr(output, "stdout", None)
-    if isinstance(stdout, str) and stdout.strip():
-        lines.append("stdout: " + stdout.strip()[:500])
-    stderr = getattr(output, "stderr", None)
-    if isinstance(stderr, str) and stderr.strip():
-        lines.append("stderr: " + stderr.strip()[:500])
-    generated = getattr(output, "generated_files", None)
-    if isinstance(generated, list) and generated:
-        lines.append(
-            "generated_files: "
-            + ", ".join(str(path) for path in generated[:20])
-        )
-    return "\n".join(lines) if lines else None
-
-
-def _structured_table_locator(
-    path: str,
-    table: object,
-) -> dict[str, object]:
-    values: dict[str, object] = {
-        "path": path,
-        "source_tool": "structured_probe",
-    }
-    for output_field, locator_field in (
-        ("table_index", "table_index"),
-        ("name", "table_name"),
-        ("used_range", "used_range"),
-        ("row_count", "row_count"),
-        ("column_count", "column_count"),
-        ("data_start_row", "data_start_row"),
-    ):
-        value = getattr(table, output_field, None)
-        if value not in (None, "", []):
-            values[locator_field] = value
-    candidates = getattr(table, "candidate_header_rows", None)
-    if isinstance(candidates, list) and candidates:
-        best = candidates[0]
-        row_index = getattr(best, "row_index", None)
-        confidence = getattr(best, "confidence", None)
-        if isinstance(row_index, int):
-            values["header_row_index"] = row_index
-        if isinstance(confidence, int | float):
-            values["header_confidence"] = float(confidence)
-    return values
-
-
-def _structured_table_preview(table: object) -> str | None:
-    rows = getattr(table, "sample_rows", None)
-    row_count = getattr(table, "row_count", None)
-    column_count = getattr(table, "column_count", None)
-    used_range = getattr(table, "used_range", None)
-    parts = [
-        f"rows={row_count}" if isinstance(row_count, int) else "",
-        f"columns={column_count}" if isinstance(column_count, int) else "",
-        (
-            f"used_range={used_range}"
-            if isinstance(used_range, str) and used_range
-            else ""
-        ),
-    ]
-    header_row = _header_sample_row(table, rows)
-    if header_row is not None:
-        parts.append(f"header_row={_bounded_row_preview(header_row)}")
-    elif isinstance(rows, list) and rows:
-        parts.append(f"first_row={_bounded_row_preview(rows[0])}")
-    preview = " ".join(part for part in parts if part)
-    return preview or None
-
-
-def _header_sample_row(table: object, rows: object) -> object | None:
-    if not isinstance(rows, list) or not rows:
-        return None
-    candidates = getattr(table, "candidate_header_rows", None)
-    if not isinstance(candidates, list) or not candidates:
-        return None
-    row_index = getattr(candidates[0], "row_index", None)
-    if not isinstance(row_index, int):
-        return None
-    sample_index = row_index - 1
-    if sample_index < 0 or sample_index >= len(rows):
-        return None
-    return cast(object, rows[sample_index])
-
-
-def _bounded_row_preview(row: object) -> str:
-    if not isinstance(row, list):
-        return _bounded_cell_preview(row)
-    cells = [_bounded_cell_preview(cell) for cell in row[:8]]
-    suffix = f", ...(+{len(row) - 8})" if len(row) > 8 else ""
-    return "[" + ", ".join(cells) + suffix + "]"
-
-
-def _bounded_cell_preview(cell: object) -> str:
-    text = str(cell)
-    if len(text) > 40:
-        text = text[:40].rstrip() + "..."
-    return repr(text)
 
 
 def _asset_locator_from_descriptor(asset: object) -> dict[str, object]:
@@ -1066,7 +760,7 @@ def _asset_locator_from_descriptor(asset: object) -> dict[str, object]:
     return values
 
 
-def _asset_refs_from_output(output: BaseModel | None) -> list[int]:
+def _asset_refs_from_output(output: BaseModel | _OutputView | None) -> list[int]:
     if output is None:
         return []
     assets = getattr(output, "assets", None)
@@ -1074,8 +768,7 @@ def _asset_refs_from_output(output: BaseModel | None) -> list[int]:
         return [
             asset_id
             for asset in assets
-            if isinstance((asset_id := getattr(asset, "asset_id", None)), int)
-            and asset_id > 0
+            if isinstance((asset_id := getattr(asset, "asset_id", None)), int) and asset_id > 0
         ]
     asset_id = getattr(output, "asset_id", None)
     return [asset_id] if isinstance(asset_id, int) and asset_id > 0 else []
@@ -1090,11 +783,7 @@ def _search_asset_locators(
             continue
         text = str(item.get("text", "") or "")
         record_type = str(item.get("record_type", "") or "")
-        if (
-            "ASSET_ANCHOR:" not in text
-            and "asset" not in record_type
-            and "section" not in record_type
-        ):
+        if "ASSET_ANCHOR:" not in text and "asset" not in record_type and "section" not in record_type:
             continue
         locator = _retrieval_locator(item)
         if locator.get("section_id") is not None:
@@ -1102,7 +791,7 @@ def _search_asset_locators(
     return locators
 
 
-def _operation_from_output(output: BaseModel | None) -> str | None:
+def _operation_from_output(output: BaseModel | _OutputView | None) -> str | None:
     if output is None:
         return None
     operation = getattr(output, "operation", None)
@@ -1185,11 +874,7 @@ class _OutputView:
     def model_dump_json(self, *, exclude_none: bool = False) -> str:
         value = _plain_value(self._value)
         if exclude_none and isinstance(value, dict):
-            value = {
-                key: item
-                for key, item in value.items()
-                if item is not None
-            }
+            value = {key: item for key, item in value.items() if item is not None}
         return json.dumps(value, ensure_ascii=False, sort_keys=True)
 
 
@@ -1202,10 +887,7 @@ def _result_output(result: ToolResult) -> _OutputView | None:
 
 def _plain_value(value: object) -> object:
     if isinstance(value, Mapping):
-        return {
-            str(key): _plain_value(item)
-            for key, item in value.items()
-        }
+        return {str(key): _plain_value(item) for key, item in value.items()}
     if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
         return [_plain_value(item) for item in value]
     return value

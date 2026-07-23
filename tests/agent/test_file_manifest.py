@@ -1,13 +1,11 @@
-"""Tests for file manifest, auto-probe, chart capture, and file-first processing.
+"""Tests for file manifest structured previews and file-first processing.
 
 Covers:
 - FileManifest model and build_file_manifest
 - Pandas preview for CSV and XLSX
 - Structured probe with merged cells and formulas
-- Chart/image capture in run_python_inline
 - Context block generation
 - LoopState file_manifest field
-- Auto-activation of structured_probe
 """
 
 from __future__ import annotations
@@ -22,13 +20,6 @@ from rag.agent.file_manifest import (
     SheetPreview,
     build_file_manifest,
 )
-from rag.agent.primitive_ops import (
-    ImagePreview,
-    PrimitiveOps,
-    RunPythonInlineInput,
-    StructuredProbeInput,
-)
-from rag.agent.runner.python_runner import LocalSubprocessPythonRunner
 from rag.agent.workspace import WorkspaceRuntime
 
 # ---------------------------------------------------------------------------
@@ -43,16 +34,6 @@ def ws(tmp_path: Path) -> WorkspaceRuntime:
     runtime = WorkspaceRuntime(root=root, is_temporary=True)
     runtime.initialize()
     return runtime
-
-
-@pytest.fixture()
-def ops(ws: WorkspaceRuntime) -> PrimitiveOps:
-    return PrimitiveOps(workspace=ws)
-
-
-@pytest.fixture()
-def subprocess_ops(ws: WorkspaceRuntime) -> PrimitiveOps:
-    return PrimitiveOps(workspace=ws, python_runner=LocalSubprocessPythonRunner())
 
 
 # ---------------------------------------------------------------------------
@@ -91,8 +72,10 @@ def _make_xlsx(ws: WorkspaceRuntime, name: str, sheets: dict[str, list[list]]):
 class TestFileManifestModel:
     def test_empty_manifest(self) -> None:
         m = FileManifest(
-            files=[], total_size_bytes=0,
-            has_structured_files=False, has_probeable_files=False,
+            files=[],
+            total_size_bytes=0,
+            has_structured_files=False,
+            has_probeable_files=False,
         )
         assert m.to_context_block() == ""
 
@@ -106,25 +89,31 @@ class TestFileManifestModel:
             hash="abc123",
             structured=True,
             probeable=True,
-            sheets=[SheetPreview(
-                sheet_name="data.csv",
-                total_rows=100,
-                total_columns=5,
-                columns=[],
-                head=[],
-                dtypes={},
-            )],
+            sheets=[
+                SheetPreview(
+                    sheet_name="data.csv",
+                    total_rows=100,
+                    total_columns=5,
+                    columns=[],
+                    head=[],
+                    dtypes={},
+                )
+            ],
         )
         m = FileManifest(
-            files=[entry], total_size_bytes=1024,
-            has_structured_files=True, has_probeable_files=True,
+            files=[entry],
+            total_size_bytes=1024,
+            has_structured_files=True,
+            has_probeable_files=True,
         )
         block = m.to_context_block()
         assert "data.csv" in block
         assert "100 rows" in block
         assert "5 columns" in block
-        assert "Available Tools" in block
-        assert "run_python" in block
+        assert "Available Tools" not in block
+        assert "structured_probe" not in block
+        assert "run_python" not in block
+        assert "write_file" not in block
 
     def test_context_block_shows_warnings(self) -> None:
         entry = FileManifestEntry(
@@ -136,20 +125,24 @@ class TestFileManifestModel:
             hash="def456",
             structured=True,
             probeable=True,
-            sheets=[SheetPreview(
-                sheet_name="Sheet1",
-                total_rows=50,
-                total_columns=3,
-                columns=[],
-                head=[],
-                dtypes={},
-                merged_cells=True,
-                formula_columns=["C"],
-            )],
+            sheets=[
+                SheetPreview(
+                    sheet_name="Sheet1",
+                    total_rows=50,
+                    total_columns=3,
+                    columns=[],
+                    head=[],
+                    dtypes={},
+                    merged_cells=True,
+                    formula_columns=["C"],
+                )
+            ],
         )
         m = FileManifest(
-            files=[entry], total_size_bytes=2048,
-            has_structured_files=True, has_probeable_files=True,
+            files=[entry],
+            total_size_bytes=2048,
+            has_structured_files=True,
+            has_probeable_files=True,
         )
         block = m.to_context_block()
         assert "merged cells" in block
@@ -204,13 +197,17 @@ class TestBuildManifestCSV:
 
 class TestBuildManifestXLSX:
     def test_single_sheet_xlsx(self, ws: WorkspaceRuntime) -> None:
-        _make_xlsx(ws, "data.xlsx", {
-            "Sales": [
-                ["product", "qty", "price"],
-                ["Widget", 10, 25.0],
-                ["Gadget", 20, 30.0],
-            ],
-        })
+        _make_xlsx(
+            ws,
+            "data.xlsx",
+            {
+                "Sales": [
+                    ["product", "qty", "price"],
+                    ["Widget", 10, 25.0],
+                    ["Gadget", 20, 30.0],
+                ],
+            },
+        )
         manifest = build_file_manifest(ws)
 
         assert len(manifest.files) == 1
@@ -228,10 +225,14 @@ class TestBuildManifestXLSX:
         assert sheet.head[0]["product"] == "Widget"
 
     def test_multi_sheet_xlsx(self, ws: WorkspaceRuntime) -> None:
-        _make_xlsx(ws, "report.xlsx", {
-            "Summary": [["total", "count"], [1000, 50]],
-            "Detail": [["id", "value"], [1, 100], [2, 200]],
-        })
+        _make_xlsx(
+            ws,
+            "report.xlsx",
+            {
+                "Summary": [["total", "count"], [1000, 50]],
+                "Detail": [["id", "value"], [1, 100], [2, 200]],
+            },
+        )
         manifest = build_file_manifest(ws)
 
         assert len(manifest.files) == 1
@@ -276,7 +277,7 @@ class TestBuildManifestXLSX:
 
 
 class TestProbeEnhancements:
-    def test_probe_xlsx_merged_cells(self, ws: WorkspaceRuntime, ops: PrimitiveOps) -> None:
+    def test_probe_xlsx_merged_cells(self, ws: WorkspaceRuntime) -> None:
         openpyxl = pytest.importorskip("openpyxl")
         wb = openpyxl.Workbook()
         sheet = wb.active
@@ -286,11 +287,12 @@ class TestProbeEnhancements:
         sheet.append([1, 2])
         wb.save(ws.input_files / "test.xlsx")
 
-        out = ops.structured_probe(StructuredProbeInput(path="input_files/test.xlsx"))
-        assert len(out.tables) == 1
-        assert out.tables[0].merged_cells is True
+        probe = build_file_manifest(ws).files[0].probe
+        assert probe is not None
+        assert len(probe.tables) == 1
+        assert probe.tables[0].merged_cells is True
 
-    def test_probe_xlsx_formulas(self, ws: WorkspaceRuntime, ops: PrimitiveOps) -> None:
+    def test_probe_xlsx_formulas(self, ws: WorkspaceRuntime) -> None:
         openpyxl = pytest.importorskip("openpyxl")
         wb = openpyxl.Workbook()
         sheet = wb.active
@@ -300,80 +302,18 @@ class TestProbeEnhancements:
         sheet["C2"] = "=A2+B2"
         wb.save(ws.input_files / "formula.xlsx")
 
-        out = ops.structured_probe(StructuredProbeInput(path="input_files/formula.xlsx"))
-        assert len(out.tables) == 1
-        assert "C" in out.tables[0].formula_columns
+        probe = build_file_manifest(ws).files[0].probe
+        assert probe is not None
+        assert len(probe.tables) == 1
+        assert "C" in probe.tables[0].formula_columns
 
-    def test_probe_csv_no_merged_or_formulas(self, ws: WorkspaceRuntime, ops: PrimitiveOps) -> None:
+    def test_probe_csv_no_merged_or_formulas(self, ws: WorkspaceRuntime) -> None:
         _make_csv(ws, "plain.csv", "a,b\n1,2\n")
-        out = ops.structured_probe(StructuredProbeInput(path="input_files/plain.csv"))
-        assert len(out.tables) == 1
-        assert out.tables[0].merged_cells is False
-        assert out.tables[0].formula_columns == []
-
-
-# ===================================================================
-# Chart/image capture
-# ===================================================================
-
-
-class TestChartCapture:
-    def test_matplotlib_savefig_captured(
-        self, ws: WorkspaceRuntime, subprocess_ops: PrimitiveOps,
-    ) -> None:
-        """Matplotlib savefig should be captured as image_preview."""
-        code = """
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-plt.figure()
-plt.plot([1, 2, 3], [4, 5, 6])
-plt.savefig("scratch/test_chart.png")
-plt.close()
-"""
-        out = subprocess_ops.run_python_inline(RunPythonInlineInput(code=code))
-        assert out.ok is True
-        assert any("test_chart.png" in f for f in out.generated_files)
-
-    def test_plt_show_auto_saves(
-        self, ws: WorkspaceRuntime, subprocess_ops: PrimitiveOps,
-    ) -> None:
-        """plt.show() should auto-save figures via the preamble."""
-        code = """
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-plt.figure()
-plt.plot([1, 2, 3], [10, 20, 30])
-plt.title("Test Chart")
-plt.show()
-"""
-        out = subprocess_ops.run_python_inline(RunPythonInlineInput(code=code))
-        assert out.ok is True
-        # The preamble should have saved the chart
-        chart_files = [f for f in out.generated_files if "chart_" in f and f.endswith(".png")]
-        assert len(chart_files) >= 1
-
-    def test_no_chart_when_no_matplotlib(
-        self, ws: WorkspaceRuntime, subprocess_ops: PrimitiveOps,
-    ) -> None:
-        """Code without matplotlib should not produce charts."""
-        code = "print(42)"
-        out = subprocess_ops.run_python_inline(RunPythonInlineInput(code=code))
-        assert out.ok is True
-        assert out.image_previews == []
-
-    def test_image_preview_model(self) -> None:
-        """ImagePreview model works correctly."""
-        preview = ImagePreview(
-            path="scratch/chart_001.png",
-            base64_data="iVBORw0KGgo=",
-            mime_type="image/png",
-            width=800,
-            height=600,
-        )
-        assert preview.path == "scratch/chart_001.png"
-        assert preview.width == 800
+        probe = build_file_manifest(ws).files[0].probe
+        assert probe is not None
+        assert len(probe.tables) == 1
+        assert probe.tables[0].merged_cells is False
+        assert probe.tables[0].formula_columns == []
 
 
 # ===================================================================
@@ -384,14 +324,10 @@ plt.show()
 class TestLoopStateIntegration:
     def _make_config(self):
         from rag.agent.core.context import AgentRunConfig
-        from rag.schema.runtime import AccessPolicy
+
         return AgentRunConfig(
-            run_id="test",
-            thread_id="test",
+            turn_id="test",
             llm_budget_total=1000,
-            max_depth=2,
-            access_policy=AccessPolicy.default(),
-            agent_type="generic",
         )
 
     def test_create_loop_state_with_manifest(self) -> None:
@@ -399,11 +335,13 @@ class TestLoopStateIntegration:
         from rag.agent.loop.state import create_loop_state
 
         manifest = FileManifest(
-            files=[], total_size_bytes=0,
-            has_structured_files=False, has_probeable_files=False,
+            files=[],
+            total_size_bytes=0,
+            has_structured_files=False,
+            has_probeable_files=False,
         )
         config = self._make_config()
-        state = create_loop_state(task="test", run_config=config, file_manifest=manifest)
+        state = create_loop_state(current_message="test", run_config=config, file_manifest=manifest)
         assert state["file_manifest"] is not None
         assert state["file_manifest"].files == []
 
@@ -411,7 +349,7 @@ class TestLoopStateIntegration:
         from rag.agent.loop.state import create_loop_state
 
         config = self._make_config()
-        state = create_loop_state(task="test", run_config=config)
+        state = create_loop_state(current_message="test", run_config=config)
         assert state["file_manifest"] is None
 
 
@@ -423,8 +361,10 @@ class TestLoopStateIntegration:
 class TestContextBlock:
     def test_manifest_with_no_files_renders_empty(self) -> None:
         m = FileManifest(
-            files=[], total_size_bytes=0,
-            has_structured_files=False, has_probeable_files=False,
+            files=[],
+            total_size_bytes=0,
+            has_structured_files=False,
+            has_probeable_files=False,
         )
         assert m.to_context_block() == ""
 
@@ -438,18 +378,22 @@ class TestContextBlock:
             hash="abc",
             structured=True,
             probeable=True,
-            sheets=[SheetPreview(
-                sheet_name="data.csv",
-                total_rows=5,
-                total_columns=2,
-                columns=[],
-                head=[{"a": 1, "b": 2}],
-                dtypes={},
-            )],
+            sheets=[
+                SheetPreview(
+                    sheet_name="data.csv",
+                    total_rows=5,
+                    total_columns=2,
+                    columns=[],
+                    head=[{"a": 1, "b": 2}],
+                    dtypes={},
+                )
+            ],
         )
         m = FileManifest(
-            files=[entry], total_size_bytes=100,
-            has_structured_files=True, has_probeable_files=True,
+            files=[entry],
+            total_size_bytes=100,
+            has_structured_files=True,
+            has_probeable_files=True,
         )
         block = m.to_context_block()
         assert "Available Python Packages" in block
@@ -469,8 +413,10 @@ class TestContextBlock:
             error="probe_failed: corrupt file",
         )
         m = FileManifest(
-            files=[entry], total_size_bytes=100,
-            has_structured_files=True, has_probeable_files=True,
+            files=[entry],
+            total_size_bytes=100,
+            has_structured_files=True,
+            has_probeable_files=True,
         )
         block = m.to_context_block()
         assert "probe_failed" in block
@@ -483,12 +429,11 @@ class TestContextBlock:
 
 class TestFileFirstPath:
     def test_csv_manifest_enables_first_turn_analysis(
-        self, ws: WorkspaceRuntime,
+        self,
+        ws: WorkspaceRuntime,
     ) -> None:
         """Full path: CSV → manifest → model has everything it needs."""
-        _make_csv(ws, "orders.csv",
-                  "order_id,product,amount\n"
-                  "1,Widget,100\n2,Gadget,200\n3,Widget,150\n")
+        _make_csv(ws, "orders.csv", "order_id,product,amount\n1,Widget,100\n2,Gadget,200\n3,Widget,150\n")
         manifest = build_file_manifest(ws)
 
         # Manifest should have complete info
@@ -509,16 +454,21 @@ class TestFileFirstPath:
         # Context block should be usable
         block = manifest.to_context_block()
         assert "orders.csv" in block
-        assert "run_python" in block
+        assert "Available Python Packages" in block
 
     def test_xlsx_manifest_shows_all_sheets(
-        self, ws: WorkspaceRuntime,
+        self,
+        ws: WorkspaceRuntime,
     ) -> None:
         """Multi-sheet XLSX → manifest lists all sheets with previews."""
-        _make_xlsx(ws, "report.xlsx", {
-            "Sales": [["date", "amount"], ["2024-01", 1000], ["2024-02", 1500]],
-            "Inventory": [["item", "stock"], ["Widget", 50], ["Gadget", 30]],
-        })
+        _make_xlsx(
+            ws,
+            "report.xlsx",
+            {
+                "Sales": [["date", "amount"], ["2024-01", 1000], ["2024-02", 1500]],
+                "Inventory": [["item", "stock"], ["Widget", 50], ["Gadget", 30]],
+            },
+        )
         manifest = build_file_manifest(ws)
 
         entry = manifest.files[0]
@@ -531,3 +481,54 @@ class TestFileFirstPath:
         for sheet in entry.sheets:
             assert len(sheet.columns) == 2
             assert len(sheet.head) >= 1
+
+
+class TestLegacyPrimitiveClosure:
+    def test_primitive_ops_exports_checkpoint_stable_models_only(self) -> None:
+        import rag.agent.primitive_ops as primitive_ops
+
+        assert set(primitive_ops.__all__) == {
+            "CandidateHeaderRow",
+            "CellValue",
+            "FileKind",
+            "StructuredProbeOutput",
+            "StructuredTableProbe",
+        }
+        assert not hasattr(primitive_ops, "PrimitiveOps")
+
+    def test_primitive_runner_files_are_removed(self) -> None:
+        root = Path(__file__).resolve().parents[2]
+
+        assert not (root / "rag/agent/runner/__init__.py").exists()
+        assert not (root / "rag/agent/runner/python_runner.py").exists()
+
+    def test_production_has_no_primitive_executor_references(self) -> None:
+        root = Path(__file__).resolve().parents[2]
+        forbidden = (
+            "PrimitiveOps",
+            "rag.agent.runner",
+            "RunPythonInput",
+            "RunPythonInlineInput",
+            "RunPythonOutput",
+            "StructuredProbeInput",
+            "WriteFileInput",
+            "WriteFileOutput",
+        )
+        offenders: dict[str, tuple[str, ...]] = {}
+
+        for production_root in (root / "rag", root / "agent_runtime"):
+            for path in production_root.rglob("*.py"):
+                source = path.read_text(encoding="utf-8")
+                matches = tuple(name for name in forbidden if name in source)
+                if matches:
+                    offenders[str(path.relative_to(root))] = matches
+
+        assert offenders == {}
+
+    def test_observations_do_not_special_case_removed_primitive_tools(self) -> None:
+        root = Path(__file__).resolve().parents[2]
+        source = (root / "rag/agent/core/observations.py").read_text(encoding="utf-8")
+
+        assert '"write_file"' not in source
+        assert '"run_python"' not in source
+        assert '"structured_probe"' not in source

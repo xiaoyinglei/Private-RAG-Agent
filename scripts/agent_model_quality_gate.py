@@ -28,7 +28,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import Literal, cast
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_FIXTURE_PATH = ROOT / "tests" / "agent" / "fixtures" / "model_quality_cases.json"
@@ -419,7 +419,7 @@ async def run_live_case(
     control_plane: object,
     case: Mapping[str, object],
 ) -> CaseObservation:
-    from agent_runtime import Agent
+    from agent_runtime import Agent, AgentResult
 
     case_id = str(case["id"])
     capability = str(case["capability"])
@@ -440,24 +440,26 @@ async def run_live_case(
         pause_observed = False
         approval_kind: str | None = None
         approval_resumes = 0
-        result: Any | None = None
+        result: AgentResult | None = None
         try:
-            result = await agent.achat(str(case["task"]), files=files)
+            result = await agent.arun(str(case["task"]), files=files)
             if bool(case.get("auto_approve", False)) and result.status == "paused":
                 pause_observed = True
-                request = getattr(result.raw, "human_input_request", None)
-                approval_kind = getattr(request, "kind", None)
+                approval_kind = None if result.pause is None else result.pause.kind
                 if approval_kind == "tool_approval":
                     result = await agent.aresume(result.turn_id, "allow_once")
                     approval_resumes = 1
 
-            history = agent._get_session_store().turn_history(result.turn_id)
-            raw_result = result.raw
-            tool_results = tuple(getattr(raw_result, "tool_results", ()) or ())
-            evidence = _tool_call_evidence(history, tool_results)
-            latency_profile = getattr(raw_result, "latency_profile", None)
-            stop_reason = getattr(raw_result, "stop_reason", None)
-            diagnostics = tuple(getattr(raw_result, "runtime_diagnostics", ()) or ())
+            evidence = tuple(
+                ToolCallEvidence(
+                    tool_call_id=call.tool_call_id,
+                    tool_name=call.tool_name,
+                    arguments=_mutable_json_mapping(call.arguments or {}),
+                    is_error=call.is_error,
+                    error_code=call.error_code,
+                )
+                for call in result.tool_calls
+            )
             workspace_ok = _workspace_assertions_pass(
                 workspace,
                 _mapping(case.get("workspace_assertions", {})),
@@ -468,25 +470,23 @@ async def run_live_case(
                 status=result.status,
                 answer=result.answer,
                 tool_calls=evidence,
-                model_calls=len(tuple(getattr(raw_result, "model_call_records", ()) or ())),
+                model_calls=result.usage.model_calls,
                 input_tokens=result.usage.input_tokens,
                 output_tokens=result.usage.output_tokens,
                 latency_ms=result.usage.latency_ms,
-                tool_schema_bytes=int(getattr(latency_profile, "tool_schema_bytes", 0) or 0),
+                tool_schema_bytes=result.usage.tool_schema_bytes,
                 approval_pause_observed=pause_observed,
                 approval_kind=approval_kind,
                 approval_resumes=approval_resumes,
                 workspace_assertions_passed=workspace_ok,
-                stop_reason=(None if stop_reason is None else str(stop_reason)),
-                diagnostic_codes=tuple(str(getattr(item, "code", "diagnostic")) for item in diagnostics),
+                stop_reason=result.stop_reason,
+                diagnostic_codes=tuple(item.code for item in result.diagnostics),
                 diagnostic_error_types=tuple(
-                    str(error_type)
-                    for item in diagnostics
-                    if (error_type := getattr(item, "error_type", None)) is not None
+                    item.error_type for item in result.diagnostics if item.error_type is not None
                 ),
                 infrastructure_failure=is_infrastructure_failure(
                     result.status,
-                    None if stop_reason is None else str(stop_reason),
+                    result.stop_reason,
                 ),
             )
         except Exception as exc:
@@ -511,7 +511,7 @@ async def run_live_case(
                 error=_safe_error(exc),
             )
         finally:
-            store = getattr(agent, "_session_store", None)
+            store = getattr(agent, "_turn_store", None)
             if store is not None:
                 store.close()
 
@@ -785,33 +785,6 @@ def _failure_recovered(
     )
 
 
-def _tool_call_evidence(
-    history: Sequence[Any],
-    tool_results: Sequence[Any],
-) -> tuple[ToolCallEvidence, ...]:
-    result_by_id = {str(result.tool_call_id): result for result in tool_results}
-    calls: list[ToolCallEvidence] = []
-    for message in history:
-        if getattr(message, "role", None) != "assistant":
-            continue
-        for call in tuple(getattr(message, "tool_calls", ()) or ()):
-            result = result_by_id.get(str(call.id))
-            calls.append(
-                ToolCallEvidence(
-                    tool_call_id=str(call.id),
-                    tool_name=str(call.name),
-                    arguments={str(key): cast(object, value) for key, value in dict(call.input).items()},
-                    is_error=bool(getattr(result, "is_error", False)),
-                    error_code=(
-                        None
-                        if result is None or getattr(result, "error_code", None) is None
-                        else str(result.error_code)
-                    ),
-                )
-            )
-    return tuple(calls)
-
-
 def _write_source_files(
     root: Path,
     files: Mapping[str, object],
@@ -825,6 +798,20 @@ def _write_source_files(
         path.write_text(raw_content, encoding="utf-8")
         paths.append(str(path))
     return paths
+
+
+def _mutable_json_mapping(
+    value: Mapping[str, object],
+) -> dict[str, object]:
+    return {key: _mutable_json_value(item) for key, item in value.items()}
+
+
+def _mutable_json_value(value: object) -> object:
+    if isinstance(value, Mapping):
+        return _mutable_json_mapping({str(key): item for key, item in value.items()})
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+        return [_mutable_json_value(item) for item in value]
+    return value
 
 
 def _workspace_assertions_pass(

@@ -14,25 +14,18 @@ import os
 import pytest
 
 requires_real_model = pytest.mark.skipif(
-    os.environ.get("RUN_REAL_MODEL_SMOKE") != "1"
-    or not os.environ.get("DEEPSEEK_API_KEY"),
+    os.environ.get("RUN_REAL_MODEL_SMOKE") != "1" or not os.environ.get("DEEPSEEK_API_KEY"),
     reason="Set RUN_REAL_MODEL_SMOKE=1 and DEEPSEEK_API_KEY to run real model smoke tests",
 )
 
 
 def _deepseek_service():
-    from rag.agent.builtin.generic import GENERIC_AGENT
-    from rag.agent.builtin_registry import create_builtin_tool_registry
-    from rag.agent.core.agent_service_factory import AgentServiceFactory
-    from rag.agent.core.llm_registry import ModelRegistry
+    from agent_runtime.runtime.builder import build_agent_service
 
-    registry = ModelRegistry.from_env(default_model="deepseek_chat")
-    tool_registry = create_builtin_tool_registry()
-    factory = AgentServiceFactory(
-        tool_registry=tool_registry,
-        model_registry=registry,
+    return build_agent_service(
+        None,
+        model_alias="deepseek_chat",
     )
-    return factory.create(GENERIC_AGENT)
 
 
 @pytest.mark.anyio
@@ -43,14 +36,14 @@ class TestRealModelSmoke:
         from rag.agent.service import AgentRunRequest
 
         svc = _deepseek_service()
-        result = await svc.run(AgentRunRequest(
-            task='Say exactly: "OK"',
-            max_turns=10,
-        ))
-
-        assert result.status == "done", (
-            f"status={result.status}, stop_reason={result.stop_reason}"
+        result = await svc.run(
+            AgentRunRequest(
+                message='Say exactly: "OK"',
+                max_turns=10,
+            )
         )
+
+        assert result.status == "done", f"status={result.status}, stop_reason={result.stop_reason}"
         assert result.final_answer is not None
         assert "ok" in result.final_answer.lower()
 
@@ -59,13 +52,13 @@ class TestRealModelSmoke:
         from rag.agent.service import AgentRunRequest
 
         svc = _deepseek_service()
-        result = await svc.run(AgentRunRequest(
-            task="What is 2 + 2? Answer with just the number.",
-            max_turns=10,
-        ))
-
-        assert result.status == "done", (
-            f"status={result.status}, stop_reason={result.stop_reason}"
+        result = await svc.run(
+            AgentRunRequest(
+                message="What is 2 + 2? Answer with just the number.",
+                max_turns=10,
+            )
         )
+
+        assert result.status == "done", f"status={result.status}, stop_reason={result.stop_reason}"
         assert result.final_answer is not None
         assert "4" in result.final_answer

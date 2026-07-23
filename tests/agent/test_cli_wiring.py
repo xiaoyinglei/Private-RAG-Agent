@@ -2,23 +2,23 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import click
 import pytest
+from pydantic import ValidationError
+from typer.main import get_command
+from typer.testing import CliRunner
 
-from agent_runtime.runtime.builder import (
-    CLI_AGENT_CHOICES,
-    build_agent_service,
-    build_optional_rag_runtime,
-    resolve_auto_rag_config,
-    resolve_cli_agent_definition,
-)
-from rag.agent.builtin import create_builtin_agent_registry
+from agent_runtime import RAGKnowledgeConfig
+from agent_runtime.planning import AgentPlan, PlanEvent, PlanStep
+from agent_runtime.result import AgentResult, AgentToolCall, AgentUsage
+from agent_runtime.runtime.builder import build_agent_service
 from rag.agent.cli import (
-    _build_agent_service,
     _CLIToolEventDisplay,
-    _display_result,
+    _display_agent_result,
+    _load_knowledge_config,
+    agent_app,
 )
-from rag.agent.planning import AgentPlan, PlanEvent, PlanStep
-from rag.agent.service import AgentRunRequest, AgentRunResult
+from rag.agent.service import AgentRunRequest
 from rag.agent.streaming.events import (
     EventType,
     StreamEvent,
@@ -36,7 +36,6 @@ from rag.agent.tools.integrations.mcp import (
     create_mcp_tools,
 )
 from rag.agent.tools.integrations.skills import create_skill_tools
-from rag.agent.tools.tool import ToolResult
 from rag.agent.workspace import open_workspace
 
 
@@ -48,15 +47,128 @@ class _ModelRegistry:
         raise AssertionError("model resolution is not needed for assembly")
 
 
-def test_cli_supports_only_the_product_generic_agent() -> None:
-    registry = create_builtin_agent_registry()
+@pytest.mark.parametrize(
+    ("command", "present", "removed"),
+    [
+        pytest.param(
+            "run",
+            (
+                "--previous-turn-id",
+                "--last",
+                "--knowledge-config",
+                "--file",
+                "--max-tokens-total",
+                "--allow-write-tools",
+                "--allow-execute-tools",
+            ),
+            (
+                "--agent",
+                "--turn-id",
+                "--run-id",
+                "--knowledge",
+                "--input-file",
+                "--tool",
+                "--disable-tool",
+                "--allow-discovery-tools",
+                "--budget",
+                "--vector-dsn",
+            ),
+            id="run",
+        ),
+        pytest.param(
+            "chat",
+            (
+                "--previous-turn-id",
+                "--last",
+                "--knowledge-config",
+                "--max-tokens-total",
+            ),
+            (
+                "--agent",
+                "--budget",
+                "--vector-dsn",
+                "--storage-root",
+                "--embedding-model",
+                "--reranker-model",
+            ),
+            id="chat",
+        ),
+        pytest.param(
+            "resume",
+            ("--last", "--all", "--action", "--input"),
+            ("--decision", "--vector-dsn"),
+            id="resume",
+        ),
+    ],
+)
+def test_agent_command_options_match_the_clean_public_contract(
+    command: str,
+    present: tuple[str, ...],
+    removed: tuple[str, ...],
+) -> None:
+    root_command = get_command(agent_app)
+    command_info = root_command.get_command(click.Context(root_command), command)
 
-    assert CLI_AGENT_CHOICES == ("generic",)
-    assert resolve_cli_agent_definition(registry, "generic").agent_type == (
-        "generic"
+    assert command_info is not None
+    option_names = {
+        option
+        for parameter in command_info.params
+        for option in (*parameter.opts, *parameter.secondary_opts)
+    }
+    for option in present:
+        assert option in option_names
+    for option in removed:
+        assert option not in option_names
+
+
+def test_agent_run_rejects_missing_input_without_internal_traceback(
+    tmp_path: Path,
+) -> None:
+    missing = tmp_path / "missing.txt"
+
+    result = CliRunner().invoke(
+        agent_app,
+        [
+            "run",
+            "Read the file.",
+            "--file",
+            str(missing),
+            "--non-interactive",
+        ],
+        env={"COLUMNS": "240"},
     )
-    with pytest.raises(ValueError, match="supported CLI agent"):
-        resolve_cli_agent_definition(registry, "research")
+
+    assert result.exit_code == 2
+    assert "输入文件不存在" in result.output
+    assert "Traceback" not in result.output
+
+
+def _result(
+    *,
+    status: str = "done",
+    answer: str | None = None,
+    tool_calls: tuple[AgentToolCall, ...] = (),
+    plan: AgentPlan | None = None,
+    plan_events: tuple[PlanEvent, ...] = (),
+) -> AgentResult:
+    return AgentResult(
+        answer=answer,
+        status=status,  # type: ignore[arg-type]
+        files=(),
+        tool_calls=tool_calls,
+        evidence=(),
+        citations=(),
+        usage=AgentUsage(),
+        diagnostics=(),
+        turn_id="turn-test",
+        stop_reason=None,
+        pause=None,
+        workspace_path=None,
+        groundedness=False,
+        insufficient_evidence=False,
+        plan=plan,
+        plan_events=plan_events,
+    )
 
 
 def test_builder_assembles_default_six_tools_in_product_order() -> None:
@@ -67,7 +179,7 @@ def test_builder_assembles_default_six_tools_in_product_order() -> None:
 
     assert tuple(service._tool_snapshot) == RESIDENT_CODING_TOOL_NAMES
     assert service._tool_executor._tools is service._tool_snapshot
-    state = service.initial_state(AgentRunRequest(task="Inspect repository."))
+    state = service.initial_state(AgentRunRequest(message="Inspect repository."))
     assert tuple(state["resident_tool_names"]) == RESIDENT_CODING_TOOL_NAMES
 
 
@@ -101,7 +213,7 @@ async def test_configured_knowledge_is_a_resident_extension() -> None:
         model_control_plane=_ModelRegistry(),  # type: ignore[arg-type]
         knowledge_runner=search,  # type: ignore[arg-type]
     )
-    state = service.initial_state(AgentRunRequest(task="Search docs."))
+    state = service.initial_state(AgentRunRequest(message="Search docs."))
 
     assert tuple(service._tool_snapshot) == (
         *RESIDENT_CODING_TOOL_NAMES,
@@ -113,29 +225,17 @@ async def test_configured_knowledge_is_a_resident_extension() -> None:
     ]
 
 
-def test_cli_wrapper_uses_the_same_builder_snapshot() -> None:
-    service = _build_agent_service(
-        None,
-        model_control_plane=_ModelRegistry(),  # type: ignore[arg-type]
-    )
-
-    assert tuple(service._tool_snapshot) == RESIDENT_CODING_TOOL_NAMES
-
-
 def test_cli_shows_called_tool_names_without_verbose(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    _display_result(
-        AgentRunResult(
-            run_id="visible-call",
-            thread_id="visible-call",
-            status="done",
-            tool_results=[
-                ToolResult(
+    _display_agent_result(
+        _result(
+            tool_calls=(
+                AgentToolCall(
                     tool_call_id="call_search",
                     tool_name="search_text",
-                )
-            ],
+                ),
+            ),
         ),
         verbose=False,
     )
@@ -146,13 +246,8 @@ def test_cli_shows_called_tool_names_without_verbose(
 def test_cli_does_not_repeat_an_answer_that_was_already_streamed(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    _display_result(
-        AgentRunResult(
-            run_id="streamed-answer",
-            thread_id="streamed-answer",
-            status="done",
-            final_answer="already visible",
-        ),
+    _display_agent_result(
+        _result(answer="already visible"),
         verbose=False,
         answer_streamed=True,
     )
@@ -187,13 +282,11 @@ def test_cli_shows_the_persisted_update_plan_without_verbose(
         message="Applied update_plan tool update.",
     )
 
-    _display_result(
-        AgentRunResult(
-            run_id="visible-plan",
-            thread_id="visible-plan",
+    _display_agent_result(
+        _result(
             status="paused",
             plan=plan,
-            plan_events=[event],
+            plan_events=(event,),
         ),
         verbose=False,
     )
@@ -311,13 +404,7 @@ async def test_cli_displays_patch_diff_from_existing_result_event(
             "result": {"replaced": True},
             "details": {
                 "file_path": "src/example.py",
-                "diff": (
-                    "--- a/src/example.py\n"
-                    "+++ b/src/example.py\n"
-                    "@@ -1 +1 @@\n"
-                    "-old\n"
-                    "+new"
-                ),
+                "diff": ("--- a/src/example.py\n+++ b/src/example.py\n@@ -1 +1 @@\n-old\n+new"),
                 "diff_truncated": False,
             },
         },
@@ -404,10 +491,10 @@ def test_builder_installs_hidden_factory_outputs_with_find_tools() -> None:
         "mcp__docs__search",
         "find_tools",
     )
-    automatic_state = service.initial_state(AgentRunRequest(task="Inspect docs."))
+    automatic_state = service.initial_state(AgentRunRequest(message="Inspect docs."))
     disabled_state = service.initial_state(
         AgentRunRequest(
-            task="Inspect docs.",
+            message="Inspect docs.",
             allow_discovery_tools=False,
         )
     )
@@ -416,9 +503,7 @@ def test_builder_installs_hidden_factory_outputs_with_find_tools() -> None:
         "find_tools",
     )
     assert automatic_state["allow_discovery_tools"] is True
-    assert tuple(disabled_state["resident_tool_names"]) == (
-        RESIDENT_CODING_TOOL_NAMES
-    )
+    assert tuple(disabled_state["resident_tool_names"]) == (RESIDENT_CODING_TOOL_NAMES)
     assert disabled_state["allow_discovery_tools"] is False
     assert automatic_state["active_tool_names"] == []
 
@@ -438,7 +523,7 @@ def test_builder_makes_skill_gateways_resident_when_skills_are_available(
         model_control_plane=_ModelRegistry(),  # type: ignore[arg-type]
         skill_tools=skill_tools,
     )
-    state = service.initial_state(AgentRunRequest(task="Use an installed skill."))
+    state = service.initial_state(AgentRunRequest(message="Use an installed skill."))
 
     assert tuple(state["resident_tool_names"]) == (
         *RESIDENT_CODING_TOOL_NAMES,
@@ -448,36 +533,33 @@ def test_builder_makes_skill_gateways_resident_when_skills_are_available(
     assert "find_tools" not in state["resident_tool_names"]
 
 
-def test_auto_rag_config_prefers_explicit_arguments(
-    monkeypatch: pytest.MonkeyPatch,
+def test_knowledge_config_is_serializable_and_forbids_unknown_fields(
+    tmp_path: Path,
 ) -> None:
-    monkeypatch.setenv("AGENT_VECTOR_BACKEND", "sqlite")
-    resolved = resolve_auto_rag_config(
-        storage_root=Path("custom-rag"),
-        vector_backend="milvus",
-        vector_dsn="explicit-dsn",
-        vector_namespace="explicit-ns",
-        vector_collection_prefix="explicit-prefix",
+    config = RAGKnowledgeConfig(
+        storage_root=tmp_path / "knowledge",
+        embedding_model="embed-v1",
+        vector_backend="sqlite",
+        vector_namespace="docs",
     )
 
-    assert resolved.storage_root == Path("custom-rag")
-    assert resolved.vector_backend == "sqlite"
-    assert resolved.vector_dsn == "explicit-dsn"
-    assert resolved.explicit is True
+    restored = RAGKnowledgeConfig.model_validate_json(config.model_dump_json())
+
+    assert restored == config
+    with pytest.raises(ValidationError):
+        RAGKnowledgeConfig.model_validate({"storage_root": ".rag", "source_name": "legacy"})
 
 
-def test_optional_rag_runtime_is_lazy_when_not_explicit() -> None:
-    runtime, diagnostics = build_optional_rag_runtime(
-        storage_root=Path(".rag"),
-        model_alias=None,
-        embedding_model_alias=None,
-        reranker_model_alias=None,
-        vector_backend="milvus",
-        vector_dsn=None,
-        vector_namespace=None,
-        vector_collection_prefix=None,
-        explicit=False,
+def test_cli_loads_one_explicit_yaml_knowledge_config(tmp_path: Path) -> None:
+    path = tmp_path / "knowledge.yaml"
+    path.write_text(
+        "storage_root: /tmp/index\nvector_backend: sqlite\n",
+        encoding="utf-8",
     )
 
-    assert runtime is None
-    assert diagnostics == ()
+    config = _load_knowledge_config(path)
+
+    assert config == RAGKnowledgeConfig(
+        storage_root=Path("/tmp/index"),
+        vector_backend="sqlite",
+    )

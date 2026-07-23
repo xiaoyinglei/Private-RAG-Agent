@@ -109,7 +109,6 @@
       "fake_tool": "search_knowledge",
       "fake_arguments": {
         "query": "What is the approval limit?",
-        "constraints": "policy",
         "top_k": 5
       }
     },

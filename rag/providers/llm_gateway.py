@@ -272,6 +272,11 @@ class LLMGateway:
             for key, value in payload.items()
             if key not in {"model", "messages", "tools", "max_completion_tokens"}
         }
+        max_completion_tokens = payload.get("max_completion_tokens")
+        if isinstance(max_completion_tokens, int):
+            # Route the canonical request limit through the gateway so context
+            # projection, reservation, and the provider call use one budget.
+            provider_kwargs["max_tokens"] = max_completion_tokens
         if stream:
             chunks = self.astream_with_tools(
                 stage=stage,

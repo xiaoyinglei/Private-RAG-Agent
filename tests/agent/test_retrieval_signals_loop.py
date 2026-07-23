@@ -11,7 +11,6 @@ from rag.agent.loop.state import create_loop_state
 from rag.agent.service import AgentRunResult
 from rag.agent.tools.integrations.knowledge import KnowledgeSearchInput
 from rag.agent.tools.tool import ToolResult
-from rag.schema.runtime import AccessPolicy
 
 
 def test_final_knowledge_input_does_not_expose_retrieval_routing() -> None:
@@ -19,11 +18,19 @@ def test_final_knowledge_input_does_not_expose_retrieval_routing() -> None:
 
     assert payload.query == "policy"
     assert not hasattr(payload, "retrieval_signals")
+    assert not hasattr(payload, "constraints")
     with pytest.raises(ValidationError):
         KnowledgeSearchInput.model_validate(
             {
                 "query": "policy",
                 "retrieval_signals": {"special_targets": ["table"]},
+            }
+        )
+    with pytest.raises(ValidationError):
+        KnowledgeSearchInput.model_validate(
+            {
+                "query": "policy",
+                "constraints": {"owner": "finance"},
             }
         )
 
@@ -43,9 +50,7 @@ def test_knowledge_result_semantics_stay_in_canonical_tool_result() -> None:
     )
     batch = ObservationExtractor().extract([result])
 
-    assert batch.structured_observations[0].tool_call_id == (
-        "call-knowledge"
-    )
+    assert batch.structured_observations[0].tool_call_id == ("call-knowledge")
     assert batch.answer_candidates[0].text == "Grounded answer"
     assert result.structured_content["groundedness_flag"] is True
     assert not hasattr(batch, "retrieval_signals")
@@ -53,13 +58,10 @@ def test_knowledge_result_semantics_stay_in_canonical_tool_result() -> None:
 
 def test_loop_state_has_no_retrieval_control_channel() -> None:
     state = create_loop_state(
-        task="search configured knowledge",
+        current_message="search configured knowledge",
         run_config=AgentRunConfig(
-            run_id="no-retrieval-signals",
-            thread_id="no-retrieval-signals",
+            turn_id="no-retrieval-signals",
             llm_budget_total=100,
-            max_depth=1,
-            access_policy=AccessPolicy.default(),
         ),
     )
 
@@ -69,13 +71,10 @@ def test_loop_state_has_no_retrieval_control_channel() -> None:
 
 def test_public_run_result_accepts_final_knowledge_citation_anchors() -> None:
     state = create_loop_state(
-        task="search configured knowledge",
+        current_message="search configured knowledge",
         run_config=AgentRunConfig(
-            run_id="final-knowledge-result",
-            thread_id="final-knowledge-result",
+            turn_id="final-knowledge-result",
             llm_budget_total=100,
-            max_depth=1,
-            access_policy=AccessPolicy.default(),
         ),
     )
     state["tool_results"] = [
@@ -93,7 +92,7 @@ def test_public_run_result_accepts_final_knowledge_citation_anchors() -> None:
         )
     ]
 
-    result = AgentRunResult.from_state(state)
+    result = AgentRunResult.from_loop_result(state)
 
     assert result.groundedness_flag is True
     assert result.citations == []

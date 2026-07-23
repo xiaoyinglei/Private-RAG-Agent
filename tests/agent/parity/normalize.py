@@ -43,7 +43,7 @@ def normalize_loop_state(
         ],
         "active_tool_names": list(state["active_tool_names"]),
         "transcript_roles": [
-            message.role for message in state["canonical_transcript"]
+            message.role for message in state["turn_transcript"]
         ],
         "call_origins": [
             {

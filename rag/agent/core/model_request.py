@@ -345,6 +345,30 @@ class ModelCallRecord:
         object.__setattr__(self, "usage", self.usage.model_copy(deep=True))
 
 
+def split_turn_context(
+    *,
+    conversation_history: Sequence[ModelMessage],
+    turn_transcript: Sequence[ModelMessage],
+) -> tuple[str, tuple[ModelMessage, ...]]:
+    """Project explicit Conversation/Turn state into the model's stable prefix and transcript."""
+
+    history = _snapshot_messages(
+        conversation_history,
+        field_name="conversation_history",
+    )
+    current = _snapshot_messages(
+        turn_transcript,
+        field_name="turn_transcript",
+    )
+    combined = (*history, *current)
+    if not combined:
+        raise ValueError("Turn context requires at least one user message")
+    first = combined[0]
+    if first.role != "user" or not first.content.strip():
+        raise ValueError("Turn context must begin with a non-empty user message")
+    return first.content, tuple(combined[1:])
+
+
 def build_stable_context(
     *,
     instructions: Sequence[str],
@@ -746,6 +770,7 @@ __all__ = [
     "freeze_json_mapping",
     "model_settings_payload",
     "model_call_record_payload",
+    "split_turn_context",
     "stable_context_json",
     "tool_choice_payload",
     "tool_definition_payload",

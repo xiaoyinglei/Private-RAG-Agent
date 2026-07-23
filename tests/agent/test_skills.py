@@ -47,7 +47,6 @@ from rag.agent.tools.integrations.skills import (
 from rag.agent.tools.permissions import ToolExecutionContext as FinalToolExecutionContext
 from rag.agent.tools.tool import Tool, ToolCall, ToolCallOrigin
 from rag.agent.workspace import open_workspace
-from rag.schema.runtime import AccessPolicy
 
 # ── Helpers ──────────────────────────────────────────────────────────
 
@@ -90,11 +89,7 @@ def _write_skill(
 
 def _run_config() -> AgentRunConfig:
     return AgentRunConfig(
-        run_id="run-test",
-        thread_id="thread-test",
-        agent_type="generic",
-        max_depth=2,
-        access_policy=AccessPolicy(),
+        turn_id="run-test",
     )
 
 
@@ -138,19 +133,17 @@ class TestLoader:
                 skill_dir = Path(d) / ".agents" / "skills" / "extra-test"
                 skill_dir.mkdir(parents=True)
                 sf = skill_dir / "SKILL.md"
-                sf.write_text(
-                    f"---\nname: extra-test\ndescription: d\n{field}: some-value\n---\nbody"
-                )
+                sf.write_text(f"---\nname: extra-test\ndescription: d\n{field}: some-value\n---\nbody")
                 manifest = load_skill_from_file(sf, SkillSource.PROJECT)
-                assert manifest.extra.get(field) == "some-value", (
-                    f"Field '{field}' should be in extra"
-                )
+                assert manifest.extra.get(field) == "some-value", f"Field '{field}' should be in extra"
 
     def test_allowed_tools_parses(self):
         """allowed_tools should be parsed as a tuple."""
         with tempfile.TemporaryDirectory() as d:
             skill_md = _write_skill(
-                Path(d), "t1", "desc",
+                Path(d),
+                "t1",
+                "desc",
                 allowed_tools=["read_file", "search_knowledge"],
             )
             manifest = load_skill_from_file(skill_md, SkillSource.PROJECT)
@@ -160,7 +153,9 @@ class TestLoader:
         """paths should be parsed as a tuple."""
         with tempfile.TemporaryDirectory() as d:
             skill_md = _write_skill(
-                Path(d), "t2", "desc",
+                Path(d),
+                "t2",
+                "desc",
                 paths=["**/*.xlsx", "docs/**"],
             )
             manifest = load_skill_from_file(skill_md, SkillSource.PROJECT)
@@ -171,7 +166,9 @@ class TestLoader:
         """disable_model_invocation should be parsed as bool."""
         with tempfile.TemporaryDirectory() as d:
             skill_md = _write_skill(
-                Path(d), "t3", "desc",
+                Path(d),
+                "t3",
+                "desc",
                 disable_model_invocation=True,
             )
             manifest = load_skill_from_file(skill_md, SkillSource.PROJECT)
@@ -290,9 +287,7 @@ class TestCatalog:
             _write_skill(Path(d), "dup", "Project version")
             ext_skill = Path(ext) / "dup"
             ext_skill.mkdir()
-            (ext_skill / "SKILL.md").write_text(
-                "---\nname: dup\ndescription: External version\n---\nexternal"
-            )
+            (ext_skill / "SKILL.md").write_text("---\nname: dup\ndescription: External version\n---\nexternal")
             manifests = scan_and_load_skills(
                 Path(d),
                 repo_root=Path(d),
@@ -342,8 +337,7 @@ class TestContext:
             skill_dir = Path(d) / ".agents" / "skills" / "args-test"
             skill_dir.mkdir(parents=True)
             (skill_dir / "SKILL.md").write_text(
-                "---\nname: args-test\ndescription: Test args\n---\n"
-                "Use $ARGUMENTS to process input."
+                "---\nname: args-test\ndescription: Test args\n---\nUse $ARGUMENTS to process input."
             )
             manifests = scan_and_load_skills(Path(d), repo_root=Path(d))
             catalog = SkillCatalog(manifests)
@@ -358,8 +352,7 @@ class TestContext:
             skill_dir = Path(d) / ".agents" / "skills" / "dir-test"
             skill_dir.mkdir(parents=True)
             (skill_dir / "SKILL.md").write_text(
-                "---\nname: dir-test\ndescription: Test dir\n---\n"
-                "References are at ${SKILL_DIR}/references/."
+                "---\nname: dir-test\ndescription: Test dir\n---\nReferences are at ${SKILL_DIR}/references/."
             )
             manifests = scan_and_load_skills(Path(d), repo_root=Path(d))
             catalog = SkillCatalog(manifests)
@@ -437,15 +430,13 @@ class TestContext:
             state.active["project:changed-test"] = loaded.to_ref()
 
             skill_md.write_text(
-                "---\nname: changed-test\ndescription: Changed render test\n---\n"
-                "# changed-test\n\nChanged body.\n"
+                "---\nname: changed-test\ndescription: Changed render test\n---\n# changed-test\n\nChanged body.\n"
             )
 
             rendered = render_active_loaded_skills(state)
 
             assert 'code="skill_content_changed_on_resume"' in rendered
             assert "Changed body." in rendered
-
 
 
 # ── Policy tests ─────────────────────────────────────────────────────
@@ -539,9 +530,7 @@ class TestForwardCompatibility:
         with tempfile.TemporaryDirectory() as d:
             skill_dir = Path(d) / ".agents" / "skills" / "licensed"
             skill_dir.mkdir(parents=True)
-            (skill_dir / "SKILL.md").write_text(
-                "---\nname: licensed\ndescription: d\nlicense: MIT\n---\nbody"
-            )
+            (skill_dir / "SKILL.md").write_text("---\nname: licensed\ndescription: d\nlicense: MIT\n---\nbody")
             manifests = scan_and_load_skills(Path(d), repo_root=Path(d))
             assert len(manifests) == 1
             assert manifests[0].extra.get("license") == "MIT"
@@ -552,8 +541,7 @@ class TestForwardCompatibility:
             skill_dir = Path(d) / ".agents" / "skills" / "future"
             skill_dir.mkdir(parents=True)
             (skill_dir / "SKILL.md").write_text(
-                "---\nname: future\ndescription: d\n"
-                "foo: bar\nbaz: 42\nnested:\n  x: 1\n---\nbody"
+                "---\nname: future\ndescription: d\nfoo: bar\nbaz: 42\nnested:\n  x: 1\n---\nbody"
             )
             manifests = scan_and_load_skills(Path(d), repo_root=Path(d))
             assert len(manifests) == 1
@@ -569,12 +557,12 @@ class TestForwardCompatibility:
             skill_dir = Path(d) / ".agents" / "skills" / "xlsx"
             skill_dir.mkdir(parents=True)
             (skill_dir / "SKILL.md").write_text(
-                '---\n'
-                'name: xlsx\n'
+                "---\n"
+                "name: xlsx\n"
                 'description: "Use this skill for spreadsheets."\n'
-                'license: Proprietary. LICENSE.txt has complete terms\n'
-                '---\n'
-                '# XLSX Skill\n\nBody content.\n'
+                "license: Proprietary. LICENSE.txt has complete terms\n"
+                "---\n"
+                "# XLSX Skill\n\nBody content.\n"
             )
             manifests = scan_and_load_skills(Path(d), repo_root=Path(d))
             assert len(manifests) == 1
@@ -590,9 +578,7 @@ class TestNamespace:
         with tempfile.TemporaryDirectory() as d:
             ns_dir = Path(d) / ".agents" / "skills" / "acme" / "pdf-tool"
             ns_dir.mkdir(parents=True)
-            (ns_dir / "SKILL.md").write_text(
-                "---\nname: pdf-tool\ndescription: PDF converter\n---\nbody"
-            )
+            (ns_dir / "SKILL.md").write_text("---\nname: pdf-tool\ndescription: PDF converter\n---\nbody")
             manifests = scan_and_load_skills(Path(d), repo_root=Path(d))
             assert len(manifests) == 1
             assert manifests[0].name == "acme:pdf-tool"
@@ -604,9 +590,7 @@ class TestNamespace:
         with tempfile.TemporaryDirectory() as d:
             ns_dir = Path(d) / ".agents" / "skills" / "acme" / "review"
             ns_dir.mkdir(parents=True)
-            (ns_dir / "SKILL.md").write_text(
-                "---\nname: review\ndescription: Review tool\n---\nbody"
-            )
+            (ns_dir / "SKILL.md").write_text("---\nname: review\ndescription: Review tool\n---\nbody")
             manifests = scan_and_load_skills(Path(d), repo_root=Path(d))
             catalog = SkillCatalog(manifests)
 
@@ -624,13 +608,10 @@ class TestExternalSkills:
         """SKILL_PATH env var should be scanned."""
         import os
 
-        with tempfile.TemporaryDirectory() as d, \
-             tempfile.TemporaryDirectory() as ext_dir:
+        with tempfile.TemporaryDirectory() as d, tempfile.TemporaryDirectory() as ext_dir:
             ext_skill = Path(ext_dir) / "ext-skill"
             ext_skill.mkdir()
-            (ext_skill / "SKILL.md").write_text(
-                "---\nname: ext-skill\ndescription: External skill\n---\nbody"
-            )
+            (ext_skill / "SKILL.md").write_text("---\nname: ext-skill\ndescription: External skill\n---\nbody")
 
             old_val = os.environ.get("SKILL_PATH", "")
             os.environ["SKILL_PATH"] = ext_dir
@@ -648,13 +629,10 @@ class TestExternalSkills:
 
     def test_extra_dirs_parameter(self):
         """extra_dirs parameter should inject additional skill dirs."""
-        with tempfile.TemporaryDirectory() as d, \
-             tempfile.TemporaryDirectory() as extra:
+        with tempfile.TemporaryDirectory() as d, tempfile.TemporaryDirectory() as extra:
             extra_skill = Path(extra) / "extra-skill"
             extra_skill.mkdir()
-            (extra_skill / "SKILL.md").write_text(
-                "---\nname: extra-skill\ndescription: Extra\n---\nbody"
-            )
+            (extra_skill / "SKILL.md").write_text("---\nname: extra-skill\ndescription: Extra\n---\nbody")
 
             manifests = scan_and_load_skills(
                 Path(d),
@@ -669,11 +647,10 @@ class TestExternalSkills:
         with tempfile.TemporaryDirectory() as d:
             skill_dir = Path(d) / "ext-skill"
             skill_dir.mkdir()
-            (skill_dir / "SKILL.md").write_text(
-                "---\nname: ext-skill\ndescription: External\n---\nbody"
-            )
+            (skill_dir / "SKILL.md").write_text("---\nname: ext-skill\ndescription: External\n---\nbody")
             m = load_skill_from_file(
-                skill_dir / "SKILL.md", SkillSource.EXTERNAL,
+                skill_dir / "SKILL.md",
+                SkillSource.EXTERNAL,
             )
 
             # Default policy trusts external
@@ -693,16 +670,11 @@ class TestSkillStateIntegration:
         """SkillState should be present in a newly created LoopState."""
         from rag.agent.core.context import AgentRunConfig
         from rag.agent.loop.state import create_loop_state
-        from rag.schema.runtime import AccessPolicy
 
         run_config = AgentRunConfig(
-            run_id="r1",
-            thread_id="t1",
-            agent_type="generic",
-            max_depth=2,
-            access_policy=AccessPolicy(),
+            turn_id="r1",
         )
-        state = create_loop_state(task="test", run_config=run_config)
+        state = create_loop_state(current_message="test", run_config=run_config)
         assert "skill_state" in state
         skill_state = state["skill_state"]
         assert isinstance(skill_state, SkillState)
@@ -717,7 +689,7 @@ class TestSkillStateIntegration:
             _write_skill(Path(d), "checkpoint-test", "Checkpoint test")
             catalog = SkillCatalog(scan_and_load_skills(Path(d), repo_root=Path(d)))
             loaded = catalog.load("project:checkpoint-test", iteration=1)
-            state = create_loop_state(task="test", run_config=_run_config())
+            state = create_loop_state(current_message="test", run_config=_run_config())
             state["skill_state"].active["project:checkpoint-test"] = loaded.to_ref()
 
             serde = agent_checkpoint_serde()
@@ -733,15 +705,11 @@ class TestSkillRuntime:
         tmp_path: Path,
     ) -> None:
         _write_skill(tmp_path, "runtime-test", "Runtime test")
-        catalog = SkillCatalog(
-            scan_and_load_skills(tmp_path, repo_root=tmp_path)
-        )
+        catalog = SkillCatalog(scan_and_load_skills(tmp_path, repo_root=tmp_path))
         runtime = SkillRuntime(catalog)
-        state = create_loop_state(task="test", run_config=_run_config())
+        state = create_loop_state(current_message="test", run_config=_run_config())
 
-        event = runtime.invoke_skill(
-            {"name": "project:runtime-test", "args": "input.csv"}
-        )
+        event = runtime.invoke_skill({"name": "project:runtime-test", "args": "input.csv"})
         runtime.apply_activation_event(state, event, iteration=3)
 
         assert event["success"] is True
@@ -750,9 +718,7 @@ class TestSkillRuntime:
         active = state["skill_state"].active["project:runtime-test"]
         assert active.loaded_at_iteration == 3
         assert active.args == "input.csv"
-        assert runtime.validated_active_skill_ids(state) == frozenset(
-            {"project:runtime-test"}
-        )
+        assert runtime.validated_active_skill_ids(state) == frozenset({"project:runtime-test"})
 
     def test_invoke_rejects_non_invocable_skill(
         self,
@@ -764,9 +730,7 @@ class TestSkillRuntime:
             "Manual only",
             disable_model_invocation=True,
         )
-        runtime = SkillRuntime(
-            SkillCatalog(scan_and_load_skills(tmp_path, repo_root=tmp_path))
-        )
+        runtime = SkillRuntime(SkillCatalog(scan_and_load_skills(tmp_path, repo_root=tmp_path)))
 
         event = runtime.invoke_skill({"name": "project:manual-only"})
 
@@ -778,11 +742,9 @@ class TestSkillRuntime:
         tmp_path: Path,
     ) -> None:
         _write_skill(tmp_path, "identity-test", "Identity test")
-        catalog = SkillCatalog(
-            scan_and_load_skills(tmp_path, repo_root=tmp_path)
-        )
+        catalog = SkillCatalog(scan_and_load_skills(tmp_path, repo_root=tmp_path))
         runtime = SkillRuntime(catalog)
-        state = create_loop_state(task="test", run_config=_run_config())
+        state = create_loop_state(current_message="test", run_config=_run_config())
         loaded = catalog.load("project:identity-test", iteration=1)
         assert loaded is not None
         ref = loaded.to_ref()
@@ -892,7 +854,7 @@ class TestFinalSkillToolFactories:
         assert execution.result.structured_content is not None
         output = execution.result.structured_content
         assert output["workspace_path"] == (
-            "scratch/skills/project_demo/scripts/helper.py"
+            ".rag/agent_runtime/scratch/skills/project_demo/scripts/helper.py"
         )
         materialized = workspace.root / output["workspace_path"]
         assert materialized.read_text(encoding="utf-8") == "print('ok')\n"
@@ -944,14 +906,9 @@ class TestFinalSkillToolFactories:
         source = module_path.read_text(encoding="utf-8")
         tree = ast.parse(source)
         imports = {
-            node.module
-            for node in ast.walk(tree)
-            if isinstance(node, ast.ImportFrom) and node.module is not None
+            node.module for node in ast.walk(tree) if isinstance(node, ast.ImportFrom) and node.module is not None
         }
 
-        assert not any(
-            module.endswith(("skills.catalog", "skills.loader"))
-            for module in imports
-        )
+        assert not any(module.endswith(("skills.catalog", "skills.loader")) for module in imports)
         assert "SkillCatalog" not in source
         assert "SkillLoader" not in source

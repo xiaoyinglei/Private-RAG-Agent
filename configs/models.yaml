@@ -185,8 +185,9 @@ models:
 # ---------------------------------------------------------------------------
 defaults:
   # For local-only testing, change this to qwen3_8b_mlx_4bit.
-  # For cloud-quality agent testing, groq_gpt_oss_120b or deepseek_chat is better.
-  primary_model: groq_gpt_oss_120b
+  # The bundled default must be usable for real coding turns without Groq's
+  # free-tier 8k TPM ceiling; Groq models remain explicit opt-in choices.
+  primary_model: deepseek_chat
 
   embedding_model: qwen3_embedding_8b_4bit_dwq
   reranker_model: qwen3_reranker_4b
@@ -230,7 +231,7 @@ generation:
     temperature: 0.3
 
   tool_decision:
-    max_tokens: 1024
+    max_tokens: 4096
     temperature: 0.2
 
   final_answer:
@@ -253,8 +254,8 @@ llm_budgets:
     safety_margin_tokens: 512
 
   tool_decision:
-    max_input_tokens: 12000
-    max_output_tokens: 768
+    max_input_tokens: 32000
+    max_output_tokens: 4096
     safety_margin_tokens: 512
 
   retrieval_summary:

@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, Protocol, cast
 
 import aiosqlite
+import ormsgpack
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.base import (
     BaseCheckpointSaver,
@@ -26,6 +27,7 @@ from langgraph.checkpoint.base import (
     empty_checkpoint,
 )
 from langgraph.checkpoint.memory import MemorySaver
+from langgraph.checkpoint.serde import jsonplus as langgraph_jsonplus
 from langgraph.checkpoint.serde.base import SerializerProtocol
 from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 from langgraph.checkpoint.sqlite import SqliteSaver
@@ -115,10 +117,7 @@ class CanonicalToolCheckpoint:
         _checkpoint_string(self.prompt_revision, field_name="prompt_revision")
         if not isinstance(self.manifest, ToolManifest):
             raise TypeError("manifest must be a ToolManifest")
-        transcript = tuple(
-            snapshot_model_message(message)
-            for message in self.transcript
-        )
+        transcript = tuple(snapshot_model_message(message) for message in self.transcript)
         pending = _checkpoint_tool_calls(
             self.pending_tool_calls,
             field_name="pending_tool_calls",
@@ -139,10 +138,7 @@ class CanonicalToolCheckpoint:
         dependent_calls = (*pending, *paused)
         if any(call.tool_call_id not in calls_by_id for call in dependent_calls):
             raise ValueError("pending and paused tool calls must exist in tool_calls")
-        if any(
-            calls_by_id[call.tool_call_id] != call
-            for call in dependent_calls
-        ):
+        if any(calls_by_id[call.tool_call_id] != call for call in dependent_calls):
             raise ValueError("pending and paused tool calls must exactly match tool_calls")
         records: list[ModelCallRecord] = []
         for record in self.model_call_records:
@@ -164,6 +160,7 @@ class CanonicalToolCheckpoint:
         object.__setattr__(self, "pending_tool_calls", pending)
         object.__setattr__(self, "paused_tool_calls", paused)
         object.__setattr__(self, "model_call_records", tuple(records))
+
 
 AGENT_CHECKPOINT_MSGPACK_ALLOWLIST: tuple[tuple[str, ...], ...] = (
     ("rag.agent.core.messages", "ModelMessage"),
@@ -231,14 +228,11 @@ AGENT_CHECKPOINT_MSGPACK_ALLOWLIST: tuple[tuple[str, ...], ...] = (
     ("rag.agent.loop.substate", "PlanState"),
     ("rag.agent.loop.stop_hooks", "StopHookOutcome"),
     ("rag.agent.loop.stop_hooks", "StopVerdict"),
-    ("rag.agent.planning", "AgentPlan"),
-    ("rag.agent.planning", "PlanEvent"),
-    ("rag.agent.planning", "PlanStep"),
-    ("rag.agent.planning", "PlanStepPatch"),
-    ("rag.agent.planning", "PlanUpdate"),
-    ("rag.agent.primitive_ops", "CandidateHeaderRow"),
-    ("rag.agent.primitive_ops", "StructuredProbeOutput"),
-    ("rag.agent.primitive_ops", "StructuredTableProbe"),
+    ("agent_runtime.planning", "AgentPlan"),
+    ("agent_runtime.planning", "PlanEvent"),
+    ("agent_runtime.planning", "PlanStep"),
+    ("agent_runtime.planning", "PlanStepPatch"),
+    ("agent_runtime.planning", "PlanUpdate"),
     ("rag.agent.skills.models", "LoadedSkill"),
     ("rag.agent.skills.models", "LoadedSkillRef"),
     ("rag.agent.skills.models", "SkillInvocation"),
@@ -300,11 +294,155 @@ class _AgentCheckpointSerializer:
 
 
 def agent_checkpoint_serde() -> SerializerProtocol:
-    return _AgentCheckpointSerializer(
-        JsonPlusSerializer(
+    return _AgentCheckpointSerializer(_AgentJsonPlusSerializer())
+
+
+_CHECKPOINT_ALIAS_MISSING = object()
+_AGENT_RUN_CONFIG_FIELDS = frozenset(
+    {
+        "turn_id",
+        "llm_budget_total",
+        "max_turns",
+        "max_context_tokens",
+        "tool_policy",
+        "memory_policy",
+    }
+)
+_LEGACY_PLAN_TYPE_NAMES = frozenset(
+    {
+        "AgentPlan",
+        "PlanEvent",
+        "PlanStep",
+        "PlanStepPatch",
+        "PlanUpdate",
+    }
+)
+_CHECKPOINT_CONSTRUCTOR_CODES = frozenset(
+    {
+        langgraph_jsonplus.EXT_CONSTRUCTOR_SINGLE_ARG,
+        langgraph_jsonplus.EXT_CONSTRUCTOR_POS_ARGS,
+        langgraph_jsonplus.EXT_CONSTRUCTOR_KW_ARGS,
+        langgraph_jsonplus.EXT_PYDANTIC_V1,
+        langgraph_jsonplus.EXT_PYDANTIC_V2,
+    }
+)
+
+
+class _AgentJsonPlusSerializer(JsonPlusSerializer):
+    """Decode removed Agent fields and legacy Plan module identities eagerly."""
+
+    def __init__(self) -> None:
+        standard = JsonPlusSerializer(
             allowed_msgpack_modules=AGENT_CHECKPOINT_MSGPACK_ALLOWLIST,
         )
+        self._standard_unpack_ext_hook = standard._unpack_ext_hook
+        super().__init__(
+            allowed_msgpack_modules=AGENT_CHECKPOINT_MSGPACK_ALLOWLIST,
+            __unpack_ext_hook__=self._agent_unpack_ext_hook,
+        )
+
+    def _agent_unpack_ext_hook(self, code: int, data: bytes) -> object:
+        if code in _CHECKPOINT_CONSTRUCTOR_CODES:
+            try:
+                payload = ormsgpack.unpackb(
+                    data,
+                    ext_hook=self._agent_unpack_ext_hook,
+                    option=ormsgpack.OPT_NON_STR_KEYS,
+                )
+                revived = _revive_checkpoint_alias(code, payload)
+                if revived is not _CHECKPOINT_ALIAS_MISSING:
+                    return revived
+            except Exception:
+                pass
+        return self._standard_unpack_ext_hook(code, data)
+
+    def _reviver(self, value: dict[str, Any]) -> Any:
+        revived = _revive_checkpoint_json_alias(value)
+        if revived is not _CHECKPOINT_ALIAS_MISSING:
+            return revived
+        return super()._reviver(value)
+
+
+def _revive_checkpoint_alias(code: int, payload: object) -> object:
+    if not isinstance(payload, Sequence) or isinstance(payload, (str, bytes)):
+        return _CHECKPOINT_ALIAS_MISSING
+    if len(payload) < 3:
+        return _CHECKPOINT_ALIAS_MISSING
+    module_name, type_name, constructor_value = payload[:3]
+    if not isinstance(module_name, str) or not isinstance(type_name, str):
+        return _CHECKPOINT_ALIAS_MISSING
+    target = _checkpoint_type_alias(module_name, type_name)
+    if target is None:
+        return _CHECKPOINT_ALIAS_MISSING
+    if code == langgraph_jsonplus.EXT_CONSTRUCTOR_SINGLE_ARG:
+        return target(constructor_value)
+    if code == langgraph_jsonplus.EXT_CONSTRUCTOR_POS_ARGS:
+        if not isinstance(constructor_value, Sequence) or isinstance(
+            constructor_value,
+            (str, bytes),
+        ):
+            return _CHECKPOINT_ALIAS_MISSING
+        return target(*constructor_value)
+    if not isinstance(constructor_value, Mapping):
+        return _CHECKPOINT_ALIAS_MISSING
+    return _construct_checkpoint_alias(
+        target,
+        constructor_value,
     )
+
+
+def _revive_checkpoint_json_alias(value: Mapping[str, object]) -> object:
+    if value.get("lc") != 2 or value.get("type") != "constructor":
+        return _CHECKPOINT_ALIAS_MISSING
+    identifier = value.get("id")
+    if not isinstance(identifier, Sequence) or isinstance(
+        identifier,
+        (str, bytes),
+    ):
+        return _CHECKPOINT_ALIAS_MISSING
+    parts = tuple(identifier)
+    if not parts or any(not isinstance(part, str) for part in parts):
+        return _CHECKPOINT_ALIAS_MISSING
+    target = _checkpoint_type_alias(".".join(parts[:-1]), str(parts[-1]))
+    if target is None:
+        return _CHECKPOINT_ALIAS_MISSING
+    kwargs = value.get("kwargs")
+    if isinstance(kwargs, Mapping):
+        return _construct_checkpoint_alias(target, kwargs)
+    args = value.get("args")
+    if isinstance(args, Sequence) and not isinstance(args, (str, bytes)):
+        return target(*args)
+    return target()
+
+
+def _checkpoint_type_alias(
+    module_name: str,
+    type_name: str,
+) -> type[Any] | None:
+    if module_name == "rag.agent.core.context" and type_name == "AgentRunConfig":
+        return AgentRunConfig
+    if module_name == "rag.agent.planning" and type_name in _LEGACY_PLAN_TYPE_NAMES:
+        from agent_runtime import planning
+
+        target = getattr(planning, type_name, None)
+        return target if isinstance(target, type) else None
+    return None
+
+
+def _construct_checkpoint_alias(
+    target: type[Any],
+    raw_kwargs: Mapping[object, object],
+) -> object:
+    kwargs = {str(key): value for key, value in raw_kwargs.items() if isinstance(key, str)}
+    if target is AgentRunConfig:
+        legacy_run_id = kwargs.pop("run_id", None)
+        legacy_thread_id = kwargs.pop("thread_id", None)
+        if "turn_id" not in kwargs:
+            legacy_turn_id = legacy_run_id or legacy_thread_id
+            if legacy_turn_id is not None:
+                kwargs["turn_id"] = legacy_turn_id
+        kwargs = {key: value for key, value in kwargs.items() if key in _AGENT_RUN_CONFIG_FIELDS}
+    return target(**kwargs)
 
 
 def _encode_serde_value(value: object) -> object:
@@ -314,10 +452,7 @@ def _encode_serde_value(value: object) -> object:
             _SERDE_VALUE_KEY: _encode_runtime_tool_result(value),
         }
     if isinstance(value, Mapping):
-        return {
-            key: _encode_serde_value(item)
-            for key, item in value.items()
-        }
+        return {key: _encode_serde_value(item) for key, item in value.items()}
     if isinstance(value, tuple):
         return tuple(_encode_serde_value(item) for item in value)
     if isinstance(value, list):
@@ -332,13 +467,8 @@ def _decode_serde_value(value: object) -> object:
             and value.get(_SERDE_TYPE_KEY) == _SERDE_TOOL_RESULT
             and isinstance(value.get(_SERDE_VALUE_KEY), Mapping)
         ):
-            return _decode_runtime_tool_result(
-                cast(Mapping[str, object], value[_SERDE_VALUE_KEY])
-            )
-        return {
-            key: _decode_serde_value(item)
-            for key, item in value.items()
-        }
+            return _decode_runtime_tool_result(cast(Mapping[str, object], value[_SERDE_VALUE_KEY]))
+        return {key: _decode_serde_value(item) for key, item in value.items()}
     if isinstance(value, tuple):
         return tuple(_decode_serde_value(item) for item in value)
     if isinstance(value, list):
@@ -519,9 +649,7 @@ class LangGraphCheckpointStore:
         *,
         run_config: AgentRunConfig,
         compatibility_config: GoalCompatibilityConfig | None = None,
-        snapshot_sink: (
-            Callable[[LoopState], None | Awaitable[None]] | None
-        ) = None,
+        snapshot_sink: (Callable[[LoopState], None | Awaitable[None]] | None) = None,
     ) -> None:
         self._checkpointer = checkpointer
         self._run_config = run_config
@@ -653,11 +781,25 @@ class LangGraphCheckpointStore:
                     raise CheckpointPersistenceError("tool reconciliation request is missing tool_call_id")
                 record = state["tool_execution_records"].get(tool_call_id)
                 if record is None:
-                    raise CheckpointPersistenceError(f"execution record not found for {tool_call_id}")
-                state["tool_execution_records"][tool_call_id] = _apply_tool_reconciliation(
-                    record,
-                    response,
-                )
+                    if (
+                        request.context.get("error_code") == "tool_definition_changed"
+                        and response.decision == "mark_failed"
+                    ):
+                        state["denied_tool_call_ids"] = list(
+                            dict.fromkeys(
+                                [
+                                    *state["denied_tool_call_ids"],
+                                    tool_call_id,
+                                ]
+                            )
+                        )
+                    else:
+                        raise CheckpointPersistenceError(f"execution record not found for {tool_call_id}")
+                else:
+                    state["tool_execution_records"][tool_call_id] = _apply_tool_reconciliation(
+                        record,
+                        response,
+                    )
             elif request.kind == "tool_approval":
                 state["approved_tool_call_ids"] = list(
                     dict.fromkeys(
@@ -817,7 +959,9 @@ class LangGraphCheckpointStore:
             RunnableConfig,
             {
                 "configurable": {
-                    "thread_id": self._run_config.thread_id,
+                    # ``thread_id`` is LangGraph's storage key; the Agent domain
+                    # has one canonical execution identity: Turn ID.
+                    "thread_id": self._run_config.turn_id,
                     "checkpoint_ns": LOOP_CHECKPOINT_NAMESPACE,
                 }
             },
@@ -837,11 +981,7 @@ def _encode_canonical_state(state: LoopState) -> LoopState:
     )
     paused = dependent if state.get("status") == "paused" else ()
     pending = () if paused else dependent
-    transcript = (
-        state["turn_transcript"]
-        if state["run_config"].session_id is not None
-        else state["canonical_transcript"]
-    )
+    transcript = state["turn_transcript"]
     checkpoint = CanonicalToolCheckpoint(
         context_revision=state.get("context_revision", "context_pending"),
         prompt_revision=state.get("prompt_revision", "prompt_pending"),
@@ -853,10 +993,7 @@ def _encode_canonical_state(state: LoopState) -> LoopState:
         model_call_records=tuple(state.get("model_call_records", ())),
     )
     state["tool_checkpoint"] = encode_tool_checkpoint(checkpoint)
-    state["tool_results"] = [
-        cast(Any, _encode_runtime_tool_result(result))
-        for result in state.get("tool_results", ())
-    ]
+    state["tool_results"] = [cast(Any, _encode_runtime_tool_result(result)) for result in state.get("tool_results", ())]
     state["tool_execution_records"] = cast(
         Any,
         {
@@ -867,25 +1004,18 @@ def _encode_canonical_state(state: LoopState) -> LoopState:
             ).items()
         },
     )
-    state["canonical_transcript"] = []
     state["turn_transcript"] = []
     state["canonical_tool_calls"] = {}
     state["model_call_records"] = []
     state["tool_manifest"] = None
     state["pending_tool_calls"] = [
-        item.model_copy(
-            update={"plan": item.plan.model_copy(update={"origin": None})}
-        )
+        item.model_copy(update={"plan": item.plan.model_copy(update={"origin": None})})
         for item in state.get("pending_tool_calls", ())
     ]
     state["tool_call_ledger"] = state["tool_call_ledger"].model_copy(
         update={
             "entries": [
-                entry.model_copy(
-                    update={
-                        "plan": entry.plan.model_copy(update={"origin": None})
-                    }
-                )
+                entry.model_copy(update={"plan": entry.plan.model_copy(update={"origin": None})})
                 for entry in state["tool_call_ledger"].entries
             ]
         }
@@ -893,29 +1023,18 @@ def _encode_canonical_state(state: LoopState) -> LoopState:
     turn = state.get("last_model_turn")
     if turn is not None:
         state["last_model_turn"] = turn.model_copy(
-            update={
-                "tool_calls": tuple(
-                    plan.model_copy(update={"origin": None})
-                    for plan in turn.tool_calls
-                )
-            }
+            update={"tool_calls": tuple(plan.model_copy(update={"origin": None}) for plan in turn.tool_calls)}
         )
     return state
 
 
 def _decode_canonical_state(state: LoopState) -> LoopState:
     state["tool_results"] = [
-        _decode_runtime_tool_result(result)
-        if isinstance(result, Mapping)
-        else result
+        _decode_runtime_tool_result(result) if isinstance(result, Mapping) else result
         for result in state.get("tool_results", ())
     ]
     state["tool_execution_records"] = {
-        call_id: (
-            _decode_execution_record(record)
-            if isinstance(record, Mapping)
-            else record
-        )
+        call_id: (_decode_execution_record(record) if isinstance(record, Mapping) else record)
         for call_id, record in state.get(
             "tool_execution_records",
             {},
@@ -927,39 +1046,19 @@ def _decode_canonical_state(state: LoopState) -> LoopState:
     checkpoint = decode_tool_checkpoint(raw)
     state["context_revision"] = checkpoint.context_revision
     state["prompt_revision"] = checkpoint.prompt_revision
-    state["canonical_transcript"] = list(checkpoint.transcript)
-    if state["run_config"].session_id is not None:
-        state["turn_transcript"] = list(checkpoint.transcript)
+    state["turn_transcript"] = list(checkpoint.transcript)
     state["tool_manifest"] = checkpoint.manifest
-    state["provider_serializer_revision"] = (
-        checkpoint.manifest.provider_serializer_revision
-    )
-    state["resident_tool_names"] = list(
-        checkpoint.manifest.resident_tool_names
-    )
-    state["explicit_tool_names"] = list(
-        checkpoint.manifest.explicit_tool_names
-    )
-    state["active_tool_names"] = list(
-        checkpoint.manifest.active_tool_names
-    )
-    state["canonical_tool_calls"] = {
-        call.tool_call_id: call
-        for call in checkpoint.tool_calls
-    }
+    state["provider_serializer_revision"] = checkpoint.manifest.provider_serializer_revision
+    state["resident_tool_names"] = list(checkpoint.manifest.resident_tool_names)
+    state["explicit_tool_names"] = list(checkpoint.manifest.explicit_tool_names)
+    state["active_tool_names"] = list(checkpoint.manifest.active_tool_names)
+    state["canonical_tool_calls"] = {call.tool_call_id: call for call in checkpoint.tool_calls}
     state["model_call_records"] = list(checkpoint.model_call_records)
     origins = {
-        call.tool_call_id: call.origin
-        for call in (*checkpoint.pending_tool_calls, *checkpoint.paused_tool_calls)
+        call.tool_call_id: call.origin for call in (*checkpoint.pending_tool_calls, *checkpoint.paused_tool_calls)
     }
     state["pending_tool_calls"] = [
-        item.model_copy(
-            update={
-                "plan": item.plan.model_copy(
-                    update={"origin": origins[item.tool_call_id]}
-                )
-            }
-        )
+        item.model_copy(update={"plan": item.plan.model_copy(update={"origin": origins[item.tool_call_id]})})
         if item.tool_call_id in origins
         else item
         for item in state.get("pending_tool_calls", ())
@@ -972,11 +1071,8 @@ def _decode_canonical_state(state: LoopState) -> LoopState:
                         "plan": entry.plan.model_copy(
                             update={
                                 "origin": (
-                                    state["canonical_tool_calls"][
-                                        entry.plan.tool_call_id
-                                    ].origin
-                                    if entry.plan.tool_call_id
-                                    in state["canonical_tool_calls"]
+                                    state["canonical_tool_calls"][entry.plan.tool_call_id].origin
+                                    if entry.plan.tool_call_id in state["canonical_tool_calls"]
                                     else None
                                 )
                             }
@@ -1001,9 +1097,7 @@ def _encode_runtime_tool_result(result: ToolResult) -> dict[str, object]:
             }
             for block in result.content
         ],
-        "structured_content": _plain_checkpoint_json(
-            result.structured_content
-        ),
+        "structured_content": _plain_checkpoint_json(result.structured_content),
         "is_error": result.is_error,
         "error_code": result.error_code,
         "error_message": result.error_message,
@@ -1033,10 +1127,13 @@ def _decode_runtime_tool_result(raw: Mapping[str, object]) -> ToolResult:
         ),
         content=tuple(
             ToolContentBlock(
-                type=cast(Any, _checkpoint_string(
-                    item.get("type"),
-                    field_name="tool_result.content.type",
-                )),
+                type=cast(
+                    Any,
+                    _checkpoint_string(
+                        item.get("type"),
+                        field_name="tool_result.content.type",
+                    ),
+                ),
                 data=cast(
                     Mapping[str, JsonValue],
                     _checkpoint_mapping(
@@ -1175,27 +1272,12 @@ def encode_tool_checkpoint(
         "format_version": TOOL_CHECKPOINT_FORMAT_VERSION,
         "context_revision": checkpoint.context_revision,
         "prompt_revision": checkpoint.prompt_revision,
-        "transcript": [
-            _plain_checkpoint_json(model_message_payload(message))
-            for message in checkpoint.transcript
-        ],
+        "transcript": [_plain_checkpoint_json(model_message_payload(message)) for message in checkpoint.transcript],
         "manifest": checkpoint.manifest.model_dump(mode="json"),
-        "tool_calls": [
-            _encode_checkpoint_tool_call(call)
-            for call in checkpoint.tool_calls
-        ],
-        "pending_tool_calls": [
-            _encode_checkpoint_tool_call(call)
-            for call in checkpoint.pending_tool_calls
-        ],
-        "paused_tool_calls": [
-            _encode_checkpoint_tool_call(call)
-            for call in checkpoint.paused_tool_calls
-        ],
-        "model_call_records": [
-            model_call_record_payload(record)
-            for record in checkpoint.model_call_records
-        ],
+        "tool_calls": [_encode_checkpoint_tool_call(call) for call in checkpoint.tool_calls],
+        "pending_tool_calls": [_encode_checkpoint_tool_call(call) for call in checkpoint.pending_tool_calls],
+        "paused_tool_calls": [_encode_checkpoint_tool_call(call) for call in checkpoint.paused_tool_calls],
+        "model_call_records": [model_call_record_payload(record) for record in checkpoint.model_call_records],
         "legacy_migrated": checkpoint.legacy_migrated,
     }
 
@@ -1205,14 +1287,8 @@ def decode_tool_checkpoint(raw: object) -> CanonicalToolCheckpoint:
 
     payload = _checkpoint_mapping(raw, field_name="checkpoint")
     version = payload.get("format_version")
-    if (
-        not isinstance(version, int)
-        or isinstance(version, bool)
-        or version != TOOL_CHECKPOINT_FORMAT_VERSION
-    ):
-        raise ValueError(
-            f"unsupported tool checkpoint format_version: {version!r}"
-        )
+    if not isinstance(version, int) or isinstance(version, bool) or version != TOOL_CHECKPOINT_FORMAT_VERSION:
+        raise ValueError(f"unsupported tool checkpoint format_version: {version!r}")
     return CanonicalToolCheckpoint(
         context_revision=_checkpoint_string(
             payload.get("context_revision"),
@@ -1276,9 +1352,7 @@ def decode_legacy_tool_state_v1(raw: object) -> CanonicalToolCheckpoint:
     payload = _checkpoint_mapping(raw, field_name="legacy checkpoint")
     legacy_version = payload.get("format_version")
     if legacy_version is not None and (
-        not isinstance(legacy_version, int)
-        or isinstance(legacy_version, bool)
-        or legacy_version != 1
+        not isinstance(legacy_version, int) or isinstance(legacy_version, bool) or legacy_version != 1
     ):
         raise ValueError("legacy tool checkpoint format_version must be absent or 1")
     trace_value = payload.get("tooling_model_request_trace", {})
@@ -1293,9 +1367,7 @@ def decode_legacy_tool_state_v1(raw: object) -> CanonicalToolCheckpoint:
     )
     if not set(active_names) <= set(exposed_names):
         raise ValueError("legacy active tools must be present in sent schema names")
-    resident_names = tuple(
-        name for name in exposed_names if name not in set(active_names)
-    )
+    resident_names = tuple(name for name in exposed_names if name not in set(active_names))
     ordered_manifest_names = (*resident_names, *active_names)
     legacy_hash = "legacy_unverified_v1"
     toolset_revision = _checkpoint_string_or_default(
@@ -1357,9 +1429,7 @@ def decode_legacy_tool_state_v1(raw: object) -> CanonicalToolCheckpoint:
         default="Legacy checkpoint task unavailable.",
         field_name="initial_user_task",
     )
-    transcript: list[ModelMessage] = [
-        ModelMessage(role="user", content=initial_task)
-    ]
+    transcript: list[ModelMessage] = [ModelMessage(role="user", content=initial_task)]
     calls: list[CanonicalToolCall] = []
     pending: list[CanonicalToolCall] = []
     paused: list[CanonicalToolCall] = []
@@ -1419,9 +1489,7 @@ def decode_legacy_tool_state_v1(raw: object) -> CanonicalToolCheckpoint:
             transcript.append(
                 ModelMessage(
                     role="tool",
-                    content=canonical_json_text(
-                        cast(JsonValue, visible_result)
-                    ),
+                    content=canonical_json_text(cast(JsonValue, visible_result)),
                     tool_call_id=call_id,
                 )
             )
@@ -1481,29 +1549,16 @@ def reconcile_tool_manifest(
     )
     persisted_entries = {entry.name: entry for entry in persisted.entries}
     rebuilt_entries = {entry.name: entry for entry in rebuilt.entries}
-    missing = tuple(
-        entry.name
-        for entry in persisted.entries
-        if entry.name not in rebuilt_entries
-    )
+    missing = tuple(entry.name for entry in persisted.entries if entry.name not in rebuilt_entries)
     changed_existing = tuple(
         entry.name
         for entry in persisted.entries
-        if entry.name in rebuilt_entries
-        and entry != rebuilt_entries[entry.name]
+        if entry.name in rebuilt_entries and entry != rebuilt_entries[entry.name]
     )
-    added = tuple(
-        entry.name
-        for entry in rebuilt.entries
-        if entry.name not in persisted_entries
-    )
+    added = tuple(entry.name for entry in rebuilt.entries if entry.name not in persisted_entries)
     changed = (*changed_existing, *added)
     affected_existing = set(missing) | set(changed_existing)
-    dependents = tuple(
-        call
-        for call in (*pending, *paused)
-        if call.tool_name in affected_existing
-    )
+    dependents = tuple(call for call in (*pending, *paused) if call.tool_name in affected_existing)
 
     if persisted == rebuilt:
         return ToolManifestDriftDecision(
@@ -1525,16 +1580,9 @@ def reconcile_tool_manifest(
             provider_wire_hash_guaranteed=False,
         )
 
-    serializer_changed = (
-        persisted.provider_serializer_revision
-        != rebuilt.provider_serializer_revision
-    )
+    serializer_changed = persisted.provider_serializer_revision != rebuilt.provider_serializer_revision
     available_names = set(rebuilt_entries)
-    active_names = tuple(
-        name
-        for name in persisted.active_tool_names
-        if name in available_names
-    )
+    active_names = tuple(name for name in persisted.active_tool_names if name in available_names)
     return ToolManifestDriftDecision(
         status=ToolManifestDriftStatus.NEW_REVISION_REQUIRED,
         reason=(
@@ -1692,22 +1740,15 @@ def _decode_model_call_record(raw: object) -> ModelCallRecord:
         logical_input is not None
         and uncached_input is not None
         and cache_read is not None
-        and logical_input
-        != uncached_input + cache_read + (cache_write or 0)
+        and logical_input != uncached_input + cache_read + (cache_write or 0)
     ):
         raise ValueError("checkpoint contains inconsistent normalized usage")
     if usage_source == "tokenizer_estimate" and (
-        cache_read is not None
-        or cache_write is not None
-        or raw_usage is not None
+        cache_read is not None or cache_write is not None or raw_usage is not None
     ):
         raise ValueError("tokenizer usage cannot contain provider cache evidence")
     usage = LLMUsage(
-        input_tokens=(
-            logical_input
-            if logical_input is not None
-            else (uncached_input or 0)
-        ),
+        input_tokens=(logical_input if logical_input is not None else (uncached_input or 0)),
         output_tokens=output_tokens,
         cached_input_tokens=cache_read or 0,
         source=cast(Any, usage_source),
@@ -1820,8 +1861,7 @@ def _checkpoint_sequence(
 
 def _checkpoint_names(value: object, *, field_name: str) -> tuple[str, ...]:
     names = tuple(
-        _checkpoint_string(item, field_name=field_name)
-        for item in _checkpoint_sequence(value, field_name=field_name)
+        _checkpoint_string(item, field_name=field_name) for item in _checkpoint_sequence(value, field_name=field_name)
     )
     if len(set(names)) != len(names):
         raise ValueError(f"{field_name} must contain unique names")
@@ -1905,26 +1945,25 @@ def _apply_tool_reconciliation(
             status=ExecutionStatus.FAILED,
             requires_reconciliation=False,
         )
-    raise ValueError(
-        f"unsupported tool reconciliation decision: {response.decision}"
-    )
+    raise ValueError(f"unsupported tool reconciliation decision: {response.decision}")
 
 
 def _normalize_loaded_state(state: LoopState) -> LoopState:
-    run_config = state["run_config"]
-    if not isinstance(run_config.source_scope, tuple):
-        state["run_config"] = replace(
-            run_config,
-            source_scope=tuple(run_config.source_scope),
-        )
     # Backfill typed sub-state for old checkpoints (flat discovery fields deprecated)
     from rag.agent.loop.substate import DeferredToolState
 
     state.setdefault("deferred_tool_state", DeferredToolState())
-    state.setdefault("canonical_transcript", [])
-    state.setdefault("turn_transcript", [])
+    raw_state = cast(dict[str, Any], state)
+    legacy_task = raw_state.pop("task", None)
+    legacy_transcript = raw_state.pop("canonical_transcript", None)
+    _migrate_legacy_message_context(
+        raw_state,
+        legacy_task=legacy_task,
+        legacy_transcript=legacy_transcript,
+    )
     state.setdefault("canonical_tool_calls", {})
     state.setdefault("model_call_records", [])
+    state.setdefault("input_files", [])
     state.setdefault("tool_manifest", None)
     state.setdefault("tool_checkpoint", None)
     state.setdefault("context_revision", "context_pending")
@@ -1942,13 +1981,102 @@ def _normalize_loaded_state(state: LoopState) -> LoopState:
     return state
 
 
-_DEPRECATED_STATE_FIELDS = frozenset({
-    "retrieval_signals", "retrieval_signals_debug",
-    "evidence", "citations", "evidence_refs",
-    "answer_candidates", "computation_results",
-    "structured_observations", "context_units",
-    "context_bindings", "locators", "asset_refs",
-})
+def _migrate_legacy_message_context(
+    state: dict[str, Any],
+    *,
+    legacy_task: object,
+    legacy_transcript: object,
+) -> None:
+    """Project old task/canonical fields into explicit Conversation and Turn state."""
+
+    anchor = legacy_task if isinstance(legacy_task, str) and legacy_task.strip() else None
+    has_legacy_context = legacy_task is not None or legacy_transcript is not None
+    canonical = _legacy_model_messages(legacy_transcript)
+    current_turn = _legacy_model_messages(state.get("turn_transcript"))
+    full_context = list(canonical)
+    if anchor is not None and (
+        not full_context
+        or full_context[0].role != "user"
+        or full_context[0].content != anchor
+    ):
+        full_context.insert(0, ModelMessage(role="user", content=anchor))
+
+    if current_turn:
+        history = (
+            full_context[: -len(current_turn)]
+            if len(full_context) >= len(current_turn)
+            and full_context[-len(current_turn) :] == current_turn
+            else []
+        )
+    elif full_context:
+        user_starts = [
+            index
+            for index, message in enumerate(full_context)
+            if message.role == "user"
+        ]
+        if user_starts:
+            current_start = user_starts[-1]
+            history = full_context[:current_start]
+            current_turn = full_context[current_start:]
+        else:
+            fallback = anchor or "Legacy checkpoint message unavailable."
+            history = []
+            current_turn = [
+                ModelMessage(role="user", content=fallback),
+                *full_context,
+            ]
+    else:
+        fallback = anchor or "Legacy checkpoint message unavailable."
+        history = []
+        current_turn = [ModelMessage(role="user", content=fallback)]
+
+    current_user = next(
+        (message.content for message in current_turn if message.role == "user"),
+        anchor or "Legacy checkpoint message unavailable.",
+    )
+    state.setdefault("current_message", current_user)
+    if "conversation_history" not in state or (
+        has_legacy_context
+        and not state["conversation_history"]
+    ):
+        state["conversation_history"] = history
+    if "turn_transcript" not in state or (
+        has_legacy_context
+        and not state["turn_transcript"]
+        and state.get("tool_checkpoint") is None
+    ):
+        state["turn_transcript"] = current_turn
+
+
+def _legacy_model_messages(value: object) -> list[ModelMessage]:
+    if value is None:
+        return []
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
+        raise TypeError("legacy transcript must be a sequence of ModelMessage values")
+    messages: list[ModelMessage] = []
+    for message in value:
+        if not isinstance(message, ModelMessage):
+            raise TypeError("legacy transcript must contain ModelMessage values")
+        messages.append(snapshot_model_message(message))
+    return messages
+
+
+_DEPRECATED_STATE_FIELDS = frozenset(
+    {
+        "retrieval_signals",
+        "retrieval_signals_debug",
+        "evidence",
+        "citations",
+        "evidence_refs",
+        "answer_candidates",
+        "computation_results",
+        "structured_observations",
+        "context_units",
+        "context_bindings",
+        "locators",
+        "asset_refs",
+    }
+)
 
 
 def _migrate_legacy_state(raw: dict[str, Any]) -> LoopState:

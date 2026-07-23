@@ -9,7 +9,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from rag.agent.tools.tool import (
     CancellationMode,
@@ -27,6 +27,21 @@ from rag.agent.tools.tool import (
 from rag.agent.workspace import WorkspaceRuntime
 
 _INTERNAL_DIRECTORY = ".agent_memory"
+_DEFAULT_HIDDEN_DIRECTORIES = frozenset(
+    {
+        _INTERNAL_DIRECTORY,
+        ".git",
+        ".mypy_cache",
+        ".nox",
+        ".pytest_cache",
+        ".rag",
+        ".ruff_cache",
+        ".tox",
+        ".venv",
+        "__pycache__",
+        "node_modules",
+    }
+)
 _MAX_PATCH_DIFF_CHARS = 12_000
 
 
@@ -82,7 +97,32 @@ class ReadFileInput(BaseModel):
         max_length=64,
         description="Text encoding used when decoding non-binary bytes.",
     )
-    offset: int = Field(default=0, ge=0, description="Byte offset to start reading.")
+    offset: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "Byte offset to start reading; this is not a source line number. "
+            "For the next non-overlapping chunk, pass the previous output's "
+            "next_offset value."
+        ),
+    )
+    start_line: int | None = Field(
+        default=None,
+        ge=1,
+        description=(
+            "One-based source line to start from. Pass search_text.line_number "
+            "here, never in offset."
+        ),
+    )
+    max_lines: int | None = Field(
+        default=None,
+        ge=1,
+        le=2_000,
+        description=(
+            "Maximum source lines to return from start_line. When start_line is "
+            "set and max_lines is omitted, 200 lines are returned."
+        ),
+    )
     max_bytes: int = Field(
         default=16_000,
         ge=1,
@@ -94,6 +134,16 @@ class ReadFileInput(BaseModel):
         ),
     )
 
+    @model_validator(mode="after")
+    def validate_read_mode(self) -> ReadFileInput:
+        if self.offset and (
+            self.start_line is not None or self.max_lines is not None
+        ):
+            raise ValueError(
+                "offset cannot be combined with start_line or max_lines"
+            )
+        return self
+
 
 class ReadFileOutput(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -102,6 +152,24 @@ class ReadFileOutput(BaseModel):
     content: str
     size_bytes: int = Field(ge=0)
     offset: int = Field(ge=0)
+    next_offset: int | None = Field(
+        default=None,
+        ge=0,
+        description=(
+            "Byte offset for the next non-overlapping chunk, or null when the "
+            "end of the file has been reached."
+        ),
+    )
+    start_line: int | None = Field(default=None, ge=1)
+    end_line: int | None = Field(default=None, ge=1)
+    next_line: int | None = Field(
+        default=None,
+        ge=1,
+        description=(
+            "One-based start_line for the next non-overlapping line chunk, or "
+            "null when line-based reading reached the end of the file."
+        ),
+    )
     truncated: bool
     is_binary: bool
     encoding: str
@@ -187,7 +255,7 @@ def create_list_files_tool(workspace: WorkspaceRuntime) -> Tool:
             str(arguments["path"]),
             effects=frozenset({ToolEffect.READ_WORKSPACE}),
         ),
-        execution_revision="builtin-list-files-v1",
+        execution_revision="builtin-list-files-v2-hidden-generated",
         idempotent=True,
         concurrency_safe=True,
         cancellation_mode=CancellationMode.COOPERATIVE,
@@ -243,7 +311,7 @@ def create_apply_patch_tool(workspace: WorkspaceRuntime) -> Tool:
             description=(
                 "Edit an existing UTF-8 workspace file by exact text replacement. "
                 "Without replace_all, the old text must occur exactly once. The write "
-                "is atomically installed and never creates a second write_file tool."
+                "is atomically installed and does not create new files."
             ),
             input_schema=_PATCH_INPUT_SCHEMA,
         ),
@@ -254,17 +322,21 @@ def create_apply_patch_tool(workspace: WorkspaceRuntime) -> Tool:
         ),
         normalize_output=_normalize_apply_patch,
         output_schema=_PATCH_OUTPUT_SCHEMA,
-        static_effects=frozenset({
-            ToolEffect.READ_WORKSPACE,
-            ToolEffect.WRITE_WORKSPACE,
-        }),
+        static_effects=frozenset(
+            {
+                ToolEffect.READ_WORKSPACE,
+                ToolEffect.WRITE_WORKSPACE,
+            }
+        ),
         resolve_use=lambda arguments: _workspace_use(
             workspace,
             str(arguments["file_path"]),
-            effects=frozenset({
-                ToolEffect.READ_WORKSPACE,
-                ToolEffect.WRITE_WORKSPACE,
-            }),
+            effects=frozenset(
+                {
+                    ToolEffect.READ_WORKSPACE,
+                    ToolEffect.WRITE_WORKSPACE,
+                }
+            ),
         ),
         execution_revision="builtin-apply-patch-v1",
         idempotent=True,
@@ -287,13 +359,10 @@ def _list_files(
     entries: list[FileEntry] = []
     truncated = False
     for path in sorted(directory.iterdir(), key=lambda item: item.name):
-        if path.name == _INTERNAL_DIRECTORY:
+        if path.name in _DEFAULT_HIDDEN_DIRECTORIES:
             continue
         relative = path.relative_to(workspace.root).as_posix()
-        if request.glob and not (
-            fnmatch.fnmatch(path.name, request.glob)
-            or fnmatch.fnmatch(relative, request.glob)
-        ):
+        if request.glob and not (fnmatch.fnmatch(path.name, request.glob) or fnmatch.fnmatch(relative, request.glob)):
             continue
         if len(entries) >= request.limit:
             truncated = True
@@ -320,6 +389,9 @@ def _read_file(
     if not target.is_file():
         raise FileNotFoundError(f"workspace file not found: {request.path}")
 
+    if request.start_line is not None or request.max_lines is not None:
+        return _read_file_lines(target, request)
+
     size = target.stat().st_size
     with target.open("rb") as stream:
         stream.seek(request.offset)
@@ -333,10 +405,86 @@ def _read_file(
         content=content,
         size_bytes=size,
         offset=request.offset,
+        next_offset=request.offset + len(bounded) if truncated else None,
+        start_line=None,
+        end_line=None,
+        next_line=None,
         truncated=truncated,
         is_binary=is_binary,
         encoding=request.encoding,
     )
+
+
+def _read_file_lines(target: Path, request: ReadFileInput) -> ReadFileOutput:
+    size = target.stat().st_size
+    start_line = request.start_line or 1
+    max_lines = request.max_lines or 200
+    with target.open("rb") as stream:
+        for _line_number in range(1, start_line):
+            if not stream.readline():
+                return ReadFileOutput(
+                    path=request.path,
+                    content="",
+                    size_bytes=size,
+                    offset=size,
+                    next_offset=None,
+                    start_line=start_line,
+                    end_line=None,
+                    next_line=None,
+                    truncated=False,
+                    is_binary=False,
+                    encoding=request.encoding,
+                )
+
+        content_offset = stream.tell()
+        chunks: list[bytes] = []
+        bytes_used = 0
+        complete_lines = 0
+        byte_limited = False
+        while complete_lines < max_lines:
+            line_offset = stream.tell()
+            line = stream.readline()
+            if not line:
+                break
+            remaining = request.max_bytes - bytes_used
+            if len(line) > remaining:
+                if remaining > 0:
+                    chunks.append(line[:remaining])
+                    bytes_used += remaining
+                    stream.seek(line_offset + remaining)
+                else:
+                    stream.seek(line_offset)
+                byte_limited = True
+                break
+            chunks.append(line)
+            bytes_used += len(line)
+            complete_lines += 1
+
+        continuation_offset = stream.tell()
+        has_more = bool(stream.read(1))
+        line_limited = complete_lines >= max_lines and has_more
+        truncated = byte_limited or line_limited
+        bounded = b"".join(chunks)
+        is_binary = b"\x00" in bounded
+        content = "" if is_binary else bounded.decode(request.encoding, errors="replace")
+        displayed_lines = complete_lines + (1 if byte_limited and bounded else 0)
+        return ReadFileOutput(
+            path=request.path,
+            content=content,
+            size_bytes=size,
+            offset=content_offset,
+            next_offset=continuation_offset if truncated else None,
+            start_line=start_line,
+            end_line=(
+                None
+                if displayed_lines == 0
+                else start_line + displayed_lines - 1
+            ),
+            next_line=(start_line + complete_lines if line_limited else None),
+            truncated=truncated,
+            is_binary=is_binary,
+            encoding=request.encoding,
+        )
 
 
 def _apply_patch(
@@ -483,9 +631,7 @@ def _normalize_model(
 
 def _normalize_apply_patch(raw: object) -> NormalizedToolOutput:
     execution = (
-        raw
-        if isinstance(raw, _ApplyPatchRunResult)
-        else _ApplyPatchRunResult(ApplyPatchOutput.model_validate(raw))
+        raw if isinstance(raw, _ApplyPatchRunResult) else _ApplyPatchRunResult(ApplyPatchOutput.model_validate(raw))
     )
     validated = ApplyPatchOutput.model_validate(execution.output)
     structured = json_schema_output(

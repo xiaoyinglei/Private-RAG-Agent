@@ -29,8 +29,7 @@ from rag.agent.core.model_request import (
     build_tool_manifest,
     model_call_record_payload,
 )
-from rag.agent.core.turn_contracts import ToolManifestDriftStatus
-from rag.agent.core.turn_contracts import ToolCallPlan
+from rag.agent.core.turn_contracts import ToolCallPlan, ToolManifestDriftStatus
 from rag.agent.loop.state import create_loop_state
 from rag.agent.tools.tool import (
     CancellationMode,
@@ -45,7 +44,6 @@ from rag.agent.tools.tool import (
     json_schema_input,
 )
 from rag.schema.llm import normalize_llm_usage
-from rag.schema.runtime import AccessPolicy
 
 _FIXTURE = Path(__file__).parent / "fixtures/checkpoints/legacy_tool_state_v1.json"
 
@@ -433,8 +431,7 @@ def test_legacy_fixture_rebuilds_canonical_transcript_once_without_active_wiring
     active_calls = {
         node.func.id
         for function in tree.body
-        if isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef))
-        and function.name in active_functions
+        if isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)) and function.name in active_functions
         for node in ast.walk(function)
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
     }
@@ -442,8 +439,7 @@ def test_legacy_fixture_rebuilds_canonical_transcript_once_without_active_wiring
     legacy_function = next(
         function
         for function in tree.body
-        if isinstance(function, ast.FunctionDef)
-        and function.name == "decode_legacy_tool_state_v1"
+        if isinstance(function, ast.FunctionDef) and function.name == "decode_legacy_tool_state_v1"
     )
     legacy_source = ast.get_source_segment(
         module_path.read_text(encoding="utf-8"),
@@ -496,13 +492,10 @@ async def test_real_checkpoint_store_uses_v2_codec_and_preserves_call_origin() -
         ),
     )
     config = AgentRunConfig(
-        run_id=run_id,
-        thread_id=run_id,
-        max_depth=1,
-        access_policy=AccessPolicy.default(),
+        turn_id=run_id,
     )
     state = create_loop_state(
-        task="Read the file.",
+        current_message="Read the file.",
         run_config=config,
         pending_tool_calls=(
             ToolCallPlan(
@@ -512,7 +505,7 @@ async def test_real_checkpoint_store_uses_v2_codec_and_preserves_call_origin() -
             ),
         ),
     )
-    state["canonical_transcript"] = [ModelMessage(role="user", content="Read the file.")]  # type: ignore[typeddict-unknown-key]
+    state["turn_transcript"] = [ModelMessage(role="user", content="Read the file.")]  # type: ignore[typeddict-unknown-key]
     state["context_revision"] = context.context_revision  # type: ignore[typeddict-unknown-key]
     state["prompt_revision"] = request_b.prompt_revision  # type: ignore[typeddict-unknown-key]
     state["tool_manifest"] = _manifest((tool_b,), resident=("list_files",))  # type: ignore[typeddict-unknown-key]

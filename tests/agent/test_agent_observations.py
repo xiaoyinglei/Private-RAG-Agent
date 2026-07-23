@@ -7,8 +7,92 @@ from rag.agent.core.observations import (
     ObservationExtractor,
     StructuredObservation,
 )
+from rag.agent.tools.builtins.filesystem import (
+    FileEntry,
+    ListFilesOutput,
+    ReadFileOutput,
+)
 from rag.agent.tools.tool import ToolResult
 from rag.schema.query import AnswerCitation, EvidenceItem
+
+
+def test_canonical_list_files_observation_preserves_workspace_locator() -> None:
+    output = ListFilesOutput(
+        entries=[
+            FileEntry(
+                path="input_files/data.csv",
+                name="data.csv",
+                size_bytes=12,
+                is_directory=False,
+                is_symlink=False,
+            )
+        ]
+    )
+    result = ToolResult(
+        tool_call_id="tc-list",
+        tool_name="list_files",
+        structured_content=output.model_dump(mode="json"),
+    )
+
+    update = ObservationExtractor().reduce_tool_results({"tool_results": [result]})
+
+    expected_locator = {
+        "source_tool": "list_files",
+        "path": "input_files/data.csv",
+        "name": "data.csv",
+        "size_bytes": 12,
+        "is_dir": False,
+    }
+    [unit] = update["context_units"]
+    assert unit == ContextUnit(
+        unit_id="workspace_file:input_files/data.csv",
+        unit_type="workspace_file",
+        locator=expected_locator,
+        preview="input_files/data.csv (12 bytes)",
+        content_ref="input_files/data.csv",
+        capabilities=["read_file"],
+        metadata={"source_tool": "list_files"},
+    )
+    assert update["locators"] == [expected_locator]
+
+
+def test_canonical_read_file_observation_preserves_content_and_locator() -> None:
+    output = ReadFileOutput(
+        path="input_files/data.csv",
+        content="name,value\nalpha,1\n",
+        size_bytes=19,
+        offset=0,
+        truncated=False,
+        is_binary=False,
+        encoding="utf-8",
+    )
+    result = ToolResult(
+        tool_call_id="tc-read",
+        tool_name="read_file",
+        structured_content=output.model_dump(mode="json"),
+    )
+
+    update = ObservationExtractor().reduce_tool_results({"tool_results": [result]})
+
+    expected_locator = {
+        "source_tool": "read_file",
+        "path": "input_files/data.csv",
+        "size_bytes": 19,
+        "truncated": False,
+        "is_binary": False,
+        "encoding": "utf-8",
+    }
+    [unit] = update["context_units"]
+    assert unit == ContextUnit(
+        unit_id="workspace_file:input_files/data.csv",
+        unit_type="workspace_file_content",
+        locator=expected_locator,
+        preview="name,value\nalpha,1\n",
+        content_ref="tc-read",
+        capabilities=["read_file"],
+        metadata={"source_tool": "read_file"},
+    )
+    assert update["locators"] == [expected_locator]
 
 
 def test_neutral_rag_observation_preserves_evidence_and_citations() -> None:
