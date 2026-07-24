@@ -9,7 +9,13 @@ import pytest
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from pydantic import BaseModel
 
-from agent_runtime.planning import AgentPlan, PlanStep, PlanTracker, PlanUpdate
+from agent_runtime.planning import (
+    AgentPlan,
+    GoalCommitment,
+    PlanStep,
+    PlanTracker,
+    PlanUpdate,
+)
 from rag.agent.core.context import AgentRunConfig
 from rag.agent.core.definition import AgentRuntimePolicy
 from rag.agent.core.human_input import HumanInputRequest, ToolCallSummary
@@ -387,7 +393,14 @@ async def test_loop_provider_injects_compact_typed_working_state() -> None:
 async def test_working_state_separates_model_claims_from_runtime_evidence() -> None:
     gateway = _RecordingGateway()
     state = _state("typed-working-state-authority")
+    goal_id = "a" * 64
+    commitment = GoalCommitment(
+        commitment_id="goal_001",
+        requirement="Fix the runtime.",
+    )
     state["plan_state"].agent_plan = AgentPlan(
+        goal_id=goal_id,
+        goal_commitments=[commitment],
         objective="Fix the runtime.",
         active_step_id="step_read",
         target_files=["rag/agent/loop/runtime.py", "invented.py"],
@@ -398,6 +411,7 @@ async def test_working_state_separates_model_claims_from_runtime_evidence() -> N
                 step_id="step_read",
                 title="Read the runtime.",
                 status="in_progress",
+                goal_commitment_ids=[commitment.commitment_id],
                 expected_tool_names=["read_file"],
             )
         ],
@@ -423,6 +437,17 @@ async def test_working_state_separates_model_claims_from_runtime_evidence() -> N
         if '"event_type":"working_state"' in message.content
     )
     payload = json.loads(working_state.content)["payload"]
+    assert payload["goal_contract"] == {
+        "authority": "runtime",
+        "goal_id": goal_id,
+        "objective": "Fix the runtime.",
+        "commitments": [
+            {
+                "commitment_id": "goal_001",
+                "requirement": "Fix the runtime.",
+            }
+        ],
+    }
     assert payload["plan_claims"]["authority"] == "advisory"
     assert payload["runtime_evidence"]["grounded_paths"] == [
         "rag/agent/loop/runtime.py"

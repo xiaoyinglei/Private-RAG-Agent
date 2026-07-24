@@ -455,6 +455,19 @@ def _working_state_message(state: LoopState) -> ModelMessage | None:
     return context_event_message(
         "working_state",
         {
+            "goal_contract": (
+                None
+                if plan is None or plan.goal_id is None
+                else {
+                    "authority": "runtime",
+                    "goal_id": plan.goal_id,
+                    "objective": plan.objective,
+                    "commitments": tuple(
+                        commitment.model_dump(mode="json")
+                        for commitment in plan.goal_commitments
+                    ),
+                }
+            ),
             "plan_claims": plan_payload,
             "runtime_evidence": {
                 "authority": "runtime",

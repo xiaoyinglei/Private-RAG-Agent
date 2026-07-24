@@ -680,6 +680,86 @@ def test_false_completion_diagnosis_names_execution_closure() -> None:
     assert "hidden_acceptance:failed" in diagnosis.evidence
 
 
+def test_goal_drift_diagnosis_precedes_generic_execution_closure() -> None:
+    module = _load_benchmark_module()
+    facts = module.RunFacts(
+        model_alias="groq_gpt_oss_120b",
+        turn_status="failed",
+        valid_diff=False,
+        hidden_acceptance_passed=False,
+        stop_reason="max_turns",
+    )
+
+    diagnosis = module.diagnose_run(
+        facts,
+        module.classify_outcome(facts),
+        agent_stdout=(
+            "[goal_plan_contract] goal_drift: the submitted plan replaced "
+            "the immutable objective\n"
+        ),
+        acceptance_stdout="1 failed",
+        acceptance_stderr="",
+    )
+
+    assert diagnosis.primary is module.DiagnosisCause.GOAL_DRIFT
+    assert diagnosis.secondary == ()
+    assert diagnosis.confidence == 1.0
+    assert diagnosis.evidence == ("runtime_diagnostic:goal_drift",)
+
+
+def test_recovered_goal_drift_remains_secondary_to_terminal_failure() -> None:
+    module = _load_benchmark_module()
+    facts = module.RunFacts(
+        model_alias="kimi_cloud",
+        turn_status="failed",
+        valid_diff=False,
+        hidden_acceptance_passed=False,
+        stop_reason="max_turns",
+    )
+
+    diagnosis = module.diagnose_run(
+        facts,
+        module.classify_outcome(facts),
+        agent_stdout=(
+            "✗ update_plan (goal_drift: missing goal binding)\n"
+            "✓ update_plan: accepted revision 12\n"
+            "停止原因: max_turns\n"
+        ),
+        acceptance_stdout="1 failed",
+        acceptance_stderr="",
+    )
+
+    assert diagnosis.primary is module.DiagnosisCause.EXECUTION_CLOSURE
+    assert diagnosis.secondary == (module.DiagnosisCause.GOAL_DRIFT,)
+    assert "runtime_diagnostic:goal_drift_recovered" in diagnosis.evidence
+
+
+def test_provider_limit_preserves_goal_drift_as_a_secondary_cause() -> None:
+    module = _load_benchmark_module()
+    facts = module.RunFacts(
+        model_alias="groq_gpt_oss_120b",
+        turn_status="failed",
+        valid_diff=False,
+        hidden_acceptance_passed=False,
+        provider_error_code="rate_limit",
+    )
+
+    diagnosis = module.diagnose_run(
+        facts,
+        module.RunOutcome.PROVIDER_LIMITED,
+        agent_stdout=(
+            "[goal_plan_contract] goal_drift\n"
+            "model_provider_failed: rate_limit\n"
+        ),
+        acceptance_stdout="",
+        acceptance_stderr="",
+    )
+
+    assert diagnosis.primary is module.DiagnosisCause.PROVIDER_LIMIT
+    assert diagnosis.secondary == (module.DiagnosisCause.GOAL_DRIFT,)
+    assert "pre_limit:goal_drift" in diagnosis.evidence
+
+
 @pytest.mark.parametrize(
     ("facts", "expected"),
     [

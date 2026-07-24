@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from agent_runtime.planning import (
     AgentPlan,
+    GoalCommitment,
     PlanStep,
     PlanStepPatch,
     PlanTracker,
@@ -150,7 +151,14 @@ def test_unexpected_tool_cannot_complete_a_verification_step() -> None:
 
 
 def test_llm_update_cannot_claim_plan_or_step_completion() -> None:
+    goal_id = "a" * 64
+    commitment = GoalCommitment(
+        commitment_id="goal_001",
+        requirement="Verify evidence before completion.",
+    )
     plan = AgentPlan(
+        goal_id=goal_id,
+        goal_commitments=[commitment],
         objective="Verify evidence before completion.",
         active_step_id="step_verify",
         steps=[
@@ -158,6 +166,7 @@ def test_llm_update_cannot_claim_plan_or_step_completion() -> None:
                 step_id="step_verify",
                 title="Verify evidence",
                 status="in_progress",
+                goal_commitment_ids=[commitment.commitment_id],
             )
         ],
     )
@@ -165,6 +174,7 @@ def test_llm_update_cannot_claim_plan_or_step_completion() -> None:
     updated, events = PlanTracker().apply_advisory_update(
         plan,
         PlanUpdate(
+            objective="Replace the original goal with unrelated work.",
             status="complete",
             step_updates=[
                 PlanStepPatch(
@@ -177,8 +187,12 @@ def test_llm_update_cannot_claim_plan_or_step_completion() -> None:
     )
 
     assert updated.status == "active"
+    assert updated.goal_id == goal_id
+    assert updated.goal_commitments == [commitment]
+    assert updated.objective == "Verify evidence before completion."
     assert updated.steps[0].status == "in_progress"
     assert "llm_completion_ignored" in events[0].warnings
+    assert "objective_change_ignored" in events[0].warnings
 
 
 def test_update_plan_cannot_claim_completion_without_tool_evidence() -> None:

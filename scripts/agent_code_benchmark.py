@@ -100,6 +100,7 @@ class DiagnosisCause(StrEnum):
     TOOL_CONTRACT = "tool_contract"
     CONTEXT_ASSEMBLY = "context_assembly"
     EXECUTION_CLOSURE = "execution_closure"
+    GOAL_DRIFT = "goal_drift"
     PROVIDER_ADAPTER = "provider_adapter"
     PROVIDER_LIMIT = "provider_limit"
     SAFETY_BOUNDARY = "safety_boundary"
@@ -596,6 +597,17 @@ def diagnose_run(
     acceptance_stderr: str,
 ) -> Diagnosis:
     combined = f"{agent_stdout}\n{acceptance_stdout}\n{acceptance_stderr}".lower()
+    goal_drift_recovered = _goal_drift_was_recovered(agent_stdout)
+    recovered_goal_secondary = (
+        (DiagnosisCause.GOAL_DRIFT,)
+        if goal_drift_recovered
+        else ()
+    )
+    recovered_goal_evidence = (
+        ("runtime_diagnostic:goal_drift_recovered",)
+        if goal_drift_recovered
+        else ()
+    )
     if outcome is RunOutcome.PASSED:
         return Diagnosis(
             primary=DiagnosisCause.UNKNOWN,
@@ -646,9 +658,19 @@ def diagnose_run(
     ):
         return Diagnosis(
             primary=DiagnosisCause.CONTEXT_ASSEMBLY,
-            secondary=(),
+            secondary=recovered_goal_secondary,
             confidence=0.95,
-            evidence=("runtime_error:context_overflow",),
+            evidence=(
+                "runtime_error:context_overflow",
+                *recovered_goal_evidence,
+            ),
+        )
+    if "goal_drift" in combined and not goal_drift_recovered:
+        return Diagnosis(
+            primary=DiagnosisCause.GOAL_DRIFT,
+            secondary=(),
+            confidence=1.0,
+            evidence=("runtime_diagnostic:goal_drift",),
         )
     if facts.stop_reason == "delivery_stalled" or "delivery_stalled" in combined:
         evidence = ["stop_reason:delivery_stalled"]
@@ -660,8 +682,14 @@ def diagnose_run(
             if "request timed out" in combined
             else ()
         )
+        secondary = tuple(
+            dict.fromkeys(
+                (*secondary, *recovered_goal_secondary)
+            )
+        )
         if "request timed out" in combined:
             evidence.append("provider_error:request_timeout")
+        evidence.extend(recovered_goal_evidence)
         return Diagnosis(
             primary=DiagnosisCause.MODEL_CAPABILITY_GAP,
             secondary=secondary,
@@ -676,42 +704,77 @@ def diagnose_run(
             evidence.append("hidden_acceptance:failed")
         return Diagnosis(
             primary=DiagnosisCause.EXECUTION_CLOSURE,
-            secondary=(),
+            secondary=recovered_goal_secondary,
             confidence=0.95,
-            evidence=tuple(evidence or ("completion_evidence:invalid",)),
+            evidence=(
+                *tuple(evidence or ("completion_evidence:invalid",)),
+                *recovered_goal_evidence,
+            ),
         )
     if facts.valid_diff and not facts.hidden_acceptance_passed:
         return Diagnosis(
             primary=DiagnosisCause.EXECUTION_CLOSURE,
-            secondary=(),
+            secondary=recovered_goal_secondary,
             confidence=0.85,
-            evidence=("hidden_acceptance:failed",),
+            evidence=(
+                "hidden_acceptance:failed",
+                *recovered_goal_evidence,
+            ),
         )
     if facts.provider_error_code is not None or "model_provider_failed" in combined:
         return Diagnosis(
             primary=DiagnosisCause.PROVIDER_ADAPTER,
-            secondary=(),
+            secondary=recovered_goal_secondary,
             confidence=0.8,
             evidence=(
                 f"provider_error:{facts.provider_error_code or 'model_provider_failed'}",
+                *recovered_goal_evidence,
             ),
         )
     if facts.runtime_error is not None:
         return Diagnosis(
             primary=DiagnosisCause.EXECUTION_CLOSURE,
-            secondary=(),
+            secondary=recovered_goal_secondary,
             confidence=0.75,
-            evidence=(f"runtime_error:{facts.runtime_error}",),
+            evidence=(
+                f"runtime_error:{facts.runtime_error}",
+                *recovered_goal_evidence,
+            ),
         )
     return Diagnosis(
         primary=DiagnosisCause.EXECUTION_CLOSURE,
-        secondary=(),
+        secondary=recovered_goal_secondary,
         confidence=0.5,
         evidence=(
             f"turn_status:{facts.turn_status}",
             f"hidden_acceptance:{'passed' if facts.hidden_acceptance_passed else 'failed'}",
+            *recovered_goal_evidence,
         ),
     )
+
+
+def _goal_drift_was_recovered(agent_stdout: str) -> bool:
+    last_drift = -1
+    last_accepted_plan = -1
+    last_recovery_diagnostic = -1
+    for index, line in enumerate(agent_stdout.lower().splitlines()):
+        if "goal_drift_recovered" in line:
+            last_recovery_diagnostic = index
+        if (
+            "goal_drift" in line
+            and "goal_drift_recovered" not in line
+            and (
+                "update_plan" in line
+                or "goal_plan_contract" in line
+            )
+        ):
+            last_drift = index
+        if "✓ update_plan" in line:
+            last_accepted_plan = index
+    return last_drift >= 0 and max(
+        last_accepted_plan,
+        last_recovery_diagnostic,
+    ) > last_drift
 
 
 def _pre_provider_limit_diagnosis(
@@ -720,6 +783,10 @@ def _pre_provider_limit_diagnosis(
 ) -> tuple[tuple[DiagnosisCause, ...], tuple[str, ...]]:
     causes: list[DiagnosisCause] = []
     evidence: list[str] = []
+
+    if "goal_drift" in combined_output:
+        causes.append(DiagnosisCause.GOAL_DRIFT)
+        evidence.append("pre_limit:goal_drift")
 
     for marker in (
         "repeated_inspection",

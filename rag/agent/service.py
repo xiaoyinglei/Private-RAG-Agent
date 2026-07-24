@@ -822,6 +822,7 @@ class AgentService:
             stream_sink=self._stream_sink,
             skill_runtime=self._skill_runtime,
             discoverable_tool_names=self._discoverable_tool_names,
+            goal_spec=goal_spec or GoalSpec(original_query=state["current_message"]),
         )
 
     def _default_resident_names(self) -> tuple[str, ...]:

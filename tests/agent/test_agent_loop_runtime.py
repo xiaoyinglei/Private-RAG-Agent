@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 from langgraph.checkpoint.memory import MemorySaver
 
-from agent_runtime.planning import AgentPlan, PlanStep
+from agent_runtime.planning import AgentPlan, GoalCommitment, PlanStep
 from rag.agent.core.checkpointing import (
     CheckpointStore,
     LangGraphCheckpointStore,
@@ -19,6 +19,11 @@ from rag.agent.core.checkpointing import (
 from rag.agent.core.context import AgentRunConfig, TurnRegistry
 from rag.agent.core.definition import AgentRuntimePolicy
 from rag.agent.core.finalization import FinishCandidateBuilder
+from rag.agent.core.goal_contract import (
+    GoalConstraint,
+    GoalPlanContract,
+    GoalSpec,
+)
 from rag.agent.core.human_input import HumanInputResponse
 from rag.agent.core.model_request import build_tool_manifest
 from rag.agent.core.observations import ObservationBatch
@@ -244,6 +249,7 @@ def _loop(
     events: _Events | None = None,
     max_model_retries: int = 1,
     skill_runtime: SkillRuntime | None = None,
+    goal_spec: GoalSpec | None = None,
 ) -> AgentLoop:
     snapshot = {tool.definition.name: tool for tool in tools}
     return AgentLoop(
@@ -259,6 +265,7 @@ def _loop(
         event_sink=events or _Events(),
         max_model_retries=max_model_retries,
         skill_runtime=skill_runtime,
+        goal_spec=goal_spec,
     )
 
 
@@ -1697,6 +1704,375 @@ def test_real_workspace_change_reopens_one_verification_batch() -> None:
 
     assert executable == (verify,)
     assert blocked == ()
+
+
+@pytest.mark.anyio
+async def test_goal_contract_rejects_the_observed_kimi_off_goal_plan() -> None:
+    goal_text = (
+        "This is an implementation task in the current repository. Modify the "
+        "code and run focused tests. Successful patch application should produce "
+        "a canonical diff event that flows from the filesystem tool through the "
+        "loop and appears once in the public CLI. Preserve existing tool-result "
+        "and answer streaming behavior."
+    )
+    goal = GoalSpec(
+        original_query=goal_text,
+        constraints=[
+            GoalConstraint(
+                constraint_id="workspace_change",
+                constraint_type="workspace_change",
+                expected_value=True,
+            )
+        ],
+    )
+    contract = GoalPlanContract.from_goal_spec(goal)
+    off_goal_update = ToolCallPlan.create(
+        "update_plan",
+        {
+            "goal_id": contract.goal_id,
+            "objective": goal_text,
+            "target_files": [],
+            "hypothesis": (
+                "The specific implementation task is not yet identified. I need "
+                "to explore the repository and find any failing test."
+            ),
+            "remaining_unknowns": [
+                "What is the specific implementation task or bug to fix?",
+                "Which files need to be modified?",
+            ],
+            "plan": [
+                {
+                    "step": (
+                        "Explore repository structure and identify the "
+                        "implementation task"
+                        ),
+                        "status": "in_progress",
+                        "goal_commitment_ids": [
+                            contract.commitment_ids[0]
+                        ],
+                        "expected_tool_names": ["list_files"],
+                    },
+                    {
+                        "step": "Run tests to find an unrelated failure",
+                        "status": "pending",
+                        "goal_commitment_ids": [
+                            contract.commitment_ids[0]
+                        ],
+                        "expected_tool_names": ["run_command"],
+                    },
+            ],
+        },
+    )
+    update_plan = create_update_plan_tool(
+        lambda _arguments: {
+            "accepted": True,
+            "revision": 1,
+            "message": "plan updated",
+        }
+    )
+    state = create_loop_state(
+        current_message=goal_text,
+        run_config=_config("loop-goal-drift-kimi"),
+    )
+    state["resident_tool_names"] = ["update_plan"]
+
+    result = await _loop(
+        provider=_SequenceProvider(
+            [
+                ModelTurnDraft(action="execute", tool_calls=(off_goal_update,)),
+                ModelTurnDraft(
+                    action="pause",
+                    pause_reason="The immutable goal rejected this plan.",
+                ),
+            ]
+        ),
+        tools=(update_plan,),
+        goal_spec=goal,
+    ).run(state)
+
+    plan = result["plan_state"].agent_plan
+    assert plan is not None
+    assert plan.objective == goal_text
+    assert plan.revision == 0
+    assert plan.steps[0].title == "Work on the current task."
+    rejected = next(
+        item
+        for item in result["tool_results"]
+        if item.tool_call_id == off_goal_update.tool_call_id
+    )
+    assert rejected.is_error is True
+    assert rejected.error_code == "goal_drift"
+    assert any(
+        str(issue).startswith("missing_goal_commitment:")
+        for issue in rejected.metadata["goal_contract_issues"]
+    )
+    assert any(
+        item.code == "goal_drift"
+        and item.component == "goal_plan_contract"
+        for item in result["runtime_diagnostics"]
+    )
+
+
+@pytest.mark.anyio
+async def test_goal_contract_fails_closed_when_resume_uses_a_different_goal() -> None:
+    original = GoalSpec(original_query="Implement canonical diff events.")
+    replacement = GoalSpec(original_query="Rewrite unrelated approval output.")
+    original_contract = GoalPlanContract.from_goal_spec(original)
+    state = create_loop_state(
+        current_message=original.original_query,
+        run_config=_config("loop-goal-drift-resume"),
+    )
+    state["plan_state"].agent_plan = AgentPlan(
+        goal_id=original_contract.goal_id,
+        objective=original.original_query,
+        active_step_id="step_implement",
+        steps=[
+            PlanStep(
+                step_id="step_implement",
+                title="Implement canonical diff events.",
+                status="in_progress",
+                expected_tool_names=["apply_patch"],
+            )
+        ],
+    )
+    provider = _SequenceProvider(
+        [
+            ModelTurnDraft(
+                action="pause",
+                pause_reason="A mismatched checkpoint must never reach the model.",
+            )
+        ]
+    )
+
+    result = await _loop(
+        provider=provider,
+        goal_spec=replacement,
+    ).run(state)
+
+    assert result["status"] == "failed"
+    assert result["terminal"] is not None
+    assert result["terminal"].stop_reason == "goal_drift"
+    assert provider.seen_states == []
+    assert any(
+        item.code == "goal_drift"
+        and item.component == "goal_plan_contract"
+        for item in result["runtime_diagnostics"]
+    )
+
+
+@pytest.mark.anyio
+async def test_goal_contract_fails_closed_when_checkpoint_rewrites_a_commitment() -> None:
+    goal = GoalSpec(original_query="Implement canonical diff events.")
+    contract = GoalPlanContract.from_goal_spec(goal)
+    rewritten = GoalCommitment(
+        commitment_id=contract.commitment_ids[0],
+        requirement="Rewrite unrelated approval output.",
+    )
+    state = create_loop_state(
+        current_message=goal.original_query,
+        run_config=_config("loop-goal-commitment-rewrite"),
+    )
+    state["plan_state"].agent_plan = AgentPlan(
+        goal_id=contract.goal_id,
+        goal_commitments=[rewritten],
+        objective=goal.original_query,
+        active_step_id="step_rewrite",
+        steps=[
+            PlanStep(
+                step_id="step_rewrite",
+                title="Rewrite unrelated approval output.",
+                status="in_progress",
+                goal_commitment_ids=[rewritten.commitment_id],
+                expected_tool_names=["apply_patch"],
+            )
+        ],
+    )
+    provider = _SequenceProvider(
+        [
+            ModelTurnDraft(
+                action="pause",
+                pause_reason="A rewritten commitment must not reach the model.",
+            )
+        ]
+    )
+
+    result = await _loop(
+        provider=provider,
+        goal_spec=goal,
+    ).run(state)
+
+    assert result["status"] == "failed"
+    assert result["terminal"] is not None
+    assert result["terminal"].stop_reason == "goal_drift"
+    assert provider.seen_states == []
+    assert "goal_commitments_mismatch" in (
+        result["terminal"].error or ""
+    )
+
+
+@pytest.mark.anyio
+async def test_goal_contract_migrates_a_matching_legacy_checkpoint() -> None:
+    goal = GoalSpec(original_query="Implement canonical diff events.")
+    contract = GoalPlanContract.from_goal_spec(goal)
+    state = create_loop_state(
+        current_message=goal.original_query,
+        run_config=_config("loop-goal-contract-legacy-checkpoint"),
+    )
+    state["plan_state"].agent_plan = AgentPlan(
+        objective=goal.original_query,
+        active_step_id="step_implement",
+        steps=[
+            PlanStep(
+                step_id="step_implement",
+                title="Implement canonical diff events.",
+                status="in_progress",
+                expected_tool_names=["apply_patch"],
+            )
+        ],
+    )
+
+    result = await _loop(
+        provider=_SequenceProvider(
+            [
+                ModelTurnDraft(
+                    action="pause",
+                    pause_reason="Inspect the migrated checkpoint.",
+                )
+            ]
+        ),
+        goal_spec=goal,
+    ).run(state)
+
+    plan = result["plan_state"].agent_plan
+    assert result["status"] == "paused"
+    assert plan is not None
+    assert plan.goal_id == contract.goal_id
+    assert plan.objective == goal.original_query
+    assert not any(
+        item.code == "goal_drift"
+        for item in result["runtime_diagnostics"]
+    )
+
+
+@pytest.mark.anyio
+async def test_goal_contract_allows_strategy_changes_for_the_same_goal() -> None:
+    goal = GoalSpec(original_query="Implement canonical diff events end to end.")
+    contract = GoalPlanContract.from_goal_spec(goal)
+
+    def update(
+        *,
+        target_file: str,
+        hypothesis: str,
+        step: str,
+        bind_goal: bool = True,
+    ) -> ToolCallPlan:
+        goal_binding = (
+            {
+                "goal_id": contract.goal_id,
+                "objective": goal.original_query,
+            }
+            if bind_goal
+            else {}
+        )
+        return ToolCallPlan.create(
+            "update_plan",
+            {
+                **goal_binding,
+                "target_files": [target_file],
+                "hypothesis": hypothesis,
+                "remaining_unknowns": [],
+                "plan": [
+                    {
+                        "step": step,
+                        "status": "in_progress",
+                        "goal_commitment_ids": list(
+                            contract.commitment_ids
+                        ),
+                        "expected_tool_names": ["apply_patch"],
+                    }
+                ],
+            },
+        )
+
+    unbound = update(
+        target_file="rag/agent/tools/builtins/filesystem.py",
+        hypothesis=(
+            "The filesystem patch result must expose the canonical diff payload."
+        ),
+        step="Add the canonical diff payload at the filesystem boundary",
+        bind_goal=False,
+    )
+    first = update(
+        target_file="rag/agent/tools/builtins/filesystem.py",
+        hypothesis=(
+            "The filesystem patch result must expose the canonical diff payload."
+        ),
+        step="Add the canonical diff payload at the filesystem boundary",
+    )
+    second = update(
+        target_file="rag/agent/loop/runtime.py",
+        hypothesis=(
+            "The filesystem payload already exists, so the loop must project it "
+            "without duplication."
+        ),
+        step="Project the existing diff payload once from the loop",
+    )
+    update_plan = create_update_plan_tool(
+        lambda _arguments: {
+            "accepted": True,
+            "revision": 1,
+            "message": "plan updated",
+        }
+    )
+    state = create_loop_state(
+        current_message=goal.original_query,
+        run_config=_config("loop-goal-strategy-change"),
+    )
+    state["resident_tool_names"] = ["update_plan"]
+
+    result = await _loop(
+        provider=_SequenceProvider(
+            [
+                ModelTurnDraft(action="execute", tool_calls=(unbound,)),
+                ModelTurnDraft(action="execute", tool_calls=(first,)),
+                ModelTurnDraft(action="execute", tool_calls=(second,)),
+                ModelTurnDraft(
+                    action="pause",
+                    pause_reason="Inspect the accepted strategy change.",
+                ),
+            ]
+        ),
+        tools=(update_plan,),
+        goal_spec=goal,
+    ).run(state)
+
+    plan = result["plan_state"].agent_plan
+    assert plan is not None
+    assert plan.goal_id == contract.goal_id
+    assert plan.objective == goal.original_query
+    assert plan.revision == 2
+    assert plan.target_files == ["rag/agent/loop/runtime.py"]
+    assert plan.steps[0].title == (
+        "Project the existing diff payload once from the loop"
+    )
+    assert len(
+        [
+            item
+            for item in result["tool_results"]
+            if item.tool_name == "update_plan"
+            and not item.is_error
+        ]
+    ) == 2
+    assert any(
+        item.code == "goal_drift_recovered"
+        and item.component == "goal_plan_contract"
+        for item in result["runtime_diagnostics"]
+    )
+    assert all(
+        item.error_code in {None, "goal_drift"}
+        for item in result["tool_results"]
+        if item.tool_name == "update_plan"
+    )
 
 
 @pytest.mark.anyio
