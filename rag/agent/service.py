@@ -814,6 +814,7 @@ class AgentService:
                     definition=self._policy,
                     output_finalizer=output_finalizer,
                     goal_spec=goal_spec,
+                    workspace_root=workspace.root,
                 ),
                 max_blocks=self._policy.max_stop_hook_blocks,
             ),

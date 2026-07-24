@@ -272,6 +272,11 @@ class LLMGateway:
             for key, value in payload.items()
             if key not in {"model", "messages", "tools", "max_completion_tokens"}
         }
+        if request.settings.provider_options:
+            provider_kwargs["extra_body"] = {
+                key: provider_kwargs.pop(key)
+                for key in request.settings.provider_options
+            }
         max_completion_tokens = payload.get("max_completion_tokens")
         if isinstance(max_completion_tokens, int):
             # Route the canonical request limit through the gateway so context
@@ -287,6 +292,7 @@ class LLMGateway:
                 kwargs=provider_kwargs,
             )
             text = ""
+            reasoning_content = ""
             calls: list[ToolCall] = []
             current_id = ""
             current_name = ""
@@ -298,6 +304,8 @@ class LLMGateway:
                     text += chunk.content
                     if text_delta_sink is not None:
                         await _emit_text_delta(text_delta_sink, chunk.content)
+                elif chunk.type == "thinking_delta":
+                    reasoning_content += chunk.content
                 elif chunk.type == "tool_use_start":
                     current_id = chunk.tool_id
                     current_name = chunk.tool_name
@@ -330,6 +338,7 @@ class LLMGateway:
             turn = ToolUseResult(
                 tool_calls=calls,
                 text=text,
+                reasoning_content=reasoning_content or None,
                 stop_reason=normalized_stop,
                 raw_stop_reason=stop_reason,
             )
@@ -627,7 +636,7 @@ class LLMGateway:
                 chunk = await queue.get()
                 if chunk is None:
                     break
-                if chunk.type == "text_delta":
+                if chunk.type in {"text_delta", "thinking_delta"}:
                     total_output_tokens += self._token_accounting.count(
                         chunk.content
                     )
@@ -879,6 +888,7 @@ class LLMGateway:
             result = self._invoke_with_tools(messages, tools, kwargs)
             raw = result.value
             text = ""
+            reasoning_content = ""
             tool_calls_list: list[dict[str, Any]] = []
             stop_reason = "end_turn"
 
@@ -887,6 +897,7 @@ class LLMGateway:
             ) or hasattr(raw, "choices"):
                 turn = parse_openai_response(raw)
                 text = turn.text
+                reasoning_content = turn.reasoning_content or ""
                 stop_reason = turn.stop_reason.value
                 tool_calls_list = [
                     {
@@ -914,6 +925,12 @@ class LLMGateway:
                 tool_calls_list = list(getattr(raw, "tool_calls", []))
             else:
                 text = str(raw) if raw else ""
+
+            if reasoning_content:
+                _put(StreamChunk(
+                    type="thinking_delta",
+                    content=reasoning_content,
+                ))
 
             # 分块 yield 文本
             chunk_size = 20

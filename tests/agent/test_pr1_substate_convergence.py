@@ -9,6 +9,7 @@ import pytest
 from agent_runtime.planning import AgentPlan, PlanEvent, PlanStep
 from rag.agent.core.checkpointing import _migrate_legacy_state, agent_checkpoint_serde
 from rag.agent.core.context import AgentRunConfig
+from rag.agent.core.observations import StructuredObservation
 from rag.agent.loop.state import (
     StopHookFeedback,
     create_loop_state,
@@ -48,6 +49,8 @@ def test_memory_state_default_factory_works_without_args() -> None:
     ms = MemoryState()
     assert ms.working_summary is None
     assert ms.extracted_facts == []
+    assert ms.recent_observations == []
+    assert ms.known_locators == []
     assert ms.reactive_compact_used is False
     assert isinstance(ms.persistent, PersistentMemorySnapshot)
     assert ms.persistent.index_digest == ""
@@ -290,6 +293,21 @@ def test_checkpoint_serde_roundtrips_substate_models(
         "plan_state": PlanState(agent_plan=None, plan_events=[]),
         "memory_state": MemoryState(
             memory_warnings=["low budget"],
+            recent_observations=[
+                StructuredObservation(
+                    tool_call_id="tc-search",
+                    tool_name="search_text",
+                    status="ok",
+                    raw_result_ref="tc-search",
+                )
+            ],
+            known_locators=[
+                {
+                    "source_tool": "search_text",
+                    "path": "rag/agent/loop/runtime.py",
+                    "line_number": 718,
+                }
+            ],
             persistent=PersistentMemorySnapshot(
                 index_digest="digest content",
                 selected_count=3,

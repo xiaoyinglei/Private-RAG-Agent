@@ -19,9 +19,25 @@ from rag.agent.workspace import open_workspace
 
 _PLAN_ARGUMENTS = {
     "explanation": "Implementation is ready; verification is next.",
+    "target_files": ["rag/agent/loop/runtime.py"],
+    "hypothesis": (
+        "Persisting evidence-bound tool expectations will keep execution "
+        "aligned with the active implementation step."
+    ),
+    "remaining_unknowns": [
+        "Whether the checkpoint round-trip preserves the complete theory."
+    ],
     "plan": [
-        {"step": "Implement durable plan state", "status": "completed"},
-        {"step": "Run integration verification", "status": "in_progress"},
+        {
+            "step": "Implement durable plan state",
+            "status": "completed",
+            "expected_tool_names": ["apply_patch"],
+        },
+        {
+            "step": "Run integration verification",
+            "status": "in_progress",
+            "expected_tool_names": ["run_command"],
+        },
     ],
 }
 
@@ -88,22 +104,42 @@ async def test_update_plan_is_canonical_result_and_checkpoint_state(
     assert result.status == "paused"
     assert result.plan is not None
     assert result.plan.summary == _PLAN_ARGUMENTS["explanation"]
+    assert result.plan.target_files == _PLAN_ARGUMENTS["target_files"]
+    assert result.plan.hypothesis == _PLAN_ARGUMENTS["hypothesis"]
+    assert result.plan.remaining_unknowns == _PLAN_ARGUMENTS[
+        "remaining_unknowns"
+    ]
     assert [step.title for step in result.plan.steps] == [
         "Implement durable plan state",
         "Run integration verification",
     ]
     assert [step.status for step in result.plan.steps] == [
-        "completed",
+        "pending",
         "in_progress",
+    ]
+    assert [step.expected_tool_names for step in result.plan.steps] == [
+        ["apply_patch"],
+        ["run_command"],
     ]
     assert result.plan.revision == 1
     assert result.plan.active_step_id == "step_002"
-    assert any(event.event_type == "llm_update" for event in result.plan_events)
+    update_event = next(
+        event
+        for event in result.plan_events
+        if event.event_type == "llm_update"
+    )
+    assert update_event.warnings == ["unverified_completion_ignored"]
     update_result = next(item for item in result.tool_results if item.tool_name == "update_plan")
     assert update_result.structured_content == {
         "accepted": True,
         "revision": result.plan.revision,
-        "message": "Plan updated and persisted.",
+        "message": (
+            "Plan persisted as advisory state; runtime evidence controls "
+            "inspection and completion."
+        ),
+        "authority": "advisory",
+        "grounded_target_files": (),
+        "unverified_target_files": ("rag/agent/loop/runtime.py",),
     }
 
     restored = await LangGraphCheckpointStore(
@@ -141,9 +177,15 @@ async def test_update_plan_emits_complete_plan_snapshot_on_stream(
     assert plan_event.iteration == 1
     assert plan_event.sequence > 0
     assert plan_event.data["plan"]["summary"] == _PLAN_ARGUMENTS["explanation"]
+    assert plan_event.data["plan"]["target_files"] == _PLAN_ARGUMENTS[
+        "target_files"
+    ]
+    assert plan_event.data["plan"]["hypothesis"] == _PLAN_ARGUMENTS[
+        "hypothesis"
+    ]
     assert plan_event.data["plan"]["active_step_id"] == "step_002"
     assert [step["status"] for step in plan_event.data["plan"]["steps"]] == [
-        "completed",
+        "pending",
         "in_progress",
     ]
     assert plan_event.data["event"]["event_type"] == "llm_update"

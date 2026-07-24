@@ -90,12 +90,27 @@ class AgentPlan(BaseModel):
     status: PlanStatus = "active"
     revision: int = Field(default=0, ge=0)
     active_step_id: str | None = None
+    target_files: list[str] = Field(default_factory=list)
+    hypothesis: str | None = None
+    remaining_unknowns: list[str] = Field(default_factory=list)
     steps: list[PlanStep] = Field(default_factory=list)
     summary: str | None = None
 
     @model_validator(mode="after")
     def bound_fields(self) -> Self:
         self.objective = _bounded_text(self.objective, MAX_OBJECTIVE_CHARS) or "Current task"
+        self.target_files = _dedupe_texts(
+            self.target_files,
+            limit=MAX_STEP_REFS,
+        )
+        if self.hypothesis is not None:
+            self.hypothesis = (
+                _bounded_text(self.hypothesis, MAX_PLAN_SUMMARY_CHARS) or None
+            )
+        self.remaining_unknowns = _dedupe_texts(
+            self.remaining_unknowns,
+            limit=MAX_STEP_REFS,
+        )
         self.steps = self.steps[:MAX_PLAN_STEPS]
         if self.summary is not None:
             self.summary = _bounded_text(self.summary, MAX_PLAN_SUMMARY_CHARS) or None
@@ -224,6 +239,9 @@ class PlanTracker:
             status=plan_status or plan.status,
             revision=plan.revision + 1,
             active_step_id=active_step_id,
+            target_files=plan.target_files,
+            hypothesis=plan.hypothesis,
+            remaining_unknowns=plan.remaining_unknowns,
             steps=steps,
             summary=update.summary if update.summary is not None else plan.summary,
         )
@@ -259,6 +277,9 @@ class PlanTracker:
         plan: AgentPlan,
         *,
         steps: Sequence[PlanStep],
+        target_files: Sequence[str],
+        hypothesis: str,
+        remaining_unknowns: Sequence[str],
         summary: str | None,
     ) -> tuple[AgentPlan, list[PlanEvent]]:
         """Persist the complete visible plan submitted through update_plan."""
@@ -266,7 +287,19 @@ class PlanTracker:
         warnings: list[str] = []
         if len(steps) > self.max_steps:
             warnings.append("steps_truncated")
-        bounded_steps = list(steps[: self.max_steps])
+        bounded_steps: list[PlanStep] = []
+        for step in steps[: self.max_steps]:
+            if (
+                step.status == "completed"
+                and not step.tool_call_ids
+                and not step.evidence_refs
+            ):
+                warnings.append("unverified_completion_ignored")
+                bounded_steps.append(
+                    step.model_copy(update={"status": "pending"})
+                )
+                continue
+            bounded_steps.append(step)
         active_step_id = next(
             (
                 step.step_id
@@ -286,6 +319,9 @@ class PlanTracker:
             ),
             revision=plan.revision + 1,
             active_step_id=active_step_id,
+            target_files=list(target_files),
+            hypothesis=hypothesis,
+            remaining_unknowns=list(remaining_unknowns),
             steps=bounded_steps,
             summary=summary,
         )
@@ -311,6 +347,17 @@ class PlanTracker:
         step = _active_or_next_step(plan)
         if step is None:
             return plan, []
+        matching_call_ids = [
+            tool_call_id
+            for tool_call_id, tool_name in zip(
+                tool_call_ids,
+                tool_names,
+                strict=False,
+            )
+            if tool_name in step.expected_tool_names
+        ]
+        if not matching_call_ids:
+            return plan, []
         steps: list[PlanStep] = []
         for current in plan.steps:
             if current.step_id != step.step_id:
@@ -321,11 +368,7 @@ class PlanTracker:
                     update={
                         "status": "in_progress" if current.status == "pending" else current.status,
                         "tool_call_ids": _dedupe_texts(
-                            [*current.tool_call_ids, *tool_call_ids],
-                            limit=MAX_STEP_REFS,
-                        ),
-                        "expected_tool_names": _dedupe_texts(
-                            [*current.expected_tool_names, *tool_names],
+                            [*current.tool_call_ids, *matching_call_ids],
                             limit=MAX_STEP_REFS,
                         ),
                     }
@@ -344,7 +387,7 @@ class PlanTracker:
                 updated,
                 message="Recorded tool decision against active plan step.",
                 related_step_id=step.step_id,
-                tool_call_ids=list(tool_call_ids),
+                tool_call_ids=matching_call_ids,
             )
         ]
 

@@ -10,6 +10,7 @@ from __future__ import annotations
 from pydantic import BaseModel, Field
 
 from agent_runtime.planning import AgentPlan, PlanEvent
+from rag.agent.core.observations import StructuredObservation
 from rag.agent.core.output_models import ValidatedFinalOutput
 from rag.agent.core.runtime_diagnostics import RuntimeDiagnostic
 from rag.agent.loop.state import StopHookFeedback
@@ -48,6 +49,12 @@ class MemoryState(BaseModel):
 
     working_summary: WorkingSummary | None = None
     extracted_facts: list[ExtractedFact] = Field(default_factory=list)
+    recent_observations: list[StructuredObservation] = Field(default_factory=list)
+    # Runtime-owned truth. Unlike the model-visible locator projection below,
+    # verified paths are checkpointed without lossy eviction.
+    verified_workspace_paths: list[str] = Field(default_factory=list)
+    # Bounded model-context projection; never an authorization source by itself.
+    known_locators: list[dict[str, object]] = Field(default_factory=list)
     context_budget: ContextBudgetSnapshot | None = None
     memory_refs: list[MemoryRef] = Field(default_factory=list)
     memory_budget: MemoryBudgetSnapshot | None = None

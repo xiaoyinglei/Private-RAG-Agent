@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Mapping, Sequence
-from typing import Literal
+from typing import Literal, cast
 
 from pydantic import BaseModel, Field
 
@@ -12,8 +13,10 @@ from rag.agent.core.messages import (
     StopReason,
     ToolUseResult,
     canonical_json_text,
+    context_event_message,
     model_message_payload,
 )
+from rag.agent.core.messages import ToolCall as ModelToolCall
 from rag.agent.core.model_request import (
     ContextBlock,
     ModelRequest,
@@ -25,6 +28,10 @@ from rag.agent.core.model_request import (
     split_turn_context,
     tool_definition_payload,
 )
+from rag.agent.core.observations import (
+    grounded_workspace_paths,
+    runtime_workspace_change,
+)
 from rag.agent.core.runtime_diagnostics import AgentLatencyProfile
 from rag.agent.core.turn_contracts import ToolCallPlan
 from rag.agent.loop.runtime import ModelTurnEnvelope
@@ -32,9 +39,12 @@ from rag.agent.loop.state import LoopState, ModelTurnDraft
 from rag.agent.skills.runtime import SkillRuntime
 from rag.agent.streaming.events import text_delta
 from rag.agent.tools.selection import select_tools
-from rag.agent.tools.tool import Tool, ToolCallOrigin
+from rag.agent.tools.tool import JsonValue, Tool, ToolCallOrigin
 from rag.providers.llm_gateway import LLMGateway
 from rag.schema.llm import LLMCallStage
+
+_MODEL_REQUEST_OVERHEAD_TOKENS = 128
+_MAX_WORKING_STATE_GROUNDED_PATHS = 200
 
 
 class LoopModelDecision(BaseModel):
@@ -191,6 +201,9 @@ class LLMLoopModelTurnProvider:
             initial_memory=tuple(state.get("persistent_memories", ())),
             transcript=context_transcript,
         )
+        working_state = _working_state_message(state)
+        if working_state is not None:
+            context = context.append_message(working_state)
         context_limit = (
             state["run_config"].max_context_tokens
             or self._context_window_tokens
@@ -203,9 +216,32 @@ class LLMLoopModelTurnProvider:
             LLMCallStage.TOOL_DECISION,
             kwargs={"max_tokens": settings.max_output_tokens},
         ).max_input_tokens
+        tool_schema_tokens = self._gateway.token_accounting.count(
+            canonical_json_text(
+                tuple(
+                    tool_definition_payload(tool.definition)
+                    for tool in selected_tools
+                )
+            )
+        )
+        message_input_limit = max(
+            256,
+            min(model_input_limit, stage_input_limit)
+            - tool_schema_tokens
+            - _MODEL_REQUEST_OVERHEAD_TOKENS,
+        )
         context = _project_model_context(
             context,
-            max_input_tokens=min(model_input_limit, stage_input_limit),
+            max_input_tokens=message_input_limit,
+            message_compaction_min_count=(
+                state["run_config"].memory_policy.message_compaction_min_count
+            ),
+            retained_tail_count=(
+                state["run_config"].memory_policy.max_message_tail_count
+            ),
+            max_summary_chars=(
+                state["run_config"].memory_policy.max_working_summary_chars
+            ),
         )
         request = build_model_request(
             request_id=(
@@ -227,6 +263,10 @@ class LLMLoopModelTurnProvider:
         turn = response.turn
         if not isinstance(turn, ToolUseResult):
             raise TypeError("gateway must return a provider-neutral ToolUseResult")
+        turn = _scope_model_tool_call_ids(
+            turn,
+            request_id=request.request_id,
+        )
         record = bind_model_call_record(
             request=request,
             provider_wire_hash=response.provider_wire_hash,
@@ -235,6 +275,7 @@ class LLMLoopModelTurnProvider:
         assistant_message = ModelMessage(
             role="assistant",
             content=turn.text,
+            reasoning_content=turn.reasoning_content,
             tool_calls=tuple(turn.tool_calls),
         )
         return ModelTurnEnvelope(
@@ -260,6 +301,9 @@ class LLMLoopModelTurnProvider:
         )
         top_p = self._kwargs.get("top_p", 1.0)
         seed = self._kwargs.get("seed")
+        provider_options = self._kwargs.get("provider_options", {})
+        if not isinstance(provider_options, Mapping):
+            raise TypeError("provider_options must be a mapping")
         return ModelSettings(
             model=self._model,
             max_output_tokens=_int_setting(max_output_tokens),
@@ -277,6 +321,10 @@ class LLMLoopModelTurnProvider:
                 if seed is None
                 else _int_setting(seed)
             ),
+            provider_options=cast(
+                Mapping[str, JsonValue],
+                provider_options,
+            ),
         )
 
     async def _emit_text_delta(self, value: str) -> None:
@@ -293,6 +341,9 @@ def _project_model_context(
     context: StableModelContext,
     *,
     max_input_tokens: int,
+    message_compaction_min_count: int,
+    retained_tail_count: int,
+    max_summary_chars: int,
 ) -> StableModelContext:
     """Bound model-visible history without mutating canonical Session history."""
 
@@ -300,27 +351,161 @@ def _project_model_context(
         return context
     maximum_bytes = max_input_tokens * 4
     visible = (*context.stable_messages, *context.transcript)
-    if _messages_size(visible) <= maximum_bytes:
+    exceeds_input_budget = _messages_size(visible) > maximum_bytes
+    proactive = len(context.transcript) >= message_compaction_min_count
+    if not proactive and not exceeds_input_budget:
         return context
 
-    tail_budget = max(512, maximum_bytes // 2)
-    tail_start = len(context.transcript)
-    used = 0
-    for index in range(len(context.transcript) - 1, -1, -1):
-        size = _message_size(context.transcript[index])
-        if tail_start < len(context.transcript) and used + size > tail_budget:
-            break
-        tail_start = index
-        used += size
+    tail_start = (
+        max(0, len(context.transcript) - retained_tail_count)
+        if proactive
+        else 0
+    )
+    if exceeds_input_budget:
+        tail_budget = max(512, maximum_bytes // 2)
+        budget_tail_start = len(context.transcript)
+        used = 0
+        for index in range(len(context.transcript) - 1, -1, -1):
+            size = _message_size(context.transcript[index])
+            if (
+                budget_tail_start < len(context.transcript)
+                and used + size > tail_budget
+            ):
+                break
+            budget_tail_start = index
+            used += size
+        tail_start = max(tail_start, budget_tail_start)
     tail_start = _extend_tail_for_tool_pair(context.transcript, tail_start)
     tail = context.transcript[tail_start:]
     covered = context.transcript[:tail_start]
-    summary_limit = min(12_000, max(256, maximum_bytes // 4))
+    if not covered:
+        return context
+    summary_limit = min(
+        max_summary_chars,
+        12_000,
+        max(256, maximum_bytes // 4),
+    )
     summary = _deterministic_transcript_summary(
         covered,
         max_chars=summary_limit,
     )
     return context.compact(summary=summary, retained_tail=tail)
+
+
+def _working_state_message(state: LoopState) -> ModelMessage | None:
+    memory_state = state["memory_state"]
+    plan = state["plan_state"].agent_plan
+    if (
+        not memory_state.recent_observations
+        and not memory_state.known_locators
+        and not memory_state.verified_workspace_paths
+        and plan is None
+    ):
+        return None
+
+    plan_payload: JsonValue = None
+    if plan is not None:
+        plan_payload = {
+            "authority": "advisory",
+            "objective": plan.objective,
+            "status": plan.status,
+            "active_step_id": plan.active_step_id,
+            "target_files": tuple(plan.target_files),
+            "hypothesis": plan.hypothesis,
+            "remaining_unknowns": tuple(plan.remaining_unknowns),
+            "steps": tuple(
+                {
+                    "step_id": step.step_id,
+                    "title": step.title,
+                    "status": step.status,
+                    "expected_tool_names": tuple(step.expected_tool_names),
+                }
+                for step in plan.steps
+            ),
+        }
+    file_manifest = state.get("file_manifest")
+    manifest_paths = (
+        ()
+        if file_manifest is None
+        else tuple(entry.path for entry in file_manifest.files)
+    )
+    verified_grounded_paths = grounded_workspace_paths(
+        locators=memory_state.known_locators,
+        input_paths=(
+            *manifest_paths,
+            *memory_state.verified_workspace_paths,
+        ),
+        tool_results=state["tool_results"],
+        tool_calls=state["canonical_tool_calls"],
+    )
+    grounded_path_set = set(verified_grounded_paths)
+    grounded_paths = _project_grounded_workspace_paths(
+        verified_grounded_paths,
+        plan=plan,
+    )
+    unverified_plan_targets = (
+        ()
+        if plan is None
+        else tuple(
+            path
+            for path in plan.target_files
+            if path not in grounded_path_set
+        )
+    )
+    return context_event_message(
+        "working_state",
+        {
+            "plan_claims": plan_payload,
+            "runtime_evidence": {
+                "authority": "runtime",
+                "grounded_paths": grounded_paths,
+                "grounded_path_count": len(verified_grounded_paths),
+                "grounded_paths_truncated": (
+                    len(grounded_paths) < len(verified_grounded_paths)
+                ),
+                "unverified_plan_targets": unverified_plan_targets,
+                "recent_observations": tuple(
+                    {
+                        "tool_call_id": observation.tool_call_id,
+                        "tool_name": observation.tool_name,
+                        "status": observation.status,
+                        "error": observation.error,
+                        "warnings": tuple(observation.warnings),
+                    }
+                    for observation in memory_state.recent_observations
+                ),
+                "known_locators": tuple(
+                    cast(Mapping[str, JsonValue], locator)
+                    for locator in memory_state.known_locators
+                ),
+                "workspace_change_tool_call_ids": tuple(
+                    result.tool_call_id
+                    for result in state["tool_results"]
+                    if runtime_workspace_change(result) is not None
+                ),
+            },
+        },
+    )
+
+
+def _project_grounded_workspace_paths(
+    paths: Sequence[str],
+    *,
+    plan: object | None,
+) -> tuple[str, ...]:
+    if len(paths) <= _MAX_WORKING_STATE_GROUNDED_PATHS:
+        return tuple(paths)
+    path_set = set(paths)
+    selected: dict[str, None] = {}
+    target_files = getattr(plan, "target_files", ()) if plan is not None else ()
+    for path in target_files:
+        if path in path_set:
+            selected.setdefault(path, None)
+    for path in reversed(paths):
+        selected.setdefault(path, None)
+        if len(selected) >= _MAX_WORKING_STATE_GROUNDED_PATHS:
+            break
+    return tuple(selected)
 
 
 def _extend_tail_for_tool_pair(
@@ -434,6 +619,31 @@ def _draft_from_turn(
         action="finish",
         final_answer=turn.text or "The model returned an empty final response.",
     )
+
+
+def _scope_model_tool_call_ids(
+    turn: ToolUseResult,
+    *,
+    request_id: str,
+) -> ToolUseResult:
+    """Make provider-local tool IDs deterministic and unique per request."""
+
+    if not turn.tool_calls:
+        return turn
+    scoped_calls = [
+        ModelToolCall(
+            id=(
+                "tc_"
+                + hashlib.sha256(
+                    f"{request_id}\0{index}\0{call.id}".encode()
+                ).hexdigest()[:20]
+            ),
+            name=call.name,
+            input=dict(call.input),
+        )
+        for index, call in enumerate(turn.tool_calls)
+    ]
+    return turn.model_copy(update={"tool_calls": scoped_calls})
 
 
 def create_loop_model_turn_provider(

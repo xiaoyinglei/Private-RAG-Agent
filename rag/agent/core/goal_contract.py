@@ -146,10 +146,7 @@ class GoalContractEvaluator:
             issues.append(
                 GoalContractIssue(
                     issue_id=f"constraint:{constraint.constraint_id}",
-                    description=(
-                        "Bind context satisfying the required constraint "
-                        f"{constraint.constraint_id!r}."
-                    ),
+                    description=_constraint_issue_description(constraint),
                     kind="constraint",
                 )
             )
@@ -226,6 +223,29 @@ def _issue_description(kind: DeliverableKind) -> str:
             "Provide a reproducible computation with traceable evidence."
         ),
     }[kind]
+
+
+def _constraint_issue_description(constraint: GoalConstraint) -> str:
+    if (
+        constraint.constraint_type == "workspace_change"
+        and constraint.expected_value is True
+    ):
+        return (
+            "Make a real workspace change with a write tool before finishing; "
+            "a prose-only answer does not complete this task."
+        )
+    if (
+        constraint.constraint_type == "verification_after_change"
+        and constraint.expected_value is True
+    ):
+        return (
+            "Run a recognized test, lint, type-check, or build command after the "
+            "latest workspace change and keep every such verification green."
+        )
+    return (
+        "Bind context satisfying the required constraint "
+        f"{constraint.constraint_id!r}."
+    )
 
 
 __all__ = [

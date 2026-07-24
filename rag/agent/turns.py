@@ -942,10 +942,16 @@ def _message_from_json(raw: str) -> ModelMessage:
         for item in tool_calls_raw
         if isinstance(item, dict)
     )
+    reasoning_content = payload.get("reasoning_content")
+    if reasoning_content is not None and not isinstance(reasoning_content, str):
+        raise RuntimeError(
+            "canonical history reasoning_content must be a string or null"
+        )
     return snapshot_model_message(
         ModelMessage(
             role=cast(Any, payload.get("role")),
             content=str(payload.get("content", "")),
+            reasoning_content=reasoning_content,
             tool_calls=tool_calls,
             tool_call_id=cast(str | None, payload.get("tool_call_id")),
         )

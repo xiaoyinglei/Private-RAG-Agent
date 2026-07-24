@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import difflib
 import fnmatch
+import hashlib
 import os
 import stat
 import tempfile
@@ -212,6 +213,8 @@ class _ApplyPatchRunResult:
     output: ApplyPatchOutput
     diff: str = ""
     diff_truncated: bool = False
+    before_sha256: str | None = None
+    after_sha256: str | None = None
 
 
 _LIST_INPUT_SCHEMA, _validate_list_input = pydantic_input(ListFilesInput)
@@ -224,6 +227,7 @@ _PATCH_ERROR_CODES = {
     "file not found": "file_not_found",
     "old_string not found": "old_string_not_found",
     "old_string is not unique; set replace_all=true": "old_string_not_unique",
+    "replacement produced no change": "patch_no_change",
 }
 
 
@@ -528,6 +532,15 @@ def _apply_patch(
         if request.replace_all
         else current.replace(request.old_string, request.new_string, 1)
     )
+    if updated == current:
+        return _ApplyPatchRunResult(
+            ApplyPatchOutput(
+                file_path=request.file_path,
+                replaced=False,
+                occurrences=occurrences if request.replace_all else 1,
+                message="replacement produced no change",
+            )
+        )
     diff, diff_truncated = _patch_diff(
         current,
         updated,
@@ -543,6 +556,8 @@ def _apply_patch(
         ),
         diff=diff,
         diff_truncated=diff_truncated,
+        before_sha256=hashlib.sha256(current.encode("utf-8")).hexdigest(),
+        after_sha256=hashlib.sha256(updated.encode("utf-8")).hexdigest(),
     )
 
 
@@ -645,6 +660,9 @@ def _normalize_apply_patch(raw: object) -> NormalizedToolOutput:
                 "file_path": validated.file_path,
                 "diff": execution.diff,
                 "diff_truncated": execution.diff_truncated,
+                "workspace_changed": True,
+                "before_sha256": execution.before_sha256,
+                "after_sha256": execution.after_sha256,
             },
         )
     return NormalizedToolOutput(

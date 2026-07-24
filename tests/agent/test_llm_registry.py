@@ -48,8 +48,16 @@ def test_load_configs_models_maps_openai_compatible_protocol(tmp_path: Path) -> 
                         "provider": "qwen",
                         "protocol": "openai_compatible",
                         "model": "Qwen/Qwen3-8B-MLX-4bit",
+                        "max_tokens": 16384,
                         "base_url": "http://127.0.0.1:8080/v1",
                         "context_window_tokens": 32768,
+                        "defaults": {
+                            "temperature": 1.0,
+                            "top_p": 0.95,
+                            "provider_options": {
+                                "thinking": {"type": "enabled"},
+                            },
+                        },
                     }
                 },
                 "defaults": {"primary_model": "qwen3_8b_mlx_4bit"},
@@ -71,6 +79,12 @@ def test_load_configs_models_maps_openai_compatible_protocol(tmp_path: Path) -> 
     assert config.models["qwen3_8b_mlx_4bit"].provider is ModelProvider.OPENAI_COMPATIBLE
     assert config.models["qwen3_8b_mlx_4bit"].base_url == "http://127.0.0.1:8080/v1"
     assert config.models["qwen3_8b_mlx_4bit"].context_window_tokens == 32768
+    assert config.models["qwen3_8b_mlx_4bit"].max_tokens == 16384
+    assert config.models["qwen3_8b_mlx_4bit"].defaults == {
+        "temperature": 1.0,
+        "top_p": 0.95,
+        "provider_options": {"thinking": {"type": "enabled"}},
+    }
     assert config.llm_stage_budgets[LLMCallStage.TOOL_DECISION].max_input_tokens == 12000
 
 
@@ -154,6 +168,7 @@ def test_load_configs_models_supports_provider_section_schema(
                         "provider": "groq",
                         "model": "openai/gpt-oss-120b",
                         "context_window_tokens": 131072,
+                        "request_context_tokens": 8000,
                     },
                 },
                 "defaults": {"primary_model": "groq_gpt_oss_120b"},
@@ -174,6 +189,8 @@ def test_load_configs_models_supports_provider_section_schema(
     assert groq.base_url == "https://api.groq.com/openai/v1"
     assert groq.api_key_env == "GROQ_API_KEY"
     assert groq.location == "cloud"
+    assert groq.context_window_tokens == 131072
+    assert groq.request_context_tokens == 8000
     assert provider_config.api_key == "sk-test"
     assert provider_config.base_url == "https://api.groq.com/openai/v1"
     assert local.provider is ModelProvider.OPENAI_COMPATIBLE
@@ -347,6 +364,60 @@ class TestModelRegistryResolve:
         assert resolved.kwargs["max_tokens"] == 512
         assert resolved.kwargs["temperature"] == 0.3
         assert resolved.kwargs["top_p"] == 0.8
+
+    def test_request_context_limit_caps_runtime_without_rewriting_model_window(
+        self,
+    ) -> None:
+        spec = ModelSpec(
+            provider=ModelProvider.OLLAMA,
+            model="request-capped",
+            context_window_tokens=131_072,
+            request_context_tokens=8_000,
+        )
+        registry = ModelRegistry(
+            AgentModelsConfig(
+                models={"capped": spec},
+                default_model="capped",
+            )
+        )
+
+        resolved = registry.resolve("capped")
+
+        assert registry.get_model_spec("capped").context_window_tokens == 131_072
+        assert resolved.context_window_tokens == 8_000
+        assert (
+            resolved.gateway.effective_stage_budget(
+                LLMCallStage.TOOL_DECISION,
+                kwargs={"max_tokens": 2_048},
+            ).max_input_tokens
+            == 5_440
+        )
+
+    def test_explicit_model_output_limit_expands_tool_decision_stage_budget(
+        self,
+    ) -> None:
+        spec = ModelSpec(
+            provider=ModelProvider.OLLAMA,
+            model="long-thinking",
+            max_tokens=32_768,
+            context_window_tokens=131_072,
+            request_context_tokens=65_536,
+        )
+        registry = ModelRegistry(
+            AgentModelsConfig(
+                models={"long": spec},
+                default_model="long",
+            )
+        )
+
+        resolved = registry.resolve("long")
+        budget = resolved.gateway.effective_stage_budget(
+            LLMCallStage.TOOL_DECISION,
+            kwargs={"max_tokens": resolved.kwargs["max_tokens"]},
+        )
+
+        assert budget.max_output_tokens == 32_768
+        assert budget.max_input_tokens > 30_000
 
 
 class TestModelRegistryResolveOrFallback:

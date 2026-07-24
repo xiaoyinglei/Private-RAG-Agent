@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 from dataclasses import replace
 from types import SimpleNamespace
@@ -8,7 +9,7 @@ import pytest
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from pydantic import BaseModel
 
-from agent_runtime.planning import PlanStep, PlanTracker, PlanUpdate
+from agent_runtime.planning import AgentPlan, PlanStep, PlanTracker, PlanUpdate
 from rag.agent.core.context import AgentRunConfig
 from rag.agent.core.definition import AgentRuntimePolicy
 from rag.agent.core.human_input import HumanInputRequest, ToolCallSummary
@@ -28,6 +29,8 @@ from rag.agent.core.messages import (
 from rag.agent.core.messages import (
     ToolCall as ModelToolCall,
 )
+from rag.agent.core.model_request import ToolChoiceMode
+from rag.agent.core.observations import StructuredObservation
 from rag.agent.core.turn_contracts import ToolCallPlan
 from rag.agent.file_manifest import FileManifest, FileManifestEntry
 from rag.agent.loop.state import (
@@ -54,6 +57,7 @@ from rag.agent.tools.tool import (
 )
 from rag.assembly.tokenizer import TokenAccountingService, TokenizerContract
 from rag.providers.llm_gateway import AgentModelResponse
+from rag.providers.openai_wire import serialize_openai_request
 from rag.schema.llm import LLMCallStage, LLMStageBudget, LLMUsage
 
 
@@ -66,6 +70,17 @@ class _RecordingGateway:
     ) -> None:
         self.calls: list[dict[str, object]] = []
         self.max_input_tokens = max_input_tokens
+        self.token_accounting = TokenAccountingService(
+            TokenizerContract(
+                embedding_model_name="recording-gateway",
+                tokenizer_model_name="recording-gateway",
+                chunking_tokenizer_model_name="recording-gateway",
+                tokenizer_backend="simple",
+                max_context_tokens=32_768,
+                prompt_reserved_tokens=256,
+                local_files_only=True,
+            )
+        )
         self.turn = turn or ToolUseResult(
             text="The policy changed in 2026.",
             tool_calls=[],
@@ -285,6 +300,306 @@ async def test_long_session_projects_model_context_without_mutating_history() ->
 
 
 @pytest.mark.anyio
+async def test_loop_provider_proactively_compacts_canonical_transcript_by_policy() -> None:
+    gateway = _RecordingGateway()
+    provider = _provider(
+        gateway,
+        names=(),
+        context_window_tokens=32_768,
+    )
+    state = _state("proactive-transcript-compaction")
+    state["run_config"] = replace(
+        state["run_config"],
+        memory_policy=MemoryPolicy(
+            message_compaction_min_count=4,
+            max_message_tail_count=2,
+        ),
+    )
+    transcript = [
+        ModelMessage(
+            role="user" if index % 2 == 0 else "assistant",
+            content=f"compact-message-{index}",
+        )
+        for index in range(7)
+    ]
+    state["turn_transcript"] = list(transcript)
+
+    await provider.next_turn(
+        state,
+        definition=_definition(),
+        budget_remaining=10_000,
+    )
+
+    request = gateway.calls[0]["request"]
+    assert state["turn_transcript"] == transcript
+    assert any("context_compaction" in message.content for message in request.messages)
+    assert [message.content for message in request.messages[-2:]] == [
+        "compact-message-5",
+        "compact-message-6",
+    ]
+
+
+@pytest.mark.anyio
+async def test_loop_provider_injects_compact_typed_working_state() -> None:
+    gateway = _RecordingGateway()
+    state = _state("typed-working-state")
+    state["memory_state"].recent_observations = [
+        StructuredObservation(
+            tool_call_id="tc-search-runtime",
+            tool_name="search_text",
+            status="ok",
+            locators=[
+                {
+                    "source_tool": "search_text",
+                    "path": "rag/agent/loop/runtime.py",
+                    "line_number": 718,
+                }
+            ],
+            raw_result_ref="tc-search-runtime",
+        )
+    ]
+    state["memory_state"].known_locators = [
+        {
+            "source_tool": "search_text",
+            "path": "rag/agent/loop/runtime.py",
+            "line_number": 718,
+        }
+    ]
+
+    await _provider(gateway, names=()).next_turn(
+        state,
+        definition=_definition(),
+        budget_remaining=10_000,
+    )
+
+    request = gateway.calls[0]["request"]
+    working_state = [
+        message
+        for message in request.messages
+        if '"event_type":"working_state"' in message.content
+    ]
+    assert len(working_state) == 1
+    assert "tc-search-runtime" in working_state[0].content
+    assert "rag/agent/loop/runtime.py" in working_state[0].content
+
+
+@pytest.mark.anyio
+async def test_working_state_separates_model_claims_from_runtime_evidence() -> None:
+    gateway = _RecordingGateway()
+    state = _state("typed-working-state-authority")
+    state["plan_state"].agent_plan = AgentPlan(
+        objective="Fix the runtime.",
+        active_step_id="step_read",
+        target_files=["rag/agent/loop/runtime.py", "invented.py"],
+        hypothesis="The plan claims that both files participate in the defect.",
+        remaining_unknowns=["Which branch owns the completion decision?"],
+        steps=[
+            PlanStep(
+                step_id="step_read",
+                title="Read the runtime.",
+                status="in_progress",
+                expected_tool_names=["read_file"],
+            )
+        ],
+    )
+    state["memory_state"].known_locators = [
+        {
+            "source_tool": "search_text",
+            "path": "rag/agent/loop/runtime.py",
+            "line_number": 718,
+        }
+    ]
+
+    await _provider(gateway, names=()).next_turn(
+        state,
+        definition=_definition(),
+        budget_remaining=10_000,
+    )
+
+    request = gateway.calls[0]["request"]
+    working_state = next(
+        message
+        for message in request.messages
+        if '"event_type":"working_state"' in message.content
+    )
+    payload = json.loads(working_state.content)["payload"]
+    assert payload["plan_claims"]["authority"] == "advisory"
+    assert payload["runtime_evidence"]["grounded_paths"] == [
+        "rag/agent/loop/runtime.py"
+    ]
+    assert payload["runtime_evidence"]["unverified_plan_targets"] == [
+        "invented.py"
+    ]
+    assert "instruction" not in payload
+
+
+@pytest.mark.anyio
+async def test_working_state_uses_durable_workspace_truth_after_projection_loss() -> None:
+    gateway = _RecordingGateway()
+    state = _state("typed-working-state-durable-evidence")
+    state["memory_state"].known_locators = [
+        {
+            "source_tool": "list_files",
+            "path": "agent_runtime/runtime/mcp.py",
+        }
+    ]
+    state["memory_state"].verified_workspace_paths = [
+        "agent_runtime/__init__.py",
+        "agent_runtime/result.py",
+        "agent_runtime/runtime/mcp.py",
+    ]
+    state["plan_state"].agent_plan = AgentPlan(
+        objective="Read the public runtime contract.",
+        active_step_id="step_read",
+        target_files=["agent_runtime/__init__.py"],
+        steps=[
+            PlanStep(
+                step_id="step_read",
+                title="Read agent_runtime/__init__.py.",
+                status="in_progress",
+                expected_tool_names=["read_file"],
+            )
+        ],
+    )
+
+    await _provider(gateway, names=()).next_turn(
+        state,
+        definition=_definition(),
+        budget_remaining=10_000,
+    )
+
+    request = gateway.calls[0]["request"]
+    working_state = next(
+        message
+        for message in request.messages
+        if '"event_type":"working_state"' in message.content
+    )
+    payload = json.loads(working_state.content)["payload"]["runtime_evidence"]
+    assert payload["grounded_paths"] == [
+        "agent_runtime/__init__.py",
+        "agent_runtime/result.py",
+        "agent_runtime/runtime/mcp.py",
+    ]
+    assert payload["unverified_plan_targets"] == []
+
+
+@pytest.mark.anyio
+async def test_working_state_bounds_path_projection_without_losing_truth() -> None:
+    gateway = _RecordingGateway()
+    state = _state("typed-working-state-bounded-path-projection")
+    verified_paths = [
+        f"src/generated/module_{index:03d}.py"
+        for index in range(260)
+    ]
+    state["memory_state"].verified_workspace_paths = verified_paths
+    state["plan_state"].agent_plan = AgentPlan(
+        objective="Read the oldest verified target.",
+        active_step_id="step_read",
+        target_files=[verified_paths[0]],
+        steps=[
+            PlanStep(
+                step_id="step_read",
+                title="Read the oldest verified target.",
+                status="in_progress",
+                expected_tool_names=["read_file"],
+            )
+        ],
+    )
+
+    await _provider(gateway, names=()).next_turn(
+        state,
+        definition=_definition(),
+        budget_remaining=10_000,
+    )
+
+    request = gateway.calls[0]["request"]
+    working_state = next(
+        message
+        for message in request.messages
+        if '"event_type":"working_state"' in message.content
+    )
+    payload = json.loads(working_state.content)["payload"]["runtime_evidence"]
+    assert payload["grounded_path_count"] == 260
+    assert payload["grounded_paths_truncated"] is True
+    assert len(payload["grounded_paths"]) == 200
+    assert verified_paths[0] in payload["grounded_paths"]
+    assert payload["unverified_plan_targets"] == []
+
+
+@pytest.mark.anyio
+async def test_planning_required_keeps_provider_tool_choice_recoverable() -> None:
+    gateway = _RecordingGateway()
+    state = _state("force-update-plan")
+    state["tool_results"] = [
+        ToolResult(
+            tool_call_id="tc-unplanned-read",
+            tool_name="read_file",
+            is_error=True,
+            error_code="planning_required",
+            error_message="Submit an evidence-bound plan before inspecting again.",
+        )
+    ]
+
+    await _provider(
+        gateway,
+        names=("read_file", "update_plan"),
+    ).next_turn(
+        state,
+        definition=_definition(),
+        budget_remaining=10_000,
+    )
+
+    request = gateway.calls[0]["request"]
+    assert request.tool_choice.mode is ToolChoiceMode.AUTO
+    assert request.tool_choice.name is None
+
+
+@pytest.mark.anyio
+async def test_needs_replan_keeps_finish_and_delivery_available() -> None:
+    gateway = _RecordingGateway()
+    state = _state("force-replan")
+    state["plan_state"].agent_plan = AgentPlan(
+        objective="Deliver and verify.",
+        status="needs_replan",
+        active_step_id="step_read",
+        target_files=["rag/agent/loop/runtime.py"],
+        hypothesis=(
+            "The runtime is allowing evidence gathering outside the active "
+            "plan step."
+        ),
+        remaining_unknowns=["Which guard should reject the next read."],
+        steps=[
+            PlanStep(
+                step_id="step_read",
+                title="Read the exact source location.",
+                status="in_progress",
+                expected_tool_names=["read_file"],
+            )
+        ],
+    )
+
+    await _provider(
+        gateway,
+        names=("read_file", "update_plan"),
+    ).next_turn(
+        state,
+        definition=_definition(),
+        budget_remaining=10_000,
+    )
+
+    request = gateway.calls[0]["request"]
+    assert request.tool_choice.mode is ToolChoiceMode.AUTO
+    assert request.tool_choice.name is None
+    working_state = next(
+        message
+        for message in request.messages
+        if '"event_type":"working_state"' in message.content
+    )
+    assert "runtime is allowing evidence gathering" in working_state.content
+    assert "rag/agent/loop/runtime.py" in working_state.content
+
+
+@pytest.mark.anyio
 async def test_loop_provider_projects_to_gateway_stage_budget() -> None:
     gateway = _RecordingGateway(max_input_tokens=512)
     provider = _provider(
@@ -311,6 +626,50 @@ async def test_loop_provider_projects_to_gateway_stage_budget() -> None:
     request = gateway.calls[0]["request"]
     assert state["turn_transcript"] == transcript
     assert len(request.messages) < len(transcript) + 2
+    assert any("context_compaction" in message.content for message in request.messages)
+
+
+@pytest.mark.anyio
+async def test_loop_provider_reserves_input_budget_for_tool_schemas() -> None:
+    gateway = _RecordingGateway(max_input_tokens=1_800)
+    tool = _tool("read_file")
+    tool = replace(
+        tool,
+        definition=ToolDefinition(
+            name=tool.definition.name,
+            description="schema " * 1_200,
+            input_schema=tool.definition.input_schema,
+        ),
+    )
+    provider = LLMLoopModelTurnProvider(
+        gateway,  # type: ignore[arg-type]
+        model="test-model",
+        provider="openai-compatible",
+        supports_native_tools=True,
+        registry_snapshot={"read_file": tool},
+        resident_tool_names=("read_file",),
+        context_window_tokens=32_768,
+    )
+    state = _state("tool-schema-budget")
+    state["turn_transcript"] = [
+        ModelMessage(
+            role="assistant" if index % 2 else "user",
+            content=f"history-{index}: " + ("detail " * 120),
+        )
+        for index in range(20)
+    ]
+
+    await provider.next_turn(
+        state,
+        definition=_definition(),
+        budget_remaining=10_000,
+    )
+
+    request = gateway.calls[0]["request"]
+    input_tokens = gateway.token_accounting.count(
+        serialize_openai_request(request).serialized_json
+    )
+    assert input_tokens <= gateway.max_input_tokens
     assert any("context_compaction" in message.content for message in request.messages)
 
 
@@ -412,6 +771,52 @@ async def test_loop_provider_binds_tool_call_to_originating_request() -> None:
     assert call.origin.request_id == envelope.request.request_id
     assert call.origin.toolset_revision == envelope.request.toolset_revision
     assert call.origin.exposed_tool_names == ("read_file",)
+
+
+@pytest.mark.anyio
+async def test_loop_provider_scopes_reused_provider_tool_ids_per_request() -> None:
+    gateway = _RecordingGateway(
+        ToolUseResult(
+            text="",
+            tool_calls=[
+                ModelToolCall(
+                    id="read_file_9",
+                    name="read_file",
+                    input={"path": "README.md"},
+                )
+            ],
+            stop_reason=StopReason.TOOL_USE,
+            raw_stop_reason="tool_calls",
+        )
+    )
+    provider = _provider(gateway, names=("read_file",))
+    first_state = _state("loop-reused-provider-id")
+    first_state["resident_tool_names"] = ["read_file"]
+    first_state["iteration"] = 9
+    second_state = _state("loop-reused-provider-id")
+    second_state["resident_tool_names"] = ["read_file"]
+    second_state["iteration"] = 10
+
+    first = await provider.next_turn(
+        first_state,
+        definition=_definition(),
+        budget_remaining=5_000,
+    )
+    second = await provider.next_turn(
+        second_state,
+        definition=_definition(),
+        budget_remaining=5_000,
+    )
+
+    first_id = first.draft.tool_calls[0].tool_call_id
+    second_id = second.draft.tool_calls[0].tool_call_id
+    assert first_id.startswith("tc_")
+    assert second_id.startswith("tc_")
+    assert first_id != second_id
+    assert first.assistant_message is not None
+    assert second.assistant_message is not None
+    assert first.assistant_message.tool_calls[0].id == first_id
+    assert second.assistant_message.tool_calls[0].id == second_id
 
 
 @pytest.mark.anyio

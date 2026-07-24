@@ -151,6 +151,46 @@ class _CanonicalNativeGenerator:
         )
 
 
+class _ReasoningNativeGenerator:
+    def generate_with_tools(
+        self,
+        *,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        **kwargs: Any,
+    ) -> LLMProviderResult[dict[str, object]]:
+        del messages, tools, kwargs
+        return LLMProviderResult(
+            value={
+                "choices": [
+                    {
+                        "finish_reason": "tool_calls",
+                        "message": {
+                            "role": "assistant",
+                            "content": None,
+                            "reasoning_content": "Inspect the source before editing.",
+                            "tool_calls": [
+                                {
+                                    "id": "call_reasoning",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "read_file",
+                                        "arguments": '{"path":"README.md"}',
+                                    },
+                                }
+                            ],
+                        },
+                    }
+                ]
+            },
+            usage=LLMUsage(
+                input_tokens=20,
+                output_tokens=8,
+                source="provider",
+            ),
+        )
+
+
 class _RejectedToolCallGenerator:
     def generate_with_tools(
         self,
@@ -624,6 +664,35 @@ async def test_gateway_adapts_one_canonical_request_to_openai_wire() -> None:
 
 
 @pytest.mark.anyio
+async def test_canonical_provider_options_use_openai_extra_body_transport() -> None:
+    generator = _CanonicalNativeGenerator()
+    original = _canonical_request()
+    request = replace(
+        original,
+        settings=replace(
+            original.settings,
+            provider_options={"thinking": {"type": "enabled"}},
+        ),
+    )
+
+    await _gateway(
+        generator,
+        max_input_tokens=2_000,
+        model_context_tokens=4_000,
+    ).agenerate_model_request(
+        stage=LLMCallStage.TOOL_DECISION,
+        request=request,
+        provider="openai-compatible",
+        supports_native_tools=True,
+    )
+
+    assert "thinking" not in generator.calls[0]
+    assert generator.calls[0]["extra_body"] == {
+        "thinking": {"type": "enabled"}
+    }
+
+
+@pytest.mark.anyio
 async def test_canonical_request_output_limit_reaches_native_provider() -> None:
     generator = _CanonicalNativeGenerator()
     original = _canonical_request()
@@ -735,3 +804,22 @@ async def test_streaming_canonical_request_uses_final_provider_usage() -> None:
     assert result.usage.cache_read_input_tokens == 9
     assert result.usage.usage_source == "provider"
     assert deltas == ["stream answer"]
+
+
+@pytest.mark.anyio
+async def test_streaming_fallback_preserves_reasoning_for_next_tool_turn() -> None:
+    result = await _gateway(
+        _ReasoningNativeGenerator(),
+        max_input_tokens=2_000,
+        max_output_tokens=128,
+        model_context_tokens=4_000,
+    ).agenerate_model_request(
+        stage=LLMCallStage.TOOL_DECISION,
+        request=_canonical_request(),
+        provider="openai-compatible",
+        supports_native_tools=True,
+        stream=True,
+    )
+
+    assert result.turn.reasoning_content == "Inspect the source before editing."
+    assert result.turn.tool_calls[0].name == "read_file"

@@ -49,7 +49,7 @@ def _state() -> dict[str, object]:
     return create_loop_state(current_message="Find policy evidence", run_config=_config())
 
 
-def test_observations_do_not_recreate_deprecated_flat_state() -> None:
+def test_observations_update_typed_working_state_without_flat_channels() -> None:
     state = _state()
     batch = ObservationBatch(
         structured_observations=[
@@ -57,6 +57,7 @@ def test_observations_do_not_recreate_deprecated_flat_state() -> None:
                 tool_call_id="call-1",
                 tool_name="search_knowledge",
                 status="ok",
+                locators=[{"doc_id": 7, "section_id": 3}],
                 raw_result_ref="call-1",
             )
         ]
@@ -64,6 +65,10 @@ def test_observations_do_not_recreate_deprecated_flat_state() -> None:
 
     AgentLoop._merge_observations(state, batch)
 
+    assert state["memory_state"].recent_observations == batch.structured_observations
+    assert state["memory_state"].known_locators == [
+        {"doc_id": 7, "section_id": 3}
+    ]
     assert {
         "structured_observations",
         "evidence",
@@ -139,6 +144,15 @@ def test_llm_context_assembler_preserves_canonical_tool_content() -> None:
 def test_plan_tracker_accepts_core_structured_observation_directly() -> None:
     tracker = PlanTracker()
     plan, _ = tracker.initialize_task(task="Track one tool result")
+    plan = plan.model_copy(
+        update={
+            "steps": [
+                plan.steps[0].model_copy(
+                    update={"expected_tool_names": ["search_knowledge"]}
+                )
+            ]
+        }
+    )
     plan, _ = tracker.record_decision_progress(
         plan,
         tool_call_ids=["call-1"],

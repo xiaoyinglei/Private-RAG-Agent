@@ -556,6 +556,7 @@ async def _run_facade_command(
     max_tokens_total: int | None,
     interactive_approval: bool,
     max_turns: int | None = None,
+    require_workspace_change: bool = False,
     allow_write_tools: bool = False,
     allow_execute_tools: bool = False,
     event_display: _CLIToolEventDisplay | None = None,
@@ -570,6 +571,7 @@ async def _run_facade_command(
             files=files,
             max_turns=max_turns,
             max_tokens_total=max_tokens_total,
+            require_workspace_change=require_workspace_change,
             allow_write_tools=allow_write_tools,
             allow_execute_tools=allow_execute_tools,
             event_sink=display,
@@ -957,6 +959,13 @@ def agent_run(
         Path,
         typer.Option("--checkpoint-db", help="SQLite checkpoint 文件；启用后可跨进程 resume"),
     ] = DEFAULT_CHECKPOINT_PATH,
+    model_session_path: Annotated[
+        Path,
+        typer.Option(
+            "--model-session-path",
+            help="模型会话状态文件；可放在 workspace 外部。",
+        ),
+    ] = DEFAULT_MODEL_SESSION_PATH,
     max_tokens_total: Annotated[
         int | None,
         typer.Option(
@@ -992,6 +1001,17 @@ def agent_run(
         bool,
         typer.Option("--allow-write-tools", help="预授权本次 workspace 写入类调用"),
     ] = False,
+    require_workspace_change: Annotated[
+        bool,
+        typer.Option(
+            "--require-workspace-change",
+            help=(
+                "仅在产生真实 workspace 变更后允许完成 Turn；若同时允许"
+                "进程执行，还要求在最后一次真实变更后成功运行测试、lint、"
+                "类型检查或构建。"
+            ),
+        ),
+    ] = False,
     allow_execute_tools: Annotated[
         bool,
         typer.Option("--allow-execute-tools", help="预授权本次进程执行类调用"),
@@ -1019,7 +1039,7 @@ def agent_run(
         model=model,
         checkpoint_db=checkpoint_db,
         workspace_path=Path.cwd(),
-        model_session_path=DEFAULT_MODEL_SESSION_PATH,
+        model_session_path=model_session_path,
         knowledge=_load_knowledge_config(knowledge_config),
     )
     interactive_approval = not non_interactive and _is_interactive_terminal()
@@ -1033,6 +1053,7 @@ def agent_run(
             max_tokens_total=max_tokens_total,
             interactive_approval=interactive_approval,
             max_turns=max_turns,
+            require_workspace_change=require_workspace_change,
             allow_write_tools=allow_write_tools,
             allow_execute_tools=allow_execute_tools,
             event_display=event_display,

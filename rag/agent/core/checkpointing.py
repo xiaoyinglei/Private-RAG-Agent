@@ -1691,10 +1691,14 @@ def _decode_checkpoint_message(raw: object) -> ModelMessage:
     tool_call_id = payload.get("tool_call_id")
     if tool_call_id is not None and not isinstance(tool_call_id, str):
         raise TypeError("message tool_call_id must be a string or None")
+    reasoning_content = payload.get("reasoning_content")
+    if reasoning_content is not None and not isinstance(reasoning_content, str):
+        raise TypeError("message reasoning_content must be a string or None")
     return snapshot_model_message(
         ModelMessage(
             role=cast(Any, role),
             content=content,
+            reasoning_content=reasoning_content,
             tool_calls=tuple(tool_calls),
             tool_call_id=tool_call_id,
         )

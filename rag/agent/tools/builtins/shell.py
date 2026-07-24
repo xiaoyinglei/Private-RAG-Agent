@@ -534,6 +534,14 @@ def _normalize_command_output(raw: object) -> NormalizedToolOutput:
             error_message=validated.stderr,
             retryable=False,
         )
+    if validated.exit_code != 0:
+        return NormalizedToolOutput(
+            structured_content=structured,
+            is_error=True,
+            error_code="command_failed",
+            error_message=f"command exited with status {validated.exit_code}",
+            retryable=False,
+        )
     return NormalizedToolOutput(structured_content=structured)
 
 

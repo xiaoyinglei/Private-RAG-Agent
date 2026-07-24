@@ -195,6 +195,13 @@ async def test_filesystem_tools_list_read_patch_and_expose_changes_immediately(
     assert "-needle_one()" in patch_diff
     assert "+fresh_symbol()" in patch_diff
     assert patched.result.metadata["diff_truncated"] is False
+    assert patched.result.metadata["workspace_changed"] is True
+    assert len(str(patched.result.metadata["before_sha256"])) == 64
+    assert len(str(patched.result.metadata["after_sha256"])) == 64
+    assert (
+        patched.result.metadata["before_sha256"]
+        != patched.result.metadata["after_sha256"]
+    )
     assert old_search.result.structured_content is not None
     assert old_search.result.structured_content["matches"] == ()
     assert new_search.result.structured_content is not None
@@ -306,6 +313,30 @@ async def test_apply_patch_non_effect_is_a_canonical_tool_error(
     assert execution.result.error_message
     assert execution.result.structured_content is not None
     assert execution.result.structured_content["replaced"] is False
+
+
+@pytest.mark.anyio
+async def test_apply_patch_rejects_replacement_with_identical_content(
+    tmp_path: Path,
+) -> None:
+    workspace = open_workspace(tmp_path, create=True)
+    target = workspace.root / "notes.txt"
+    target.write_text("same", encoding="utf-8")
+
+    execution = await _execute(
+        _tools_by_name(workspace)["apply_patch"],
+        {
+            "file_path": "notes.txt",
+            "old_string": "same",
+            "new_string": "same",
+        },
+        workspace=workspace,
+    )
+
+    assert execution.result.is_error is True
+    assert execution.result.error_code == "patch_no_change"
+    assert execution.result.metadata.get("workspace_changed") is not True
+    assert target.read_text(encoding="utf-8") == "same"
 
 
 @pytest.mark.anyio
@@ -432,6 +463,71 @@ async def test_search_text_prioritizes_source_and_returns_local_context(
 
 
 @pytest.mark.anyio
+async def test_search_text_deprioritizes_agent_support_sources_at_workspace_root(
+    tmp_path: Path,
+) -> None:
+    workspace = open_workspace(tmp_path, create=True)
+    product_source = workspace.root / "src"
+    support_source = workspace.root / ".agents" / "skills" / "helper"
+    product_source.mkdir()
+    support_source.mkdir(parents=True)
+    (product_source / "runtime.py").write_text(
+        "class RuntimeSystem:\n    pass\n",
+        encoding="utf-8",
+    )
+    (support_source / "scripts.py").write_text(
+        "class SupportSystem:\n    pass\n",
+        encoding="utf-8",
+    )
+
+    execution = await _execute(
+        _tools_by_name(workspace)["search_text"],
+        {"pattern": "System", "path": ".", "max_results": 1},
+        workspace=workspace,
+    )
+
+    assert execution.result.structured_content is not None
+    [match] = execution.result.structured_content["matches"]
+    assert match["file_path"] == "src/runtime.py"
+
+
+@pytest.mark.anyio
+async def test_search_text_directory_results_are_diverse_across_matching_files(
+    tmp_path: Path,
+) -> None:
+    workspace = open_workspace(tmp_path, create=True)
+    source = workspace.root / "src"
+    source.mkdir()
+    (source / "noisy.py").write_text(
+        "\n".join(f"OpenAI noisy reference {index}" for index in range(20)),
+        encoding="utf-8",
+    )
+    (source / "relevant.py").write_text(
+        "class OpenAIWireRequest:\n    pass\n",
+        encoding="utf-8",
+    )
+
+    execution = await _execute(
+        _tools_by_name(workspace)["search_text"],
+        {
+            "pattern": "OpenAI",
+            "path": "src",
+            "max_results": 5,
+        },
+        workspace=workspace,
+    )
+
+    assert execution.result.structured_content is not None
+    matches = execution.result.structured_content["matches"]
+    assert len(matches) == 5
+    assert {match["file_path"] for match in matches} == {
+        "src/noisy.py",
+        "src/relevant.py",
+    }
+    assert execution.result.structured_content["truncated"] is True
+
+
+@pytest.mark.anyio
 async def test_search_text_skips_generated_directories_by_default(
     tmp_path: Path,
 ) -> None:
@@ -501,9 +597,24 @@ async def test_update_plan_uses_the_injected_state_callback(tmp_path: Path) -> N
         update_plan,
         {
             "explanation": "Show the next implementation checkpoint.",
+            "target_files": ["rag/agent/tools/builtins/planning.py"],
+            "hypothesis": (
+                "Making the working theory explicit will prevent repeated "
+                "repository discovery."
+            ),
+            "remaining_unknowns": ["Whether focused tests remain green."],
             "plan": [
-                {"step": "Implement the resident tools", "status": "in_progress"},
-                {"step": "Run focused tests", "status": "pending"},
+                {
+                    "step_id": "step_implement",
+                    "step": "Implement the resident tools",
+                    "status": "in_progress",
+                    "expected_tool_names": ["apply_patch"],
+                },
+                {
+                    "step": "Run focused tests",
+                    "status": "pending",
+                    "expected_tool_names": ["run_command"],
+                },
             ],
         },
         workspace=workspace,
@@ -514,9 +625,116 @@ async def test_update_plan_uses_the_injected_state_callback(tmp_path: Path) -> N
         "accepted": True,
         "revision": 1,
         "message": "plan updated",
+        "authority": "advisory",
+        "grounded_target_files": (),
+        "unverified_target_files": (),
     }
     assert len(updates) == 1
+    assert updates[0]["plan"][0]["step_id"] == "step_implement"
     assert updates[0]["plan"][0]["step"] == "Implement the resident tools"
+    assert updates[0]["target_files"] == (
+        "rag/agent/tools/builtins/planning.py",
+    )
+    assert "working theory" in str(updates[0]["hypothesis"])
+
+
+@pytest.mark.anyio
+async def test_update_plan_accepts_a_bounded_discovery_checkpoint(
+    tmp_path: Path,
+) -> None:
+    workspace = open_workspace(tmp_path, create=True)
+    updates: list[Mapping[str, Any]] = []
+    update_plan = _tools_by_name(workspace, updates=updates)["update_plan"]
+
+    execution = await _execute(
+        update_plan,
+        {
+            "target_files": [],
+            "hypothesis": (
+                "The event is likely dropped between the filesystem tool and "
+                "the loop, but the exact files are not grounded yet."
+            ),
+            "remaining_unknowns": [
+                "Which files define patch output and loop event forwarding?"
+            ],
+            "plan": [
+                {
+                    "step": "Locate the patch output and event forwarding code",
+                    "status": "in_progress",
+                    "expected_tool_names": ["search_text"],
+                }
+            ],
+        },
+        workspace=workspace,
+    )
+
+    assert execution.result.is_error is False
+    assert updates[0]["target_files"] == ()
+    assert updates[0]["remaining_unknowns"] == (
+        "Which files define patch output and loop event forwarding?",
+    )
+
+
+@pytest.mark.anyio
+async def test_update_plan_rejects_a_plan_without_a_working_theory(
+    tmp_path: Path,
+) -> None:
+    workspace = open_workspace(tmp_path, create=True)
+    update_plan = _tools_by_name(workspace)["update_plan"]
+
+    execution = await _execute(
+        update_plan,
+        {
+            "plan": [
+                {
+                    "step": "Keep inspecting",
+                    "status": "in_progress",
+                    "expected_tool_names": ["read_file"],
+                }
+            ]
+        },
+        workspace=workspace,
+    )
+
+    assert execution.result.is_error is True
+    assert execution.result.error_code == "invalid_arguments"
+    assert "target_files" in (execution.result.error_message or "")
+    assert {
+        "target_files",
+        "hypothesis",
+        "remaining_unknowns",
+    }.issubset(set(update_plan.definition.input_schema["required"]))
+
+
+@pytest.mark.anyio
+async def test_update_plan_rejects_target_files_outside_the_workspace(
+    tmp_path: Path,
+) -> None:
+    workspace = open_workspace(tmp_path, create=True)
+    update_plan = _tools_by_name(workspace)["update_plan"]
+
+    execution = await _execute(
+        update_plan,
+        {
+            "target_files": ["../outside.py"],
+            "hypothesis": (
+                "The implementation file outside the workspace needs editing."
+            ),
+            "remaining_unknowns": [],
+            "plan": [
+                {
+                    "step": "Read the target",
+                    "status": "in_progress",
+                    "expected_tool_names": ["read_file"],
+                }
+            ],
+        },
+        workspace=workspace,
+    )
+
+    assert execution.result.is_error is True
+    assert execution.result.error_code == "invalid_arguments"
+    assert "target_files" in (execution.result.error_message or "")
 
 
 @pytest.mark.anyio
@@ -545,6 +763,33 @@ async def test_run_command_returns_bounded_structured_process_output(
     assert execution.result.structured_content["timed_out"] is False
     assert execution.result.structured_content["execution_mode"] == "restricted_sandbox"
     assert execution.result.structured_content["network_enabled"] is False
+
+
+@pytest.mark.anyio
+@pytest.mark.usefixtures("fake_sandbox_exec")
+async def test_run_command_nonzero_exit_is_a_canonical_tool_failure(
+    tmp_path: Path,
+) -> None:
+    workspace = open_workspace(tmp_path, create=True)
+    tools = _tools_by_name(workspace)
+
+    execution = await _execute(
+        tools["run_command"],
+        {
+            "command": "printf 'failure evidence' >&2; exit 7",
+            "working_dir": ".",
+            "timeout_seconds": 1,
+        },
+        workspace=workspace,
+    )
+
+    assert execution.result.is_error is True
+    assert execution.result.error_code == "command_failed"
+    assert execution.result.error_message == "command exited with status 7"
+    assert execution.result.retryable is False
+    assert execution.result.structured_content is not None
+    assert execution.result.structured_content["stderr"] == "failure evidence"
+    assert execution.result.structured_content["exit_code"] == 7
 
 
 @pytest.mark.anyio

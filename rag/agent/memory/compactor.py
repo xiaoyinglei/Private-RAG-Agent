@@ -260,20 +260,33 @@ class MessageCompactor:
             ]
         # Dual-write to structured memory_state for checkpoint/restore.
         from rag.agent.core.checkpointing import _digest_text
-        from rag.agent.loop.substate import MemoryState, PersistentMemorySnapshot
-
-        update["memory_state"] = MemoryState(
-            working_summary=update.get("working_summary", state["memory_state"].working_summary),
-            extracted_facts=list(update.get("extracted_facts", state["memory_state"].extracted_facts)),
-            context_budget=state["memory_state"].context_budget,
-            memory_refs=list(update.get("memory_refs", state["memory_state"].memory_refs)),
-            memory_budget=state["memory_state"].memory_budget,
-            memory_warnings=list(update.get("memory_warnings", state["memory_state"].memory_warnings)),
-            reactive_compact_used=bool(state["memory_state"].reactive_compact_used),
-            persistent=PersistentMemorySnapshot(
-                index_digest=_digest_text(state.get("memory_index", "")),
-                selected_count=len(state.get("persistent_memories", [])),
-            ),
+        memory_state = state["memory_state"]
+        update["memory_state"] = memory_state.model_copy(
+            update={
+                "working_summary": update.get(
+                    "working_summary",
+                    memory_state.working_summary,
+                ),
+                "extracted_facts": list(
+                    update.get("extracted_facts", memory_state.extracted_facts)
+                ),
+                "memory_refs": list(
+                    update.get("memory_refs", memory_state.memory_refs)
+                ),
+                "memory_warnings": list(
+                    update.get("memory_warnings", memory_state.memory_warnings)
+                ),
+                "persistent": memory_state.persistent.model_copy(
+                    update={
+                        "index_digest": _digest_text(
+                            state.get("memory_index", "")
+                        ),
+                        "selected_count": len(
+                            state.get("persistent_memories", [])
+                        ),
+                    }
+                ),
+            }
         )
         return {**state, **update}
 
@@ -730,28 +743,43 @@ class LoopContextCompactor:
         state_dict: dict[str, Any],
     ) -> None:
         from rag.agent.core.checkpointing import _digest_text
-        from rag.agent.loop.substate import MemoryState, PersistentMemorySnapshot
-
         memory_state = state["memory_state"]
-        state["memory_state"] = MemoryState(
-            working_summary=state_dict.get(
-                "working_summary",
-                memory_state.working_summary,
-            ),
-            extracted_facts=list(
-                state_dict.get("extracted_facts", memory_state.extracted_facts)
-            ),
-            context_budget=memory_state.context_budget,
-            memory_refs=list(state_dict.get("memory_refs", memory_state.memory_refs)),
-            memory_budget=state_dict.get("memory_budget", memory_state.memory_budget),
-            memory_warnings=list(
-                state_dict.get("memory_warnings", memory_state.memory_warnings)
-            ),
-            reactive_compact_used=bool(memory_state.reactive_compact_used),
-            persistent=PersistentMemorySnapshot(
-                index_digest=_digest_text(state.get("memory_index", "")),
-                selected_count=len(state.get("persistent_memories", [])),
-            ),
+        state["memory_state"] = memory_state.model_copy(
+            update={
+                "working_summary": state_dict.get(
+                    "working_summary",
+                    memory_state.working_summary,
+                ),
+                "extracted_facts": list(
+                    state_dict.get(
+                        "extracted_facts",
+                        memory_state.extracted_facts,
+                    )
+                ),
+                "memory_refs": list(
+                    state_dict.get("memory_refs", memory_state.memory_refs)
+                ),
+                "memory_budget": state_dict.get(
+                    "memory_budget",
+                    memory_state.memory_budget,
+                ),
+                "memory_warnings": list(
+                    state_dict.get(
+                        "memory_warnings",
+                        memory_state.memory_warnings,
+                    )
+                ),
+                "persistent": memory_state.persistent.model_copy(
+                    update={
+                        "index_digest": _digest_text(
+                            state.get("memory_index", "")
+                        ),
+                        "selected_count": len(
+                            state.get("persistent_memories", [])
+                        ),
+                    }
+                ),
+            }
         )
 
     def prepare(self, state: LoopState) -> LoopCompactionResult:

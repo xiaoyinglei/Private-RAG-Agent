@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import time
@@ -30,6 +31,7 @@ from rag.agent.core.human_input import HumanInputRequest, ToolCallSummary
 from rag.agent.core.llm_context import AgentLLMContextOverflowError
 from rag.agent.core.messages import (
     ModelMessage,
+    canonical_json_text,
     context_event_message,
     tool_result_message,
 )
@@ -38,9 +40,19 @@ from rag.agent.core.model_request import (
     ModelRequest,
     build_tool_manifest,
 )
-from rag.agent.core.observations import ObservationBatch, ObservationExtractor
+from rag.agent.core.observations import (
+    ObservationBatch,
+    ObservationExtractor,
+    grounded_workspace_paths,
+    runtime_workspace_change,
+    tool_result_progress_error,
+)
 from rag.agent.core.output_models import ValidatedFinalOutput
-from rag.agent.core.runtime_diagnostics import AgentLatencyProfile, RuntimeDiagnostic
+from rag.agent.core.runtime_diagnostics import (
+    AgentLatencyProfile,
+    RuntimeDiagnostic,
+    redact_sensitive_text,
+)
 from rag.agent.loop.state import (
     LoopPause,
     LoopState,
@@ -87,14 +99,14 @@ _NATIVE_TOOL_SET = frozenset(
 
 _REPEATED_TOOL_FAILURE_CODE = "repeated_tool_failure"
 _MAX_RETRYABLE_IDENTICAL_FAILURES = 2
-_DELIVERY_CONTROL_CODE = "delivery_control"
-_DELIVERY_STALLED_CODE = "delivery_stalled"
+_PLANNING_REQUIRED_CODE = "planning_required"
+_PLANNING_EVIDENCE_REQUIRED_CODE = "planning_evidence_required"
 _EXPLORATION_TOOL_NAMES = frozenset(
     {"list_files", "search_text", "read_file", "run_command", "find_tools"}
 )
-_DELIVERY_CONTROL_THRESHOLDS = (8, 12, 20, 28)
-_EXPLORATION_LIMIT = 20
-_FOCUSED_EXPLORATION_EXTENSION = 8
+_STABLE_INSPECTION_TOOL_NAMES = frozenset(
+    {"list_files", "search_text", "read_file", "find_tools"}
+)
 
 
 def _add_model_latency(state: LoopState, latency_ms: float) -> None:
@@ -659,6 +671,60 @@ class AgentLoop:
         retries: int,
     ) -> tuple[ModelTurn | None, int]:
         """Model provider failure.  Retry or fail."""
+        safe_error = redact_sensitive_text(
+            str(exc) or type(exc).__name__
+        )
+        if isinstance(exc, LLMToolCallValidationError):
+            append_loop_diagnostic(
+                state,
+                RuntimeDiagnostic.from_exception(
+                    code="model_tool_call_rejected",
+                    component="agent_loop",
+                    error=exc,
+                    severity="warning",
+                ),
+            )
+            feedback: dict[str, JsonValue] = {
+                "recovery": "correct_tool_arguments",
+                "validation_error": redact_sensitive_text(
+                    exc.validation_error
+                ),
+            }
+            if exc.failed_generation:
+                feedback["failed_generation"] = redact_sensitive_text(
+                    exc.failed_generation
+                )
+            _append_turn_messages(
+                state,
+                (
+                    context_event_message(
+                        "model_tool_call_rejected",
+                        feedback,
+                    ),
+                ),
+            )
+            await self._emit_stream(
+                _stream_recovery(
+                    strategy="tool_call_correction",
+                    detail=redact_sensitive_text(
+                        exc.validation_error
+                    )[:200],
+                    turn_id=state["run_config"].turn_id,
+                    iteration=state["iteration"],
+                )
+            )
+            await self._transition(
+                state,
+                reason="retry",
+                detail={
+                    "component": "model_tool_call",
+                    "attempt": 0,
+                    "error": safe_error,
+                },
+                checkpoint_reason="model_tool_call_rejected",
+            )
+            return None, 0
+
         append_loop_diagnostic(
             state,
             RuntimeDiagnostic.from_exception(
@@ -670,36 +736,17 @@ class AgentLoop:
             await self._fail(
                 state,
                 stop_reason="model_provider_failed",
-                error=str(exc) or type(exc).__name__,
+                error=safe_error,
                 transition_reason="failed",
                 checkpoint_reason="model_provider_failed",
             )
             return None, retries
 
         retries += 1
-        if isinstance(exc, LLMToolCallValidationError):
-            feedback: dict[str, JsonValue] = {
-                "instruction": (
-                    "Return a corrected tool call whose arguments satisfy the "
-                    "published JSON schema. Do not repeat the rejected call."
-                ),
-                "validation_error": exc.validation_error,
-            }
-            if exc.failed_generation:
-                feedback["failed_generation"] = exc.failed_generation
-            _append_turn_messages(
-                state,
-                (
-                    context_event_message(
-                        "model_tool_call_rejected",
-                        feedback,
-                    ),
-                ),
-            )
         await self._emit_stream(
             _stream_recovery(
                 strategy="model_retry",
-                detail=f"attempt={retries}, error={str(exc)[:200]}",
+                detail=f"attempt={retries}, error={safe_error[:200]}",
                 turn_id=state["run_config"].turn_id,
                 iteration=state["iteration"],
             )
@@ -707,7 +754,11 @@ class AgentLoop:
         await self._transition(
             state,
             reason="retry",
-            detail={"component": "model", "attempt": retries, "error": str(exc)},
+            detail={
+                "component": "model",
+                "attempt": retries,
+                "error": safe_error,
+            },
             checkpoint_reason="model_retry",
         )
         return None, retries  # caller will retry
@@ -717,13 +768,21 @@ class AgentLoop:
         turn = state["iteration"]
         pending = tuple(state["pending_tool_calls"])
         calls = tuple(self._canonical_call(state, pending_call) for pending_call in pending)
-        delivery_calls, delivery_results = _guard_exploration_stall(
-            state,
-            calls,
+        progress_checked_calls, planning_results = (
+            _guard_evidence_driven_progress(
+                state,
+                calls,
+            )
         )
-        executable_calls, circuit_results = _guard_repeated_tool_failures(
+        circuit_checked_calls, circuit_results = _guard_repeated_tool_failures(
             state,
-            delivery_calls,
+            progress_checked_calls,
+        )
+        executable_calls, repeated_inspection_results = (
+            _guard_repeated_successful_inspections(
+                state,
+                circuit_checked_calls,
+            )
         )
         for call in executable_calls:
             await self._emit_stream(
@@ -760,7 +819,11 @@ class AgentLoop:
         approval_ids = {execution.result.tool_call_id for execution in approval_executions}
         results_by_id = {
             result.tool_call_id: result
-            for result in (*delivery_results, *circuit_results)
+            for result in (
+                *planning_results,
+                *circuit_results,
+                *repeated_inspection_results,
+            )
         }
         results_by_id.update(
             {
@@ -791,7 +854,11 @@ class AgentLoop:
             seen_tool_call_ids=list(self._observed_tool_call_ids),
         )
         self._observed_tool_call_ids.update(observation.tool_call_id for observation in batch.structured_observations)
-        self._merge_observations(state, batch)
+        self._merge_observations(
+            state,
+            batch,
+            tool_results=observable_results,
+        )
         self._record_plan_observations(state, batch)
 
         new_results, plan_updates = self._apply_update_plan_results(
@@ -800,26 +867,18 @@ class AgentLoop:
             results=new_results,
         )
         self._apply_activation_results(state, new_results)
+        transcript_messages = _tool_result_transcript_messages(
+            state,
+            new_results,
+        )
         state["tool_results"] = _merge_keyed(
             state["tool_results"],
             new_results,
         )
         _append_turn_messages(
             state,
-            tuple(tool_result_message(result) for result in new_results),
+            transcript_messages,
         )
-        delivery_control = _delivery_control_event(state)
-        if delivery_control is not None:
-            _append_turn_messages(state, (delivery_control,))
-            await self._emit_stream(
-                _stream_recovery(
-                    strategy="delivery_control",
-                    detail=delivery_control.content[:200],
-                    turn_id=turn_id,
-                    iteration=turn,
-                )
-            )
-
         for tool_result in new_results:
             if tool_result.is_error:
                 await self._emit_stream(
@@ -909,7 +968,11 @@ class AgentLoop:
                 "phase": "recorded",
                 "result_count": len(new_results),
                 "pending_count": len(state["pending_tool_calls"]),
+                "planning_required_count": len(planning_results),
                 "circuit_breaker_count": len(circuit_results),
+                "repeated_inspection_count": len(
+                    repeated_inspection_results
+                ),
             },
             checkpoint_reason="tool_results_recorded",
         )
@@ -924,34 +987,6 @@ class AgentLoop:
 
         # Record tool call metrics.
         self._record_metrics(state, new_results)
-
-        delivery_control_remained_open = not executions and any(
-            result.metadata.get("delivery_control_already_open") is True
-            for result in delivery_results
-        )
-        if delivery_control_remained_open:
-            inspection_counts: list[int] = []
-            for result in delivery_results:
-                value = result.metadata.get("consecutive_exploration_calls")
-                if isinstance(value, int) and not isinstance(value, bool):
-                    inspection_counts.append(value)
-            inspection_calls = max(
-                inspection_counts,
-                default=_EXPLORATION_LIMIT,
-            )
-            await self._fail(
-                state,
-                stop_reason=_DELIVERY_STALLED_CODE,
-                error=(
-                    f"The model used {inspection_calls} inspection calls plus "
-                    "the focused extension without making a concrete delivery "
-                    "action. Narrow the task or select a model capable of "
-                    "cross-file coding."
-                ),
-                transition_reason="failed",
-                checkpoint_reason=_DELIVERY_STALLED_CODE,
-            )
-            return True
 
         circuit_remained_open = not executions and any(
             result.metadata.get("circuit_already_open") is True for result in circuit_results
@@ -990,30 +1025,66 @@ class AgentLoop:
                     task=state["current_message"],
                 )
                 self._append_plan_events(state, events)
+            available_evidence = [
+                prior
+                for prior in state["tool_results"]
+                if not prior.is_error and prior.tool_name != "update_plan"
+            ]
+            used_evidence_ids: set[str] = set()
             steps = [
                 PlanStep(
-                    step_id=f"step_{index:03d}",
+                    step_id=item.step_id or f"step_{index:03d}",
                     title=item.step,
                     status=item.status,
+                    expected_tool_names=item.expected_tool_names,
+                    tool_call_ids=(
+                        []
+                        if item.status != "completed"
+                        else _claim_matching_plan_evidence(
+                            available_evidence,
+                            expected_tool_names=item.expected_tool_names,
+                            used_tool_call_ids=used_evidence_ids,
+                        )
+                    ),
                 )
                 for index, item in enumerate(submitted.plan, start=1)
             ]
             updated, events = self._plan_tracker.replace_from_tool(
                 current,
                 steps=steps,
+                target_files=submitted.target_files,
+                hypothesis=submitted.hypothesis,
+                remaining_unknowns=submitted.remaining_unknowns,
                 summary=submitted.explanation,
             )
             state["plan_state"].agent_plan = updated
             self._append_plan_events(state, events)
             event = events[-1]
             plan_updates.append((updated, event))
+            grounded_paths = _runtime_grounded_workspace_paths(state)
+            grounded_targets = [
+                path
+                for path in updated.target_files
+                if _normalized_workspace_path(path) in grounded_paths
+            ]
+            unverified_targets = [
+                path
+                for path in updated.target_files
+                if _normalized_workspace_path(path) not in grounded_paths
+            ]
             canonical_results.append(
                 replace(
                     result,
                     structured_content={
                         "accepted": True,
                         "revision": updated.revision,
-                        "message": "Plan updated and persisted.",
+                        "message": (
+                            "Plan persisted as advisory state; runtime evidence "
+                            "controls inspection and completion."
+                        ),
+                        "authority": "advisory",
+                        "grounded_target_files": tuple(grounded_targets),
+                        "unverified_target_files": tuple(unverified_targets),
                     },
                 )
             )
@@ -1246,6 +1317,7 @@ class AgentLoop:
         checkpoint_reason: str,
         final_output: ValidatedFinalOutput | None = None,
     ) -> None:
+        error = redact_sensitive_text(error)
         state["status"] = "failed"
         state["pause"] = None
         state["terminal"] = LoopTerminal(
@@ -1385,10 +1457,61 @@ class AgentLoop:
     def _merge_observations(
         state: LoopState,
         batch: ObservationBatch,
+        *,
+        tool_results: Sequence[ToolResult] = (),
     ) -> None:
-        # Tool semantics are already fixed in canonical ToolResult values and the
-        # append-only model transcript; observations do not re-render them.
-        return
+        memory_state = state["memory_state"]
+        observation_limit = (
+            state["run_config"].memory_policy.reactive_compact_max_observations
+        )
+        locator_limit = (
+            state["run_config"].memory_policy.reactive_compact_max_evidence
+        )
+        observations_by_id = {
+            observation.tool_call_id: observation
+            for observation in memory_state.recent_observations
+        }
+        for observation in batch.structured_observations:
+            observations_by_id[observation.tool_call_id] = observation
+
+        locators_by_key = {
+            json.dumps(locator, ensure_ascii=False, sort_keys=True): locator
+            for locator in memory_state.known_locators
+        }
+        new_locators = [
+            *batch.locators,
+            *[
+                locator
+                for observation in batch.structured_observations
+                for locator in observation.locators
+            ],
+        ]
+        for locator in new_locators:
+            locators_by_key[
+                json.dumps(locator, ensure_ascii=False, sort_keys=True)
+            ] = locator
+        verified_paths = dict.fromkeys(
+            memory_state.verified_workspace_paths
+        )
+        for path in grounded_workspace_paths(
+            locators=new_locators,
+            tool_results=(
+                *state["tool_results"],
+                *tool_results,
+            ),
+            tool_calls=state["canonical_tool_calls"],
+        ):
+            verified_paths.setdefault(path, None)
+
+        state["memory_state"] = memory_state.model_copy(
+            update={
+                "recent_observations": list(observations_by_id.values())[
+                    -observation_limit:
+                ],
+                "verified_workspace_paths": list(verified_paths),
+                "known_locators": list(locators_by_key.values())[-locator_limit:],
+            }
+        )
 
 
 async def _await_value[T](value: T | Awaitable[T]) -> T:
@@ -1404,156 +1527,247 @@ async def _remaining_llm_budget(handles: Any) -> int | None:
     return cast(int, await ledger.remaining())
 
 
-def _delivery_control_event(state: LoopState) -> ModelMessage | None:
-    trailing = _trailing_exploration_results(state)
-    if not trailing:
-        return None
-
-    inspection_calls = len(trailing)
-    reached = [
-        threshold
-        for threshold in _DELIVERY_CONTROL_THRESHOLDS
-        if inspection_calls >= threshold
-    ]
-    if not reached:
-        return None
-    threshold = reached[-1]
-    cycle_id = trailing[0].tool_call_id
-    marker = f'"cycle_id":"{cycle_id}"'
-    threshold_marker = f'"threshold":{threshold}'
-    if any(
-        message.role == "context"
-        and '"event_type":"delivery_control"' in message.content
-        and marker in message.content
-        and threshold_marker in message.content
-        for message in state["turn_transcript"]
-    ):
-        return None
-
-    if threshold < 12:
-        instruction = (
-            "Stop broad exploration and choose the delivery path now. For an "
-            "implementation task, update the plan or make the first concrete "
-            "edit. For an analysis task, synthesize the answer from current "
-            "evidence."
-        )
-    elif threshold < _EXPLORATION_LIMIT:
-        instruction = (
-            "The first concrete edit is overdue. Stop mapping the repository. "
-            "Use only the exact remaining evidence needed for the existing "
-            "choke point, then call apply_patch or finish with blocker evidence."
-        )
-    else:
-        instruction = (
-            "Exploration is closed for this delivery cycle. Do not issue "
-            "another list_files, search_text, read_file, find_tools, or "
-            "run_command call. If evidence is still missing, one update_plan "
-            "checkpoint naming the exact unresolved files or questions grants "
-            "at most eight focused inspection calls; repeating update_plan does "
-            "not grant more. Otherwise call apply_patch, use another concrete "
-            "delivery tool, or finish with blocker evidence."
-        )
-    return context_event_message(
-        "delivery_control",
-        {
-            "cycle_id": cycle_id,
-            "inspection_calls": inspection_calls,
-            "threshold": threshold,
-            "instruction": instruction,
-        },
-    )
+def _claim_matching_plan_evidence(
+    results: Sequence[ToolResult],
+    *,
+    expected_tool_names: Sequence[str],
+    used_tool_call_ids: set[str],
+) -> list[str]:
+    for result in reversed(results):
+        if (
+            result.tool_call_id in used_tool_call_ids
+            or result.tool_name not in expected_tool_names
+            or tool_result_progress_error(result) is not None
+        ):
+            continue
+        used_tool_call_ids.add(result.tool_call_id)
+        return [result.tool_call_id]
+    return []
 
 
-def _guard_exploration_stall(
+def _guard_evidence_driven_progress(
     state: LoopState,
     calls: Sequence[ToolCall],
 ) -> tuple[tuple[ToolCall, ...], tuple[ToolResult, ...]]:
-    cycle = _delivery_cycle_results(state)
-    trailing = _trailing_exploration_results(state)
-    trailing_exploration_calls = len(trailing)
-    control_already_open = any(
-        result.error_code == _DELIVERY_CONTROL_CODE for result in cycle
+    """Require machine-checkable intent after the first evidence-gathering turn."""
+
+    plan = state["plan_state"].agent_plan
+    active_step = _active_plan_step(plan)
+    bootstrap_plan = _is_bootstrap_plan(plan)
+    successful_evidence_exists = any(
+        not result.is_error
+        and result.tool_name in _EXPLORATION_TOOL_NAMES
+        and tool_result_progress_error(result) is None
+        for result in _delivery_cycle_results(state)
     )
-    focused_extension_active = control_already_open and any(
-        result.tool_name == "update_plan" for result in cycle
+    verification_after_change = bool(
+        state["tool_results"]
+        and runtime_workspace_change(state["tool_results"][-1]) is not None
     )
-    exploration_limit = _EXPLORATION_LIMIT + (
-        _FOCUSED_EXPLORATION_EXTENSION if focused_extension_active else 0
-    )
-    remaining_exploration = max(
-        exploration_limit - trailing_exploration_calls,
-        0,
-    )
-    projected_exploration_calls = trailing_exploration_calls
 
     executable: list[ToolCall] = []
     blocked: list[ToolResult] = []
     for call in calls:
-        if call.tool_call_id in state["tool_execution_records"]:
-            # Delivery actions remain available. Recorded calls must stay on
-            # ToolExecutor's replay/reconciliation path.
+        if (
+            call.tool_call_id in state["tool_execution_records"]
+            or call.tool_name == "update_plan"
+            or call.tool_name not in _EXPLORATION_TOOL_NAMES
+        ):
             executable.append(call)
             continue
-        if call.tool_name not in _EXPLORATION_TOOL_NAMES:
-            executable.append(call)
-            if call.tool_name != "update_plan":
-                # A concrete delivery action starts a fresh inspection cycle,
-                # including focused verification later in the same tool batch.
-                remaining_exploration = _EXPLORATION_LIMIT
-                projected_exploration_calls = 0
-                control_already_open = False
-                focused_extension_active = False
-            continue
-        if remaining_exploration > 0:
-            executable.append(call)
-            remaining_exploration -= 1
-            projected_exploration_calls += 1
-            continue
-        if not control_already_open:
-            message = (
-                "Exploration limit reached after "
-                f"{projected_exploration_calls} consecutive inspection calls. "
-                "Submit one update_plan naming the exact unresolved evidence "
-                "for up to eight focused inspection calls, call apply_patch, "
-                "use another concrete delivery tool, or finish."
-            )
-        elif focused_extension_active:
-            message = (
-                "The focused exploration extension is exhausted. Repeating "
-                "update_plan does not grant more calls. Call apply_patch, use "
-                "another concrete delivery tool, or finish."
-            )
+
+        reason: str | None = None
+        error_code = _PLANNING_REQUIRED_CODE
+        unverified_path: str | None = None
+        expected_tool_names: list[str] = []
+        follows_known_evidence = _follows_known_evidence(state, call)
+        if plan is not None and plan.status == "needs_replan":
+            if not verification_after_change and not follows_known_evidence:
+                reason = (
+                    "The current plan no longer matches the observed evidence. "
+                    "Submit update_plan before gathering more evidence."
+                )
+        elif plan is None or bootstrap_plan:
+            if successful_evidence_exists and not follows_known_evidence:
+                reason = (
+                    "The initial evidence-gathering turn is complete. Submit "
+                    "update_plan with concrete unresolved questions and exact "
+                    "expected_tool_names before inspecting again."
+                )
+        elif active_step is None:
+            if not follows_known_evidence:
+                reason = (
+                    "The plan has no executable step. Submit update_plan before "
+                    "gathering more evidence."
+                )
         else:
-            message = (
-                "Exploration remains closed. Use the available evidence to "
-                "call apply_patch, use another concrete delivery tool, or "
-                "finish."
-            )
+            expected_tool_names = list(active_step.expected_tool_names)
+            if (
+                call.tool_name not in active_step.expected_tool_names
+                and not follows_known_evidence
+            ):
+                reason = (
+                    f"The active plan step expects {expected_tool_names!r}, not "
+                    f"{call.tool_name!r}. Submit update_plan if the evidence "
+                    "changed the next action."
+                )
+            elif (
+                successful_evidence_exists
+                and call.tool_name in {"list_files", "search_text", "read_file"}
+                and not _inspection_path_is_grounded(state, call)
+            ):
+                error_code = _PLANNING_EVIDENCE_REQUIRED_CODE
+                unverified_path = _inspection_workspace_path(call)
+                reason = (
+                    "The model plan is advisory and cannot establish a file "
+                    "location. Discover this path through a successful workspace "
+                    "tool result or use a path already present in runtime evidence."
+                )
+
+        if reason is None:
+            executable.append(call)
+            continue
         blocked.append(
             ToolResult(
                 tool_call_id=call.tool_call_id,
                 tool_name=call.tool_name,
                 is_error=True,
-                error_code=_DELIVERY_CONTROL_CODE,
-                error_message=message,
+                error_code=error_code,
+                error_message=reason,
                 retryable=False,
                 metadata={
-                    "consecutive_exploration_calls": projected_exploration_calls,
-                    "delivery_control_already_open": control_already_open,
-                    "focused_extension_active": focused_extension_active,
+                    "plan_status": (
+                        "unplanned"
+                        if plan is None or bootstrap_plan
+                        else plan.status
+                    ),
+                    "active_step_id": (
+                        None if active_step is None else active_step.step_id
+                    ),
+                    "expected_tool_names": tuple(expected_tool_names),
+                    **(
+                        {"unverified_path": unverified_path}
+                        if unverified_path is not None
+                        else {}
+                    ),
                 },
             )
         )
     return tuple(executable), tuple(blocked)
 
 
-def _trailing_exploration_results(state: LoopState) -> list[ToolResult]:
-    return [
-        result
+def _follows_known_evidence(
+    state: LoopState,
+    call: ToolCall,
+) -> bool:
+    """Authorize an inspection only from durable, runtime-verified paths."""
+
+    if call.tool_name not in {"list_files", "search_text", "read_file"}:
+        return False
+    requested_path = _inspection_workspace_path(call)
+    if requested_path is None:
+        return False
+    known_paths = _runtime_grounded_workspace_paths(state)
+    if requested_path not in known_paths:
+        return False
+    # Delivery cycles and prompt compaction are deliberately lossy control
+    # projections.  They must never invalidate an observed workspace fact.
+    # Repetition and exploration limits are enforced by their dedicated guards.
+    return True
+
+
+def _normalized_workspace_path(value: str) -> str:
+    normalized = value.strip().replace("\\", "/")
+    while normalized.startswith("./"):
+        normalized = normalized[2:]
+    return normalized.rstrip("/")
+
+
+def _inspection_workspace_path(call: ToolCall) -> str | None:
+    raw_path = call.arguments.get("path")
+    if raw_path is None and call.tool_name in {"list_files", "search_text"}:
+        raw_path = "."
+    if not isinstance(raw_path, str):
+        return None
+    normalized = _normalized_workspace_path(raw_path)
+    return normalized or None
+
+
+def _inspection_path_is_grounded(
+    state: LoopState,
+    call: ToolCall,
+) -> bool:
+    requested_path = _inspection_workspace_path(call)
+    if requested_path is None:
+        return False
+    if call.tool_name in {"list_files", "search_text"} and not any(
+        not result.is_error
+        and result.tool_name in {"list_files", "search_text"}
         for result in _delivery_cycle_results(state)
-        if result.tool_name in _EXPLORATION_TOOL_NAMES
-        and result.error_code != _DELIVERY_CONTROL_CODE
-    ]
+    ):
+        # A direct read may be the first useful observation. Preserve exactly
+        # one bounded discovery action so a cross-layer task can locate the
+        # next component without treating the model's guessed path as fact.
+        return True
+    grounded_paths = _runtime_grounded_workspace_paths(state)
+    if call.tool_name == "read_file":
+        return requested_path in grounded_paths
+    if requested_path == ".":
+        return False
+    prefix = f"{requested_path}/"
+    return requested_path in grounded_paths or any(
+        path.startswith(prefix) for path in grounded_paths
+    )
+
+
+def _runtime_grounded_workspace_paths(state: LoopState) -> set[str]:
+    manifest = state.get("file_manifest")
+    manifest_paths = (
+        ()
+        if manifest is None
+        else tuple(entry.path for entry in manifest.files)
+    )
+    return set(
+        grounded_workspace_paths(
+            locators=state["memory_state"].known_locators,
+            input_paths=(
+                *manifest_paths,
+                *state["memory_state"].verified_workspace_paths,
+            ),
+            tool_results=state["tool_results"],
+            tool_calls=state["canonical_tool_calls"],
+        )
+    )
+
+
+def _is_bootstrap_plan(plan: AgentPlan | None) -> bool:
+    return bool(
+        plan is not None
+        and plan.revision == 0
+        and len(plan.steps) == 1
+        and plan.steps[0].step_id == "step_task"
+        and not plan.steps[0].expected_tool_names
+    )
+
+
+def _active_plan_step(plan: AgentPlan | None) -> PlanStep | None:
+    if plan is None:
+        return None
+    if plan.active_step_id is not None:
+        for step in plan.steps:
+            if (
+                step.step_id == plan.active_step_id
+                and step.status in {"pending", "in_progress"}
+            ):
+                return step
+    return next(
+        (
+            step
+            for step in plan.steps
+            if step.status in {"pending", "in_progress"}
+        ),
+        None,
+    )
 
 
 def _delivery_cycle_results(state: LoopState) -> list[ToolResult]:
@@ -1613,6 +1827,63 @@ def _guard_repeated_tool_failures(
     return tuple(executable), tuple(blocked)
 
 
+def _guard_repeated_successful_inspections(
+    state: LoopState,
+    calls: Sequence[ToolCall],
+) -> tuple[tuple[ToolCall, ...], tuple[ToolResult, ...]]:
+    successful_cycle_results = tuple(
+        result
+        for result in _delivery_cycle_results(state)
+        if not result.is_error
+        and result.tool_name in _STABLE_INSPECTION_TOOL_NAMES
+    )
+    executable: list[ToolCall] = []
+    blocked: list[ToolResult] = []
+    for call in calls:
+        if (
+            call.tool_call_id in state["tool_execution_records"]
+            or call.tool_name not in _STABLE_INSPECTION_TOOL_NAMES
+        ):
+            executable.append(call)
+            continue
+        previous = next(
+            (
+                result
+                for result in reversed(successful_cycle_results)
+                if (
+                    (previous_call := state["canonical_tool_calls"].get(
+                        result.tool_call_id
+                    ))
+                    is not None
+                    and _same_tool_invocation(previous_call, call)
+                )
+            ),
+            None,
+        )
+        if previous is None:
+            executable.append(call)
+            continue
+        blocked.append(
+            ToolResult(
+                tool_call_id=call.tool_call_id,
+                tool_name=call.tool_name,
+                is_error=True,
+                error_code="repeated_inspection",
+                error_message=(
+                    "This exact read-only inspection already succeeded without "
+                    "an intervening delivery action. Use the existing result, "
+                    "narrow or change the arguments, choose a different tool, "
+                    "or make the concrete delivery change."
+                ),
+                retryable=False,
+                metadata={
+                    "previous_tool_call_id": previous.tool_call_id,
+                },
+            )
+        )
+    return tuple(executable), tuple(blocked)
+
+
 def _matching_tool_failures_since_recovery(
     state: LoopState,
     call: ToolCall,
@@ -1626,6 +1897,96 @@ def _matching_tool_failures_since_recovery(
             failures.append(result)
     failures.reverse()
     return tuple(failures)
+
+
+def _tool_result_transcript_messages(
+    state: LoopState,
+    results: Sequence[ToolResult],
+) -> tuple[ModelMessage, ...]:
+    seen: dict[str, tuple[str, int]] = {}
+    prior_failures: list[ToolResult] = []
+    for result in reversed(state["tool_results"]):
+        if not result.is_error:
+            break
+        prior_failures.append(result)
+    for result in reversed(prior_failures):
+        fingerprint = _tool_failure_evidence_fingerprint(result)
+        if fingerprint is None:
+            continue
+        original_id, count = seen.get(
+            fingerprint,
+            (result.tool_call_id, 0),
+        )
+        seen[fingerprint] = (original_id, count + 1)
+
+    messages: list[ModelMessage] = []
+    for result in results:
+        if not result.is_error:
+            seen.clear()
+            messages.append(tool_result_message(result))
+            continue
+        fingerprint = _tool_failure_evidence_fingerprint(result)
+        previous = None if fingerprint is None else seen.get(fingerprint)
+        if fingerprint is None or previous is None:
+            messages.append(tool_result_message(result))
+            if fingerprint is not None:
+                seen[fingerprint] = (result.tool_call_id, 1)
+            continue
+        original_id, count = previous
+        repeat_count = count + 1
+        visible_result = replace(
+            result,
+            content=(),
+            structured_content={
+                "repeated_failure": True,
+                "evidence_fingerprint": fingerprint,
+                "original_tool_call_id": original_id,
+                "repeat_count": repeat_count,
+            },
+        )
+        messages.append(tool_result_message(visible_result))
+        seen[fingerprint] = (original_id, repeat_count)
+    return tuple(messages)
+
+
+def _tool_failure_evidence_fingerprint(
+    result: ToolResult,
+) -> str | None:
+    if not result.is_error:
+        return None
+    structured_content = result.structured_content
+    if result.tool_name == "run_command" and isinstance(
+        structured_content,
+        Mapping,
+    ):
+        structured_content = {
+            key: value
+            for key, value in structured_content.items()
+            if key != "duration_ms"
+        }
+    visible_content = tuple(
+        {
+            "type": block.type,
+            "data": block.data,
+        }
+        for block in result.content
+    )
+    payload = cast(
+        JsonValue,
+        {
+            "tool_name": result.tool_name,
+            "content": visible_content,
+            "structured_content": structured_content,
+            "is_error": result.is_error,
+            "error_code": result.error_code,
+            "error_message": result.error_message,
+            "retryable": result.retryable,
+            "truncated": result.truncated,
+        },
+    )
+    return hashlib.sha256(
+        canonical_json_text(payload).encode("utf-8")
+    ).hexdigest()
 
 
 def _same_tool_invocation(left: ToolCall, right: ToolCall) -> bool:
