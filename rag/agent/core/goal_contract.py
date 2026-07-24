@@ -1,15 +1,10 @@
 from __future__ import annotations
 
-import hashlib
-import json
-import re
-from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from collections.abc import Sequence
 from typing import Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from agent_runtime.planning import GoalCommitment
 from rag.agent.core.observations import (
     ComputationResult,
     ContextBinding,
@@ -22,10 +17,6 @@ AcceptanceRule = Literal[
     "traceable_evidence",
     "reproducible_computation",
 ]
-_MAX_GOAL_COMMITMENTS = 12
-_GOAL_CLAUSE_SPLIT = re.compile(
-    r"(?<=[.!?])\s+|(?<=[。！？])|\n+"
-)
 
 
 class GoalConstraint(BaseModel):
@@ -70,11 +61,11 @@ class GoalDeliverable(BaseModel):
 
 
 class GoalSpec(BaseModel):
-    """Canonical user goal; completion gates remain explicit stop-hook policy."""
+    """Opt-in completion contract evaluated only by an explicit stop hook."""
 
     model_config = ConfigDict(frozen=True)
 
-    original_query: str = Field(min_length=1, max_length=8_000)
+    original_query: str
     deliverables: list[GoalDeliverable] = Field(default_factory=list)
     constraints: list[GoalConstraint] = Field(default_factory=list)
     success_criteria: list[str] = Field(default_factory=list)
@@ -85,8 +76,6 @@ class GoalSpec(BaseModel):
 
     @model_validator(mode="after")
     def normalize_deliverables(self) -> Self:
-        if not self.original_query.strip():
-            raise ValueError("original_query must be non-empty")
         deliverables = list(self.deliverables)
         if not deliverables:
             if self.required_outputs:
@@ -108,108 +97,6 @@ class GoalCompatibilityConfig(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     goal_spec: GoalSpec | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class GoalPlanContract:
-    """Immutable runtime snapshot that a model-authored plan must preserve."""
-
-    goal_id: str
-    objective: str
-    normalized_objective: str
-    commitments: tuple[GoalCommitment, ...]
-
-    @classmethod
-    def from_goal_spec(cls, goal_spec: GoalSpec) -> GoalPlanContract:
-        payload = goal_spec.model_dump(mode="json")
-        canonical = json.dumps(
-            payload,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-            allow_nan=False,
-        )
-        objective = goal_spec.original_query
-        return cls(
-            goal_id=hashlib.sha256(canonical.encode("utf-8")).hexdigest(),
-            objective=objective,
-            normalized_objective=_normalize_goal_text(objective),
-            commitments=tuple(
-                GoalCommitment(
-                    commitment_id=f"goal_{index:03d}",
-                    requirement=requirement,
-                )
-                for index, requirement in enumerate(
-                    _goal_commitment_texts(goal_spec),
-                    start=1,
-                )
-            ),
-        )
-
-    @classmethod
-    def from_query(cls, query: str) -> GoalPlanContract:
-        return cls.from_goal_spec(GoalSpec(original_query=query))
-
-    def accepts(self, *, goal_id: object, objective: object) -> bool:
-        return (
-            isinstance(goal_id, str)
-            and goal_id == self.goal_id
-            and isinstance(objective, str)
-            and _normalize_goal_text(objective) == self.normalized_objective
-        )
-
-    @property
-    def commitment_ids(self) -> tuple[str, ...]:
-        return tuple(item.commitment_id for item in self.commitments)
-
-    def plan_update_issues(
-        self,
-        *,
-        goal_id: object,
-        objective: object,
-        plan: object,
-    ) -> tuple[str, ...]:
-        """Return deterministic reasons a replacement plan breaks the goal."""
-
-        if not self.accepts(goal_id=goal_id, objective=objective):
-            return ("goal_identity_mismatch",)
-        if not isinstance(plan, Sequence) or isinstance(plan, (str, bytes)):
-            return ("plan_commitments_missing",)
-
-        required = set(self.commitment_ids)
-        covered: set[str] = set()
-        issues: list[str] = []
-        for index, raw_step in enumerate(plan, start=1):
-            if not isinstance(raw_step, Mapping):
-                issues.append(f"plan_step_{index:03d}_unbound")
-                continue
-            raw_ids = raw_step.get("goal_commitment_ids")
-            if not isinstance(raw_ids, Sequence) or isinstance(
-                raw_ids,
-                (str, bytes),
-            ):
-                issues.append(f"plan_step_{index:03d}_unbound")
-                continue
-            step_ids = {
-                value
-                for value in raw_ids
-                if isinstance(value, str)
-            }
-            if not step_ids:
-                issues.append(f"plan_step_{index:03d}_unbound")
-                continue
-            unknown = sorted(step_ids - required)
-            issues.extend(
-                f"unknown_goal_commitment:{value}"
-                for value in unknown
-            )
-            covered.update(step_ids & required)
-
-        issues.extend(
-            f"missing_goal_commitment:{value}"
-            for value in sorted(required - covered)
-        )
-        return tuple(dict.fromkeys(issues))
 
 
 class GoalContractIssue(BaseModel):
@@ -361,57 +248,6 @@ def _constraint_issue_description(constraint: GoalConstraint) -> str:
     )
 
 
-def _normalize_goal_text(value: str) -> str:
-    return " ".join(value.split())
-
-
-def _goal_commitment_texts(goal_spec: GoalSpec) -> tuple[str, ...]:
-    requirements = [
-        _normalize_goal_text(value)
-        for value in _GOAL_CLAUSE_SPLIT.split(goal_spec.original_query)
-        if _normalize_goal_text(value)
-    ]
-    requirements.extend(
-        f"Success criterion: {_normalize_goal_text(value)}"
-        for value in goal_spec.success_criteria
-        if _normalize_goal_text(value)
-    )
-    requirements.extend(
-        f"Required evidence: {_normalize_goal_text(value)}"
-        for value in goal_spec.required_evidence
-        if _normalize_goal_text(value)
-    )
-    requirements.extend(
-        f"Required operation: {_normalize_goal_text(value)}"
-        for value in goal_spec.required_operations
-        if _normalize_goal_text(value)
-    )
-    requirements.extend(
-        (
-            f"Constraint {constraint.constraint_id}: "
-            f"{constraint.constraint_type} must equal "
-            f"{json.dumps(constraint.expected_value, ensure_ascii=False, sort_keys=True)}"
-        )
-        for constraint in goal_spec.constraints
-        if constraint.required
-    )
-    requirements.extend(
-        (
-            f"Deliverable {deliverable.deliverable_id}: "
-            f"{deliverable.kind} with {deliverable.acceptance_rule}"
-        )
-        for deliverable in goal_spec.deliverables
-        if deliverable.required and deliverable.kind != "answer"
-    )
-    deduped = tuple(dict.fromkeys(requirements))
-    if len(deduped) <= _MAX_GOAL_COMMITMENTS:
-        return deduped
-    return (
-        *deduped[: _MAX_GOAL_COMMITMENTS - 1],
-        " ".join(deduped[_MAX_GOAL_COMMITMENTS - 1 :]),
-    )
-
-
 __all__ = [
     "AcceptanceRule",
     "DeliverableKind",
@@ -420,8 +256,6 @@ __all__ = [
     "GoalContractEvaluation",
     "GoalContractEvaluator",
     "GoalContractIssue",
-    "GoalCommitment",
     "GoalDeliverable",
-    "GoalPlanContract",
     "GoalSpec",
 ]

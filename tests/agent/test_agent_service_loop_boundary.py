@@ -356,7 +356,7 @@ async def test_resume_reconciles_pending_call_before_changed_tool_executes() -> 
 
 
 @pytest.mark.anyio
-async def test_explicit_goal_spec_keeps_completion_gating_in_stop_hook() -> None:
+async def test_explicit_goal_spec_is_a_stop_hook_not_default_controller() -> None:
     service = AgentService(
         definition=_definition(),
         tool_registry=_registry([]),

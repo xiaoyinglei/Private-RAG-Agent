@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from typing import Literal, Self
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, Field, model_validator
 
 PlanStepStatus = Literal["pending", "in_progress", "completed", "blocked", "skipped"]
 PlanStatus = Literal["active", "complete", "blocked", "needs_replan"]
@@ -25,37 +25,8 @@ MAX_PLAN_EVENTS = 30
 MAX_STEP_TITLE_CHARS = 180
 MAX_STEP_NOTES_CHARS = 240
 MAX_PLAN_SUMMARY_CHARS = 800
-MAX_OBJECTIVE_CHARS = 8_000
+MAX_OBJECTIVE_CHARS = 500
 MAX_STEP_REFS = 16
-
-
-class GoalCommitment(BaseModel):
-    """One runtime-owned requirement retained across strategy changes."""
-
-    model_config = ConfigDict(frozen=True)
-
-    commitment_id: str = Field(min_length=1, max_length=80)
-    requirement: str = Field(min_length=1, max_length=2_000)
-
-    @model_validator(mode="after")
-    def bound_fields(self) -> Self:
-        object.__setattr__(
-            self,
-            "commitment_id",
-            _safe_identifier(
-                self.commitment_id,
-                prefix="goal",
-            ),
-        )
-        object.__setattr__(
-            self,
-            "requirement",
-            (
-                _bounded_text(self.requirement, 2_000)
-                or "Preserve the user goal."
-            ),
-        )
-        return self
 
 
 class PlanStep(BaseModel):
@@ -68,7 +39,6 @@ class PlanStep(BaseModel):
     step_id: str
     title: str
     status: PlanStepStatus = "pending"
-    goal_commitment_ids: list[str] = Field(default_factory=list)
     expected_tool_names: list[str] = Field(default_factory=list)
     tool_call_ids: list[str] = Field(default_factory=list)
     evidence_refs: list[str] = Field(default_factory=list)
@@ -82,10 +52,6 @@ class PlanStep(BaseModel):
     def bound_fields(self) -> Self:
         self.step_id = _safe_identifier(self.step_id, prefix="step")
         self.title = _bounded_text(self.title, MAX_STEP_TITLE_CHARS) or "Untitled step"
-        self.goal_commitment_ids = _dedupe_texts(
-            self.goal_commitment_ids,
-            limit=MAX_STEP_REFS,
-        )
         self.expected_tool_names = _dedupe_texts(self.expected_tool_names, limit=MAX_STEP_REFS)
         self.tool_call_ids = _dedupe_texts(self.tool_call_ids, limit=MAX_STEP_REFS)
         self.evidence_refs = _dedupe_texts(self.evidence_refs, limit=MAX_STEP_REFS)
@@ -98,7 +64,6 @@ class PlanStepPatch(BaseModel):
     step_id: str
     title: str | None = None
     status: PlanStepStatus | None = None
-    goal_commitment_ids: list[str] | None = None
     expected_tool_names: list[str] | None = None
     tool_call_ids: list[str] | None = None
     evidence_refs: list[str] | None = None
@@ -109,11 +74,6 @@ class PlanStepPatch(BaseModel):
         self.step_id = _safe_identifier(self.step_id, prefix="step")
         if self.title is not None:
             self.title = _bounded_text(self.title, MAX_STEP_TITLE_CHARS) or None
-        if self.goal_commitment_ids is not None:
-            self.goal_commitment_ids = _dedupe_texts(
-                self.goal_commitment_ids,
-                limit=MAX_STEP_REFS,
-            )
         if self.expected_tool_names is not None:
             self.expected_tool_names = _dedupe_texts(self.expected_tool_names, limit=MAX_STEP_REFS)
         if self.tool_call_ids is not None:
@@ -126,13 +86,6 @@ class PlanStepPatch(BaseModel):
 
 
 class AgentPlan(BaseModel):
-    goal_id: str | None = Field(
-        default=None,
-        min_length=64,
-        max_length=64,
-        pattern=r"^[0-9a-f]{64}$",
-    )
-    goal_commitments: list[GoalCommitment] = Field(default_factory=list)
     objective: str
     status: PlanStatus = "active"
     revision: int = Field(default=0, ge=0)
@@ -145,12 +98,6 @@ class AgentPlan(BaseModel):
 
     @model_validator(mode="after")
     def bound_fields(self) -> Self:
-        self.goal_commitments = list(
-            {
-                item.commitment_id: item
-                for item in self.goal_commitments
-            }.values()
-        )[:MAX_STEP_REFS]
         self.objective = _bounded_text(self.objective, MAX_OBJECTIVE_CHARS) or "Current task"
         self.target_files = _dedupe_texts(
             self.target_files,
@@ -223,26 +170,14 @@ class PlanEvent(BaseModel):
 class PlanTracker:
     max_steps: int = MAX_PLAN_STEPS
 
-    def initialize_task(
-        self,
-        *,
-        task: str,
-        goal_id: str | None = None,
-        goal_commitments: Sequence[GoalCommitment] = (),
-    ) -> tuple[AgentPlan, list[PlanEvent]]:
+    def initialize_task(self, *, task: str) -> tuple[AgentPlan, list[PlanEvent]]:
         """Create an advisory task plan without deriving completion gaps."""
 
         step = PlanStep(
             step_id="step_task",
             title="Work on the current task.",
-            goal_commitment_ids=[
-                item.commitment_id
-                for item in goal_commitments
-            ],
         )
         plan = AgentPlan(
-            goal_id=goal_id,
-            goal_commitments=list(goal_commitments),
             objective=task,
             status="active",
             active_step_id=step.step_id,
@@ -268,8 +203,6 @@ class PlanTracker:
         if plan_status == "complete":
             warnings.append("llm_completion_ignored")
             plan_status = plan.status
-        if update.objective is not None and update.objective != plan.objective:
-            warnings.append("objective_change_ignored")
         if update.mode == "replace" and update.steps:
             if len(update.steps) > self.max_steps:
                 warnings.append("steps_truncated")
@@ -302,9 +235,7 @@ class PlanTracker:
 
         active_step_id = update.active_step_id or plan.active_step_id
         updated = AgentPlan(
-            goal_id=plan.goal_id,
-            goal_commitments=plan.goal_commitments,
-            objective=plan.objective,
+            objective=update.objective or plan.objective,
             status=plan_status or plan.status,
             revision=plan.revision + 1,
             active_step_id=active_step_id,
@@ -379,8 +310,6 @@ class PlanTracker:
             None,
         )
         updated = AgentPlan(
-            goal_id=plan.goal_id,
-            goal_commitments=plan.goal_commitments,
             objective=plan.objective,
             status=(
                 "complete"
@@ -642,8 +571,6 @@ def _patch_step(step: PlanStep, patch: PlanStepPatch) -> PlanStep:
         update["title"] = patch.title
     if patch.status is not None:
         update["status"] = patch.status
-    if patch.goal_commitment_ids is not None:
-        update["goal_commitment_ids"] = patch.goal_commitment_ids
     if patch.expected_tool_names is not None:
         update["expected_tool_names"] = patch.expected_tool_names
     if patch.tool_call_ids is not None:
@@ -781,7 +708,6 @@ def _dedupe_texts(values: Sequence[str], *, limit: int) -> list[str]:
 
 __all__ = [
     "AgentPlan",
-    "GoalCommitment",
     "MAX_PLAN_EVENTS",
     "MAX_PLAN_STEPS",
     "PlanTracker",

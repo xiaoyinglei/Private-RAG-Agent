@@ -52,31 +52,13 @@ class _UpdatePlanThenPauseProvider:
     ) -> ModelTurnDraft:
         del definition, budget_remaining
         if not state["tool_results"]:
-            plan = state["plan_state"].agent_plan
-            assert plan is not None
-            assert plan.goal_id is not None
-            commitment_ids = [
-                item.commitment_id
-                for item in plan.goal_commitments
-            ]
             return ModelTurnDraft(
                 action="execute",
                 tool_calls=(
                     ToolCallPlan(
                         tool_call_id="call_update_plan",
                         tool_name="update_plan",
-                        arguments={
-                            **_PLAN_ARGUMENTS,
-                            "goal_id": plan.goal_id,
-                            "objective": plan.objective,
-                            "plan": [
-                                {
-                                    **item,
-                                    "goal_commitment_ids": commitment_ids,
-                                }
-                                for item in _PLAN_ARGUMENTS["plan"]
-                            ],
-                        },
+                        arguments=_PLAN_ARGUMENTS,
                     ),
                 ),
             )
@@ -140,12 +122,6 @@ async def test_update_plan_is_canonical_result_and_checkpoint_state(
         ["run_command"],
     ]
     assert result.plan.revision == 1
-    assert result.plan.goal_id is not None
-    assert result.plan.goal_commitments
-    assert all(
-        step.goal_commitment_ids
-        for step in result.plan.steps
-    )
     assert result.plan.active_step_id == "step_002"
     update_event = next(
         event
@@ -208,7 +184,6 @@ async def test_update_plan_emits_complete_plan_snapshot_on_stream(
         "hypothesis"
     ]
     assert plan_event.data["plan"]["active_step_id"] == "step_002"
-    assert plan_event.data["plan"]["goal_id"] is not None
     assert [step["status"] for step in plan_event.data["plan"]["steps"]] == [
         "pending",
         "in_progress",

@@ -27,7 +27,6 @@ from rag.agent.core.finalization import (
     FinishCandidateBuilder,
     FinishCandidateBuildError,
 )
-from rag.agent.core.goal_contract import GoalPlanContract, GoalSpec
 from rag.agent.core.human_input import HumanInputRequest, ToolCallSummary
 from rag.agent.core.llm_context import AgentLLMContextOverflowError
 from rag.agent.core.messages import (
@@ -102,7 +101,6 @@ _REPEATED_TOOL_FAILURE_CODE = "repeated_tool_failure"
 _MAX_RETRYABLE_IDENTICAL_FAILURES = 2
 _PLANNING_REQUIRED_CODE = "planning_required"
 _PLANNING_EVIDENCE_REQUIRED_CODE = "planning_evidence_required"
-_GOAL_DRIFT_CODE = "goal_drift"
 _EXPLORATION_TOOL_NAMES = frozenset(
     {"list_files", "search_text", "read_file", "run_command", "find_tools"}
 )
@@ -192,7 +190,6 @@ class AgentLoop:
         max_model_retries: int = 1,
         skill_runtime: SkillRuntime | None = None,
         discoverable_tool_names: Sequence[str] | None = None,
-        goal_spec: GoalSpec | None = None,
     ) -> None:
         if max_model_retries < 0:
             raise ValueError("max_model_retries must be non-negative")
@@ -214,11 +211,6 @@ class AgentLoop:
         self._max_model_retries = max_model_retries
         self._skill_runtime = skill_runtime
         self._discoverable_tool_names = None if discoverable_tool_names is None else tuple(discoverable_tool_names)
-        self._goal_plan_contract = (
-            None
-            if goal_spec is None
-            else GoalPlanContract.from_goal_spec(goal_spec)
-        )
 
     def _set_stream_sink(self, sink: StreamEventSink | None) -> None:
         """Set the active stream sink, propagating to sub-components that support it."""
@@ -272,104 +264,9 @@ class AgentLoop:
         if state["status"] != "running":
             return state
         handles = TurnRegistry.get_or_create(state["run_config"])
-        plan = state["plan_state"].agent_plan
-        if (
-            plan is not None
-            and self._goal_plan_contract is not None
-            and not plan.goal_commitments
-            and plan.goal_id in {
-                None,
-                self._goal_plan_contract.goal_id,
-            }
-            and self._goal_plan_contract.accepts(
-                goal_id=self._goal_plan_contract.goal_id,
-                objective=plan.objective,
-            )
-        ):
-            migrated, events = self._plan_tracker.initialize_task(
-                task=self._goal_plan_contract.objective,
-                goal_id=self._goal_plan_contract.goal_id,
-                goal_commitments=self._goal_plan_contract.commitments,
-            )
-            plan = migrated.model_copy(
-                update={"revision": plan.revision + 1}
-            )
-            events = [
-                event.model_copy(
-                    update={
-                        "plan_revision": plan.revision,
-                        "message": (
-                            "Reset a legacy plan under the immutable goal "
-                            "commitment contract."
-                        ),
-                    }
-                )
-                for event in events
-            ]
-            state["plan_state"].agent_plan = plan
-            self._append_plan_events(state, events)
-        checkpoint_goal_issues = (
-            ()
-            if plan is None or self._goal_plan_contract is None
-            else (
-                ("goal_commitments_mismatch",)
-                if tuple(plan.goal_commitments)
-                != self._goal_plan_contract.commitments
-                else self._goal_plan_contract.plan_update_issues(
-                    goal_id=plan.goal_id,
-                    objective=plan.objective,
-                    plan=[
-                        {
-                            "goal_commitment_ids": step.goal_commitment_ids,
-                        }
-                        for step in plan.steps
-                    ],
-                )
-            )
-        )
-        if (
-            plan is not None
-            and self._goal_plan_contract is not None
-            and checkpoint_goal_issues
-        ):
-            message = (
-                "The checkpoint plan does not match the immutable goal contract: "
-                f"{', '.join(checkpoint_goal_issues)}."
-            )
-            append_loop_diagnostic(
-                state,
-                RuntimeDiagnostic(
-                    code=_GOAL_DRIFT_CODE,
-                    component="goal_plan_contract",
-                    message=message,
-                    severity="error",
-                ),
-            )
-            await self._fail(
-                state,
-                stop_reason=_GOAL_DRIFT_CODE,
-                error=message,
-                transition_reason="failed",
-                checkpoint_reason=_GOAL_DRIFT_CODE,
-            )
-            return state
-        if plan is None:
+        if state["plan_state"].agent_plan is None:
             plan, events = self._plan_tracker.initialize_task(
-                task=(
-                    state["current_message"]
-                    if self._goal_plan_contract is None
-                    else self._goal_plan_contract.objective
-                ),
-                goal_id=(
-                    None
-                    if self._goal_plan_contract is None
-                    else self._goal_plan_contract.goal_id
-                ),
-                goal_commitments=(
-                    ()
-                    if self._goal_plan_contract is None
-                    else self._goal_plan_contract.commitments
-                ),
+                task=state["current_message"],
             )
             state["plan_state"].agent_plan = plan
             state["plan_state"].plan_events = list(events)
@@ -866,88 +763,15 @@ class AgentLoop:
         )
         return None, retries  # caller will retry
 
-    def _guard_goal_plan_contract(
-        self,
-        state: LoopState,
-        calls: Sequence[ToolCall],
-    ) -> tuple[tuple[ToolCall, ...], tuple[ToolResult, ...]]:
-        contract = self._goal_plan_contract
-        if contract is None:
-            return tuple(calls), ()
-
-        executable: list[ToolCall] = []
-        blocked: list[ToolResult] = []
-        for call in calls:
-            if call.tool_name != "update_plan":
-                executable.append(call)
-                continue
-            issues = contract.plan_update_issues(
-                goal_id=call.arguments.get("goal_id"),
-                objective=call.arguments.get("objective"),
-                plan=call.arguments.get("plan"),
-            )
-            if not issues:
-                executable.append(call)
-                continue
-
-            plan = state["plan_state"].agent_plan
-            revision = 0 if plan is None else plan.revision
-            message = (
-                "The submitted plan does not preserve every immutable user-goal "
-                "commitment. Copy goal_id and objective from "
-                "working_state.goal_contract, bind every step to one or more "
-                "goal_commitment_ids, and cover every listed commitment. "
-                f"Issues: {', '.join(issues)}."
-            )
-            append_loop_diagnostic(
-                state,
-                RuntimeDiagnostic(
-                    code=_GOAL_DRIFT_CODE,
-                    component="goal_plan_contract",
-                    message=message,
-                    severity="error",
-                ),
-            )
-            blocked.append(
-                ToolResult(
-                    tool_call_id=call.tool_call_id,
-                    tool_name=call.tool_name,
-                    structured_content={
-                        "accepted": False,
-                        "goal_id": contract.goal_id,
-                        "goal_commitments": tuple(
-                            item.model_dump(mode="json")
-                            for item in contract.commitments
-                        ),
-                        "issues": issues,
-                        "plan_revision": revision,
-                    },
-                    is_error=True,
-                    error_code=_GOAL_DRIFT_CODE,
-                    error_message=message,
-                    retryable=False,
-                    metadata={
-                        "goal_id": contract.goal_id,
-                        "goal_contract_issues": issues,
-                        "plan_revision": revision,
-                    },
-                )
-            )
-        return tuple(executable), tuple(blocked)
-
     async def _execute_pending_tools(self, state: LoopState) -> bool:
         turn_id = state["run_config"].turn_id
         turn = state["iteration"]
         pending = tuple(state["pending_tool_calls"])
         calls = tuple(self._canonical_call(state, pending_call) for pending_call in pending)
-        goal_checked_calls, goal_results = self._guard_goal_plan_contract(
-            state,
-            calls,
-        )
         progress_checked_calls, planning_results = (
             _guard_evidence_driven_progress(
                 state,
-                goal_checked_calls,
+                calls,
             )
         )
         circuit_checked_calls, circuit_results = _guard_repeated_tool_failures(
@@ -999,7 +823,6 @@ class AgentLoop:
                 *planning_results,
                 *circuit_results,
                 *repeated_inspection_results,
-                *goal_results,
             )
         }
         results_by_id.update(
@@ -1190,58 +1013,16 @@ class AgentLoop:
         calls_by_id = {call.tool_call_id: call for call in calls}
         canonical_results: list[ToolResult] = []
         plan_updates: list[tuple[AgentPlan, PlanEvent]] = []
-        prior_plan_results = [
-            item
-            for item in state["tool_results"]
-            if item.tool_name == "update_plan"
-        ]
-        goal_drift_open = bool(
-            prior_plan_results
-            and prior_plan_results[-1].error_code == _GOAL_DRIFT_CODE
-        )
         for result in results:
             if result.tool_name != "update_plan" or result.is_error:
-                if (
-                    result.tool_name == "update_plan"
-                    and result.error_code == _GOAL_DRIFT_CODE
-                ):
-                    goal_drift_open = True
                 canonical_results.append(result)
                 continue
-            if goal_drift_open:
-                append_loop_diagnostic(
-                    state,
-                    RuntimeDiagnostic(
-                        code="goal_drift_recovered",
-                        component="goal_plan_contract",
-                        message=(
-                            "A corrected update_plan restored every immutable "
-                            "goal commitment."
-                        ),
-                        severity="warning",
-                    ),
-                )
-                goal_drift_open = False
             call = calls_by_id[result.tool_call_id]
             submitted = UpdatePlanInput.model_validate(call.arguments)
             current = state["plan_state"].agent_plan
             if current is None:
                 current, events = self._plan_tracker.initialize_task(
-                    task=(
-                        state["current_message"]
-                        if self._goal_plan_contract is None
-                        else self._goal_plan_contract.objective
-                    ),
-                    goal_id=(
-                        None
-                        if self._goal_plan_contract is None
-                        else self._goal_plan_contract.goal_id
-                    ),
-                    goal_commitments=(
-                        ()
-                        if self._goal_plan_contract is None
-                        else self._goal_plan_contract.commitments
-                    ),
+                    task=state["current_message"],
                 )
                 self._append_plan_events(state, events)
             available_evidence = [
@@ -1255,7 +1036,6 @@ class AgentLoop:
                     step_id=item.step_id or f"step_{index:03d}",
                     title=item.step,
                     status=item.status,
-                    goal_commitment_ids=item.goal_commitment_ids,
                     expected_tool_names=item.expected_tool_names,
                     tool_call_ids=(
                         []

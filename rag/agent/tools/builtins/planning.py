@@ -50,16 +50,6 @@ class PlanStepInput(BaseModel):
     status: Literal["pending", "in_progress", "completed"] = Field(
         description="Current state of this exact step."
     )
-    goal_commitment_ids: list[str] = Field(
-        default_factory=list,
-        max_length=12,
-        description=(
-            "Runtime-owned requirement identifiers from "
-            "working_state.goal_contract.commitments that this step serves. "
-            "Every step must bind at least one identifier, and the complete plan "
-            "must cover every listed commitment."
-        ),
-    )
     expected_tool_names: list[str] = Field(
         min_length=1,
         max_length=4,
@@ -78,38 +68,10 @@ class PlanStepInput(BaseModel):
             raise ValueError("expected tool names must be non-empty")
         return normalized
 
-    @field_validator("goal_commitment_ids")
-    @classmethod
-    def validate_goal_commitment_ids(cls, values: list[str]) -> list[str]:
-        normalized = list(dict.fromkeys(value.strip() for value in values))
-        if any(not value or len(value) > 80 for value in normalized):
-            raise ValueError("goal commitment identifiers must be concise")
-        return normalized
-
 
 class UpdatePlanInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    goal_id: str | None = Field(
-        default=None,
-        min_length=64,
-        max_length=64,
-        pattern=r"^[0-9a-f]{64}$",
-        description=(
-            "Opaque immutable goal identifier from "
-            "working_state.goal_contract.goal_id. Copy it exactly; a plan cannot "
-            "replace the goal it is meant to serve."
-        ),
-    )
-    objective: str | None = Field(
-        default=None,
-        min_length=1,
-        max_length=8_000,
-        description=(
-            "The immutable objective from working_state.goal_contract.objective. "
-            "Copy it exactly apart from whitespace; change only the strategy fields."
-        ),
-    )
     target_files: list[str] = Field(
         max_length=12,
         description=(
@@ -178,16 +140,6 @@ class UpdatePlanInput(BaseModel):
         normalized = " ".join(value.split())
         if len(normalized) < 12:
             raise ValueError("hypothesis must describe a concrete causal theory")
-        return normalized
-
-    @field_validator("objective")
-    @classmethod
-    def validate_objective(cls, value: str | None) -> str | None:
-        if value is None:
-            return None
-        normalized = " ".join(value.split())
-        if not normalized:
-            raise ValueError("objective must preserve the immutable user goal")
         return normalized
 
     @field_validator("remaining_unknowns")
@@ -271,18 +223,10 @@ def create_update_plan_tool(plan_updater: PlanUpdater) -> Tool:
         definition=ToolDefinition(
             name="update_plan",
             description=(
-                "Update the strategy for the immutable runtime-owned goal. Copy "
-                '"goal_id" and "objective" exactly from '
-                "working_state.goal_contract; changing or omitting either is "
-                "rejected as goal_drift. Bind every plan step to one or more "
-                '"goal_commitment_ids" from '
-                "working_state.goal_contract.commitments, and cover every "
-                "commitment in the complete plan. Replace the visible plan "
-                "with an ordered set of "
+                "Replace the visible implementation plan with an ordered set of "
                 "pending, in-progress, and completed steps. Use it when the work "
                 "crosses meaningful checkpoints. Every plan item must be shaped like "
                 '{"step": "verify tests", "status": "in_progress", '
-                '"goal_commitment_ids": ["goal_002"], '
                 '"expected_tool_names": ["run_command"]}. Also submit '
                 '"target_files", a causal "hypothesis", and '
                 '"remaining_unknowns". Inspection steps must name the concrete '
@@ -300,7 +244,7 @@ def create_update_plan_tool(plan_updater: PlanUpdater) -> Tool:
             effects=frozenset(),
             targets=(),
         ),
-        execution_revision="builtin-update-plan-v2-goal-contract",
+        execution_revision="builtin-update-plan-v1",
         idempotent=True,
         concurrency_safe=False,
         cancellation_mode=CancellationMode.COOPERATIVE,
